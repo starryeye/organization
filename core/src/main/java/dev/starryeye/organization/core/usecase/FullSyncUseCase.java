@@ -25,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -98,9 +99,10 @@ public class FullSyncUseCase {
         committed.removeAll(result.deleted());
         committed.addAll(result.written());
 
+        Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
-                SnapshotIds.generate(clock.instant(), SyncSource.LDAP),
-                clock.instant(),
+                SnapshotIds.generate(now, SyncSource.LDAP),
+                now,
                 SyncSource.LDAP,
                 committed);
 
