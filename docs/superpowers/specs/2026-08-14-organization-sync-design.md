@@ -41,7 +41,9 @@
 | 프로젝트 성격 | 인증만 제외한 중간 수준 | 재시도·안전장치·이력·메트릭은 포함, 인증은 제외 |
 | 모듈 구조 | Gradle 멀티모듈 (7개) | 컴파일 타임에 의존 방향이 강제되어 추상화 경계가 유지됨 |
 | 저장소 | DynamoDB Local | 단일 테이블 설계 |
-| 검색 범위 | ID/계층 조회만 | DynamoDB에 적합. 자유 검색은 비목표 |
+| 검색 범위 | 직원 아이디 / 조직코드 / 조직명 | 앞의 둘은 GetItem, 조직명은 GSI1 `GROUP_INDEX` (§6.1) |
+| 튜플 식별자 | 직원 아이디, 조직코드만 | 조직명은 개편 시 바뀌므로 튜플에 넣지 않는다 (§4.3) |
+| 필드 매핑 | 설정 가능, 관행적 기본값 | LDAP 조직명은 `description`, SCIM 조직코드는 `Group.externalId` |
 | 테넌시 | 단일 테넌트 | |
 | FGA 모델 | `direct_member` / `child` 분리 | 롤업 방향이 정확하고 SCIM `members`와 1:1 매핑 |
 | LDAP 매핑 | `groupOfNames` / `DIT` 두 전략 모두 지원 | 설정으로 선택 |
@@ -128,7 +130,7 @@ organization/
 
 ```java
 public record DirectoryUser(
-    String id,            // 정규화된 안정 식별자
+    String id,            // 직원 아이디 (정규화된 안정 식별자, 튜플에 사용)
     String externalId,    // LDAP DN 또는 SCIM externalId (원본 보관)
     String userName,
     String displayName,
@@ -137,9 +139,9 @@ public record DirectoryUser(
 ) {}
 
 public record DirectoryGroup(
-    String id,
+    String id,            // 조직코드 (튜플에 사용)
     String externalId,
-    String displayName,
+    String displayName,   // 조직명 (튜플에 절대 사용하지 않음 — §4.3)
     Set<MemberRef> members
 ) {}
 
@@ -161,13 +163,39 @@ public record TupleDelta(Set<RelationTuple> toWrite, Set<RelationTuple> toDelete
 }
 ```
 
-### 4.3 식별자 정규화
+### 4.3 식별자와 필드 매핑
 
-OpenFGA object id에는 `:`, `#`, 공백, `,` 등을 쓸 수 없다. LDAP DN(`cn=김철수,ou=백엔드,dc=example,dc=com`)을 그대로 쓸 수 없으므로 정규화한다.
+도메인 모델의 `DirectoryUser.id`는 **직원 아이디**, `DirectoryGroup.id`는 **조직코드**, `DirectoryGroup.displayName`은 **조직명**이다.
 
-- LDAP: 설정된 `user-id-attribute`(기본 `uid`), `group-id-attribute`(기본 `cn`) 값을 id로 쓴다. 원본 DN은 `externalId`에 보관한다.
-- SCIM: SCIM 리소스의 `id`를 그대로 쓴다. IdP가 준 `externalId`는 보관만 한다.
-- 공통: `IdNormalizer`가 허용 문자(`[A-Za-z0-9._@\-]`) 외의 문자를 `_`로 치환한다. 치환 후 충돌이 발생하면 해당 엔트리를 스킵하고 경고 로그를 남긴다(동기화 전체를 실패시키지 않는다).
+#### 왜 조직명은 튜플에 들어가면 안 되는가
+
+조직명은 개편 때마다 바뀐다. "개발본부"를 "플랫폼본부"로 개명했을 때 튜플에 이름을 썼다면 `group:개발본부` 관련 튜플을 전부 지우고 다시 써야 한다. 산하 직원이 500명이면 튜플 500개 재작성이고, 그 사이 인가 질의가 깨지고, 개명 전후로 감사 이력이 끊긴다. 코드를 쓰면 `displayName` 속성 하나만 바뀌고 튜플은 손대지 않는다.
+
+**따라서 `TupleMapper`는 `id`(직원 아이디 / 조직코드)만 사용한다.** 조직명은 DynamoDB에만 존재한다.
+
+#### 소스 필드 매핑
+
+모두 설정으로 교체 가능하며, 아래는 관행적 기본값이다.
+
+| 개념 | LDAP `group-of-names` | LDAP `dit` | SCIM 2.0 |
+|---|---|---|---|
+| 직원 아이디 | `uid` | `uid` | `User.userName` |
+| 조직코드 | `cn` (groupOfNames) | `ou` | `Group.externalId` → 없으면 `Group.id` |
+| 조직명 | `description` | `description` → 없으면 `ou` | `Group.displayName` |
+| 직원 표시명 | `displayName` → 없으면 `cn` | 동일 | `User.displayName` → 없으면 `name.formatted` |
+| 이메일 | `mail` | `mail` | `User.emails[primary].value` |
+
+두 프로토콜의 비대칭에 주의할 점이 있다.
+
+- **LDAP 그룹/OU에는 표시명 전용 표준 속성이 없다.** `displayName`은 `inetOrgPerson`(사람)에만 있다. 그래서 `groupOfNames`/`organizationalUnit`의 `description`을 조직명으로 쓰는 것이 관행이다(`cn=DEV001`, `description=개발본부`). 커스텀 스키마를 쓰는 환경을 위해 `group-name-attribute`로 교체할 수 있게 한다.
+- **SCIM `Group`에는 코드와 이름을 나눌 칸이 없다.** 필드가 `id`, `externalId`, `displayName`, `members` 넷뿐이다. Okta/Azure AD가 `externalId`로 소스 시스템의 식별자를 보내므로 이를 조직코드로 채택한다. `POST /Groups`에 `externalId`가 있으면 그 값을 리소스 `id`로 발급하고, 없으면 UUID를 발급한 뒤 경고 로그를 남긴다(이후 IdP는 발급된 `id`로 호출하므로 일관성은 유지되지만, 코드가 우리 쪽에서 만들어진 값이 된다).
+- 사번(`employeeNumber`)을 직원 아이디로 쓰고 싶은 환경을 위해 LDAP은 `user-id-attribute`로 교체 가능하다. SCIM에서는 Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)의 `employeeNumber`를 읽어야 하는데, **이번 범위에서는 확장 스키마를 파싱하지 않는다.** 필요해지면 매핑 설정에 추가한다.
+
+#### 정규화
+
+OpenFGA object id에는 `:`, `#`, 공백, `,` 등을 쓸 수 없다. LDAP DN(`cn=김철수,ou=백엔드,dc=example,dc=com`)을 그대로 쓸 수 없으므로, 위 표의 속성값을 뽑은 뒤 `IdNormalizer`가 허용 문자(`[A-Za-z0-9._@\-]`) 외를 `_`로 치환한다. 원본 DN(LDAP) 또는 IdP 식별자(SCIM)는 `externalId`에 보관한다.
+
+치환 후 충돌이 발생하면 해당 엔트리를 스킵하고 경고 로그를 남긴다. 동기화 전체를 실패시키지 않는다.
 
 ### 4.4 포트
 
@@ -348,8 +376,8 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 
 | 아이템 | PK | SK | GSI1PK | GSI1SK | 주요 속성 |
 |---|---|---|---|---|---|
-| 직원 | `USER#<id>` | `META` | – | – | externalId, userName, displayName, email, active, updatedAt |
-| 조직 | `GROUP#<id>` | `META` | – | – | externalId, displayName, updatedAt |
+| 직원 | `USER#<empId>` | `META` | – | – | externalId, userName, displayName, email, active, updatedAt |
+| 조직 | `GROUP#<orgCode>` | `META` | `GROUP_INDEX` | `<displayName>` | externalId, displayName, updatedAt |
 | 멤버십(유저) | `GROUP#<gid>` | `MEMBER#USER#<uid>` | `MEMBER#USER#<uid>` | `GROUP#<gid>` | addedAt |
 | 멤버십(하위조직) | `GROUP#<gid>` | `MEMBER#GROUP#<cid>` | `MEMBER#GROUP#<cid>` | `GROUP#<gid>` | addedAt |
 | 스냅샷 메타 | `SNAPSHOT#<sid>` | `META` | `SNAPSHOT_INDEX` | `<createdAt ISO>` | source, tupleCount, expiresAt |
@@ -361,14 +389,24 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 
 ### 6.1 접근 패턴
 
-| 필요 | 쿼리 |
-|---|---|
-| 조직 + 소속 멤버 전체 | `PK = GROUP#<gid>` (SK 전체 — META와 MEMBER가 한 번에) |
-| 어떤 멤버가 속한 조직들 | GSI1 `GSI1PK = MEMBER#USER#<uid>` |
-| 직전 스냅샷 로드 | 포인터 읽고 → `PK = SNAPSHOT#<sid>, SK begins_with TUPLE#` |
-| 최근 스냅샷 목록 | GSI1 `GSI1PK = SNAPSHOT_INDEX`, ScanIndexForward=false |
-| 최근 실행 이력 | `PK = SYNCRUN#<이번달>`, ScanIndexForward=false. 부족하면 지난달까지 |
-| 전체 로드(`loadAll`) | Scan (아카이빙 배치에서만. 학습 규모 전제) |
+| 필요 | 쿼리 | 사용처 |
+|---|---|---|
+| 직원 아이디로 조회 | `GetItem PK = USER#<empId>, SK = META` | admin API |
+| 조직코드로 조회 | `GetItem PK = GROUP#<orgCode>, SK = META` | admin API |
+| 조직 + 소속 멤버 전체 | `PK = GROUP#<orgCode>` (SK 전체 — META와 MEMBER가 한 번에) | admin API, SCIM |
+| 어떤 멤버가 속한 조직들 | GSI1 `GSI1PK = MEMBER#USER#<empId>` | SCIM 삭제, admin API |
+| 조직명 prefix 검색 | GSI1 `GSI1PK = GROUP_INDEX AND begins_with(GSI1SK, "개발")` | admin API |
+| 조직명 부분일치 / 조직 전체 목록 | GSI1 `GSI1PK = GROUP_INDEX` Query → 앱에서 `contains` 필터 | admin API |
+| 직전 스냅샷 로드 | 포인터 읽고 → `PK = SNAPSHOT#<sid>, SK begins_with TUPLE#` | LDAP diff |
+| 최근 스냅샷 목록 | GSI1 `GSI1PK = SNAPSHOT_INDEX`, ScanIndexForward=false | 감사 |
+| 최근 실행 이력 | `PK = SYNCRUN#<이번달>`, ScanIndexForward=false. 부족하면 지난달까지 | 관리 API |
+| 전체 로드(`loadAll`) | Scan (아카이빙 배치에서만) | 아카이빙 |
+
+**`GROUP_INDEX` 파티션에 대하여.** 조직 전부가 한 파티션에 몰리므로 이론상 핫 파티션이다. 조직은 직원보다 한두 자릿수 적어(대기업도 보통 수천 개) 조직 수가 수만을 넘기 전에는 문제가 되지 않는다. 그 규모에 도달하면 검색엔진을 붙여야 하며, 그것은 그 시점의 문제다.
+
+**조직명 부분일치는 DynamoDB가 못 하는 일이다.** `GROUP_INDEX` 파티션을 Query로 훑어(Scan이 아니라 Query라 조직만 읽는다) 앱에서 필터하는 것이 이 설계의 답이다. `GSI1SK = displayName` 정렬 덕분에 prefix 검색은 인덱스만으로 처리된다.
+
+이 인덱스는 admin API를 만들 때 필요하지만 **키는 지금 넣는다.** 나중에 추가하면 기존 조직 아이템 전부에 GSI 키를 백필해야 한다.
 
 ### 6.2 쓰기 순서와 원자성
 
@@ -492,8 +530,8 @@ diff에는 쓰지 않고 감사·수동복구용이다.
 
 "스냅샷을 지우고 전체를 밀어넣는다"를 순진하게 구현하면 `T_old = ∅`이 되어 `toDelete`가 비고 `toWrite`가 전체가 된다. 그런데 OpenFGA에는 기존 튜플이 남아 있다.
 
-- 여전히 유효한 튜플 → 중복 write. **OpenFGA는 이미 존재하는 튜플의 write를 에러로 거부한다**(멱등하지 않다). 어댑터에서 흡수한다(§9.1).
-- **이제는 없어야 할 튜플 → 영원히 남는다.** 지울 근거(스냅샷)를 방금 버렸고 read API는 쓰지 않으므로 되찾을 수 없다.
+- 여전히 유효한 튜플 → 중복 write. `on_duplicate: ignore`가 흡수하므로 **문제 없다**(§9.1).
+- **이제는 없어야 할 튜플 → 영원히 남는다.** 지울 근거(스냅샷)를 방금 버렸고 read API는 쓰지 않으므로 되찾을 수 없다. 이것이 진짜 문제다.
 
 따라서 순서를 뒤집는다.
 
@@ -536,8 +574,8 @@ read API 없이도 진짜로 깨끗해진다. 드리프트를 되돌리는 유�
 |---|---|
 | LDAP 연결/조회 실패 | 백오프 3회 재시도 → `FAILED` 기록, 다음 스케줄에 재시도 |
 | OpenFGA 배치 실패 | 배치 단위 백오프 3회 → 최종 실패는 `failures`에 담아 `PARTIAL` |
-| 중복 튜플 write | 어댑터가 성공으로 흡수 (§9.1) |
-| 없는 튜플 delete | 어댑터가 성공으로 흡수 (§9.1) |
+| 중복 튜플 write | `on_duplicate: ignore`로 OpenFGA가 흡수 (§9.1) |
+| 없는 튜플 delete | `on_missing: ignore`로 OpenFGA가 흡수 (§9.1) |
 | 삭제 가드 발동 | OpenFGA 미접촉, `ABORTED` + 사유 기록 |
 | ID 정규화 충돌 | 해당 엔트리 스킵 + 경고 로그. 동기화는 계속 |
 | LDAP `member` DN이 유저·그룹 어느 쪽도 아님 | 해당 멤버 스킵 + 경고 로그. 동기화는 계속 |
@@ -547,16 +585,28 @@ read API 없이도 진짜로 깨끗해진다. 드리프트를 되돌리는 유�
 | DynamoDB 실패 | SDK 재시도 + 최종 실패 시 `FAILED` |
 | sync 중복 실행 요청 | `409 Conflict` |
 
-### 9.1 멱등성 흡수
+### 9.1 멱등성
 
-OpenFGA `Write`는 배치 단위 트랜잭션이므로, 배치 안에 중복 튜플이 하나라도 있으면 **배치 전체가 실패**한다. 어댑터는 다음과 같이 처리한다.
+OpenFGA `Write`는 기본적으로 멱등하지 않다 — 이미 존재하는 튜플의 write와 존재하지 않는 튜플의 delete 모두 에러이고, 배치는 트랜잭션이므로 그 하나 때문에 **배치 전체가 실패**한다.
 
-1. 배치 실패 응답의 에러 코드가 `write_failed_due_to_invalid_input`(이미 존재 / 존재하지 않음) 계열이면
-2. 해당 배치를 튜플 단위로 재시도한다
-3. 개별 튜플에서 같은 코드가 나오면 **성공으로 간주**하고 `written`/`deleted`에 넣는다
-4. 다른 코드면 `failures`에 넣는다
+OpenFGA **v1.10.0+** 는 이를 요청 단위 옵션으로 해결한다.
 
-정상 diff 흐름에서는 발생하지 않지만, `rebuild`나 예기치 못한 재실행에서 필요하다.
+```json
+{
+  "writes":  { "tuple_keys": [ ... ], "on_duplicate": "ignore" },
+  "deletes": { "tuple_keys": [ ... ], "on_missing":  "ignore" }
+}
+```
+
+**어댑터는 항상 이 옵션을 켠다.** 따라서 튜플 단위 재시도 같은 보상 로직은 필요 없다.
+
+주의사항:
+
+- 한 요청에 `ignore`와 `error`가 섞이면 **더 엄격한 쪽(`error`)이 우선**한다. 우리는 양쪽 모두 `ignore`로 통일한다.
+- 튜플 키가 같아도 **condition 이름이나 파라미터가 다르면 여전히 충돌**이다. 이 설계는 conditional tuple을 쓰지 않으므로 해당되지 않는다.
+- `docker-compose.yml`의 OpenFGA 이미지는 **v1.10.0 이상으로 고정**한다. 그 미만에서는 이 옵션이 무시되거나 거부되므로 `rebuild`가 깨진다.
+
+이 옵션 덕분에 `rebuild`, 예기치 못한 재실행, 스냅샷과 실제의 경미한 어긋남이 모두 자연스럽게 흡수된다.
 
 ### 9.2 삭제 임계치 가드 (`DeletionGuard`)
 
@@ -628,17 +678,20 @@ IdP가 그룹 멤버 변경에 실제로 쓰는 경로만 구현한다.
 
 ### 10.2 SCIM ↔ 도메인 매핑
 
-| SCIM | 도메인 |
-|---|---|
-| `User.id` | `DirectoryUser.id` |
-| `User.externalId` | `DirectoryUser.externalId` |
-| `User.userName` | `DirectoryUser.userName` |
-| `User.name.formatted` / `displayName` | `DirectoryUser.displayName` |
-| `User.emails[primary].value` | `DirectoryUser.email` |
-| `User.active` | `DirectoryUser.active` |
-| `Group.id` | `DirectoryGroup.id` |
-| `Group.displayName` | `DirectoryGroup.displayName` |
-| `Group.members[].value` + `type` | `Set<MemberRef>` |
+| SCIM | 도메인 | 비고 |
+|---|---|---|
+| `User.id` | `DirectoryUser.id` | 직원 아이디. `POST` 시 `userName`으로 발급 |
+| `User.externalId` | `DirectoryUser.externalId` | |
+| `User.userName` | `DirectoryUser.userName` | |
+| `User.displayName` / `name.formatted` | `DirectoryUser.displayName` | |
+| `User.emails[primary].value` | `DirectoryUser.email` | |
+| `User.active` | `DirectoryUser.active` | |
+| `Group.id` | `DirectoryGroup.id` | **조직코드**. `POST` 시 `externalId`로 발급, 없으면 UUID + 경고 |
+| `Group.externalId` | `DirectoryGroup.externalId` | |
+| `Group.displayName` | `DirectoryGroup.displayName` | **조직명**. 튜플에 사용하지 않음 |
+| `Group.members[].value` + `type` | `Set<MemberRef>` | |
+
+Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)은 파싱하지 않는다. 요청에 포함되면 무시하고 `ServiceProviderConfig`에도 광고하지 않는다.
 
 `active: false`인 유저는 튜플을 생성하지 않는다(비활성 직원에게 권한이 남지 않도록). LDAP도 동일 규칙을 적용한다.
 
@@ -738,16 +791,23 @@ ldap:
   group-of-names:
     user-search-base: ou=people
     user-object-class: inetOrgPerson
-    user-id-attribute: uid
+    user-id-attribute: uid              # 직원 아이디. employeeNumber 등으로 교체 가능
+    user-name-attribute: displayName    # 없으면 cn으로 폴백
+    user-mail-attribute: mail
     group-search-base: ou=groups
     group-object-class: groupOfNames
-    group-id-attribute: cn
+    group-id-attribute: cn              # 조직코드
+    group-name-attribute: description   # 조직명 (LDAP 그룹에 표시명 표준 속성이 없음)
     member-attribute: member
   dit:
     root-dn: ou=company
     org-unit-object-class: organizationalUnit
+    group-id-attribute: ou              # 조직코드
+    group-name-attribute: description   # 없으면 ou로 폴백
     user-object-class: inetOrgPerson
     user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
 
 openfga:
   api-url: http://localhost:8080
@@ -826,7 +886,7 @@ void 신규_튜플은_생성_대상이_된다() {
 
 | 서비스 | 이미지 | 포트 | 비고 |
 |---|---|---|---|
-| openfga | `openfga/openfga` | 8080(http), 3000(playground) | `OPENFGA_DATASTORE_ENGINE=memory` — Postgres 불필요 |
+| openfga | `openfga/openfga:v1.10.x` 이상 | 8080(http), 3000(playground) | `OPENFGA_DATASTORE_ENGINE=memory` — Postgres 불필요. **v1.10.0 미만이면 `on_duplicate`/`on_missing`이 없어 §9.1이 깨진다** |
 | dynamodb-local | `amazon/dynamodb-local` | 8000 | `-inMemory` |
 | openldap | `bitnami/openldap` | 1389 | 샘플 조직도 LDIF 시드 |
 
@@ -840,7 +900,12 @@ docker compose up -d
 
 ## 16. 향후 과제
 
-1. **Admin 조회 API** — 직원 상세, 조직 트리, 산하 직원 목록. DynamoDB 현재상태 기반이라 커넥터와 무관하며 `core`의 공통 기능으로 두면 어느 인스턴스에서도 동작한다.
+1. **Admin 조회 API** — 검색 기준은 **직원 아이디 / 조직코드 / 조직명** 세 가지. DynamoDB 현재상태 기반이라 커넥터와 무관하며, `core`의 공통 기능으로 두면 어느 인스턴스에서도 동작한다. 필요한 인덱스는 이번 사이클에 이미 넣어두므로(§6.1) 백필이 필요 없다.
+   - 직원 아이디 → `GetItem PK=USER#<empId>`
+   - 조직코드 → `GetItem PK=GROUP#<orgCode>`, 소속 멤버까지 한 쿼리로
+   - 조직명 prefix → GSI1 `begins_with`
+   - 조직명 부분일치 → GSI1 `GROUP_INDEX` Query 후 앱 필터
+   - 조직 트리 / 산하 직원 목록 → 멤버십 아이템과 GSI1 역참조 조합
 2. 인증 — SCIM 엔드포인트 Bearer 토큰, 관리 API 보호
 3. 멀티 테넌시
 4. 드리프트 감지 — read API를 허용한다면 주기적 reconcile
