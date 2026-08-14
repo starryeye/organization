@@ -1,0 +1,15 @@
+apply plugin: 'org.springframework.boot'
+
+dependencies {
+    implementation project(':core')
+    implementation project(':storage-dynamodb')
+    implementation project(':authz-openfga')
+    implementation project(':connector-ldap')
+
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.unboundid.ldapsdk
+}
