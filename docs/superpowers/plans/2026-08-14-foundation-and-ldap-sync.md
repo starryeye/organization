@@ -6869,3 +6869,1951 @@ git push origin main
 ```
 
 ---
+
+## Task 14: app-ldap 조립과 스케줄러
+
+**Files:**
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncProperties.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/UseCaseConfig.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncExecutionGuard.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncScheduler.java`
+- Modify: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/LdapSyncApplication.java` (`@EnableScheduling`)
+- Modify: `app-ldap/src/main/resources/application.yml`
+- Test: `app-ldap/src/test/java/dev/starryeye/organization/ldap/app/SyncExecutionGuardTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `FullSyncUseCase` 와 포트들, Task 8~11의 어댑터 빈들, Task 12~13의 커넥터
+- Produces:
+  - `SyncProperties` (`@ConfigurationProperties("sync")`) — `cron`, `purgeCron`, `deletionGuard{enabled, thresholdRatio, minBaseline}`
+  - `UseCaseConfig` → `DeletionGuard`, `FullSyncUseCase` 빈
+  - `SyncExecutionGuard` — `tryAcquire() -> boolean`, `release()`
+  - `SyncScheduler` — `@Scheduled` 로 full sync 와 purge 를 돌린다
+
+- [ ] **Step 1: 동시 실행 방지 가드 테스트 작성**
+
+`app-ldap/src/test/java/dev/starryeye/organization/ldap/app/SyncExecutionGuardTest.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SyncExecutionGuardTest {
+
+    @Test
+    @DisplayName("동기화가 실행 중이 아니면 획득에 성공한다")
+    void 유휴상태면_획득한다() {
+        // given
+        var guard = new SyncExecutionGuard();
+
+        // when
+        boolean acquired = guard.tryAcquire();
+
+        // then
+        assertThat(acquired).isTrue();
+    }
+
+    @Test
+    @DisplayName("이미 실행 중이면 획득에 실패해 중복 실행을 막는다")
+    void 실행중이면_획득에_실패한다() {
+        // given
+        var guard = new SyncExecutionGuard();
+        guard.tryAcquire();
+
+        // when
+        boolean second = guard.tryAcquire();
+
+        // then
+        assertThat(second).isFalse();
+    }
+
+    @Test
+    @DisplayName("반납하면 다시 획득할 수 있다")
+    void 반납하면_다시_획득한다() {
+        // given
+        var guard = new SyncExecutionGuard();
+        guard.tryAcquire();
+
+        // when
+        guard.release();
+        boolean again = guard.tryAcquire();
+
+        // then
+        assertThat(again).isTrue();
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*SyncExecutionGuardTest*'
+```
+
+Expected: 컴파일 실패 — `SyncExecutionGuard` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncExecutionGuard.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * 전체 동기화가 겹쳐 도는 것을 막는다.
+ * 인스턴스가 하나라는 전제이므로 프로세스 내 플래그로 충분하다.
+ */
+public class SyncExecutionGuard {
+
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
+    public boolean tryAcquire() {
+        return running.compareAndSet(false, true);
+    }
+
+    public void release() {
+        running.set(false);
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncProperties.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import lombok.Getter;
+import lombok.Setter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@Getter
+@Setter
+@ConfigurationProperties("sync")
+public class SyncProperties {
+
+    private String cron = "0 0 3 * * *";
+    private String purgeCron = "0 0 4 * * *";
+    private DeletionGuardConfig deletionGuard = new DeletionGuardConfig();
+
+    @Getter
+    @Setter
+    public static class DeletionGuardConfig {
+        private boolean enabled = true;
+        private double thresholdRatio = 0.3;
+        private int minBaseline = 10;
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/UseCaseConfig.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.guard.DeletionGuard;
+import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.port.DirectorySnapshotSource;
+import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.time.Clock;
+
+@Configuration
+@EnableConfigurationProperties(SyncProperties.class)
+public class UseCaseConfig {
+
+    @Bean
+    public DeletionGuard deletionGuard(SyncProperties properties) {
+        var config = properties.getDeletionGuard();
+        return new DeletionGuard(new DeletionGuardPolicy(
+                config.isEnabled(), config.getThresholdRatio(), config.getMinBaseline()));
+    }
+
+    @Bean
+    public SyncExecutionGuard syncExecutionGuard() {
+        return new SyncExecutionGuard();
+    }
+
+    @Bean
+    public FullSyncUseCase fullSyncUseCase(DirectorySnapshotSource source,
+                                           TupleSnapshotRepository snapshots,
+                                           DirectoryStateRepository state,
+                                           RelationTupleWriter writer,
+                                           SyncRunRepository runs,
+                                           DeletionGuard guard,
+                                           Clock clock) {
+        return new FullSyncUseCase(source, snapshots, state, writer, runs, guard, clock);
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncScheduler.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class SyncScheduler {
+
+    private final FullSyncUseCase fullSync;
+    private final TupleSnapshotRepository snapshots;
+    private final SyncExecutionGuard executionGuard;
+
+    @Scheduled(cron = "${sync.cron}")
+    public void 전체동기화() {
+        if (!executionGuard.tryAcquire()) {
+            log.warn("이전 동기화가 아직 진행 중이라 이번 스케줄을 건너뛴다");
+            return;
+        }
+        fullSync.execute(SyncTrigger.SCHEDULED)
+                .doFinally(signal -> executionGuard.release())
+                .subscribe(
+                        run -> log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
+                                run.status(), run.writtenCount(), run.deletedCount(), run.failureCount()),
+                        error -> log.error("스케줄 동기화가 예기치 않게 실패했다", error));
+    }
+
+    /**
+     * DynamoDB Local 은 TTL 자동 삭제를 하지 않으므로 명시적으로 정리한다.
+     * 실제 AWS 에서는 TTL 이 처리하고 이 잡은 0건을 반환한다.
+     */
+    @Scheduled(cron = "${sync.purge-cron}")
+    public void 만료스냅샷정리() {
+        snapshots.purgeExpired()
+                .subscribe(
+                        count -> log.info("만료 스냅샷 정리 완료: {}건", count),
+                        error -> log.error("만료 스냅샷 정리에 실패했다", error));
+    }
+}
+```
+
+`LdapSyncApplication.java` 에 `@EnableScheduling` 추가:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+@EnableScheduling
+@SpringBootApplication(scanBasePackages = "dev.starryeye.organization")
+public class LdapSyncApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(LdapSyncApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 4: application.yml 완성**
+
+`app-ldap/src/main/resources/application.yml`:
+
+```yaml
+server:
+  port: 8081
+
+spring:
+  application:
+    name: organization-ldap
+
+sync:
+  cron: "0 0 3 * * *"
+  purge-cron: "0 0 4 * * *"
+  deletion-guard:
+    enabled: true
+    threshold-ratio: 0.3
+    min-baseline: 10
+
+ldap:
+  url: ldap://localhost:1389
+  base-dn: dc=example,dc=com
+  bind-dn: cn=admin,dc=example,dc=com
+  bind-password: adminpassword
+  page-size: 500
+  strategy: group-of-names
+  group-of-names:
+    user-search-base: ou=people
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+    group-search-base: ou=groups
+    group-object-class: groupOfNames
+    group-id-attribute: cn
+    group-name-attribute: description
+    member-attribute: member
+  dit:
+    root-dn: ou=company
+    org-unit-object-class: organizationalUnit
+    group-id-attribute: ou
+    group-name-attribute: description
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+
+openfga:
+  api-url: http://localhost:8080
+  store-name: organization
+  write-batch-size: 100
+  max-retries: 3
+
+dynamodb:
+  endpoint: http://localhost:8000
+  region: ap-northeast-2
+  table-name: organization
+  create-table-on-startup: true
+  snapshot-retention-days: 7
+  syncrun-retention-days: 30
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    dev.starryeye.organization: DEBUG
+```
+
+- [ ] **Step 5: 테스트와 빌드 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*SyncExecutionGuardTest*' && ./gradlew :app-ldap:compileJava
+```
+
+Expected: 3개 테스트 PASS, 컴파일 성공.
+
+- [ ] **Step 6: 실제로 뜨는지 확인**
+
+Run:
+
+```bash
+docker compose up -d && sleep 20 && ./gradlew :app-ldap:bootRun
+```
+
+Expected: 애플리케이션이 기동되고 로그에 `OpenFGA store 'organization' 을 생성한다`, `OpenFGA 인가 모델을 등록했다`, `DynamoDB 테이블 'organization' 을 생성한다` 가 찍힌다. 확인 후 `Ctrl+C` 로 종료한다.
+
+기동에 실패하면 원인은 대개 둘 중 하나다. `NoSuchBeanDefinitionException: DirectorySnapshotSource` 면 `connector-ldap` 의 자동 설정이 안 잡힌 것이니 `scanBasePackages` 와 `AutoConfiguration.imports` 를 확인한다. OpenFGA 연결 실패면 `docker compose ps` 로 컨테이너 상태를 본다.
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: app-ldap 조립과 스케줄러 추가
+
+core 유스케이스에 세 어댑터를 결선하고 하루 1회 전체 동기화와
+만료 스냅샷 정리를 스케줄에 걸었다.
+
+SyncExecutionGuard 로 동기화가 겹쳐 도는 것을 막는다. 인스턴스가
+하나라는 전제이므로 프로세스 내 플래그로 충분하다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 15: 관리 엔드포인트 — 수동 실행, 강제 실행, 이력 조회
+
+**Files:**
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/AdminSyncController.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncRunResponse.java`
+- Test: `app-ldap/src/test/java/dev/starryeye/organization/ldap/app/AdminSyncControllerTest.java`
+
+**Interfaces:**
+- Consumes: Task 14의 `FullSyncUseCase`, `SyncExecutionGuard`, Task 6의 `SyncRunRepository`
+- Produces:
+  - `SyncRunResponse` — API 응답 DTO
+  - `AdminSyncController` — `POST /admin/sync/full`(`?force=true`), `GET /admin/sync/runs?limit=`
+
+| 엔드포인트 | 동작 | 응답 |
+|---|---|---|
+| `POST /admin/sync/full` | `trigger=MANUAL` 로 즉시 실행 | 200 + 완료된 `SyncRun` |
+| `POST /admin/sync/full?force=true` | `trigger=FORCED`, 삭제 가드 우회 | 200 + 완료된 `SyncRun` |
+| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 | 200 + 목록 |
+| 동기화 진행 중 재요청 | — | 409 Conflict |
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`app-ldap/src/test/java/dev/starryeye/organization/ldap/app/AdminSyncControllerTest.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.http.HttpStatus;
+import org.springframework.test.web.reactive.server.WebTestClient;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.time.Instant;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+
+class AdminSyncControllerTest {
+
+    private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
+
+    private FullSyncUseCase fullSync;
+    private SyncRunRepository runs;
+    private SyncExecutionGuard executionGuard;
+    private WebTestClient client;
+
+    @BeforeEach
+    void 컨트롤러를_준비한다() {
+        fullSync = Mockito.mock(FullSyncUseCase.class);
+        runs = Mockito.mock(SyncRunRepository.class);
+        executionGuard = new SyncExecutionGuard();
+        client = WebTestClient.bindToController(
+                new AdminSyncController(fullSync, null, runs, executionGuard)).build();
+    }
+
+    private static SyncRun 완료된실행(SyncTrigger trigger, SyncStatus status) {
+        return SyncRun.builder()
+                .runId("run-1")
+                .source(SyncSource.LDAP)
+                .trigger(trigger)
+                .startedAt(지금)
+                .finishedAt(지금.plusSeconds(5))
+                .status(status)
+                .writtenCount(12)
+                .deletedCount(3)
+                .failureCount(0)
+                .snapshotId("20260814T030000-LDAP")
+                .build();
+    }
+
+    @Test
+    @DisplayName("수동 실행은 MANUAL 트리거로 동기화하고 결과를 돌려준다")
+    void 수동_실행은_MANUAL로_동작한다() {
+        // given
+        Mockito.when(fullSync.execute(SyncTrigger.MANUAL))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.MANUAL, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.trigger").isEqualTo("MANUAL")
+                .jsonPath("$.writtenCount").isEqualTo(12);
+    }
+
+    @Test
+    @DisplayName("force=true 로 요청하면 FORCED 트리거로 동기화해 삭제 가드를 우회한다")
+    void 강제_실행은_FORCED로_동작한다() {
+        // given
+        Mockito.when(fullSync.execute(SyncTrigger.FORCED))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.FORCED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.post().uri("/admin/sync/full?force=true").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.trigger").isEqualTo("FORCED");
+
+        Mockito.verify(fullSync).execute(SyncTrigger.FORCED);
+    }
+
+    @Test
+    @DisplayName("가드가 발동해 중단되면 ABORTED 상태와 사유가 응답에 담긴다")
+    void 중단된_결과가_사유와_함께_응답된다() {
+        // given
+        var aborted = 완료된실행(SyncTrigger.MANUAL, SyncStatus.ABORTED).toBuilder()
+                .message("삭제 대상 412건이 임계치 30.0%를 초과했습니다")
+                .build();
+        Mockito.when(fullSync.execute(any())).thenReturn(Mono.just(aborted));
+
+        // when, then
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("ABORTED")
+                .jsonPath("$.message").value(m -> assertThat((String) m).contains("임계치"));
+    }
+
+    @Test
+    @DisplayName("동기화가 이미 진행 중이면 409 로 거절한다")
+    void 중복_실행은_409로_거절한다() {
+        // given
+        executionGuard.tryAcquire();
+
+        // when, then
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isEqualTo(HttpStatus.CONFLICT);
+    }
+
+    @Test
+    @DisplayName("동기화가 끝나면 가드가 반납되어 다시 실행할 수 있다")
+    void 완료되면_가드가_반납된다() {
+        // given
+        Mockito.when(fullSync.execute(any()))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.MANUAL, SyncStatus.SUCCEEDED)));
+
+        // when
+        client.post().uri("/admin/sync/full").exchange().expectStatus().isOk();
+
+        // then
+        client.post().uri("/admin/sync/full").exchange().expectStatus().isOk();
+    }
+
+    @Test
+    @DisplayName("동기화가 예외로 끝나도 가드가 반납되어 잠기지 않는다")
+    void 예외가_나도_가드가_반납된다() {
+        // given
+        Mockito.when(fullSync.execute(any())).thenReturn(Mono.error(new IllegalStateException("터짐")));
+
+        // when
+        client.post().uri("/admin/sync/full").exchange().expectStatus().is5xxServerError();
+
+        // then
+        assertThat(executionGuard.tryAcquire()).isTrue();
+    }
+
+    @Test
+    @DisplayName("최근 실행 이력을 limit 만큼 조회한다")
+    void 최근_이력을_조회한다() {
+        // given
+        Mockito.when(runs.findRecent(5))
+                .thenReturn(Flux.just(완료된실행(SyncTrigger.SCHEDULED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.get().uri("/admin/sync/runs?limit=5").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$[0].runId").isEqualTo("run-1")
+                .jsonPath("$[0].trigger").isEqualTo("SCHEDULED");
+    }
+}
+```
+
+> `AdminSyncController` 생성자의 두 번째 인자는 Task 16에서 만들 `RebuildUseCase` 다. 이 태스크에서는 `null` 을 넘겨도 rebuild 엔드포인트를 호출하지 않으므로 문제없다.
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*AdminSyncControllerTest*'
+```
+
+Expected: 컴파일 실패 — `AdminSyncController`, `SyncRunResponse` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncRunResponse.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncRun;
+
+import java.time.Instant;
+
+public record SyncRunResponse(
+        String runId,
+        String source,
+        String trigger,
+        Instant startedAt,
+        Instant finishedAt,
+        String status,
+        int writtenCount,
+        int deletedCount,
+        int failureCount,
+        String snapshotId,
+        String message
+) {
+
+    public static SyncRunResponse from(SyncRun run) {
+        return new SyncRunResponse(
+                run.runId(),
+                run.source() == null ? null : run.source().name(),
+                run.trigger() == null ? null : run.trigger().name(),
+                run.startedAt(),
+                run.finishedAt(),
+                run.status() == null ? null : run.status().name(),
+                run.writtenCount(),
+                run.deletedCount(),
+                run.failureCount(),
+                run.snapshotId(),
+                run.message());
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/AdminSyncController.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.RebuildMode;
+import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+@Slf4j
+@RestController
+@RequestMapping("/admin/sync")
+@RequiredArgsConstructor
+public class AdminSyncController {
+
+    private final FullSyncUseCase fullSync;
+    private final RebuildUseCase rebuild;
+    private final SyncRunRepository runs;
+    private final SyncExecutionGuard executionGuard;
+
+    /**
+     * @param force true 면 삭제 가드를 건너뛴다. ABORTED 이후 사람이 판단해서 승인하는 통로다
+     */
+    @PostMapping("/full")
+    public Mono<SyncRunResponse> full(@RequestParam(defaultValue = "false") boolean force) {
+        SyncTrigger trigger = force ? SyncTrigger.FORCED : SyncTrigger.MANUAL;
+        log.info("수동 전체 동기화 요청: trigger={}", trigger);
+        return guarded(fullSync.execute(trigger));
+    }
+
+    /**
+     * @param mode snapshot(기본) 또는 store. 각각의 한계는 설계 문서 §8.2, §8.3 참고
+     */
+    @PostMapping("/rebuild")
+    public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "snapshot") String mode) {
+        RebuildMode rebuildMode = RebuildMode.from(mode);
+        log.warn("전체 재적재 요청: mode={}", rebuildMode);
+        return guarded(rebuild.execute(rebuildMode));
+    }
+
+    @GetMapping("/runs")
+    public Flux<SyncRunResponse> runs(@RequestParam(defaultValue = "20") int limit) {
+        return runs.findRecent(limit).map(SyncRunResponse::from);
+    }
+
+    /** 동기화가 겹쳐 돌지 않게 감싼다. 어떤 경로로 끝나든 반드시 반납한다. */
+    private Mono<SyncRunResponse> guarded(Mono<dev.starryeye.organization.core.model.SyncRun> action) {
+        if (!executionGuard.tryAcquire()) {
+            return Mono.error(new ResponseStatusException(
+                    HttpStatus.CONFLICT, "동기화가 이미 진행 중입니다"));
+        }
+        return action
+                .map(SyncRunResponse::from)
+                .doFinally(signal -> executionGuard.release());
+    }
+}
+```
+
+> `RebuildUseCase` 와 `RebuildMode` 는 Task 16에서 만든다. 이 태스크에서는 `rebuild` 메서드와 두 임포트를 잠시 주석 처리하고, Task 16에서 되살린다.
+
+- [ ] **Step 4: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*AdminSyncControllerTest*'
+```
+
+Expected: 7개 테스트 모두 PASS.
+
+`중복_실행은_409로_거절한다` 가 실패하면 `ResponseStatusException` 이 `Mono.error` 로 반환되고 있는지 확인한다. `예외가_나도_가드가_반납된다` 가 실패하면 `doFinally` 가 `map` **뒤에** 붙어 있는지 본다 — 앞에 붙으면 에러 경로에서 반납되지 않는다.
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: 관리 엔드포인트 추가 — 수동 실행, 강제 실행, 이력 조회
+
+삭제 가드를 둔 이상 우회 수단이 없으면 운영이 막히므로 force=true 를
+함께 제공한다. 동기화가 겹쳐 돌지 않게 감싸고 어떤 경로로 끝나든
+가드를 반납해 잠기지 않게 했다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 16: RebuildUseCase — 전체 재적재 두 모드
+
+**Files:**
+- Create: `core/src/main/java/dev/starryeye/organization/core/usecase/RebuildMode.java`
+- Create: `core/src/main/java/dev/starryeye/organization/core/usecase/RebuildUseCase.java`
+- Modify: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/UseCaseConfig.java` (빈 등록)
+- Modify: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/AdminSyncController.java` (Task 15에서 주석 처리한 부분 복구)
+- Test: `core/src/test/java/dev/starryeye/organization/core/usecase/RebuildUseCaseTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 포트 전부와 fake 5종
+- Produces:
+  - `RebuildMode { SNAPSHOT, STORE }` + `from(String)`
+  - `RebuildUseCase(DirectorySnapshotSource, TupleSnapshotRepository, DirectoryStateRepository, RelationTupleWriter, SyncRunRepository, Clock)` + `execute(RebuildMode) -> Mono<SyncRun>`
+
+**두 모드의 차이가 이 태스크의 전부다.**
+
+`SNAPSHOT` 모드는 **순서를 뒤집는 것이 핵심**이다. 스냅샷을 먼저 지우면 "이제는 없어야 할 튜플"을 지울 근거가 사라진다. 그래서 직전 스냅샷으로 **먼저 전부 삭제**한 다음에 스냅샷을 버린다.
+
+```
+1. findLatest() → T_old
+2. apply(delete = T_old)      ← 먼저 지운다
+3. snapshots.reset()          ← 그 다음에 버린다
+4. fetchAll() → apply(write = T_new)
+5. 새 스냅샷 저장 + replaceWith
+```
+
+`STORE` 모드는 `resetStore()` 로 store 자체를 재생성한다. read API 없이도 진짜로 깨끗해지는 유일한 수단이지만, 재생성과 재적재 사이에 **모든 인가 질의가 실패하는 공백**이 생긴다.
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`core/src/test/java/dev/starryeye/organization/core/usecase/RebuildUseCaseTest.java`:
+
+```java
+package dev.starryeye.organization.core.usecase;
+
+import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
+import dev.starryeye.organization.core.fake.FakeSnapshotSource;
+import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
+import dev.starryeye.organization.core.fake.FakeTupleWriter;
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.model.TupleSnapshot;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class RebuildUseCaseTest {
+
+    private static final Instant 고정시각 = Instant.parse("2026-08-14T03:00:00Z");
+
+    private FakeSnapshotSource source;
+    private FakeSnapshotRepository snapshots;
+    private FakeStateRepository state;
+    private FakeTupleWriter writer;
+    private FakeSyncRunRepository runs;
+    private RebuildUseCase useCase;
+
+    @BeforeEach
+    void setUp() {
+        source = new FakeSnapshotSource();
+        snapshots = new FakeSnapshotRepository();
+        state = new FakeStateRepository();
+        writer = new FakeTupleWriter();
+        runs = new FakeSyncRunRepository(고정시각);
+        useCase = new RebuildUseCase(source, snapshots, state, writer, runs,
+                Clock.fixed(고정시각, ZoneOffset.UTC));
+    }
+
+    private static DirectorySnapshot 조직도(String userId, String groupCode) {
+        return new DirectorySnapshot(
+                Map.of(userId, new DirectoryUser(userId, "uid=" + userId, userId, userId, null, true)),
+                Map.of(groupCode, new DirectoryGroup(groupCode, "cn=" + groupCode, "백엔드팀",
+                        Set.of(MemberRef.user(userId)))));
+    }
+
+    @Test
+    @DisplayName("snapshot 모드는 직전 스냅샷으로 먼저 전부 삭제한 뒤에 스냅샷을 버린다")
+    void snapshot_모드는_먼저_지우고_나중에_버린다() {
+        // given — 직전 스냅샷에 lee 소속이 남아 있다
+        var 낡은튜플 = RelationTuple.directMember("lee", "DEV002");
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(낡은튜플))).block();
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then — 첫 델타가 삭제, 그 다음이 생성이어야 한다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.appliedDeltas).hasSize(2);
+        assertThat(writer.appliedDeltas.get(0).toDelete()).containsExactly(낡은튜플);
+        assertThat(writer.appliedDeltas.get(1).toWrite())
+                .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+        assertThat(snapshots.resetCount.get()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("snapshot 모드가 끝나면 새 스냅샷과 현재상태가 최신으로 남는다")
+    void snapshot_모드_후_상태가_최신이다() {
+        // given
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("lee", "DEV002")))).block();
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then
+        var latest = snapshots.findLatest().block();
+        assertThat(latest.tuples()).containsExactly(RelationTuple.directMember("kim", "DEV002"));
+        assertThat(state.users).containsOnlyKeys("kim");
+    }
+
+    @Test
+    @DisplayName("직전 스냅샷이 없으면 삭제 단계를 건너뛰고 전체를 새로 적재한다")
+    void 직전_스냅샷이_없으면_삭제를_건너뛴다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.appliedDeltas).hasSize(1);
+        assertThat(writer.appliedDeltas.get(0).toWrite()).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("삭제 단계가 하나라도 실패하면 스냅샷을 버리지 않고 FAILED 로 끝낸다")
+    void 삭제가_실패하면_스냅샷을_버리지_않는다() {
+        // given
+        var 낡은튜플 = RelationTuple.directMember("lee", "DEV002");
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(낡은튜플))).block();
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.failFor(tuple -> tuple.equals(낡은튜플));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.resetCount.get()).isZero();
+        assertThat(snapshots.findLatest().block()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("store 모드는 store 를 재생성하고 스냅샷을 버린 뒤 전체를 적재한다")
+    void store_모드는_store를_재생성한다() {
+        // given
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("lee", "DEV002")))).block();
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        var run = useCase.execute(RebuildMode.STORE).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.resetStoreCount.get()).isEqualTo(1);
+        assertThat(snapshots.resetCount.get()).isEqualTo(1);
+        assertThat(writer.appliedDeltas).hasSize(1);
+        assertThat(writer.appliedDeltas.get(0).toDelete()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("재적재는 REBUILD 트리거로 이력에 기록된다")
+    void 재적재는_REBUILD_트리거로_기록된다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
+        assertThat(runs.finished).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("mode 문자열을 대소문자 구분 없이 해석하고 알 수 없는 값은 거절한다")
+    void mode_문자열을_해석한다() {
+        // given, when, then
+        assertThat(RebuildMode.from("snapshot")).isEqualTo(RebuildMode.SNAPSHOT);
+        assertThat(RebuildMode.from("STORE")).isEqualTo(RebuildMode.STORE);
+        org.assertj.core.api.Assertions
+                .assertThatThrownBy(() -> RebuildMode.from("nope"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :core:test --tests '*RebuildUseCaseTest*'
+```
+
+Expected: 컴파일 실패 — `RebuildUseCase`, `RebuildMode` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`core/src/main/java/dev/starryeye/organization/core/usecase/RebuildMode.java`:
+
+```java
+package dev.starryeye.organization.core.usecase;
+
+import java.util.Locale;
+
+public enum RebuildMode {
+
+    /** 직전 스냅샷을 근거로 전부 지운 뒤 재적재. 안전하지만 스냅샷에 없는 튜플은 남는다 */
+    SNAPSHOT,
+
+    /** store 자체를 재생성. 진짜로 깨끗해지지만 재적재까지 인가 질의가 실패하는 공백이 생긴다 */
+    STORE;
+
+    public static RebuildMode from(String raw) {
+        try {
+            return valueOf(raw.toUpperCase(Locale.ROOT));
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "알 수 없는 rebuild 모드입니다: " + raw + " (snapshot 또는 store)");
+        }
+    }
+}
+```
+
+`core/src/main/java/dev/starryeye/organization/core/usecase/RebuildUseCase.java`:
+
+```java
+package dev.starryeye.organization.core.usecase;
+
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncOutcome;
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.model.TupleDelta;
+import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.port.DirectorySnapshotSource;
+import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.tuple.SnapshotIds;
+import dev.starryeye.organization.core.tuple.TupleMapper;
+import dev.starryeye.organization.core.tuple.TupleMappingResult;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Mono;
+
+import java.time.Clock;
+import java.util.Set;
+
+/**
+ * 전체 재적재.
+ *
+ * <p><b>SNAPSHOT 모드의 순서가 뒤집혀 있는 것이 핵심이다.</b> 스냅샷을 먼저 지우면
+ * "이제는 없어야 할 튜플"을 지울 근거가 사라지고, read API 를 쓰지 않으므로 되찾을 수 없다.
+ * 그래서 직전 스냅샷으로 먼저 전부 삭제한 다음에 스냅샷을 버린다.
+ *
+ * <p>삭제 가드는 적용하지 않는다. 전체 삭제가 의도된 동작이기 때문이다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class RebuildUseCase {
+
+    private final DirectorySnapshotSource source;
+    private final TupleSnapshotRepository snapshots;
+    private final DirectoryStateRepository state;
+    private final RelationTupleWriter writer;
+    private final SyncRunRepository runs;
+    private final Clock clock;
+
+    public Mono<SyncRun> execute(RebuildMode mode) {
+        return runs.start(SyncSource.LDAP, SyncTrigger.REBUILD)
+                .flatMap(run -> rebuild(mode)
+                        .onErrorResume(error -> {
+                            log.error("[{}] 전체 재적재 실패", run.runId(), error);
+                            return Mono.just(SyncOutcome.failed(error.getMessage()));
+                        })
+                        .flatMap(outcome -> runs.finish(run, outcome)));
+    }
+
+    private Mono<SyncOutcome> rebuild(RebuildMode mode) {
+        Mono<Void> clear = mode == RebuildMode.STORE ? clearByStoreReset() : clearBySnapshot();
+        return clear.then(Mono.defer(this::reload));
+    }
+
+    /** store 를 통째로 재생성한다. 재적재까지 모든 인가 질의가 실패하는 공백이 생긴다. */
+    private Mono<Void> clearByStoreReset() {
+        log.warn("store 재생성 방식으로 재적재한다. 재적재가 끝날 때까지 인가 질의가 실패한다");
+        return writer.resetStore().then(snapshots.reset());
+    }
+
+    /**
+     * 직전 스냅샷을 근거로 먼저 전부 지우고, 그 다음에 스냅샷을 버린다.
+     * 삭제가 하나라도 실패하면 스냅샷을 버리지 않고 중단해, 다음 정기 동기화가 정상 동작하게 한다.
+     */
+    private Mono<Void> clearBySnapshot() {
+        return snapshots.findLatest()
+                .flatMap(previous -> writer.apply(TupleDelta.deleteOnly(previous.tuples()))
+                        .flatMap(result -> {
+                            if (result.hasFailure()) {
+                                return Mono.error(new IllegalStateException(
+                                        "직전 스냅샷 삭제 중 %d건이 실패해 재적재를 중단합니다. 스냅샷은 보존됩니다"
+                                                .formatted(result.failures().size())));
+                            }
+                            return snapshots.reset();
+                        }))
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.info("직전 스냅샷이 없어 삭제 단계를 건너뛴다");
+                    return snapshots.reset();
+                }).then(Mono.empty()))
+                .then();
+    }
+
+    private Mono<SyncOutcome> reload() {
+        return source.fetchAll().flatMap(directory -> {
+            TupleMappingResult mapping = TupleMapper.toTuples(directory);
+            mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
+
+            return writer.apply(TupleDelta.writeOnly(mapping.tuples()))
+                    .flatMap(result -> commit(directory, result));
+        });
+    }
+
+    private Mono<SyncOutcome> commit(DirectorySnapshot directory, TupleWriteResult result) {
+        Set<RelationTuple> committed = result.written();
+        TupleSnapshot snapshot = new TupleSnapshot(
+                SnapshotIds.generate(clock.instant(), SyncSource.LDAP),
+                clock.instant(),
+                SyncSource.LDAP,
+                committed);
+
+        return snapshots.save(snapshot)
+                .then(state.replaceWith(directory))
+                .thenReturn(result.hasFailure()
+                        ? SyncOutcome.partial(result, snapshot.id())
+                        : SyncOutcome.succeeded(result, snapshot.id()));
+    }
+}
+```
+
+> `clearBySnapshot` 의 `switchIfEmpty` 조합이 까다롭다. 의도는 "직전 스냅샷이 있으면 삭제 후 reset, 없으면 reset 만"이다. 테스트 `직전_스냅샷이_없으면_삭제를_건너뛴다` 가 실패하면 아래처럼 단순하게 바꿔도 된다.
+>
+> ```java
+> private Mono<Void> clearBySnapshot() {
+>     return snapshots.findLatest()
+>             .map(TupleSnapshot::tuples)
+>             .defaultIfEmpty(Set.of())
+>             .flatMap(previous -> previous.isEmpty()
+>                     ? Mono.empty()
+>                     : writer.apply(TupleDelta.deleteOnly(previous)).flatMap(this::failIfIncomplete))
+>             .then(snapshots.reset());
+> }
+> ```
+> 단, 이 형태는 삭제 실패 시에도 `snapshots.reset()` 이 실행되므로 `failIfIncomplete` 가 `Mono.error` 를 내보내 체인을 끊어야 한다. `테스트 삭제가_실패하면_스냅샷을_버리지_않는다` 가 이를 검증한다.
+
+- [ ] **Step 4: 빈 등록과 컨트롤러 복구**
+
+`UseCaseConfig.java` 에 추가:
+
+```java
+    @Bean
+    public RebuildUseCase rebuildUseCase(DirectorySnapshotSource source,
+                                         TupleSnapshotRepository snapshots,
+                                         DirectoryStateRepository state,
+                                         RelationTupleWriter writer,
+                                         SyncRunRepository runs,
+                                         Clock clock) {
+        return new RebuildUseCase(source, snapshots, state, writer, runs, clock);
+    }
+```
+
+`AdminSyncController.java` 에서 Task 15 Step 3에 주석 처리한 `rebuild` 메서드와 두 임포트를 되살린다.
+
+- [ ] **Step 5: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :core:test --tests '*RebuildUseCaseTest*' && ./gradlew :app-ldap:build
+```
+
+Expected: `RebuildUseCaseTest` 7개 PASS, `app-ldap` 빌드 성공.
+
+`snapshot_모드는_먼저_지우고_나중에_버린다` 가 이 태스크의 핵심이다. `writer.appliedDeltas.get(0)` 이 삭제가 아니라 생성이면 순서가 뒤집힌 것이고, 그러면 "이제는 없어야 할 튜플"이 영원히 남는다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: RebuildUseCase 추가 — 전체 재적재 두 모드
+
+snapshot 모드는 순서를 뒤집는 것이 핵심이다. 스냅샷을 먼저 지우면
+"이제는 없어야 할 튜플"을 지울 근거가 사라지고 read API 를 쓰지 않으므로
+되찾을 수 없다. 그래서 직전 스냅샷으로 먼저 전부 삭제한 뒤에 버린다.
+삭제가 하나라도 실패하면 스냅샷을 보존한 채 중단한다.
+
+store 모드는 store 자체를 재생성한다. read API 없이 진짜로 깨끗해지는
+유일한 수단이지만 재적재까지 인가 질의가 실패하는 공백이 생긴다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 17: 관측성 — 메트릭, 헬스체크, runId 로깅
+
+**Files:**
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncMetrics.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/OpenFgaHealthIndicator.java`
+- Create: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/DynamoDbHealthIndicator.java`
+- Modify: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncScheduler.java` (메트릭 기록)
+- Modify: `app-ldap/src/main/java/dev/starryeye/organization/ldap/app/AdminSyncController.java` (메트릭 기록)
+- Test: `app-ldap/src/test/java/dev/starryeye/organization/ldap/app/SyncMetricsTest.java`
+
+**Interfaces:**
+- Consumes: Task 2의 `SyncRun`, Micrometer `MeterRegistry`
+- Produces: `SyncMetrics(MeterRegistry)` — `record(SyncRun)`, 헬스 인디케이터 2종
+
+| 메트릭 | 타입 | 태그 |
+|---|---|---|
+| `sync.duration` | Timer | `source`, `trigger`, `status` |
+| `sync.tuples.written` | Counter | `source` |
+| `sync.tuples.deleted` | Counter | `source` |
+| `sync.tuples.failed` | Counter | `source` |
+| `sync.guard.aborted` | Counter | — |
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`app-ldap/src/test/java/dev/starryeye/organization/ldap/app/SyncMetricsTest.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SyncMetricsTest {
+
+    private static final Instant 시작 = Instant.parse("2026-08-14T03:00:00Z");
+
+    private SimpleMeterRegistry registry;
+    private SyncMetrics metrics;
+
+    @BeforeEach
+    void setUp() {
+        registry = new SimpleMeterRegistry();
+        metrics = new SyncMetrics(registry);
+    }
+
+    private static SyncRun 실행(SyncStatus status, int written, int deleted, int failed) {
+        return SyncRun.builder()
+                .runId("run-1")
+                .source(SyncSource.LDAP)
+                .trigger(SyncTrigger.SCHEDULED)
+                .startedAt(시작)
+                .finishedAt(시작.plusSeconds(12))
+                .status(status)
+                .writtenCount(written)
+                .deletedCount(deleted)
+                .failureCount(failed)
+                .build();
+    }
+
+    @Test
+    @DisplayName("동기화 소요 시간이 소스·트리거·상태 태그와 함께 기록된다")
+    void 소요_시간이_기록된다() {
+        // given, when
+        metrics.record(실행(SyncStatus.SUCCEEDED, 10, 2, 0));
+
+        // then
+        var timer = registry.find("sync.duration")
+                .tag("source", "LDAP").tag("trigger", "SCHEDULED").tag("status", "SUCCEEDED")
+                .timer();
+        assertThat(timer).isNotNull();
+        assertThat(timer.count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("생성·삭제·실패 튜플 수가 각각 카운터에 누적된다")
+    void 튜플_카운터가_누적된다() {
+        // given, when
+        metrics.record(실행(SyncStatus.PARTIAL, 10, 2, 3));
+        metrics.record(실행(SyncStatus.SUCCEEDED, 5, 1, 0));
+
+        // then
+        assertThat(registry.find("sync.tuples.written").tag("source", "LDAP").counter().count())
+                .isEqualTo(15.0);
+        assertThat(registry.find("sync.tuples.deleted").tag("source", "LDAP").counter().count())
+                .isEqualTo(3.0);
+        assertThat(registry.find("sync.tuples.failed").tag("source", "LDAP").counter().count())
+                .isEqualTo(3.0);
+    }
+
+    @Test
+    @DisplayName("가드가 발동한 실행은 별도 카운터로 집계된다")
+    void 가드_발동이_집계된다() {
+        // given, when
+        metrics.record(실행(SyncStatus.ABORTED, 0, 0, 0));
+        metrics.record(실행(SyncStatus.SUCCEEDED, 5, 0, 0));
+
+        // then
+        assertThat(registry.find("sync.guard.aborted").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("완료 시각이 없는 실행은 소요 시간을 기록하지 않는다")
+    void 미완료_실행은_시간을_기록하지_않는다() {
+        // given
+        var running = SyncRun.started("run-2", SyncSource.LDAP, SyncTrigger.MANUAL, 시작);
+
+        // when
+        metrics.record(running);
+
+        // then
+        assertThat(registry.find("sync.duration").timers()).isEmpty();
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*SyncMetricsTest*'
+```
+
+Expected: 컴파일 실패 — `SyncMetrics` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/SyncMetrics.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncStatus;
+import io.micrometer.core.instrument.MeterRegistry;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+
+@Component
+@RequiredArgsConstructor
+public class SyncMetrics {
+
+    private final MeterRegistry registry;
+
+    public void record(SyncRun run) {
+        String source = run.source().name();
+
+        if (run.finishedAt() != null) {
+            registry.timer("sync.duration",
+                            "source", source,
+                            "trigger", run.trigger().name(),
+                            "status", run.status().name())
+                    .record(Duration.between(run.startedAt(), run.finishedAt()));
+        }
+
+        registry.counter("sync.tuples.written", "source", source).increment(run.writtenCount());
+        registry.counter("sync.tuples.deleted", "source", source).increment(run.deletedCount());
+        registry.counter("sync.tuples.failed", "source", source).increment(run.failureCount());
+
+        if (run.status() == SyncStatus.ABORTED) {
+            registry.counter("sync.guard.aborted").increment();
+        }
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/DynamoDbHealthIndicator.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.storage.DynamoDbProperties;
+import lombok.RequiredArgsConstructor;
+import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.actuate.health.ReactiveHealthIndicator;
+import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
+
+@Component("dynamoDb")
+@RequiredArgsConstructor
+public class DynamoDbHealthIndicator implements ReactiveHealthIndicator {
+
+    private final DynamoDbAsyncClient client;
+    private final DynamoDbProperties properties;
+
+    @Override
+    public Mono<Health> health() {
+        return Mono.fromFuture(() -> client.describeTable(DescribeTableRequest.builder()
+                        .tableName(properties.getTableName())
+                        .build()))
+                .map(response -> Health.up()
+                        .withDetail("table", properties.getTableName())
+                        .withDetail("itemCount", response.table().itemCount())
+                        .build())
+                .onErrorResume(error -> Mono.just(Health.down(error).build()));
+    }
+}
+```
+
+`app-ldap/src/main/java/dev/starryeye/organization/ldap/app/OpenFgaHealthIndicator.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import dev.starryeye.organization.authz.OpenFgaProperties;
+import dev.starryeye.organization.authz.StoreBootstrapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.actuate.health.ReactiveHealthIndicator;
+import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+
+@Component("openFga")
+@RequiredArgsConstructor
+public class OpenFgaHealthIndicator implements ReactiveHealthIndicator {
+
+    private final StoreBootstrapper bootstrapper;
+    private final OpenFgaProperties properties;
+
+    @Override
+    public Mono<Health> health() {
+        // storeId 는 밖으로 내보내지 않는다. 해석이 되는지만 확인한다
+        return bootstrapper.resolveStore()
+                .map(storeId -> Health.up()
+                        .withDetail("storeName", properties.getStoreName())
+                        .withDetail("apiUrl", properties.getApiUrl())
+                        .build())
+                .onErrorResume(error -> Mono.just(Health.down(error).build()));
+    }
+}
+```
+
+- [ ] **Step 4: 스케줄러에 메트릭 연결**
+
+`SyncScheduler` 의 필드에 `SyncMetrics` 를 추가한다 (`@RequiredArgsConstructor` 가 생성자를 만들어 준다):
+
+```java
+public class SyncScheduler {
+
+    private final FullSyncUseCase fullSync;
+    private final TupleSnapshotRepository snapshots;
+    private final SyncExecutionGuard executionGuard;
+    private final SyncMetrics metrics;
+```
+
+`전체동기화()` 의 성공 콜백을 다음으로 교체한다:
+
+```java
+                .subscribe(
+                        run -> {
+                            metrics.record(run);
+                            log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
+                                    run.status(), run.writtenCount(), run.deletedCount(), run.failureCount());
+                        },
+                        error -> log.error("스케줄 동기화가 예기치 않게 실패했다", error));
+```
+
+- [ ] **Step 5: 컨트롤러에 메트릭 연결**
+
+`AdminSyncController` 의 필드에 `SyncMetrics` 를 추가한다:
+
+```java
+public class AdminSyncController {
+
+    private final FullSyncUseCase fullSync;
+    private final RebuildUseCase rebuild;
+    private final SyncRunRepository runs;
+    private final SyncExecutionGuard executionGuard;
+    private final SyncMetrics metrics;
+```
+
+`guarded` 의 반환 체인을 다음으로 교체한다. `doOnNext` 가 `map` **앞**, `doFinally` 가 **뒤**에 있어야 한다 — `doFinally` 가 앞에 오면 에러 경로에서 가드가 반납되지 않는다:
+
+```java
+        return action
+                .doOnNext(metrics::record)
+                .map(SyncRunResponse::from)
+                .doFinally(signal -> executionGuard.release());
+```
+
+생성자 인자가 하나 늘었으므로 `AdminSyncControllerTest` 의 `컨트롤러를_준비한다()` 도 함께 고친다:
+
+```java
+        client = WebTestClient.bindToController(
+                new AdminSyncController(fullSync, null, runs, executionGuard,
+                        new SyncMetrics(new SimpleMeterRegistry()))).build();
+```
+
+임포트에 `io.micrometer.core.instrument.simple.SimpleMeterRegistry` 를 추가한다.
+
+- [ ] **Step 6: 회귀 확인**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*AdminSyncControllerTest*' --tests '*SyncMetricsTest*'
+```
+
+Expected: `AdminSyncControllerTest` 7개 + `SyncMetricsTest` 4개 = 11개 PASS. 생성자 변경으로 Task 15의 테스트가 깨지지 않았는지 여기서 확인한다.
+
+- [ ] **Step 7: runId 를 로그에 붙이기**
+
+`FullSyncUseCase.execute` 와 `RebuildUseCase.execute` 의 `flatMap` 안에 `contextWrite` 대신 단순하게 로그 메시지에 `runId` 를 넣는 방식을 쓴다. 이미 에러 로그에는 들어가 있으므로, 시작 로그 한 줄만 추가한다.
+
+`FullSyncUseCase.execute` 의 `runs.start(...)` 뒤에:
+
+```java
+                .doOnNext(run -> log.info("[{}] 전체 동기화 시작: trigger={}", run.runId(), trigger))
+```
+
+`RebuildUseCase.execute` 에도 같은 형태로:
+
+```java
+                .doOnNext(run -> log.info("[{}] 전체 재적재 시작: mode={}", run.runId(), mode))
+```
+
+- [ ] **Step 8: 전체 빌드 확인**
+
+Run:
+
+```bash
+./gradlew build
+```
+
+Expected: 전체 모듈 `BUILD SUCCESSFUL`.
+
+- [ ] **Step 9: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: 관측성 추가 — 메트릭, 헬스체크, runId 로깅
+
+동기화 소요 시간과 생성·삭제·실패 튜플 수를 Micrometer 로 내보내고
+가드 발동은 별도 카운터로 집계한다.
+
+DynamoDB 와 OpenFGA 헬스 인디케이터를 등록했다. OpenFGA 쪽은 store
+해석이 되는지만 확인하고 storeId 는 응답에 담지 않는다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 18: End-to-End 통합 테스트
+
+**Files:**
+- Create: `app-ldap/src/test/java/dev/starryeye/organization/ldap/app/LdapSyncEndToEndTest.java`
+- Create: `app-ldap/src/test/resources/application-test.yml`
+- Create: `README.md`
+
+**Interfaces:**
+- Consumes: Task 1~17 전부
+- Produces: 없음 (검증과 문서화)
+
+**이 태스크가 검증하는 것.** 개별 단위 테스트가 통과해도 결선이 틀리면 아무것도 동작하지 않는다. LDAP → 도메인 → 튜플 → OpenFGA → DynamoDB 전 구간이 실제 컨테이너 위에서 이어지는지 확인한다.
+
+- [ ] **Step 1: 통합 테스트 작성**
+
+`app-ldap/src/test/resources/application-test.yml`:
+
+```yaml
+sync:
+  cron: "-"
+  purge-cron: "-"
+  deletion-guard:
+    enabled: true
+    threshold-ratio: 0.3
+    min-baseline: 10
+
+ldap:
+  base-dn: dc=example,dc=com
+  bind-dn: cn=admin,dc=example,dc=com
+  bind-password: adminpassword
+  strategy: group-of-names
+  group-of-names:
+    user-search-base: ou=people
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+    group-search-base: ou=groups
+    group-object-class: groupOfNames
+    group-id-attribute: cn
+    group-name-attribute: description
+    member-attribute: member
+
+dynamodb:
+  region: ap-northeast-2
+  table-name: organization-e2e
+  create-table-on-startup: true
+
+openfga:
+  store-name: organization-e2e
+```
+
+> `cron: "-"` 은 스프링의 "이 스케줄을 비활성화한다" 표기다. 통합 테스트에서 스케줄러가 제멋대로 도는 것을 막는다.
+
+`app-ldap/src/test/java/dev/starryeye/organization/ldap/app/LdapSyncEndToEndTest.java`:
+
+```java
+package dev.starryeye.organization.ldap.app;
+
+import com.unboundid.ldap.listener.InMemoryDirectoryServer;
+import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
+import com.unboundid.ldap.listener.InMemoryListenerConfig;
+import com.unboundid.ldif.LDIFReader;
+import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@Testcontainers
+@ActiveProfiles("test")
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class LdapSyncEndToEndTest {
+
+    @Container
+    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
+            DockerImageName.parse("openfga/openfga:v1.10.2"))
+            .withCommand("run")
+            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
+            .withExposedPorts(8080)
+            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+
+    @Container
+    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
+            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
+            .withExposedPorts(8000)
+            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+
+    static InMemoryDirectoryServer LDAP;
+
+    static final String LDIF = """
+            dn: dc=example,dc=com
+            objectClass: top
+            objectClass: domain
+            dc: example
+
+            dn: ou=people,dc=example,dc=com
+            objectClass: organizationalUnit
+            ou: people
+
+            dn: ou=groups,dc=example,dc=com
+            objectClass: organizationalUnit
+            ou: groups
+
+            dn: uid=kim,ou=people,dc=example,dc=com
+            objectClass: inetOrgPerson
+            uid: kim
+            cn: Kim Chulsoo
+            sn: Kim
+            displayName: 김철수
+            mail: kim@example.com
+
+            dn: uid=park,ou=people,dc=example,dc=com
+            objectClass: inetOrgPerson
+            uid: park
+            cn: Park Minsu
+            sn: Park
+            displayName: 박민수
+            mail: park@example.com
+
+            dn: cn=DEV001,ou=groups,dc=example,dc=com
+            objectClass: groupOfNames
+            cn: DEV001
+            description: 개발본부
+            member: cn=DEV002,ou=groups,dc=example,dc=com
+            member: uid=park,ou=people,dc=example,dc=com
+
+            dn: cn=DEV002,ou=groups,dc=example,dc=com
+            objectClass: groupOfNames
+            cn: DEV002
+            description: 백엔드팀
+            member: uid=kim,ou=people,dc=example,dc=com
+            """;
+
+    @DynamicPropertySource
+    static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
+        InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig("dc=example,dc=com");
+        config.addAdditionalBindCredentials("cn=admin,dc=example,dc=com", "adminpassword");
+        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("e2e", 0));
+        config.setSchema(null);
+        LDAP = new InMemoryDirectoryServer(config);
+        LDAP.importFromLDIF(true, new LDIFReader(
+                new ByteArrayInputStream(LDIF.getBytes(StandardCharsets.UTF_8))));
+        LDAP.startListening();
+
+        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("openfga.api-url",
+                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
+        registry.add("dynamodb.endpoint",
+                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+    }
+
+    @Autowired WebTestClient client;
+    @Autowired StoreBootstrapper bootstrapper;
+    @Autowired TupleSnapshotRepository snapshots;
+    @Autowired DirectoryStateRepository state;
+
+    private boolean check(String user, String relation, String object) {
+        try {
+            return bootstrapper.client().check(new ClientCheckRequest()
+                    ._object(object).relation(relation).user(user)).get().getAllowed();
+        } catch (Exception e) {
+            throw new IllegalStateException("Check 호출 실패", e);
+        }
+    }
+
+    @Test
+    @Order(1)
+    @DisplayName("수동 동기화 한 번으로 LDAP 조직도가 OpenFGA 튜플과 DynamoDB 에 모두 반영된다")
+    void 전_구간이_한_번에_이어진다() {
+        // given, when
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+
+        // then — OpenFGA 에 롤업이 성립한다
+        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+        assertThat(check("user:park", "member", "group:DEV001")).isTrue();
+        assertThat(check("user:park", "member", "group:DEV002")).isFalse();
+
+        // then — DynamoDB 에 현재상태가 남는다
+        var loaded = state.loadAll().block();
+        assertThat(loaded.users()).containsOnlyKeys("kim", "park");
+        assertThat(loaded.groups().get("DEV001").displayName()).isEqualTo("개발본부");
+
+        // then — 스냅샷이 남는다
+        var snapshot = snapshots.findLatest().block();
+        assertThat(snapshot.tuples()).hasSize(3);
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("변경이 없는 상태에서 다시 동기화하면 아무것도 쓰지 않는다")
+    void 재실행하면_변경_없음으로_끝난다() {
+        // given, when, then
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.writtenCount").isEqualTo(0)
+                .jsonPath("$.deletedCount").isEqualTo(0)
+                .jsonPath("$.message").isEqualTo("변경 없음");
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("snapshot 모드 재적재 후에도 롤업이 그대로 성립한다")
+    void snapshot_모드_재적재가_동작한다() {
+        // given, when
+        client.post().uri("/admin/sync/rebuild?mode=snapshot").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.trigger").isEqualTo("REBUILD");
+
+        // then
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+        assertThat(snapshots.findLatest().block().tuples()).hasSize(3);
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("store 모드 재적재는 store 를 비우고 다시 채운다")
+    void store_모드_재적재가_동작한다() {
+        // given, when
+        client.post().uri("/admin/sync/rebuild?mode=store").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+
+        // then
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("실행 이력에 지금까지의 동기화가 최신순으로 남아 있다")
+    void 실행_이력이_남는다() {
+        // given, when, then
+        client.get().uri("/admin/sync/runs?limit=10").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.length()").value(len -> assertThat((Integer) len).isGreaterThanOrEqualTo(4))
+                .jsonPath("$[0].source").isEqualTo("LDAP");
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("헬스체크가 DynamoDB 와 OpenFGA 연결을 모두 UP 으로 보고한다")
+    void 헬스체크가_UP이다() {
+        // given, when, then
+        client.get().uri("/actuator/health").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("UP")
+                .jsonPath("$.components.dynamoDb.status").isEqualTo("UP")
+                .jsonPath("$.components.openFga.status").isEqualTo("UP");
+    }
+}
+```
+
+- [ ] **Step 2: 테스트 실행**
+
+Run:
+
+```bash
+./gradlew :app-ldap:test --tests '*LdapSyncEndToEndTest*'
+```
+
+Expected: 6개 테스트 모두 PASS.
+
+실패하기 쉬운 지점 세 가지를 미리 적어둔다.
+
+1. `전_구간이_한_번에_이어진다` 의 튜플 수가 3이 아니면 `TupleMapper` 결과를 확인한다. 기대값은 `(group:DEV002, child, group:DEV001)`, `(user:park, direct_member, group:DEV001)`, `(user:kim, direct_member, group:DEV002)` 세 개다.
+2. `재실행하면_변경_없음으로_끝난다` 가 실패하면 `TupleMapper` 가 결정적이지 않은 것이다 — 같은 LDAP 을 두 번 읽어 다른 튜플 집합이 나오면 diff 가 비지 않는다. Task 3의 정렬 순서를 확인한다.
+3. `store_모드_재적재가_동작한다` 가 `store 가 아직 해석되지 않았다` 로 실패하면 `StoreBootstrapper.recreateStore()` 가 새 클라이언트를 `clientRef` 에 다시 넣지 않은 것이다.
+
+- [ ] **Step 3: README 작성**
+
+`README.md`:
+
+```markdown
+# organization
+
+LDAP / SCIM 디렉터리의 조직·직원 관계를 OpenFGA 튜플로 동기화하는 서버.
+
+- 설계: [docs/superpowers/specs/2026-08-14-organization-sync-design.md](docs/superpowers/specs/2026-08-14-organization-sync-design.md)
+- 구현 계획: [docs/superpowers/plans/](docs/superpowers/plans/)
+
+## 구조
+
+| 모듈 | 책임 |
+|---|---|
+| `core` | 도메인 모델, 포트, 유스케이스, 튜플 변환·비교, 삭제 가드 |
+| `storage-dynamodb` | 현재상태 / 스냅샷 / 실행이력 저장소 |
+| `authz-openfga` | store 해석, 인가 모델 등록, 멱등 튜플 쓰기 |
+| `connector-ldap` | groupOfNames / DIT 두 매핑 전략 |
+| `connector-scim` | SCIM 2.0 엔드포인트 (별도 계획에서 구현) |
+| `app-ldap` | LDAP 동기화 인스턴스 (8081) |
+| `app-scim` | SCIM 수신 인스턴스 (8082, 별도 계획) |
+
+## 동작 원리
+
+LDAP 은 pull 모델이라 변경분을 알 수 없다. 그래서 전체를 읽어 목표 튜플 집합을 만들고
+**직전 스냅샷과 diff** 해서 델타를 계산한다.
+
+델타는 **OpenFGA 에 먼저 적용**하고, 실제로 성공한 튜플만 새 스냅샷으로 커밋한다.
+실패한 튜플은 새 스냅샷에 들어가지 않으므로 다음 동기화의 diff 가 자동으로 다시 잡는다.
+재시도 큐도 상태머신도 없는 이유가 이것이다.
+
+OpenFGA 의 read API 는 쓰지 않는다. 튜플 상태의 진실의 원천은 DynamoDB 스냅샷이다.
+
+## 인가 모델
+
+```
+type group
+  relations
+    define direct_member: [user]
+    define child: [group]
+    define member: direct_member or member from child
+```
+
+조직명은 개편 때마다 바뀌므로 **튜플에 넣지 않는다.** 튜플 식별자는 직원 아이디와 조직코드뿐이다.
+
+## 로컬 실행
+
+```bash
+docker compose up -d
+./gradlew :app-ldap:bootRun
+```
+
+| 서비스 | 주소 |
+|---|---|
+| OpenFGA | http://localhost:8080 (플레이그라운드 :3000) |
+| DynamoDB Local | http://localhost:8000 |
+| OpenLDAP | ldap://localhost:1389 |
+| app-ldap | http://localhost:8081 |
+
+## 관리 API
+
+| 요청 | 설명 |
+|---|---|
+| `POST /admin/sync/full` | 즉시 전체 동기화 |
+| `POST /admin/sync/full?force=true` | 삭제 가드를 건너뛰고 실행 |
+| `POST /admin/sync/rebuild?mode=snapshot` | 직전 스냅샷으로 전부 지운 뒤 재적재 |
+| `POST /admin/sync/rebuild?mode=store` | store 를 재생성한 뒤 재적재 (재적재까지 인가 질의 실패) |
+| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
+
+## 테스트
+
+```bash
+./gradlew test
+```
+
+Docker 가 필요하다. DynamoDB Local 과 OpenFGA 는 Testcontainers 로,
+LDAP 은 UnboundID 임베디드 서버로 띄운다.
+
+## 요구 버전
+
+**OpenFGA 서버 v1.10.0 이상**이어야 한다. `on_duplicate` / `on_missing` 멱등 옵션이
+그 버전부터 제공되며, 이것이 없으면 재적재와 재실행이 배치 단위로 통째로 실패한다.
+```
+
+- [ ] **Step 4: 전체 빌드 확인**
+
+Run:
+
+```bash
+./gradlew clean build
+```
+
+Expected: 전체 모듈 `BUILD SUCCESSFUL`.
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+test: LDAP 동기화 end-to-end 통합 테스트와 README 추가
+
+임베디드 LDAP + OpenFGA/DynamoDB 컨테이너 위에서 LDAP → 도메인 → 튜플 →
+OpenFGA/DynamoDB 전 구간이 이어지는지 확인한다. 개별 단위 테스트가 통과해도
+결선이 틀리면 아무것도 동작하지 않으므로 이 테스트가 필요하다.
+
+재실행 시 "변경 없음"으로 끝나는지도 확인해 TupleMapper 의 결정성을 검증한다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## 완료 조건
+
+이 계획이 끝나면 다음이 모두 성립한다.
+
+- `./gradlew clean build` 가 전체 모듈에서 통과한다
+- `docker compose up -d && ./gradlew :app-ldap:bootRun` 으로 서버가 뜨고, OpenFGA store 와 인가 모델, DynamoDB 테이블이 자동으로 준비된다
+- `POST /admin/sync/full` 한 번으로 LDAP 조직도가 OpenFGA 에 반영되고, `Check(user:kim, member, group:DEV001)` 이 롤업으로 true 가 된다
+- 같은 요청을 다시 보내면 "변경 없음"으로 끝나 불필요한 쓰기가 없다
+- LDAP 이 0건을 반환하면 삭제 가드가 발동해 `ABORTED` 로 기록되고, `?force=true` 로 우회할 수 있다
+- 부분 실패가 나면 성공분만 스냅샷에 담겨 다음 동기화가 실패분을 다시 잡는다
+- `rebuild` 가 두 모드 모두 동작한다
+- 프로덕션 코드 어디에도 OpenFGA read/check 호출이 없고, `storeId`/`modelId` 를 다루는 코드가 `authz-openfga` 밖에 없다
+
+## 다음 계획
+
+`docs/superpowers/plans/2026-08-14-scim-connector.md` 에서 `connector-scim` 과 `app-scim` 을 구현한다. 이 계획이 만든 `core` 포트와 세 어댑터를 그대로 재사용하며, 새로 필요한 것은 SCIM 라우터·핸들러, `ScimPatchApplier`, `IncrementalSyncUseCase`, `SnapshotArchiveUseCase` 뿐이다.
