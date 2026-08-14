@@ -2896,3 +2896,2032 @@ git push origin main
 ```
 
 ---
+
+## Task 7: DynamoDB 기반 — 키 설계, 클라이언트, 테이블 생성
+
+**Files:**
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/Keys.java`
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/Attrs.java`
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbProperties.java`
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbConfig.java`
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/TableInitializer.java`
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/KeysTest.java`
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbTestSupport.java`
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/TableInitializerTest.java`
+
+**Interfaces:**
+- Consumes: Task 2의 `MemberRef`, `MemberType`, `RelationTuple`, `SyncSource`
+- Produces:
+  - `Keys` 상수/정적 메서드 (아래 Step 1 목록 전부)
+  - `Attrs.s(String)`, `Attrs.n(Number)`, `Attrs.bool(boolean)`, `Attrs.str(Map<String,AttributeValue>, String)`, `Attrs.integer(...)`, `Attrs.flag(...)`, `Attrs.instant(...)`
+  - `DynamoDbProperties` (`@ConfigurationProperties("dynamodb")`) — `endpoint`, `region`, `tableName`, `createTableOnStartup`, `snapshotRetentionDays`, `syncrunRetentionDays`
+  - `DynamoDbConfig` → `DynamoDbAsyncClient` 빈
+  - `TableInitializer.ensureTable() -> Mono<Void>`
+  - `DynamoDbTestSupport` — Testcontainers 기반 추상 테스트 베이스. Task 8~10이 상속한다
+
+- [ ] **Step 1: 키 설계 테스트 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/KeysTest.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class KeysTest {
+
+    @Test
+    @DisplayName("직원과 조직은 서로 다른 파티션 접두사를 가져 한 테이블에서 구분된다")
+    void 직원과_조직의_파티션키가_구분된다() {
+        // given, when
+        String userPk = Keys.userPk("kim");
+        String groupPk = Keys.groupPk("DEV002");
+
+        // then
+        assertThat(userPk).isEqualTo("USER#kim");
+        assertThat(groupPk).isEqualTo("GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("멤버십 정렬키는 타입을 포함해 직원 멤버와 하위 조직 멤버를 구분한다")
+    void 멤버십_정렬키는_타입을_포함한다() {
+        // given, when
+        String userMember = Keys.memberSk(MemberRef.user("kim"));
+        String groupMember = Keys.memberSk(MemberRef.group("DEV002"));
+
+        // then
+        assertThat(userMember).isEqualTo("MEMBER#USER#kim");
+        assertThat(groupMember).isEqualTo("MEMBER#GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("멤버십 정렬키를 그대로 GSI 파티션키로 써서 역참조가 가능해진다")
+    void 멤버십_역참조_키는_정렬키와_같다() {
+        // given
+        MemberRef ref = MemberRef.user("kim");
+
+        // when, then
+        assertThat(Keys.memberGsi1Pk(ref)).isEqualTo(Keys.memberSk(ref));
+    }
+
+    @Test
+    @DisplayName("튜플 정렬키는 왕복 변환해도 원래 튜플과 같다")
+    void 튜플_정렬키는_왕복_변환된다() {
+        // given
+        RelationTuple tuple = RelationTuple.directMember("kim", "DEV002");
+
+        // when
+        String sk = Keys.tupleSk(tuple);
+        RelationTuple parsed = Keys.parseTupleSk(sk);
+
+        // then
+        assertThat(sk).isEqualTo("TUPLE#user:kim|direct_member|group:DEV002");
+        assertThat(parsed).isEqualTo(tuple);
+    }
+
+    @Test
+    @DisplayName("한글 조직코드가 담긴 튜플도 왕복 변환된다")
+    void 한글_조직코드_튜플도_왕복_변환된다() {
+        // given
+        RelationTuple tuple = RelationTuple.child("백엔드팀", "개발본부");
+
+        // when
+        RelationTuple parsed = Keys.parseTupleSk(Keys.tupleSk(tuple));
+
+        // then
+        assertThat(parsed).isEqualTo(tuple);
+    }
+
+    @Test
+    @DisplayName("실행 이력 파티션키는 월 단위로 나뉘어 한 파티션이 무한히 커지지 않는다")
+    void 실행이력_파티션키는_월단위다() {
+        // given
+        Instant at = Instant.parse("2026-08-14T03:00:00Z");
+
+        // when
+        String pk = Keys.syncRunPk(at);
+
+        // then
+        assertThat(pk).isEqualTo("SYNCRUN#2026-08");
+    }
+
+    @Test
+    @DisplayName("실행 이력 정렬키는 시각이 앞에 와서 역순 조회가 최신순이 된다")
+    void 실행이력_정렬키는_시각이_앞에_온다() {
+        // given
+        Instant 이른시각 = Instant.parse("2026-08-14T03:00:00Z");
+        Instant 늦은시각 = Instant.parse("2026-08-14T04:00:00Z");
+
+        // when
+        String 이른키 = Keys.syncRunSk(이른시각, "run-b");
+        String 늦은키 = Keys.syncRunSk(늦은시각, "run-a");
+
+        // then
+        assertThat(이른키).isLessThan(늦은키);
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*KeysTest*'
+```
+
+Expected: 컴파일 실패 — `Keys` 가 없다.
+
+- [ ] **Step 3: Keys 와 Attrs 구현**
+
+`storage-dynamodb/src/main/java/dev/starryeye/organization/storage/Keys.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.RelationTuple;
+
+import java.time.Instant;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+
+/**
+ * 단일 테이블 설계의 PK/SK/GSI 키를 만들고 파싱한다.
+ * 키 규칙이 여기 한 곳에만 있어야 저장소 구현들이 어긋나지 않는다.
+ */
+public final class Keys {
+
+    public static final String PK = "PK";
+    public static final String SK = "SK";
+    public static final String GSI1PK = "GSI1PK";
+    public static final String GSI1SK = "GSI1SK";
+    public static final String GSI1 = "GSI1";
+
+    public static final String META = "META";
+
+    /** 전체 직원 열거용 GSI 파티션 */
+    public static final String USER_INDEX = "USER_INDEX";
+    /** 전체 조직 열거 + 조직명 검색용 GSI 파티션 */
+    public static final String GROUP_INDEX = "GROUP_INDEX";
+    /** 스냅샷 목록 조회용 GSI 파티션 */
+    public static final String SNAPSHOT_INDEX = "SNAPSHOT_INDEX";
+
+    public static final String SNAPSHOT_POINTER = "SNAPSHOT_POINTER";
+    public static final String LATEST = "LATEST";
+
+    private static final String TUPLE_PREFIX = "TUPLE#";
+    private static final String TUPLE_SEPARATOR = "|";
+
+    private Keys() {
+    }
+
+    public static String userPk(String userId) {
+        return "USER#" + userId;
+    }
+
+    public static String groupPk(String groupId) {
+        return "GROUP#" + groupId;
+    }
+
+    public static String memberSk(MemberRef ref) {
+        return "MEMBER#" + ref.type().name() + "#" + ref.id();
+    }
+
+    /** 멤버십 아이템의 GSI 파티션키. 정렬키와 같은 문자열이라 역참조가 성립한다. */
+    public static String memberGsi1Pk(MemberRef ref) {
+        return memberSk(ref);
+    }
+
+    public static MemberRef parseMemberSk(String sk) {
+        String[] parts = sk.split("#", 3);
+        return new MemberRef(MemberType.valueOf(parts[1]), parts[2]);
+    }
+
+    public static String snapshotPk(String snapshotId) {
+        return "SNAPSHOT#" + snapshotId;
+    }
+
+    public static String tupleSk(RelationTuple tuple) {
+        return TUPLE_PREFIX + tuple.user() + TUPLE_SEPARATOR + tuple.relation()
+                + TUPLE_SEPARATOR + tuple.object();
+    }
+
+    public static RelationTuple parseTupleSk(String sk) {
+        String body = sk.substring(TUPLE_PREFIX.length());
+        String[] parts = body.split("\\" + TUPLE_SEPARATOR, 3);
+        return new RelationTuple(parts[0], parts[1], parts[2]);
+    }
+
+    public static String syncRunPk(Instant at) {
+        return "SYNCRUN#" + YearMonth.from(at.atZone(ZoneOffset.UTC));
+    }
+
+    public static String syncRunSk(Instant startedAt, String runId) {
+        return startedAt.toString() + "#" + runId;
+    }
+}
+```
+
+`storage-dynamodb/src/main/java/dev/starryeye/organization/storage/Attrs.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+
+import java.time.Instant;
+import java.util.Map;
+
+/** AttributeValue 를 만들고 읽는 잡일을 한 곳에 모은다. */
+public final class Attrs {
+
+    private Attrs() {
+    }
+
+    public static AttributeValue s(String value) {
+        return AttributeValue.builder().s(value).build();
+    }
+
+    public static AttributeValue n(Number value) {
+        return AttributeValue.builder().n(String.valueOf(value)).build();
+    }
+
+    public static AttributeValue bool(boolean value) {
+        return AttributeValue.builder().bool(value).build();
+    }
+
+    public static String str(Map<String, AttributeValue> item, String name) {
+        AttributeValue value = item.get(name);
+        return value == null || Boolean.TRUE.equals(value.nul()) ? null : value.s();
+    }
+
+    public static int integer(Map<String, AttributeValue> item, String name) {
+        AttributeValue value = item.get(name);
+        return value == null ? 0 : Integer.parseInt(value.n());
+    }
+
+    public static long longValue(Map<String, AttributeValue> item, String name) {
+        AttributeValue value = item.get(name);
+        return value == null ? 0L : Long.parseLong(value.n());
+    }
+
+    public static boolean flag(Map<String, AttributeValue> item, String name) {
+        AttributeValue value = item.get(name);
+        return value != null && Boolean.TRUE.equals(value.bool());
+    }
+
+    public static Instant instant(Map<String, AttributeValue> item, String name) {
+        String raw = str(item, name);
+        return raw == null ? null : Instant.parse(raw);
+    }
+
+    /** null 이면 아예 넣지 않는다. DynamoDB 는 빈 문자열을 허용하지만 null 은 허용하지 않는다. */
+    public static void putIfPresent(Map<String, AttributeValue> item, String name, String value) {
+        if (value != null && !value.isEmpty()) {
+            item.put(name, s(value));
+        }
+    }
+}
+```
+
+- [ ] **Step 4: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*KeysTest*'
+```
+
+Expected: 7개 테스트 모두 PASS.
+
+- [ ] **Step 5: 설정과 클라이언트, 테이블 생성기 작성**
+
+`DynamoDbProperties.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import lombok.Getter;
+import lombok.Setter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@Getter
+@Setter
+@ConfigurationProperties("dynamodb")
+public class DynamoDbProperties {
+
+    /** DynamoDB Local 주소. 비우면 실제 AWS 엔드포인트를 쓴다 */
+    private String endpoint;
+    private String region = "ap-northeast-2";
+    private String tableName = "organization";
+    private boolean createTableOnStartup = true;
+    private int snapshotRetentionDays = 7;
+    private int syncrunRetentionDays = 30;
+}
+```
+
+`DynamoDbConfig.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+
+import java.net.URI;
+
+@Configuration
+@EnableConfigurationProperties(DynamoDbProperties.class)
+public class DynamoDbConfig {
+
+    @Bean(destroyMethod = "close")
+    public DynamoDbAsyncClient dynamoDbAsyncClient(DynamoDbProperties properties) {
+        var builder = DynamoDbAsyncClient.builder().region(Region.of(properties.getRegion()));
+        if (properties.getEndpoint() != null && !properties.getEndpoint().isBlank()) {
+            // DynamoDB Local 은 자격증명을 검증하지 않지만 SDK 가 존재 자체는 요구한다
+            builder.endpointOverride(URI.create(properties.getEndpoint()))
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create("local", "local")));
+        }
+        return builder.build();
+    }
+
+    @Bean
+    public TableInitializer tableInitializer(DynamoDbAsyncClient client, DynamoDbProperties properties) {
+        return new TableInitializer(client, properties);
+    }
+}
+```
+
+`TableInitializer.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
+import software.amazon.awssdk.services.dynamodb.model.BillingMode;
+import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
+import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
+import software.amazon.awssdk.services.dynamodb.model.KeyType;
+import software.amazon.awssdk.services.dynamodb.model.Projection;
+import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
+import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import reactor.core.publisher.Mono;
+
+@Slf4j
+@RequiredArgsConstructor
+public class TableInitializer implements InitializingBean {
+
+    private final DynamoDbAsyncClient client;
+    private final DynamoDbProperties properties;
+
+    @Override
+    public void afterPropertiesSet() {
+        if (properties.isCreateTableOnStartup()) {
+            ensureTable().block();
+        }
+    }
+
+    public Mono<Void> ensureTable() {
+        String table = properties.getTableName();
+        return Mono.fromFuture(() -> client.describeTable(DescribeTableRequest.builder()
+                        .tableName(table).build()))
+                .doOnNext(response -> log.info("DynamoDB 테이블 '{}' 이 이미 존재한다", table))
+                .then()
+                .onErrorResume(ResourceNotFoundException.class, notFound -> createTable(table));
+    }
+
+    private Mono<Void> createTable(String table) {
+        log.info("DynamoDB 테이블 '{}' 을 생성한다", table);
+        CreateTableRequest request = CreateTableRequest.builder()
+                .tableName(table)
+                .billingMode(BillingMode.PAY_PER_REQUEST)
+                .attributeDefinitions(
+                        attribute(Keys.PK), attribute(Keys.SK),
+                        attribute(Keys.GSI1PK), attribute(Keys.GSI1SK))
+                .keySchema(
+                        KeySchemaElement.builder().attributeName(Keys.PK).keyType(KeyType.HASH).build(),
+                        KeySchemaElement.builder().attributeName(Keys.SK).keyType(KeyType.RANGE).build())
+                .globalSecondaryIndexes(GlobalSecondaryIndex.builder()
+                        .indexName(Keys.GSI1)
+                        .keySchema(
+                                KeySchemaElement.builder().attributeName(Keys.GSI1PK).keyType(KeyType.HASH).build(),
+                                KeySchemaElement.builder().attributeName(Keys.GSI1SK).keyType(KeyType.RANGE).build())
+                        .projection(Projection.builder().projectionType(ProjectionType.ALL).build())
+                        .build())
+                .build();
+
+        return Mono.fromFuture(() -> client.createTable(request)).then();
+    }
+
+    private static AttributeDefinition attribute(String name) {
+        return AttributeDefinition.builder()
+                .attributeName(name)
+                .attributeType(ScalarAttributeType.S)
+                .build();
+    }
+}
+```
+
+> `ResourceNotFoundException` 은 `CompletableFuture` 안에서 `CompletionException` 으로 감싸여 올라온다. `onErrorResume(ResourceNotFoundException.class, ...)` 이 잡지 못하면 `Mono.fromFuture(...).onErrorMap(Exceptions::unwrap)` 을 앞에 붙인다. Step 8의 테스트가 이를 검증한다.
+
+- [ ] **Step 6: Testcontainers 테스트 베이스 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbTestSupport.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.DeleteTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
+
+import java.net.URI;
+import java.util.concurrent.CompletionException;
+
+/**
+ * DynamoDB Local 컨테이너를 한 번 띄우고 테스트마다 테이블을 새로 만든다.
+ * 컨테이너 기동이 느리므로 클래스마다 띄우지 않고 static 으로 공유한다.
+ */
+@Testcontainers
+public abstract class DynamoDbTestSupport {
+
+    @Container
+    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
+            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
+            .withExposedPorts(8000)
+            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+
+    protected DynamoDbAsyncClient client;
+    protected DynamoDbProperties properties;
+
+    @BeforeEach
+    void 테이블을_새로_만든다() {
+        String endpoint = "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000);
+
+        properties = new DynamoDbProperties();
+        properties.setEndpoint(endpoint);
+        properties.setTableName("organization-test");
+        properties.setCreateTableOnStartup(false);
+
+        client = DynamoDbAsyncClient.builder()
+                .region(Region.of(properties.getRegion()))
+                .endpointOverride(URI.create(endpoint))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("local", "local")))
+                .build();
+
+        dropTableIfExists();
+        new TableInitializer(client, properties).ensureTable().block();
+    }
+
+    private void dropTableIfExists() {
+        try {
+            client.deleteTable(DeleteTableRequest.builder()
+                    .tableName(properties.getTableName()).build()).join();
+        } catch (CompletionException e) {
+            if (!(e.getCause() instanceof ResourceNotFoundException)) {
+                throw e;
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 7: TableInitializer 테스트 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/TableInitializerTest.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+
+class TableInitializerTest extends DynamoDbTestSupport {
+
+    @Test
+    @DisplayName("테이블이 없으면 PK/SK 와 GSI1 을 갖춘 테이블을 생성한다")
+    void 테이블과_GSI를_생성한다() {
+        // given — DynamoDbTestSupport 가 이미 ensureTable 을 호출했다
+
+        // when
+        var described = client.describeTable(DescribeTableRequest.builder()
+                .tableName(properties.getTableName()).build()).join().table();
+
+        // then
+        assertThat(described.keySchema()).extracting(k -> k.attributeName())
+                .containsExactly(Keys.PK, Keys.SK);
+        assertThat(described.globalSecondaryIndexes()).hasSize(1);
+        assertThat(described.globalSecondaryIndexes().get(0).indexName()).isEqualTo(Keys.GSI1);
+        assertThat(described.globalSecondaryIndexes().get(0).keySchema())
+                .extracting(k -> k.attributeName())
+                .containsExactly(Keys.GSI1PK, Keys.GSI1SK);
+    }
+
+    @Test
+    @DisplayName("테이블이 이미 있으면 다시 생성하지 않고 조용히 통과한다")
+    void 이미_있으면_다시_만들지_않는다() {
+        // given, when, then
+        assertThatCode(() -> new TableInitializer(client, properties).ensureTable().block())
+                .doesNotThrowAnyException();
+    }
+}
+```
+
+- [ ] **Step 8: 테스트 실행**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test
+```
+
+Expected: `KeysTest` 7개 + `TableInitializerTest` 2개 PASS. 첫 실행은 도커 이미지를 받느라 시간이 걸린다.
+
+`이미_있으면_다시_만들지_않는다` 가 `ResourceNotFoundException` 관련으로 실패하면 Step 5의 주석대로 `onErrorMap(Exceptions::unwrap)` 을 `ensureTable` 의 `Mono.fromFuture` 뒤에 붙인다.
+
+- [ ] **Step 9: 자동 설정 등록**
+
+`storage-dynamodb/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`:
+
+```
+dev.starryeye.organization.storage.DynamoDbConfig
+```
+
+> `app-ldap` 의 `@SpringBootApplication(scanBasePackages = "dev.starryeye.organization")` 이 이미 이 패키지를 스캔하므로 자동 설정 파일은 없어도 동작한다. 다만 어댑터 모듈이 스스로 설정을 들고 다니는 편이 경계가 분명하므로 등록해 둔다. 중복 등록으로 빈이 두 번 만들어지지 않도록 `DynamoDbConfig` 에는 `@Configuration` 만 두고 `@ComponentScan` 은 두지 않는다.
+
+- [ ] **Step 10: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: DynamoDB 단일 테이블 키 설계와 테이블 초기화 추가
+
+PK/SK/GSI1 키 규칙을 Keys 한 곳에 모아 저장소 구현들이 어긋나지 않게 했다.
+멤버십 정렬키를 그대로 GSI 파티션키로 써서 역참조가 성립한다.
+실행 이력은 월 단위 파티션으로 나눠 한 파티션이 무한히 커지지 않게 했다.
+
+Testcontainers 기반 DynamoDbTestSupport 를 두어 이후 저장소 테스트가
+실제 DynamoDB Local 위에서 돌아간다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 8: DynamoDbDirectoryStateRepository
+
+**Files:**
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbDirectoryStateRepository.java`
+- Modify: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbConfig.java` (빈 등록)
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbDirectoryStateRepositoryTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `DirectoryStateRepository`, Task 7의 `Keys`/`Attrs`/`DynamoDbProperties`/`DynamoDbTestSupport`
+- Produces: `DynamoDbDirectoryStateRepository(DynamoDbAsyncClient, DynamoDbProperties)` — `DirectoryStateRepository` 구현체 빈
+
+**아이템 레이아웃** (스펙 §6):
+
+| 아이템 | PK | SK | GSI1PK | GSI1SK |
+|---|---|---|---|---|
+| 직원 | `USER#<empId>` | `META` | `USER_INDEX` | `<userName>` |
+| 조직 | `GROUP#<orgCode>` | `META` | `GROUP_INDEX` | `<displayName>` |
+| 멤버십 | `GROUP#<orgCode>` | `MEMBER#<TYPE>#<id>` | `MEMBER#<TYPE>#<id>` | `GROUP#<orgCode>` |
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbDirectoryStateRepositoryTest.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
+
+    private DynamoDbDirectoryStateRepository repository;
+
+    @BeforeEach
+    void 저장소를_준비한다() {
+        repository = new DynamoDbDirectoryStateRepository(client, properties);
+    }
+
+    private static DirectoryUser 직원(String id) {
+        return new DirectoryUser(id, "uid=" + id + ",ou=people", id, id + " 님", id + "@example.com", true);
+    }
+
+    private static DirectoryGroup 조직(String code, String name, MemberRef... members) {
+        return new DirectoryGroup(code, "cn=" + code, name, Set.of(members));
+    }
+
+    @Test
+    @DisplayName("저장한 직원을 직원 아이디로 그대로 조회한다")
+    void 직원을_저장하고_조회한다() {
+        // given
+        var kim = 직원("kim");
+
+        // when
+        repository.saveUser(kim).block();
+        var found = repository.findUser("kim").block();
+
+        // then
+        assertThat(found).isEqualTo(kim);
+    }
+
+    @Test
+    @DisplayName("존재하지 않는 직원을 조회하면 빈 결과가 나온다")
+    void 없는_직원은_빈_결과다() {
+        // given, when
+        var found = repository.findUser("ghost").block();
+
+        // then
+        assertThat(found).isNull();
+    }
+
+    @Test
+    @DisplayName("저장한 조직을 조직코드로 조회하면 멤버십까지 함께 복원된다")
+    void 조직을_멤버십까지_복원한다() {
+        // given
+        var dev002 = 조직("DEV002", "백엔드팀", MemberRef.user("kim"), MemberRef.user("lee"));
+
+        // when
+        repository.saveGroup(dev002).block();
+        var found = repository.findGroup("DEV002").block();
+
+        // then
+        assertThat(found).isEqualTo(dev002);
+    }
+
+    @Test
+    @DisplayName("조직을 다시 저장하면 사라진 멤버십은 삭제된다")
+    void 조직_재저장시_사라진_멤버십은_삭제된다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"), MemberRef.user("lee"))).block();
+
+        // when
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        var found = repository.findGroup("DEV002").block();
+
+        // then
+        assertThat(found.members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("조직명이 바뀌어도 조직코드는 유지되어 멤버십이 보존된다")
+    void 조직명_변경시_멤버십이_보존된다() {
+        // given
+        repository.saveGroup(조직("DEV001", "개발본부", MemberRef.user("park"))).block();
+
+        // when
+        repository.saveGroup(조직("DEV001", "플랫폼본부", MemberRef.user("park"))).block();
+        var found = repository.findGroup("DEV001").block();
+
+        // then
+        assertThat(found.displayName()).isEqualTo("플랫폼본부");
+        assertThat(found.members()).containsExactly(MemberRef.user("park"));
+    }
+
+    @Test
+    @DisplayName("역참조로 특정 직원이 속한 모든 조직을 찾는다")
+    void 직원이_속한_조직을_역참조로_찾는다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("OPS001", "운영팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("SALES1", "영업팀", MemberRef.user("lee"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactlyInAnyOrder("DEV002", "OPS001");
+    }
+
+    @Test
+    @DisplayName("역참조는 하위 조직이 어느 상위 조직에 속하는지도 찾는다")
+    void 하위조직의_상위조직을_역참조로_찾는다() {
+        // given
+        repository.saveGroup(조직("DEV001", "개발본부", MemberRef.group("DEV002"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.group("DEV002")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactly("DEV001");
+    }
+
+    @Test
+    @DisplayName("조직을 삭제하면 조직 자체와 멤버십 아이템이 모두 사라진다")
+    void 조직_삭제시_멤버십도_사라진다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when
+        repository.deleteGroup("DEV002").block();
+
+        // then
+        assertThat(repository.findGroup("DEV002").block()).isNull();
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("전체 교체는 스냅샷에 없는 기존 직원과 조직을 삭제한다")
+    void 전체_교체는_사라진_엔트리를_삭제한다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        repository.saveUser(직원("lee")).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"), MemberRef.user("lee"))).block();
+        repository.saveGroup(조직("OLD001", "폐지된조직")).block();
+
+        var snapshot = new DirectorySnapshot(
+                Map.of("kim", 직원("kim")),
+                Map.of("DEV002", 조직("DEV002", "백엔드팀", MemberRef.user("kim"))));
+
+        // when
+        repository.replaceWith(snapshot).block();
+        var loaded = repository.loadAll().block();
+
+        // then
+        assertThat(loaded.users()).containsOnlyKeys("kim");
+        assertThat(loaded.groups()).containsOnlyKeys("DEV002");
+        assertThat(loaded.groups().get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("전체 조회는 저장한 직원과 조직을 멤버십까지 그대로 복원한다")
+    void 전체_조회가_스냅샷을_복원한다() {
+        // given
+        var snapshot = new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "park", 직원("park")),
+                Map.of("DEV001", 조직("DEV001", "개발본부", MemberRef.group("DEV002"), MemberRef.user("park")),
+                       "DEV002", 조직("DEV002", "백엔드팀", MemberRef.user("kim"))));
+        repository.replaceWith(snapshot).block();
+
+        // when
+        var loaded = repository.loadAll().block();
+
+        // then
+        assertThat(loaded).isEqualTo(snapshot);
+    }
+
+    @Test
+    @DisplayName("한글 조직명이 담긴 조직도 저장하고 복원한다")
+    void 한글_조직명도_왕복한다() {
+        // given
+        var 조직도 = 조직("개발본부", "개발본부", MemberRef.user("kim"));
+
+        // when
+        repository.saveGroup(조직도).block();
+        var found = repository.findGroup("개발본부").block();
+
+        // then
+        assertThat(found).isEqualTo(조직도);
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*DirectoryStateRepositoryTest*'
+```
+
+Expected: 컴파일 실패 — `DynamoDbDirectoryStateRepository` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbDirectoryStateRepository.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import lombok.RequiredArgsConstructor;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@RequiredArgsConstructor
+public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
+
+    private static final int QUERY_CONCURRENCY = 8;
+
+    private static final String EXTERNAL_ID = "externalId";
+    private static final String USER_NAME = "userName";
+    private static final String DISPLAY_NAME = "displayName";
+    private static final String EMAIL = "email";
+    private static final String ACTIVE = "active";
+    private static final String UPDATED_AT = "updatedAt";
+
+    private final DynamoDbAsyncClient client;
+    private final DynamoDbProperties properties;
+
+    // ---------- 직원 ----------
+
+    @Override
+    public Mono<DirectoryUser> findUser(String userId) {
+        return queryPartition(Keys.userPk(userId))
+                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
+                .next()
+                .map(item -> toUser(userId, item));
+    }
+
+    @Override
+    public Mono<Void> saveUser(DirectoryUser user) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
+        item.put(Keys.SK, Attrs.s(Keys.META));
+        item.put(Keys.GSI1PK, Attrs.s(Keys.USER_INDEX));
+        item.put(Keys.GSI1SK, Attrs.s(user.userName() == null ? user.id() : user.userName()));
+        item.put(ACTIVE, Attrs.bool(user.active()));
+        item.put(UPDATED_AT, Attrs.s(Instant.now().toString()));
+        Attrs.putIfPresent(item, EXTERNAL_ID, user.externalId());
+        Attrs.putIfPresent(item, USER_NAME, user.userName());
+        Attrs.putIfPresent(item, DISPLAY_NAME, user.displayName());
+        Attrs.putIfPresent(item, EMAIL, user.email());
+
+        return putItem(item);
+    }
+
+    @Override
+    public Mono<Void> deleteUser(String userId) {
+        return deleteItem(Keys.userPk(userId), Keys.META);
+    }
+
+    private DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
+        return new DirectoryUser(
+                userId,
+                Attrs.str(item, EXTERNAL_ID),
+                Attrs.str(item, USER_NAME),
+                Attrs.str(item, DISPLAY_NAME),
+                Attrs.str(item, EMAIL),
+                Attrs.flag(item, ACTIVE));
+    }
+
+    // ---------- 조직 ----------
+
+    @Override
+    public Mono<DirectoryGroup> findGroup(String groupId) {
+        return queryPartition(Keys.groupPk(groupId))
+                .collectList()
+                .flatMap(items -> Mono.justOrEmpty(toGroup(groupId, items)));
+    }
+
+    @Override
+    public Mono<Void> saveGroup(DirectoryGroup group) {
+        Map<String, AttributeValue> meta = new HashMap<>();
+        meta.put(Keys.PK, Attrs.s(Keys.groupPk(group.id())));
+        meta.put(Keys.SK, Attrs.s(Keys.META));
+        meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
+        meta.put(Keys.GSI1SK, Attrs.s(group.displayName() == null ? group.id() : group.displayName()));
+        meta.put(UPDATED_AT, Attrs.s(Instant.now().toString()));
+        Attrs.putIfPresent(meta, EXTERNAL_ID, group.externalId());
+        Attrs.putIfPresent(meta, DISPLAY_NAME, group.displayName());
+
+        Set<String> targetSks = group.members().stream().map(Keys::memberSk).collect(Collectors.toSet());
+
+        return existingMemberSks(group.id())
+                .filter(sk -> !targetSks.contains(sk))
+                .flatMap(sk -> deleteItem(Keys.groupPk(group.id()), sk), QUERY_CONCURRENCY)
+                .then(putItem(meta))
+                .then(Flux.fromIterable(group.members())
+                        .flatMap(member -> putItem(memberItem(group.id(), member)), QUERY_CONCURRENCY)
+                        .then());
+    }
+
+    @Override
+    public Mono<Void> deleteGroup(String groupId) {
+        return queryPartition(Keys.groupPk(groupId))
+                .map(item -> Attrs.str(item, Keys.SK))
+                .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
+                .then();
+    }
+
+    private Map<String, AttributeValue> memberItem(String groupId, MemberRef member) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.groupPk(groupId)));
+        item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
+        item.put(Keys.GSI1PK, Attrs.s(Keys.memberGsi1Pk(member)));
+        item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
+        item.put("addedAt", Attrs.s(Instant.now().toString()));
+        return item;
+    }
+
+    private Flux<String> existingMemberSks(String groupId) {
+        return queryPartition(Keys.groupPk(groupId))
+                .map(item -> Attrs.str(item, Keys.SK))
+                .filter(sk -> sk.startsWith("MEMBER#"));
+    }
+
+    private DirectoryGroup toGroup(String groupId, List<Map<String, AttributeValue>> items) {
+        Map<String, AttributeValue> meta = items.stream()
+                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
+                .findFirst()
+                .orElse(null);
+        if (meta == null) {
+            return null;
+        }
+        Set<MemberRef> members = items.stream()
+                .map(item -> Attrs.str(item, Keys.SK))
+                .filter(sk -> sk.startsWith("MEMBER#"))
+                .map(Keys::parseMemberSk)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        return new DirectoryGroup(groupId, Attrs.str(meta, EXTERNAL_ID), Attrs.str(meta, DISPLAY_NAME), members);
+    }
+
+    // ---------- 역참조 ----------
+
+    @Override
+    public Flux<String> findGroupIdsContaining(MemberRef ref) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberGsi1Pk(ref))))
+                .build();
+
+        return paginate(request).map(item -> stripPrefix(Attrs.str(item, Keys.PK), "GROUP#"));
+    }
+
+    // ---------- 전체 ----------
+
+    @Override
+    public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
+        Mono<Void> removeStaleUsers = enumerateIds(Keys.USER_INDEX, "USER#")
+                .filter(id -> !snapshot.users().containsKey(id))
+                .flatMap(this::deleteUser, QUERY_CONCURRENCY)
+                .then();
+
+        Mono<Void> removeStaleGroups = enumerateIds(Keys.GROUP_INDEX, "GROUP#")
+                .filter(id -> !snapshot.groups().containsKey(id))
+                .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                .then();
+
+        Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
+                .flatMap(this::saveUser, QUERY_CONCURRENCY)
+                .then();
+
+        Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
+                .flatMap(this::saveGroup, QUERY_CONCURRENCY)
+                .then();
+
+        return removeStaleUsers.then(removeStaleGroups).then(upsertUsers).then(upsertGroups);
+    }
+
+    @Override
+    public Mono<DirectorySnapshot> loadAll() {
+        Mono<Map<String, DirectoryUser>> users = enumerateIds(Keys.USER_INDEX, "USER#")
+                .flatMap(this::findUser, QUERY_CONCURRENCY)
+                .collect(LinkedHashMap::new, (map, user) -> map.put(user.id(), user));
+
+        Mono<Map<String, DirectoryGroup>> groups = enumerateIds(Keys.GROUP_INDEX, "GROUP#")
+                .flatMap(this::findGroup, QUERY_CONCURRENCY)
+                .collect(LinkedHashMap::new, (map, group) -> map.put(group.id(), group));
+
+        return Mono.zip(users, groups)
+                .map(both -> new DirectorySnapshot(both.getT1(), both.getT2()));
+    }
+
+    /** GSI1 파티션을 훑어 PK 접두사를 떼고 id 만 뽑는다. Scan 을 쓰지 않는 이유는 스펙 §6.1 참고. */
+    private Flux<String> enumerateIds(String indexPartition, String pkPrefix) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(indexPartition)))
+                .build();
+
+        return paginate(request).map(item -> stripPrefix(Attrs.str(item, Keys.PK), pkPrefix));
+    }
+
+    // ---------- 공통 ----------
+
+    private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .build();
+        return paginate(request);
+    }
+
+    /** LastEvaluatedKey 를 따라가며 전체 페이지를 이어붙인다. */
+    private Flux<Map<String, AttributeValue>> paginate(QueryRequest request) {
+        return Mono.fromFuture(() -> client.query(request))
+                .flatMapMany(response -> {
+                    Flux<Map<String, AttributeValue>> page = Flux.fromIterable(response.items());
+                    if (response.lastEvaluatedKey() == null || response.lastEvaluatedKey().isEmpty()) {
+                        return page;
+                    }
+                    QueryRequest next = request.toBuilder()
+                            .exclusiveStartKey(response.lastEvaluatedKey())
+                            .build();
+                    return page.concatWith(paginate(next));
+                });
+    }
+
+    private Mono<Void> putItem(Map<String, AttributeValue> item) {
+        return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
+                .tableName(properties.getTableName())
+                .item(item)
+                .build())).then();
+    }
+
+    private Mono<Void> deleteItem(String pk, String sk) {
+        return Mono.fromFuture(() -> client.deleteItem(DeleteItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                .build())).then();
+    }
+
+    private static String stripPrefix(String value, String prefix) {
+        return value.startsWith(prefix) ? value.substring(prefix.length()) : value;
+    }
+}
+```
+
+- [ ] **Step 4: 빈 등록**
+
+`DynamoDbConfig.java` 에 추가:
+
+```java
+    @Bean
+    public DynamoDbDirectoryStateRepository dynamoDbDirectoryStateRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties) {
+        return new DynamoDbDirectoryStateRepository(client, properties);
+    }
+```
+
+- [ ] **Step 5: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*DirectoryStateRepositoryTest*'
+```
+
+Expected: 11개 테스트 모두 PASS.
+
+`전체_조회가_스냅샷을_복원한다` 가 `Map` 순서 때문에 실패하지는 않는다 — `Map.equals` 는 순서를 보지 않는다. 실패한다면 `DirectoryUser`/`DirectoryGroup` 의 필드 하나가 왕복에서 유실된 것이므로, 어떤 필드인지 assertion 메시지에서 확인한다. `externalId` 가 `null` 로 돌아온다면 `Attrs.putIfPresent` 가 빈 문자열을 걸러낸 탓이니 테스트 픽스처의 값을 확인한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: DynamoDbDirectoryStateRepository 추가
+
+조직·직원·멤버십의 현재 상태를 단일 테이블에 저장한다. 조직 파티션을
+한 번 Query 하면 META 와 멤버십이 함께 나오고, 멤버십 정렬키를 GSI
+파티션키로 재사용해 "이 직원이 속한 조직들" 역참조가 성립한다.
+
+전체 열거는 Scan 대신 GSI1 의 USER_INDEX / GROUP_INDEX 파티션을 쓴다.
+Scan 은 같은 테이블의 스냅샷 튜플까지 읽어 열거 용도로 부적절하다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 9: DynamoDbTupleSnapshotRepository
+
+**Files:**
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbTupleSnapshotRepository.java`
+- Modify: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbConfig.java` (빈 등록)
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbTupleSnapshotRepositoryTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `TupleSnapshotRepository`, Task 7의 `Keys`/`Attrs`/`DynamoDbTestSupport`
+- Produces: `DynamoDbTupleSnapshotRepository(DynamoDbAsyncClient, DynamoDbProperties, Clock)` — `TupleSnapshotRepository` 구현체 빈
+
+**저장 순서가 중요하다.** 튜플 → 메타 → 포인터. 포인터를 마지막에 갱신해야 중간에 죽어도 다음 동기화가 직전 스냅샷을 정상적으로 읽는다.
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbTupleSnapshotRepositoryTest.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.TupleSnapshot;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
+
+    private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
+
+    private DynamoDbTupleSnapshotRepository repository;
+
+    @BeforeEach
+    void 저장소를_준비한다() {
+        properties.setSnapshotRetentionDays(7);
+        repository = new DynamoDbTupleSnapshotRepository(client, properties,
+                Clock.fixed(지금, ZoneOffset.UTC));
+    }
+
+    private static TupleSnapshot 스냅샷(String id, Instant at, Set<RelationTuple> tuples) {
+        return new TupleSnapshot(id, at, SyncSource.LDAP, tuples);
+    }
+
+    private static Set<RelationTuple> 튜플들(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet());
+    }
+
+    @Test
+    @DisplayName("저장한 스냅샷이 최신 스냅샷으로 조회된다")
+    void 저장한_스냅샷이_최신으로_조회된다() {
+        // given
+        var snapshot = 스냅샷("20260814T030000-LDAP", 지금, 튜플들(3));
+
+        // when
+        repository.save(snapshot).block();
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.id()).isEqualTo("20260814T030000-LDAP");
+        assertThat(latest.source()).isEqualTo(SyncSource.LDAP);
+        assertThat(latest.tuples()).isEqualTo(snapshot.tuples());
+    }
+
+    @Test
+    @DisplayName("스냅샷이 하나도 없으면 최신 조회는 빈 결과를 준다")
+    void 스냅샷이_없으면_빈_결과다() {
+        // given, when
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest).isNull();
+    }
+
+    @Test
+    @DisplayName("나중에 저장한 스냅샷이 최신 스냅샷을 덮어쓴다")
+    void 나중_스냅샷이_최신이_된다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+
+        // when
+        repository.save(스냅샷("20260815T030000-LDAP", 지금.plusSeconds(86400), 튜플들(5))).block();
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.id()).isEqualTo("20260815T030000-LDAP");
+        assertThat(latest.tuples()).hasSize(5);
+    }
+
+    @Test
+    @DisplayName("DynamoDB 배치 한계인 25건을 넘는 튜플도 나누어 저장되고 전부 복원된다")
+    void 배치_한계를_넘는_튜플도_저장된다() {
+        // given
+        var snapshot = 스냅샷("20260814T030000-LDAP", 지금, 튜플들(120));
+
+        // when
+        repository.save(snapshot).block();
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.tuples()).hasSize(120);
+        assertThat(latest.tuples()).isEqualTo(snapshot.tuples());
+    }
+
+    @Test
+    @DisplayName("한글 조직코드가 담긴 튜플도 저장 후 그대로 복원된다")
+    void 한글_조직코드_튜플도_복원된다() {
+        // given
+        var tuples = Set.of(RelationTuple.child("백엔드팀", "개발본부"),
+                            RelationTuple.directMember("kim", "백엔드팀"));
+
+        // when
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, tuples)).block();
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.tuples()).isEqualTo(tuples);
+    }
+
+    @Test
+    @DisplayName("아이디로 과거 스냅샷을 직접 조회할 수 있다")
+    void 아이디로_과거_스냅샷을_조회한다() {
+        // given
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+
+        // when
+        var old = repository.findById("20260813T030000-LDAP").block();
+
+        // then
+        assertThat(old.tuples()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("최근 스냅샷 목록은 최신순으로 나온다")
+    void 최근_목록은_최신순이다() {
+        // given
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+
+        // when
+        var metas = repository.listRecent(7).collectList().block();
+
+        // then
+        assertThat(metas).extracting(m -> m.id())
+                .containsExactly("20260814T030000-LDAP", "20260813T030000-LDAP");
+        assertThat(metas.get(0).tupleCount()).isEqualTo(4);
+    }
+
+    @Test
+    @DisplayName("리셋하면 모든 스냅샷과 최신 포인터가 사라진다")
+    void 리셋하면_전부_사라진다() {
+        // given
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+
+        // when
+        repository.reset().block();
+
+        // then
+        assertThat(repository.findLatest().block()).isNull();
+        assertThat(repository.listRecent(30).collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("보존 기간이 지난 스냅샷만 정리되고 최근 것은 남는다")
+    void 만료된_스냅샷만_정리된다() {
+        // given — 보존 7일. 10일 전 것은 만료, 오늘 것은 유효
+        var 만료된시각 = 지금.minusSeconds(10 * 86400);
+        var 만료스냅샷 = new TupleSnapshot("20260804T030000-LDAP", 만료된시각, SyncSource.LDAP, 튜플들(2));
+        var 유효스냅샷 = 스냅샷("20260814T030000-LDAP", 지금, 튜플들(4));
+
+        repository.saveWithCreatedAt(만료스냅샷).block();
+        repository.save(유효스냅샷).block();
+
+        // when
+        var purged = repository.purgeExpired().block();
+
+        // then
+        assertThat(purged).isEqualTo(1);
+        assertThat(repository.listRecent(30).collectList().block())
+                .extracting(m -> m.id())
+                .containsExactly("20260814T030000-LDAP");
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+}
+```
+
+> `saveWithCreatedAt` 은 만료 테스트를 위해 `snapshot.createdAt()` 기준으로 TTL 을 계산하는 변형이다. 일반 `save` 는 `Clock` 의 현재 시각으로 TTL 을 잡으므로 과거 스냅샷을 만들 수 없다.
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*TupleSnapshotRepositoryTest*'
+```
+
+Expected: 컴파일 실패 — `DynamoDbTupleSnapshotRepository` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbTupleSnapshotRepository.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SnapshotMeta;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * OpenFGA 에 실제로 반영된 튜플의 기록.
+ *
+ * <p>저장 순서는 튜플 → 메타 → 포인터다. 포인터를 마지막에 갱신해야
+ * 중간에 죽어도 다음 동기화가 직전 스냅샷을 정상적으로 읽는다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository {
+
+    private static final int BATCH_SIZE = 25;
+    private static final int DELETE_CONCURRENCY = 4;
+
+    private static final String CREATED_AT = "createdAt";
+    private static final String SOURCE = "source";
+    private static final String TUPLE_COUNT = "tupleCount";
+    private static final String EXPIRES_AT = "expiresAt";
+    private static final String SNAPSHOT_ID = "snapshotId";
+
+    private final DynamoDbAsyncClient client;
+    private final DynamoDbProperties properties;
+    private final Clock clock;
+
+    @Override
+    public Mono<Void> save(TupleSnapshot snapshot) {
+        return doSave(snapshot, clock.instant());
+    }
+
+    /** 테스트에서 과거 시각의 스냅샷을 만들기 위한 변형. TTL 을 snapshot.createdAt 기준으로 잡는다. */
+    public Mono<Void> saveWithCreatedAt(TupleSnapshot snapshot) {
+        return doSave(snapshot, snapshot.createdAt());
+    }
+
+    private Mono<Void> doSave(TupleSnapshot snapshot, Instant ttlBase) {
+        long expiresAt = ttlBase.plus(Duration.ofDays(properties.getSnapshotRetentionDays())).getEpochSecond();
+
+        return writeTuples(snapshot, expiresAt)
+                .then(writeMeta(snapshot, expiresAt))
+                .then(writePointer(snapshot.id()));
+    }
+
+    private Mono<Void> writeTuples(TupleSnapshot snapshot, long expiresAt) {
+        return Flux.fromIterable(snapshot.tuples())
+                .map(tuple -> WriteRequest.builder()
+                        .putRequest(PutRequest.builder().item(tupleItem(snapshot.id(), tuple, expiresAt)).build())
+                        .build())
+                .buffer(BATCH_SIZE)
+                .concatMap(this::batchWrite)
+                .then();
+    }
+
+    private Map<String, AttributeValue> tupleItem(String snapshotId, RelationTuple tuple, long expiresAt) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)));
+        item.put(Keys.SK, Attrs.s(Keys.tupleSk(tuple)));
+        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        return item;
+    }
+
+    private Mono<Void> writeMeta(TupleSnapshot snapshot, long expiresAt) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
+        item.put(Keys.SK, Attrs.s(Keys.META));
+        item.put(Keys.GSI1PK, Attrs.s(Keys.SNAPSHOT_INDEX));
+        item.put(Keys.GSI1SK, Attrs.s(snapshot.createdAt().toString()));
+        item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
+        item.put(SOURCE, Attrs.s(snapshot.source().name()));
+        item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
+        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        return putItem(item);
+    }
+
+    private Mono<Void> writePointer(String snapshotId) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER));
+        item.put(Keys.SK, Attrs.s(Keys.LATEST));
+        item.put(SNAPSHOT_ID, Attrs.s(snapshotId));
+        return putItem(item);
+    }
+
+    @Override
+    public Mono<TupleSnapshot> findLatest() {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                        .build()))
+                .filter(response -> response.hasItem() && !response.item().isEmpty())
+                .map(response -> Attrs.str(response.item(), SNAPSHOT_ID))
+                .flatMap(this::findById);
+    }
+
+    @Override
+    public Mono<TupleSnapshot> findById(String snapshotId) {
+        return queryPartition(Keys.snapshotPk(snapshotId))
+                .collectList()
+                .flatMap(items -> Mono.justOrEmpty(toSnapshot(snapshotId, items)));
+    }
+
+    private TupleSnapshot toSnapshot(String snapshotId, List<Map<String, AttributeValue>> items) {
+        Map<String, AttributeValue> meta = items.stream()
+                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
+                .findFirst()
+                .orElse(null);
+        if (meta == null) {
+            return null;
+        }
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        for (Map<String, AttributeValue> item : items) {
+            String sk = Attrs.str(item, Keys.SK);
+            if (sk.startsWith("TUPLE#")) {
+                tuples.add(Keys.parseTupleSk(sk));
+            }
+        }
+        return new TupleSnapshot(
+                snapshotId,
+                Attrs.instant(meta, CREATED_AT),
+                SyncSource.valueOf(Attrs.str(meta, SOURCE)),
+                tuples);
+    }
+
+    @Override
+    public Flux<SnapshotMeta> listRecent(int days) {
+        Instant from = clock.instant().minus(Duration.ofDays(days));
+        return snapshotMetas()
+                .filter(meta -> !meta.createdAt().isBefore(from));
+    }
+
+    /** GSI1 SNAPSHOT_INDEX 파티션을 createdAt 역순으로 훑는다. */
+    private Flux<SnapshotMeta> snapshotMetas() {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.SNAPSHOT_INDEX)))
+                .scanIndexForward(false)
+                .build();
+
+        return paginate(request).map(item -> new SnapshotMeta(
+                stripPrefix(Attrs.str(item, Keys.PK), "SNAPSHOT#"),
+                Attrs.instant(item, CREATED_AT),
+                SyncSource.valueOf(Attrs.str(item, SOURCE)),
+                Attrs.integer(item, TUPLE_COUNT)));
+    }
+
+    @Override
+    public Mono<Void> reset() {
+        return snapshotMetas()
+                .flatMap(meta -> deleteSnapshot(meta.id()), DELETE_CONCURRENCY)
+                .then(deleteItem(Keys.SNAPSHOT_POINTER, Keys.LATEST));
+    }
+
+    @Override
+    public Mono<Integer> purgeExpired() {
+        long now = clock.instant().getEpochSecond();
+        return snapshotMetas()
+                .filterWhen(meta -> isExpired(meta.id(), now))
+                .flatMap(meta -> deleteSnapshot(meta.id()).thenReturn(1), DELETE_CONCURRENCY)
+                .reduce(0, Integer::sum)
+                .doOnNext(count -> {
+                    if (count > 0) {
+                        log.info("만료된 스냅샷 {}건을 정리했다", count);
+                    }
+                });
+    }
+
+    private Mono<Boolean> isExpired(String snapshotId, long nowEpochSecond) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)), Keys.SK, Attrs.s(Keys.META)))
+                        .build()))
+                .map(response -> Attrs.longValue(response.item(), EXPIRES_AT) <= nowEpochSecond);
+    }
+
+    private Mono<Void> deleteSnapshot(String snapshotId) {
+        return queryPartition(Keys.snapshotPk(snapshotId))
+                .map(item -> WriteRequest.builder()
+                        .deleteRequest(DeleteRequest.builder()
+                                .key(Map.of(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)),
+                                        Keys.SK, Attrs.s(Attrs.str(item, Keys.SK))))
+                                .build())
+                        .build())
+                .buffer(BATCH_SIZE)
+                .concatMap(this::batchWrite)
+                .then();
+    }
+
+    // ---------- 공통 ----------
+
+    /** UnprocessedItems 가 남으면 다시 보낸다. DynamoDB 는 배치 일부를 거절할 수 있다. */
+    private Mono<Void> batchWrite(List<WriteRequest> requests) {
+        if (requests.isEmpty()) {
+            return Mono.empty();
+        }
+        return Mono.fromFuture(() -> client.batchWriteItem(BatchWriteItemRequest.builder()
+                        .requestItems(Map.of(properties.getTableName(), requests))
+                        .build()))
+                .flatMap(response -> {
+                    List<WriteRequest> unprocessed =
+                            response.unprocessedItems().getOrDefault(properties.getTableName(), List.of());
+                    return unprocessed.isEmpty() ? Mono.empty() : batchWrite(unprocessed);
+                })
+                .then();
+    }
+
+    private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .build();
+        return paginate(request);
+    }
+
+    private Flux<Map<String, AttributeValue>> paginate(QueryRequest request) {
+        return Mono.fromFuture(() -> client.query(request))
+                .flatMapMany(response -> {
+                    Flux<Map<String, AttributeValue>> page = Flux.fromIterable(response.items());
+                    if (response.lastEvaluatedKey() == null || response.lastEvaluatedKey().isEmpty()) {
+                        return page;
+                    }
+                    return page.concatWith(paginate(
+                            request.toBuilder().exclusiveStartKey(response.lastEvaluatedKey()).build()));
+                });
+    }
+
+    private Mono<Void> putItem(Map<String, AttributeValue> item) {
+        return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
+                .tableName(properties.getTableName())
+                .item(item)
+                .build())).then();
+    }
+
+    private Mono<Void> deleteItem(String pk, String sk) {
+        return Mono.fromFuture(() -> client.deleteItem(DeleteItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                .build())).then();
+    }
+
+    private static String stripPrefix(String value, String prefix) {
+        return value.startsWith(prefix) ? value.substring(prefix.length()) : value;
+    }
+}
+```
+
+- [ ] **Step 4: 빈 등록**
+
+`DynamoDbConfig.java` 에 추가 (`Clock` 빈이 없으면 함께 등록한다):
+
+```java
+    @Bean
+    @ConditionalOnMissingBean(Clock.class)
+    public Clock clock() {
+        return Clock.systemUTC();
+    }
+
+    @Bean
+    public DynamoDbTupleSnapshotRepository dynamoDbTupleSnapshotRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbTupleSnapshotRepository(client, properties, clock);
+    }
+```
+
+임포트에 `java.time.Clock` 과 `org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean` 을 추가한다.
+
+- [ ] **Step 5: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*TupleSnapshotRepositoryTest*'
+```
+
+Expected: 9개 테스트 모두 PASS.
+
+`만료된_스냅샷만_정리된다` 가 실패하면 `purgeExpired` 가 `expiresAt` 을 초 단위 epoch 로 비교하는지 확인한다. `리셋하면_전부_사라진다` 가 포인터를 남기면 `reset` 의 `then(deleteItem(...))` 순서를 확인한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: DynamoDbTupleSnapshotRepository 추가
+
+OpenFGA read API 를 쓰지 않으므로 이 스냅샷이 OpenFGA 상태를 대신하는
+유일한 기록이다. 저장은 튜플 → 메타 → 포인터 순서로, 포인터를 마지막에
+갱신해야 중간 실패에도 다음 동기화가 직전 스냅샷을 정상적으로 읽는다.
+
+DynamoDB Local 은 TTL 자동 삭제를 하지 않으므로 purgeExpired 로 명시
+정리한다. 실제 AWS 에서는 TTL 이 처리하고 이 잡은 0건을 반환한다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 10: DynamoDbSyncRunRepository
+
+**Files:**
+- Create: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbSyncRunRepository.java`
+- Modify: `storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbConfig.java` (빈 등록)
+- Test: `storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbSyncRunRepositoryTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `SyncRunRepository`, Task 7의 `Keys`/`Attrs`/`DynamoDbTestSupport`
+- Produces: `DynamoDbSyncRunRepository(DynamoDbAsyncClient, DynamoDbProperties, Clock)` — `SyncRunRepository` 구현체 빈
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`storage-dynamodb/src/test/java/dev/starryeye/organization/storage/DynamoDbSyncRunRepositoryTest.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.SyncOutcome;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
+
+    private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
+
+    private DynamoDbSyncRunRepository repository;
+
+    @BeforeEach
+    void 저장소를_준비한다() {
+        repository = new DynamoDbSyncRunRepository(client, properties, Clock.fixed(지금, ZoneOffset.UTC));
+    }
+
+    @Test
+    @DisplayName("시작한 실행은 RUNNING 상태로 기록되고 고유한 아이디를 받는다")
+    void 시작하면_RUNNING으로_기록된다() {
+        // given, when
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.RUNNING);
+        assertThat(run.runId()).isNotBlank();
+        assertThat(run.source()).isEqualTo(SyncSource.LDAP);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.SCHEDULED);
+        assertThat(run.startedAt()).isEqualTo(지금);
+    }
+
+    @Test
+    @DisplayName("완료 처리하면 상태와 집계값이 반영된 실행 이력이 조회된다")
+    void 완료하면_집계값이_반영된다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var outcome = new SyncOutcome(SyncStatus.SUCCEEDED, 12, 3, 0, "20260814T030000-LDAP", null);
+
+        // when
+        var finished = repository.finish(run, outcome).block();
+        var recent = repository.findRecent(10).collectList().block();
+
+        // then
+        assertThat(finished.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(finished.writtenCount()).isEqualTo(12);
+        assertThat(finished.deletedCount()).isEqualTo(3);
+        assertThat(finished.snapshotId()).isEqualTo("20260814T030000-LDAP");
+        assertThat(recent).hasSize(1);
+        assertThat(recent.get(0).runId()).isEqualTo(run.runId());
+    }
+
+    @Test
+    @DisplayName("가드가 발동해 중단된 실행은 ABORTED 상태와 사유가 함께 남는다")
+    void 중단된_실행은_사유가_남는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var 사유 = "삭제 대상 412건(기준 스냅샷 606건의 68.0%)이 임계치 30.0%를 초과했습니다";
+
+        // when
+        repository.finish(run, SyncOutcome.aborted(사유)).block();
+        var recent = repository.findRecent(10).collectList().block();
+
+        // then
+        assertThat(recent.get(0).status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(recent.get(0).message()).isEqualTo(사유);
+    }
+
+    @Test
+    @DisplayName("최근 실행 이력은 최신순으로 나오고 limit 만큼만 반환된다")
+    void 최근_이력은_최신순이고_개수가_제한된다() {
+        // given — 시각을 다르게 해서 3건 기록
+        for (int i = 0; i < 3; i++) {
+            var repo = new DynamoDbSyncRunRepository(client, properties,
+                    Clock.fixed(지금.plusSeconds(i * 60L), ZoneOffset.UTC));
+            var run = repo.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+            repo.finish(run, SyncOutcome.noChange()).block();
+        }
+
+        // when
+        var recent = repository.findRecent(2).collectList().block();
+
+        // then
+        assertThat(recent).hasSize(2);
+        assertThat(recent.get(0).startedAt()).isAfter(recent.get(1).startedAt());
+    }
+
+    @Test
+    @DisplayName("이력이 없으면 빈 목록을 반환한다")
+    void 이력이_없으면_빈_목록이다() {
+        // given, when
+        var recent = repository.findRecent(10).collectList().block();
+
+        // then
+        assertThat(recent).isEmpty();
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:test --tests '*SyncRunRepositoryTest*'
+```
+
+Expected: 컴파일 실패 — `DynamoDbSyncRunRepository` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`storage-dynamodb/src/main/java/dev/starryeye/organization/storage/DynamoDbSyncRunRepository.java`:
+
+```java
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.SyncOutcome;
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.SyncRunRepository;
+import lombok.RequiredArgsConstructor;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * 동기화 1회의 실행 이력. 관측성의 실체이며, 특히 ABORTED 사유가 남아야
+ * 사람이 강제 실행을 승인할지 판단할 수 있다.
+ *
+ * <p>SCIM push 요청은 여기 기록하지 않는다. 요청 단위 이력이 폭증하기 때문이다.
+ */
+@RequiredArgsConstructor
+public class DynamoDbSyncRunRepository implements SyncRunRepository {
+
+    private static final String RUN_ID = "runId";
+    private static final String SOURCE = "source";
+    private static final String TRIGGER = "trigger";
+    private static final String STARTED_AT = "startedAt";
+    private static final String FINISHED_AT = "finishedAt";
+    private static final String STATUS = "status";
+    private static final String WRITTEN_COUNT = "writtenCount";
+    private static final String DELETED_COUNT = "deletedCount";
+    private static final String FAILURE_COUNT = "failureCount";
+    private static final String SNAPSHOT_ID = "snapshotId";
+    private static final String MESSAGE = "message";
+    private static final String EXPIRES_AT = "expiresAt";
+
+    private final DynamoDbAsyncClient client;
+    private final DynamoDbProperties properties;
+    private final Clock clock;
+
+    @Override
+    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
+        SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, clock.instant());
+        return save(run).thenReturn(run);
+    }
+
+    @Override
+    public Mono<SyncRun> finish(SyncRun run, SyncOutcome outcome) {
+        SyncRun finished = run.finished(outcome, clock.instant());
+        return save(finished).thenReturn(finished);
+    }
+
+    private Mono<Void> save(SyncRun run) {
+        long expiresAt = run.startedAt()
+                .plus(Duration.ofDays(properties.getSyncrunRetentionDays()))
+                .getEpochSecond();
+
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.syncRunPk(run.startedAt())));
+        item.put(Keys.SK, Attrs.s(Keys.syncRunSk(run.startedAt(), run.runId())));
+        item.put(RUN_ID, Attrs.s(run.runId()));
+        item.put(SOURCE, Attrs.s(run.source().name()));
+        item.put(TRIGGER, Attrs.s(run.trigger().name()));
+        item.put(STARTED_AT, Attrs.s(run.startedAt().toString()));
+        item.put(STATUS, Attrs.s(run.status().name()));
+        item.put(WRITTEN_COUNT, Attrs.n(run.writtenCount()));
+        item.put(DELETED_COUNT, Attrs.n(run.deletedCount()));
+        item.put(FAILURE_COUNT, Attrs.n(run.failureCount()));
+        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        if (run.finishedAt() != null) {
+            item.put(FINISHED_AT, Attrs.s(run.finishedAt().toString()));
+        }
+        Attrs.putIfPresent(item, SNAPSHOT_ID, run.snapshotId());
+        Attrs.putIfPresent(item, MESSAGE, run.message());
+
+        return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
+                .tableName(properties.getTableName())
+                .item(item)
+                .build())).then();
+    }
+
+    /**
+     * 이번 달 파티션을 최신순으로 읽고, 모자라면 지난달까지 이어 읽는다.
+     * 파티션을 월 단위로 나눈 대가로 조회가 두 번 나뉜다.
+     */
+    @Override
+    public Flux<SyncRun> findRecent(int limit) {
+        YearMonth thisMonth = YearMonth.from(clock.instant().atZone(ZoneOffset.UTC));
+        YearMonth lastMonth = thisMonth.minusMonths(1);
+
+        return queryMonth(thisMonth)
+                .concatWith(Flux.defer(() -> queryMonth(lastMonth)))
+                .take(limit);
+    }
+
+    private Flux<SyncRun> queryMonth(YearMonth month) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s("SYNCRUN#" + month)))
+                .scanIndexForward(false)
+                .build();
+
+        return Mono.fromFuture(() -> client.query(request))
+                .flatMapMany(response -> Flux.fromIterable(response.items()))
+                .map(this::toRun);
+    }
+
+    private SyncRun toRun(Map<String, AttributeValue> item) {
+        return SyncRun.builder()
+                .runId(Attrs.str(item, RUN_ID))
+                .source(SyncSource.valueOf(Attrs.str(item, SOURCE)))
+                .trigger(SyncTrigger.valueOf(Attrs.str(item, TRIGGER)))
+                .startedAt(Attrs.instant(item, STARTED_AT))
+                .finishedAt(Attrs.instant(item, FINISHED_AT))
+                .status(SyncStatus.valueOf(Attrs.str(item, STATUS)))
+                .writtenCount(Attrs.integer(item, WRITTEN_COUNT))
+                .deletedCount(Attrs.integer(item, DELETED_COUNT))
+                .failureCount(Attrs.integer(item, FAILURE_COUNT))
+                .snapshotId(Attrs.str(item, SNAPSHOT_ID))
+                .message(Attrs.str(item, MESSAGE))
+                .build();
+    }
+}
+```
+
+> `start` 와 `finish` 가 같은 PK/SK 를 만들기 때문에 `finish` 의 `putItem` 이 RUNNING 아이템을 덮어쓴다. 의도한 동작이다 — 실행 1건당 아이템 1개가 남는다.
+
+- [ ] **Step 4: 빈 등록**
+
+`DynamoDbConfig.java` 에 추가:
+
+```java
+    @Bean
+    public DynamoDbSyncRunRepository dynamoDbSyncRunRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbSyncRunRepository(client, properties, clock);
+    }
+```
+
+- [ ] **Step 5: storage 모듈 전체 테스트 확인**
+
+Run:
+
+```bash
+./gradlew :storage-dynamodb:build
+```
+
+Expected: `BUILD SUCCESSFUL`. `KeysTest` 7 + `TableInitializerTest` 2 + `DirectoryStateRepositoryTest` 11 + `TupleSnapshotRepositoryTest` 9 + `SyncRunRepositoryTest` 5 = 34개 PASS.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: DynamoDbSyncRunRepository 추가
+
+동기화 1회의 실행 이력을 월 단위 파티션에 적재한다. 특히 ABORTED 사유가
+남아야 사람이 강제 실행을 승인할지 판단할 수 있다.
+
+start 와 finish 가 같은 키를 쓰므로 완료 시 RUNNING 아이템을 덮어써
+실행 1건당 아이템 1개만 남는다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
