@@ -4925,3 +4925,1947 @@ git push origin main
 ```
 
 ---
+
+## Task 11: authz-openfga — 인가 모델 등록과 멱등 튜플 쓰기
+
+**Files:**
+- Create: `authz-openfga/src/main/resources/authorization-model.json`
+- Create: `authz-openfga/src/main/resources/authorization-model.fga` (사람이 읽는 문서용)
+- Create: `authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaProperties.java`
+- Create: `authz-openfga/src/main/java/dev/starryeye/organization/authz/StoreBootstrapper.java`
+- Create: `authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaRelationTupleWriter.java`
+- Create: `authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaConfig.java`
+- Test: `authz-openfga/src/test/java/dev/starryeye/organization/authz/OpenFgaTestSupport.java`
+- Test: `authz-openfga/src/test/java/dev/starryeye/organization/authz/AuthorizationModelTest.java`
+- Test: `authz-openfga/src/test/java/dev/starryeye/organization/authz/OpenFgaRelationTupleWriterTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `RelationTupleWriter`, Task 2의 `TupleDelta`/`TupleWriteResult`/`RelationTuple`
+- Produces:
+  - `OpenFgaProperties` (`@ConfigurationProperties("openfga")`) — `apiUrl`, `storeName`, `writeBatchSize`(기본 100), `maxRetries`(기본 3)
+  - `StoreBootstrapper(OpenFgaProperties)` — `resolveStore() -> Mono<String>`(storeId), `recreateStore() -> Mono<String>`, `client() -> OpenFgaClient`
+  - `OpenFgaRelationTupleWriter(StoreBootstrapper, OpenFgaProperties)` — `RelationTupleWriter` 구현체 빈
+
+**설계 의도 두 가지를 잊지 말 것.**
+
+1. **앱은 `storeId`/`modelId` 를 다루지 않는다.** 설정에는 `store-name` 만 있고, `StoreBootstrapper` 가 `ListStores` 로 이름을 찾아 없으면 만든다. write 호출에는 `authorization_model_id` 를 넘기지 않아 서버가 최신 모델을 쓴다.
+2. **멱등 옵션을 항상 켠다.** `on_duplicate: IGNORE`, `on_missing: IGNORE`. 그래서 튜플 단위 재시도 같은 보상 로직이 필요 없다.
+
+- [ ] **Step 1: 인가 모델 리소스 작성**
+
+`authz-openfga/src/main/resources/authorization-model.fga` — 사람이 읽는 문서. 앱은 읽지 않는다:
+
+```
+model
+  schema 1.1
+
+type user
+
+type group
+  relations
+    define direct_member: [user]
+    define child: [group]
+    define member: direct_member or member from child
+```
+
+`authz-openfga/src/main/resources/authorization-model.json` — 앱이 실제로 등록하는 것:
+
+```json
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user",
+      "relations": {},
+      "metadata": {
+        "relations": {}
+      }
+    },
+    {
+      "type": "group",
+      "relations": {
+        "direct_member": {
+          "this": {}
+        },
+        "child": {
+          "this": {}
+        },
+        "member": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "direct_member"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "child"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "direct_member": {
+            "directly_related_user_types": [
+              { "type": "user" }
+            ]
+          },
+          "child": {
+            "directly_related_user_types": [
+              { "type": "group" }
+            ]
+          },
+          "member": {
+            "directly_related_user_types": []
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+> JSON 을 손으로 쓴 것이므로 Step 5의 `AuthorizationModelTest` 가 실제 `Check` 로 검증한다. 형태가 틀리면 거기서 즉시 드러난다. 만약 `WriteAuthorizationModel` 이 400을 반환하면, 로컬에서 `docker run --rm openfga/cli model transform --file authorization-model.fga` 로 정본 JSON 을 뽑아 이 파일을 교체한다.
+
+- [ ] **Step 2: OpenFGA 테스트 베이스 작성**
+
+`authz-openfga/src/test/java/dev/starryeye/organization/authz/OpenFgaTestSupport.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+
+import java.util.UUID;
+
+/**
+ * OpenFGA 컨테이너를 띄운다. v1.10.0 이상이어야 on_duplicate / on_missing 이 동작한다.
+ * 테스트마다 store 이름을 새로 만들어 서로 간섭하지 않게 한다.
+ */
+@Testcontainers
+public abstract class OpenFgaTestSupport {
+
+    @Container
+    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
+            DockerImageName.parse("openfga/openfga:v1.10.2"))
+            .withCommand("run")
+            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
+            .withExposedPorts(8080)
+            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+
+    protected OpenFgaProperties properties;
+    protected StoreBootstrapper bootstrapper;
+
+    @BeforeEach
+    void OpenFGA를_준비한다() {
+        properties = new OpenFgaProperties();
+        properties.setApiUrl("http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
+        properties.setStoreName("test-" + UUID.randomUUID());
+        properties.setWriteBatchSize(100);
+        properties.setMaxRetries(3);
+
+        bootstrapper = new StoreBootstrapper(properties);
+        bootstrapper.resolveStore().block();
+    }
+}
+```
+
+- [ ] **Step 3: 인가 모델 검증 테스트 작성**
+
+`authz-openfga/src/test/java/dev/starryeye/organization/authz/AuthorizationModelTest.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.TupleDelta;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * 인가 모델 JSON 이 의도대로 동작하는지 실제 Check 로 검증한다.
+ *
+ * <p>Check 는 <b>이 테스트에서만</b> 쓴다. 프로덕션 코드는 Write/Delete 만 호출한다.
+ */
+class AuthorizationModelTest extends OpenFgaTestSupport {
+
+    private OpenFgaRelationTupleWriter writer;
+
+    @BeforeEach
+    void 쓰기어댑터를_준비한다() {
+        writer = new OpenFgaRelationTupleWriter(bootstrapper, properties);
+    }
+
+    private boolean check(String user, String relation, String object) {
+        try {
+            return bootstrapper.client().check(new ClientCheckRequest()
+                    ._object(object)
+                    .relation(relation)
+                    .user(user)).get().getAllowed();
+        } catch (Exception e) {
+            throw new IllegalStateException("Check 호출 실패", e);
+        }
+    }
+
+    @Test
+    @DisplayName("조직에 직접 속한 직원은 그 조직의 member 로 판정된다")
+    void 직속_직원은_member다() {
+        // given
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.directMember("kim", "DEV002")))).block();
+
+        // when
+        boolean allowed = check("user:kim", "member", "group:DEV002");
+
+        // then
+        assertThat(allowed).isTrue();
+    }
+
+    @Test
+    @DisplayName("하위 조직의 직원은 상위 조직의 member 로 롤업된다")
+    void 하위조직_직원은_상위조직_member로_롤업된다() {
+        // given — DEV002 는 DEV001 의 하위 조직, kim 은 DEV002 소속
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.child("DEV002", "DEV001"),
+                RelationTuple.directMember("kim", "DEV002")))).block();
+
+        // when
+        boolean allowed = check("user:kim", "member", "group:DEV001");
+
+        // then
+        assertThat(allowed).isTrue();
+    }
+
+    @Test
+    @DisplayName("세 단계로 중첩된 조직에서도 최상위까지 롤업된다")
+    void 세단계_중첩도_롤업된다() {
+        // given — C ⊂ B ⊂ A, kim 은 C 소속
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.child("C", "B"),
+                RelationTuple.child("B", "A"),
+                RelationTuple.directMember("kim", "C")))).block();
+
+        // when
+        boolean allowed = check("user:kim", "member", "group:A");
+
+        // then
+        assertThat(allowed).isTrue();
+    }
+
+    @Test
+    @DisplayName("상위 조직의 직원이 하위 조직의 member 가 되지는 않는다")
+    void 상속은_상위로만_향한다() {
+        // given — park 은 상위 조직 DEV001 직속
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.child("DEV002", "DEV001"),
+                RelationTuple.directMember("park", "DEV001")))).block();
+
+        // when
+        boolean allowed = check("user:park", "member", "group:DEV002");
+
+        // then
+        assertThat(allowed).isFalse();
+    }
+
+    @Test
+    @DisplayName("direct_member 는 직속만 판정해 산하 전체와 구분된다")
+    void direct_member는_직속만_판정한다() {
+        // given
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.child("DEV002", "DEV001"),
+                RelationTuple.directMember("kim", "DEV002")))).block();
+
+        // when
+        boolean 산하 = check("user:kim", "member", "group:DEV001");
+        boolean 직속 = check("user:kim", "direct_member", "group:DEV001");
+
+        // then
+        assertThat(산하).isTrue();
+        assertThat(직속).isFalse();
+    }
+
+    @Test
+    @DisplayName("한글 조직코드로도 롤업이 성립한다")
+    void 한글_조직코드도_롤업된다() {
+        // given
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.child("백엔드팀", "개발본부"),
+                RelationTuple.directMember("kim", "백엔드팀")))).block();
+
+        // when
+        boolean allowed = check("user:kim", "member", "group:개발본부");
+
+        // then
+        assertThat(allowed).isTrue();
+    }
+}
+```
+
+- [ ] **Step 4: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :authz-openfga:test --tests '*AuthorizationModelTest*'
+```
+
+Expected: 컴파일 실패 — `OpenFgaProperties`, `StoreBootstrapper`, `OpenFgaRelationTupleWriter` 가 없다.
+
+- [ ] **Step 5: OpenFgaProperties 와 StoreBootstrapper 구현**
+
+`authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaProperties.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import lombok.Getter;
+import lombok.Setter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@Getter
+@Setter
+@ConfigurationProperties("openfga")
+public class OpenFgaProperties {
+
+    private String apiUrl = "http://localhost:8080";
+
+    /** 앱이 아는 유일한 식별자. storeId 는 런타임에 해석한다 */
+    private String storeName = "organization";
+
+    /** OpenFGA 트랜잭션 모드의 배치 한계 */
+    private int writeBatchSize = 100;
+
+    private int maxRetries = 3;
+}
+```
+
+`authz-openfga/src/main/java/dev/starryeye/organization/authz/StoreBootstrapper.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.openfga.sdk.api.client.OpenFgaClient;
+import dev.openfga.sdk.api.configuration.ClientConfiguration;
+import dev.openfga.sdk.api.model.CreateStoreRequest;
+import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ClassPathResource;
+import reactor.core.publisher.Mono;
+
+import java.io.InputStream;
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * store 이름으로 storeId 를 해석하고 인가 모델을 등록한다.
+ *
+ * <p>앱의 어느 곳도 storeId 나 modelId 를 알지 못한다. 설정에는 store-name 만 있고,
+ * write 호출에는 authorization_model_id 를 넘기지 않아 서버가 최신 모델을 쓴다.
+ */
+@Slf4j
+public class StoreBootstrapper {
+
+    private static final String MODEL_RESOURCE = "authorization-model.json";
+
+    private final OpenFgaProperties properties;
+    private final AtomicReference<OpenFgaClient> clientRef = new AtomicReference<>();
+    private final AtomicReference<String> storeIdRef = new AtomicReference<>();
+
+    public StoreBootstrapper(OpenFgaProperties properties) {
+        this.properties = properties;
+    }
+
+    /** 이미 해석했으면 캐시된 storeId 를 준다. 없으면 찾고, 그래도 없으면 만든다. */
+    public Mono<String> resolveStore() {
+        String cached = storeIdRef.get();
+        if (cached != null) {
+            return Mono.just(cached);
+        }
+        return findStoreIdByName()
+                .switchIfEmpty(Mono.defer(this::createStore))
+                .flatMap(this::attachAndWriteModel);
+    }
+
+    /** rebuild(store 모드) 전용. store 를 지우고 같은 이름으로 다시 만든다. */
+    public Mono<String> recreateStore() {
+        return resolveStore()
+                .flatMap(storeId -> Mono.fromFuture(() -> {
+                    try {
+                        return client().deleteStore();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("store 삭제 실패", e);
+                    }
+                }).then(Mono.fromRunnable(() -> {
+                    storeIdRef.set(null);
+                    clientRef.set(null);
+                })))
+                .then(Mono.defer(this::createStore))
+                .flatMap(this::attachAndWriteModel);
+    }
+
+    public OpenFgaClient client() {
+        OpenFgaClient client = clientRef.get();
+        if (client == null) {
+            throw new IllegalStateException("store 가 아직 해석되지 않았다. resolveStore() 를 먼저 호출하라");
+        }
+        return client;
+    }
+
+    private Mono<String> findStoreIdByName() {
+        return Mono.fromCallable(() -> newClient(null))
+                .flatMap(client -> Mono.fromFuture(() -> {
+                    try {
+                        return client.listStores();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("store 목록 조회 실패", e);
+                    }
+                }))
+                .flatMap(response -> response.getStores().stream()
+                        .filter(store -> properties.getStoreName().equals(store.getName()))
+                        .findFirst()
+                        .map(store -> Mono.just(store.getId()))
+                        .orElseGet(Mono::empty));
+    }
+
+    private Mono<String> createStore() {
+        log.info("OpenFGA store '{}' 을 생성한다", properties.getStoreName());
+        return Mono.fromCallable(() -> newClient(null))
+                .flatMap(client -> Mono.fromFuture(() -> {
+                    try {
+                        return client.createStore(new CreateStoreRequest().name(properties.getStoreName()));
+                    } catch (Exception e) {
+                        throw new IllegalStateException("store 생성 실패", e);
+                    }
+                }))
+                .map(response -> response.getId());
+    }
+
+    private Mono<String> attachAndWriteModel(String storeId) {
+        return Mono.fromCallable(() -> {
+                    OpenFgaClient client = newClient(storeId);
+                    clientRef.set(client);
+                    storeIdRef.set(storeId);
+                    return client;
+                })
+                .flatMap(client -> Mono.fromFuture(() -> {
+                    try {
+                        return client.writeAuthorizationModel(readModel());
+                    } catch (Exception e) {
+                        throw new IllegalStateException("인가 모델 등록 실패", e);
+                    }
+                }))
+                .doOnNext(response -> log.info("OpenFGA 인가 모델을 등록했다"))
+                .thenReturn(storeId);
+    }
+
+    private WriteAuthorizationModelRequest readModel() {
+        try (InputStream in = new ClassPathResource(MODEL_RESOURCE).getInputStream()) {
+            return new ObjectMapper().readValue(in, WriteAuthorizationModelRequest.class);
+        } catch (Exception e) {
+            throw new IllegalStateException(MODEL_RESOURCE + " 를 읽을 수 없다", e);
+        }
+    }
+
+    private OpenFgaClient newClient(String storeId) {
+        try {
+            ClientConfiguration configuration = new ClientConfiguration().apiUrl(properties.getApiUrl());
+            if (storeId != null) {
+                configuration.storeId(storeId);
+            }
+            return new OpenFgaClient(configuration);
+        } catch (Exception e) {
+            throw new IllegalStateException("OpenFGA 클라이언트 생성 실패", e);
+        }
+    }
+}
+```
+
+> **SDK 시그니처 확인 지점.** `listStores()`, `createStore(...)`, `writeAuthorizationModel(...)`, `deleteStore()` 의 정확한 반환 타입과 예외 선언은 openfga-sdk 0.9.11 기준으로 확인한다. 컴파일 에러가 나면 `dev.openfga.sdk.api.client.OpenFgaClient` 의 javadoc 또는 소스를 열어 실제 시그니처에 맞춘다. **구조(이름으로 찾기 → 없으면 생성 → 모델 등록 → storeId 를 밖으로 내보내지 않기)는 바꾸지 않는다.**
+
+- [ ] **Step 6: OpenFgaRelationTupleWriter 구현**
+
+`authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaRelationTupleWriter.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import dev.openfga.sdk.api.client.model.ClientTupleKey;
+import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
+import dev.openfga.sdk.api.client.model.ClientWriteRequest;
+import dev.openfga.sdk.api.configuration.ClientWriteOptions;
+import dev.openfga.sdk.api.model.WriteRequestDeletes;
+import dev.openfga.sdk.api.model.WriteRequestWrites;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.TupleDelta;
+import dev.starryeye.organization.core.model.TupleFailure;
+import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.port.RelationTupleWriter;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * 델타를 OpenFGA 에 반영한다. 읽기 API 는 호출하지 않는다.
+ *
+ * <p>멱등 옵션(on_duplicate / on_missing = IGNORE)을 항상 켜므로 중복 write 나
+ * 없는 튜플 delete 로 배치가 통째로 실패하지 않는다. 튜플 단위 보상 로직이 필요 없는 이유다.
+ * 이 옵션은 OpenFGA 서버 v1.10.0 이상에서만 동작한다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
+
+    private final StoreBootstrapper bootstrapper;
+    private final OpenFgaProperties properties;
+
+    @Override
+    public Mono<TupleWriteResult> apply(TupleDelta delta) {
+        if (delta.isEmpty()) {
+            return Mono.just(TupleWriteResult.empty());
+        }
+
+        List<Batch> batches = new ArrayList<>();
+        partition(List.copyOf(delta.toDelete())).forEach(chunk -> batches.add(Batch.deletes(chunk)));
+        partition(List.copyOf(delta.toWrite())).forEach(chunk -> batches.add(Batch.writes(chunk)));
+
+        return bootstrapper.resolveStore()
+                .thenMany(Flux.fromIterable(batches).concatMap(this::applyBatch))
+                .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+    }
+
+    @Override
+    public Mono<Void> resetStore() {
+        log.warn("OpenFGA store 를 재생성한다. 재생성이 끝날 때까지 모든 인가 질의가 실패한다");
+        return bootstrapper.recreateStore().then();
+    }
+
+    /** 삭제를 먼저 처리한다. 같은 델타에 삭제와 생성이 섞였을 때 순서가 뒤집히면 결과가 달라진다. */
+    private List<List<RelationTuple>> partition(List<RelationTuple> tuples) {
+        List<List<RelationTuple>> chunks = new ArrayList<>();
+        int size = properties.getWriteBatchSize();
+        for (int i = 0; i < tuples.size(); i += size) {
+            chunks.add(tuples.subList(i, Math.min(i + size, tuples.size())));
+        }
+        return chunks;
+    }
+
+    private Mono<TupleWriteResult> applyBatch(Batch batch) {
+        return Mono.fromFuture(() -> {
+                    try {
+                        return bootstrapper.client().write(toRequest(batch), writeOptions());
+                    } catch (Exception e) {
+                        throw new IllegalStateException("OpenFGA write 호출 실패", e);
+                    }
+                })
+                .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(200)))
+                .thenReturn(batch.succeeded())
+                .onErrorResume(error -> {
+                    log.error("배치 {}건 적용 실패", batch.tuples().size(), error);
+                    return Mono.just(batch.failed(rootMessage(error)));
+                });
+    }
+
+    private ClientWriteRequest toRequest(Batch batch) {
+        ClientWriteRequest request = new ClientWriteRequest();
+        if (batch.delete()) {
+            request.deletes(batch.tuples().stream()
+                    .map(tuple -> new ClientTupleKeyWithoutCondition()
+                            .user(tuple.user())
+                            .relation(tuple.relation())
+                            ._object(tuple.object()))
+                    .toList());
+        } else {
+            request.writes(batch.tuples().stream()
+                    .map(tuple -> new ClientTupleKey()
+                            .user(tuple.user())
+                            .relation(tuple.relation())
+                            ._object(tuple.object()))
+                    .toList());
+        }
+        return request;
+    }
+
+    /** 멱등 옵션. 이것이 없으면 rebuild 와 재실행이 배치 단위로 통째로 실패한다. */
+    private ClientWriteOptions writeOptions() {
+        return new ClientWriteOptions()
+                .onDuplicate(WriteRequestWrites.OnDuplicateEnum.IGNORE)
+                .onMissing(WriteRequestDeletes.OnMissingEnum.IGNORE);
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        return cause.getMessage();
+    }
+
+    private static TupleWriteResult merge(TupleWriteResult a, TupleWriteResult b) {
+        Set<RelationTuple> written = new HashSet<>(a.written());
+        written.addAll(b.written());
+        Set<RelationTuple> deleted = new HashSet<>(a.deleted());
+        deleted.addAll(b.deleted());
+        List<TupleFailure> failures = new ArrayList<>(a.failures());
+        failures.addAll(b.failures());
+        return new TupleWriteResult(written, deleted, failures);
+    }
+
+    private record Batch(List<RelationTuple> tuples, boolean delete) {
+
+        static Batch writes(List<RelationTuple> tuples) {
+            return new Batch(tuples, false);
+        }
+
+        static Batch deletes(List<RelationTuple> tuples) {
+            return new Batch(tuples, true);
+        }
+
+        TupleWriteResult succeeded() {
+            return delete
+                    ? new TupleWriteResult(Set.of(), Set.copyOf(tuples), List.of())
+                    : new TupleWriteResult(Set.copyOf(tuples), Set.of(), List.of());
+        }
+
+        TupleWriteResult failed(String reason) {
+            return new TupleWriteResult(Set.of(), Set.of(),
+                    tuples.stream().map(tuple -> new TupleFailure(tuple, reason)).toList());
+        }
+    }
+}
+```
+
+> **SDK 시그니처 확인 지점.** `ClientWriteOptions.onDuplicate(...)` / `.onMissing(...)` 과 열거 타입 위치(`WriteRequestWrites.OnDuplicateEnum` / `WriteRequestDeletes.OnMissingEnum`)를 0.9.11 기준으로 확인한다. 이름이 다르면 IDE 자동완성으로 실제 이름을 찾아 맞춘다. **옵션을 켜지 않은 채로 넘어가면 안 된다** — Task 16의 rebuild 테스트가 반드시 실패한다.
+
+- [ ] **Step 7: 설정 클래스 작성**
+
+`authz-openfga/src/main/java/dev/starryeye/organization/authz/OpenFgaConfig.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@EnableConfigurationProperties(OpenFgaProperties.class)
+public class OpenFgaConfig {
+
+    @Bean
+    public StoreBootstrapper storeBootstrapper(OpenFgaProperties properties) {
+        return new StoreBootstrapper(properties);
+    }
+
+    @Bean
+    public OpenFgaRelationTupleWriter openFgaRelationTupleWriter(
+            StoreBootstrapper bootstrapper, OpenFgaProperties properties) {
+        return new OpenFgaRelationTupleWriter(bootstrapper, properties);
+    }
+}
+```
+
+`authz-openfga/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`:
+
+```
+dev.starryeye.organization.authz.OpenFgaConfig
+```
+
+- [ ] **Step 8: 인가 모델 테스트 실행**
+
+Run:
+
+```bash
+./gradlew :authz-openfga:test --tests '*AuthorizationModelTest*'
+```
+
+Expected: 6개 테스트 모두 PASS.
+
+`하위조직_직원은_상위조직_member로_롤업된다` 가 실패하면 `authorization-model.json` 의 `tupleToUserset` 부분이 틀린 것이다. `tupleset.relation` 은 `child`, `computedUserset.relation` 은 `member` 여야 한다. `상속은_상위로만_향한다` 가 실패하면 방향이 뒤집힌 것이므로 `RelationTuple.child(child, parent)` 의 인자 순서를 확인한다.
+
+- [ ] **Step 9: 쓰기 어댑터 테스트 작성**
+
+`authz-openfga/src/test/java/dev/starryeye/organization/authz/OpenFgaRelationTupleWriterTest.java`:
+
+```java
+package dev.starryeye.organization.authz;
+
+import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.TupleDelta;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
+
+    private OpenFgaRelationTupleWriter writer;
+
+    @BeforeEach
+    void 쓰기어댑터를_준비한다() {
+        writer = new OpenFgaRelationTupleWriter(bootstrapper, properties);
+    }
+
+    private boolean check(String user, String relation, String object) {
+        try {
+            return bootstrapper.client().check(new ClientCheckRequest()
+                    ._object(object).relation(relation).user(user)).get().getAllowed();
+        } catch (Exception e) {
+            throw new IllegalStateException("Check 호출 실패", e);
+        }
+    }
+
+    @Test
+    @DisplayName("빈 델타는 OpenFGA를 호출하지 않고 빈 결과를 준다")
+    void 빈_델타는_아무것도_하지_않는다() {
+        // given, when
+        var result = writer.apply(TupleDelta.empty()).block();
+
+        // then
+        assertThat(result.written()).isEmpty();
+        assertThat(result.deleted()).isEmpty();
+        assertThat(result.hasFailure()).isFalse();
+    }
+
+    @Test
+    @DisplayName("적용에 성공한 튜플이 결과의 written 에 담긴다")
+    void 성공한_튜플이_결과에_담긴다() {
+        // given
+        var delta = TupleDelta.writeOnly(Set.of(
+                RelationTuple.directMember("kim", "DEV002"),
+                RelationTuple.directMember("lee", "DEV002")));
+
+        // when
+        var result = writer.apply(delta).block();
+
+        // then
+        assertThat(result.written()).isEqualTo(delta.toWrite());
+        assertThat(result.hasFailure()).isFalse();
+    }
+
+    @Test
+    @DisplayName("삭제한 튜플은 더 이상 member 로 판정되지 않는다")
+    void 삭제하면_판정에서_빠진다() {
+        // given
+        var tuple = RelationTuple.directMember("kim", "DEV002");
+        writer.apply(TupleDelta.writeOnly(Set.of(tuple))).block();
+
+        // when
+        var result = writer.apply(TupleDelta.deleteOnly(Set.of(tuple))).block();
+
+        // then
+        assertThat(result.deleted()).containsExactly(tuple);
+        assertThat(check("user:kim", "member", "group:DEV002")).isFalse();
+    }
+
+    @Test
+    @DisplayName("이미 존재하는 튜플을 다시 써도 멱등 옵션 덕분에 실패하지 않는다")
+    void 중복_생성은_멱등하게_흡수된다() {
+        // given
+        var delta = TupleDelta.writeOnly(Set.of(RelationTuple.directMember("kim", "DEV002")));
+        writer.apply(delta).block();
+
+        // when
+        var result = writer.apply(delta).block();
+
+        // then
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(result.written()).isEqualTo(delta.toWrite());
+    }
+
+    @Test
+    @DisplayName("존재하지 않는 튜플을 삭제해도 멱등 옵션 덕분에 실패하지 않는다")
+    void 없는_튜플_삭제는_멱등하게_흡수된다() {
+        // given
+        var delta = TupleDelta.deleteOnly(Set.of(RelationTuple.directMember("ghost", "DEV002")));
+
+        // when
+        var result = writer.apply(delta).block();
+
+        // then
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(result.deleted()).isEqualTo(delta.toDelete());
+    }
+
+    @Test
+    @DisplayName("배치 한계인 100건을 넘는 델타도 나누어 전부 반영된다")
+    void 배치_한계를_넘는_델타도_반영된다() {
+        // given
+        var tuples = IntStream.range(0, 250)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet());
+
+        // when
+        var result = writer.apply(TupleDelta.writeOnly(tuples)).block();
+
+        // then
+        assertThat(result.written()).hasSize(250);
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(check("user:user249", "member", "group:DEV002")).isTrue();
+    }
+
+    @Test
+    @DisplayName("한 델타에 생성과 삭제가 섞여 있으면 삭제를 먼저 처리한다")
+    void 생성과_삭제가_섞여도_처리된다() {
+        // given
+        var 기존 = RelationTuple.directMember("lee", "DEV002");
+        writer.apply(TupleDelta.writeOnly(Set.of(기존))).block();
+        var 신규 = RelationTuple.directMember("park", "DEV002");
+
+        // when
+        var result = writer.apply(new TupleDelta(Set.of(신규), Set.of(기존))).block();
+
+        // then
+        assertThat(result.written()).containsExactly(신규);
+        assertThat(result.deleted()).containsExactly(기존);
+        assertThat(check("user:park", "member", "group:DEV002")).isTrue();
+        assertThat(check("user:lee", "member", "group:DEV002")).isFalse();
+    }
+
+    @Test
+    @DisplayName("store 를 재생성하면 기존 튜플이 모두 사라진다")
+    void store_재생성은_전부_비운다() {
+        // given
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.directMember("kim", "DEV002")))).block();
+        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
+
+        // when
+        writer.resetStore().block();
+
+        // then
+        assertThat(check("user:kim", "member", "group:DEV002")).isFalse();
+    }
+}
+```
+
+- [ ] **Step 10: 전체 테스트 실행**
+
+Run:
+
+```bash
+./gradlew :authz-openfga:build
+```
+
+Expected: `AuthorizationModelTest` 6 + `OpenFgaRelationTupleWriterTest` 8 = 14개 PASS.
+
+`중복_생성은_멱등하게_흡수된다` 나 `없는_튜플_삭제는_멱등하게_흡수된다` 가 실패하면 Step 6의 `writeOptions()` 가 실제로 요청에 반영되고 있는지, 그리고 컨테이너 이미지가 `v1.10.2` 인지 확인한다. 두 조건 중 하나라도 빠지면 이 테스트는 통과할 수 없다.
+
+- [ ] **Step 11: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: OpenFGA 어댑터 추가 — 인가 모델 등록과 멱등 튜플 쓰기
+
+앱은 storeId 도 modelId 도 다루지 않는다. store-name 으로 ListStores 해서
+없으면 만들고, write 에는 authorization_model_id 를 넘기지 않아 서버가
+최신 모델을 쓴다.
+
+on_duplicate / on_missing 을 IGNORE 로 항상 켜서 중복 write 나 없는 튜플
+delete 로 배치가 통째로 실패하지 않게 했다. 튜플 단위 보상 로직이 필요 없다.
+이 옵션은 OpenFGA v1.10.0+ 에서만 동작하므로 컨테이너를 v1.10.2 로 고정했다.
+
+인가 모델 JSON 은 실제 Check 로 검증한다. Check 는 테스트 전용이며
+프로덕션 코드에는 두지 않는다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 12: connector-ldap — groupOfNames 전략
+
+**Files:**
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapProperties.java`
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/LdapMappingStrategy.java`
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/GroupOfNamesStrategy.java`
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapDirectorySnapshotSource.java`
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapConfig.java`
+- Test: `connector-ldap/src/test/java/dev/starryeye/organization/ldap/EmbeddedLdapSupport.java`
+- Test: `connector-ldap/src/test/java/dev/starryeye/organization/ldap/GroupOfNamesStrategyTest.java`
+
+**Interfaces:**
+- Consumes: Task 6의 `DirectorySnapshotSource`, Task 2의 도메인 모델, Task 2의 `IdNormalizer`
+- Produces:
+  - `LdapProperties` (`@ConfigurationProperties("ldap")`) — 아래 Step 2 구조 그대로
+  - `LdapMappingStrategy` 인터페이스 — `DirectorySnapshot read(LdapTemplate template)`
+  - `GroupOfNamesStrategy implements LdapMappingStrategy`
+  - `LdapDirectorySnapshotSource(LdapTemplate, LdapMappingStrategy)` — `DirectorySnapshotSource` 구현체 빈. 블로킹 호출을 `boundedElastic` 으로 감싼다
+  - `EmbeddedLdapSupport` — UnboundID in-memory LDAP 테스트 베이스. Task 13이 재사용한다
+
+**매핑 규칙:** 조직코드는 `cn`, 조직명은 `description`, 직원 아이디는 `uid`. `member` DN 이 미리 읽어둔 유저 DN 집합에 있으면 `MemberRef.user`, 그룹 DN 집합에 있으면 `MemberRef.group`, 어느 쪽도 아니면 스킵한다. **DN 마다 추가 조회하지 않는다.**
+
+- [ ] **Step 1: 임베디드 LDAP 테스트 베이스 작성**
+
+`connector-ldap/src/test/java/dev/starryeye/organization/ldap/EmbeddedLdapSupport.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import com.unboundid.ldap.listener.InMemoryDirectoryServer;
+import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
+import com.unboundid.ldap.listener.InMemoryListenerConfig;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.ldap.core.LdapTemplate;
+import org.springframework.ldap.core.support.LdapContextSource;
+
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * UnboundID in-memory LDAP 서버. 도커 없이 밀리초 단위로 뜬다.
+ * 로컬에서 실제 OpenLDAP 으로 확인하는 것은 docker-compose 쪽 몫이다.
+ */
+public abstract class EmbeddedLdapSupport {
+
+    protected static final String BASE_DN = "dc=example,dc=com";
+    protected static final String BIND_DN = "cn=admin," + BASE_DN;
+    protected static final String BIND_PASSWORD = "adminpassword";
+
+    private InMemoryDirectoryServer server;
+    protected LdapTemplate ldapTemplate;
+
+    /** 각 테스트가 자기 조직도 LDIF 를 준다 */
+    protected abstract String ldif();
+
+    @BeforeEach
+    void LDAP서버를_띄운다() throws Exception {
+        InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
+        config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
+        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("test", 0));
+        config.setSchema(null);
+
+        server = new InMemoryDirectoryServer(config);
+        server.importFromLDIF(true,
+                new com.unboundid.ldif.LDIFReader(
+                        new ByteArrayInputStream(ldif().getBytes(StandardCharsets.UTF_8))));
+        server.startListening();
+
+        LdapContextSource contextSource = new LdapContextSource();
+        contextSource.setUrl("ldap://localhost:" + server.getListenPort());
+        contextSource.setBase(BASE_DN);
+        contextSource.setUserDn(BIND_DN);
+        contextSource.setPassword(BIND_PASSWORD);
+        contextSource.afterPropertiesSet();
+
+        ldapTemplate = new LdapTemplate(contextSource);
+        ldapTemplate.setIgnorePartialResultException(true);
+    }
+
+    @AfterEach
+    void LDAP서버를_내린다() {
+        if (server != null) {
+            server.shutDown(true);
+        }
+    }
+}
+```
+
+- [ ] **Step 2: 실패하는 테스트 작성**
+
+`connector-ldap/src/test/java/dev/starryeye/organization/ldap/GroupOfNamesStrategyTest.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class GroupOfNamesStrategyTest extends EmbeddedLdapSupport {
+
+    @Override
+    protected String ldif() {
+        return """
+                dn: dc=example,dc=com
+                objectClass: top
+                objectClass: domain
+                dc: example
+
+                dn: ou=people,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: people
+
+                dn: ou=groups,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: groups
+
+                dn: uid=kim,ou=people,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: kim
+                cn: Kim Chulsoo
+                sn: Kim
+                displayName: 김철수
+                mail: kim@example.com
+
+                dn: uid=lee,ou=people,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: lee
+                cn: Lee Younghee
+                sn: Lee
+                displayName: 이영희
+                mail: lee@example.com
+
+                dn: uid=park,ou=people,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: park
+                cn: Park Minsu
+                sn: Park
+                displayName: 박민수
+                mail: park@example.com
+
+                dn: cn=DEV001,ou=groups,dc=example,dc=com
+                objectClass: groupOfNames
+                cn: DEV001
+                description: 개발본부
+                member: cn=DEV002,ou=groups,dc=example,dc=com
+                member: uid=park,ou=people,dc=example,dc=com
+
+                dn: cn=DEV002,ou=groups,dc=example,dc=com
+                objectClass: groupOfNames
+                cn: DEV002
+                description: 백엔드팀
+                member: uid=kim,ou=people,dc=example,dc=com
+                member: uid=lee,ou=people,dc=example,dc=com
+                member: uid=ghost,ou=people,dc=example,dc=com
+                """;
+    }
+
+    private LdapProperties 기본설정() {
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        var g = properties.getGroupOfNames();
+        g.setUserSearchBase("ou=people");
+        g.setUserObjectClass("inetOrgPerson");
+        g.setUserIdAttribute("uid");
+        g.setUserNameAttribute("displayName");
+        g.setUserMailAttribute("mail");
+        g.setGroupSearchBase("ou=groups");
+        g.setGroupObjectClass("groupOfNames");
+        g.setGroupIdAttribute("cn");
+        g.setGroupNameAttribute("description");
+        g.setMemberAttribute("member");
+        return properties;
+    }
+
+    @Test
+    @DisplayName("직원 엔트리를 읽어 직원 아이디와 표시명, 이메일을 채운다")
+    void 직원을_읽는다() {
+        // given
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("kim", "lee", "park");
+        var kim = snapshot.users().get("kim");
+        assertThat(kim.displayName()).isEqualTo("김철수");
+        assertThat(kim.email()).isEqualTo("kim@example.com");
+        assertThat(kim.active()).isTrue();
+        assertThat(kim.externalId()).contains("uid=kim");
+    }
+
+    @Test
+    @DisplayName("조직코드는 cn 에서, 조직명은 description 에서 읽어 서로 분리된다")
+    void 조직코드와_조직명을_분리해_읽는다() {
+        // given
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups()).containsOnlyKeys("DEV001", "DEV002");
+        assertThat(snapshot.groups().get("DEV001").displayName()).isEqualTo("개발본부");
+        assertThat(snapshot.groups().get("DEV002").displayName()).isEqualTo("백엔드팀");
+    }
+
+    @Test
+    @DisplayName("member DN 이 사람이면 직원 멤버로, 그룹이면 하위 조직 멤버로 분류된다")
+    void 멤버_DN을_사람과_그룹으로_분류한다() {
+        // given
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV001").members())
+                .containsExactlyInAnyOrder(MemberRef.group("DEV002"), MemberRef.user("park"));
+        assertThat(snapshot.groups().get("DEV002").members())
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("사람도 그룹도 아닌 member DN 은 건너뛰고 동기화를 완주한다")
+    void 정체불명_멤버는_건너뛴다() {
+        // given — DEV002 의 member 중 uid=ghost 는 실제 엔트리가 없다
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV002").members())
+                .doesNotContain(MemberRef.user("ghost"))
+                .hasSize(2);
+    }
+
+    @Test
+    @DisplayName("조직명 속성이 비어 있으면 조직코드를 표시명으로 대신 쓴다")
+    void 조직명이_없으면_조직코드로_대체한다() {
+        // given
+        var properties = 기본설정();
+        properties.getGroupOfNames().setGroupNameAttribute("businessCategory");
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV001").displayName()).isEqualTo("DEV001");
+    }
+
+    @Test
+    @DisplayName("직원 아이디 속성을 사번으로 바꾸면 사번 기준으로 읽는다")
+    void 직원_아이디_속성을_바꿀_수_있다() {
+        // given — 이 LDIF 에는 employeeNumber 가 없으므로 uid 가 없는 상태를 흉내낸다
+        var properties = 기본설정();
+        properties.getGroupOfNames().setUserIdAttribute("cn");
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — cn 값에 공백이 있으므로 정규화되어 밑줄로 바뀐다
+        assertThat(snapshot.users()).containsKey("Kim_Chulsoo");
+    }
+}
+```
+
+- [ ] **Step 3: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :connector-ldap:test --tests '*GroupOfNamesStrategyTest*'
+```
+
+Expected: 컴파일 실패 — `LdapProperties`, `GroupOfNamesStrategy` 가 없다.
+
+- [ ] **Step 4: LdapProperties 작성**
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapProperties.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import lombok.Getter;
+import lombok.Setter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@Getter
+@Setter
+@ConfigurationProperties("ldap")
+public class LdapProperties {
+
+    private String url = "ldap://localhost:1389";
+    private String baseDn = "dc=example,dc=com";
+    private String bindDn;
+    private String bindPassword;
+    private int pageSize = 500;
+
+    /** group-of-names | dit */
+    private String strategy = "group-of-names";
+
+    private GroupOfNames groupOfNames = new GroupOfNames();
+    private Dit dit = new Dit();
+
+    @Getter
+    @Setter
+    public static class GroupOfNames {
+        private String userSearchBase = "ou=people";
+        private String userObjectClass = "inetOrgPerson";
+        /** 직원 아이디. employeeNumber 등으로 교체 가능 */
+        private String userIdAttribute = "uid";
+        private String userNameAttribute = "displayName";
+        private String userMailAttribute = "mail";
+        private String groupSearchBase = "ou=groups";
+        private String groupObjectClass = "groupOfNames";
+        /** 조직코드 */
+        private String groupIdAttribute = "cn";
+        /** 조직명. LDAP 그룹에는 표시명 표준 속성이 없어 description 을 쓴다 */
+        private String groupNameAttribute = "description";
+        private String memberAttribute = "member";
+    }
+
+    @Getter
+    @Setter
+    public static class Dit {
+        private String rootDn = "ou=company";
+        private String orgUnitObjectClass = "organizationalUnit";
+        /** 조직코드 */
+        private String groupIdAttribute = "ou";
+        /** 조직명. 없으면 조직코드로 대체 */
+        private String groupNameAttribute = "description";
+        private String userObjectClass = "inetOrgPerson";
+        private String userIdAttribute = "uid";
+        private String userNameAttribute = "displayName";
+        private String userMailAttribute = "mail";
+    }
+}
+```
+
+- [ ] **Step 5: 전략 인터페이스와 groupOfNames 구현**
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/LdapMappingStrategy.java`:
+
+```java
+package dev.starryeye.organization.ldap.strategy;
+
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import org.springframework.ldap.core.LdapTemplate;
+
+/**
+ * LDAP 은 소속을 표현하는 방법이 두 가지다.
+ * 어느 쪽을 쓰든 같은 {@link DirectorySnapshot} 을 만들어 반환하므로 이후 로직은 전략을 모른다.
+ */
+public interface LdapMappingStrategy {
+
+    DirectorySnapshot read(LdapTemplate template);
+}
+```
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/GroupOfNamesStrategy.java`:
+
+```java
+package dev.starryeye.organization.ldap.strategy;
+
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.tuple.IdNormalizer;
+import dev.starryeye.organization.ldap.LdapProperties;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ldap.core.AttributesMapper;
+import org.springframework.ldap.core.LdapTemplate;
+import org.springframework.ldap.query.LdapQueryBuilder;
+
+import javax.naming.NamingEnumeration;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 그룹 엔트리의 member 속성을 읽는다. SCIM 의 members 배열과 구조가 같아 변환이 자연스럽다.
+ *
+ * <p>member DN 이 사람인지 그룹인지는 미리 읽어둔 DN 집합으로 판별한다.
+ * DN 마다 추가 조회를 하면 조직 규모에 비례해 왕복이 폭증한다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class GroupOfNamesStrategy implements LdapMappingStrategy {
+
+    private final LdapProperties properties;
+
+    @Override
+    public DirectorySnapshot read(LdapTemplate template) {
+        LdapProperties.GroupOfNames config = properties.getGroupOfNames();
+
+        List<RawEntry> userEntries = template.search(
+                LdapQueryBuilder.query()
+                        .base(config.getUserSearchBase())
+                        .where("objectClass").is(config.getUserObjectClass()),
+                userMapper(config));
+
+        List<RawEntry> groupEntries = template.search(
+                LdapQueryBuilder.query()
+                        .base(config.getGroupSearchBase())
+                        .where("objectClass").is(config.getGroupObjectClass()),
+                groupMapper(config));
+
+        Map<String, String> userIdByDn = new LinkedHashMap<>();
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        for (RawEntry entry : userEntries) {
+            userIdByDn.put(normalizeDn(entry.dn()), entry.id());
+            users.put(entry.id(), new DirectoryUser(
+                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), true));
+        }
+
+        Map<String, String> groupIdByDn = new LinkedHashMap<>();
+        for (RawEntry entry : groupEntries) {
+            groupIdByDn.put(normalizeDn(entry.dn()), entry.id());
+        }
+
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        for (RawEntry entry : groupEntries) {
+            Set<MemberRef> members = new LinkedHashSet<>();
+            for (String memberDn : entry.members()) {
+                String key = normalizeDn(memberDn);
+                String userId = userIdByDn.get(key);
+                if (userId != null) {
+                    members.add(MemberRef.user(userId));
+                    continue;
+                }
+                String groupId = groupIdByDn.get(key);
+                if (groupId != null) {
+                    members.add(MemberRef.group(groupId));
+                    continue;
+                }
+                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다", entry.id(), memberDn);
+            }
+            groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
+        }
+
+        return new DirectorySnapshot(users, groups);
+    }
+
+    private AttributesMapper<RawEntry> userMapper(LdapProperties.GroupOfNames config) {
+        return attributes -> new RawEntry(
+                IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
+                dnOf(attributes, config.getUserIdAttribute(), config.getUserSearchBase()),
+                firstNonBlank(value(attributes, config.getUserNameAttribute()),
+                        value(attributes, "cn"),
+                        required(attributes, config.getUserIdAttribute())),
+                value(attributes, config.getUserMailAttribute()),
+                List.of());
+    }
+
+    private AttributesMapper<RawEntry> groupMapper(LdapProperties.GroupOfNames config) {
+        return attributes -> {
+            String code = IdNormalizer.normalize(required(attributes, config.getGroupIdAttribute()));
+            return new RawEntry(
+                    code,
+                    dnOf(attributes, config.getGroupIdAttribute(), config.getGroupSearchBase()),
+                    firstNonBlank(value(attributes, config.getGroupNameAttribute()), code),
+                    null,
+                    values(attributes, config.getMemberAttribute()));
+        };
+    }
+
+    /**
+     * AttributesMapper 에는 DN 이 넘어오지 않으므로 검색 베이스와 식별 속성으로 재구성한다.
+     * externalId 보관과 member DN 대조에만 쓰이므로 정확한 형태보다 일관성이 중요하다.
+     */
+    private String dnOf(Attributes attributes, String idAttribute, String searchBase) {
+        return idAttribute + "=" + required(attributes, idAttribute)
+                + "," + searchBase + "," + properties.getBaseDn();
+    }
+
+    /** 대소문자와 공백 차이로 DN 대조가 어긋나지 않게 정규화한다. */
+    private static String normalizeDn(String dn) {
+        return dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim();
+    }
+
+    private static String required(Attributes attributes, String name) {
+        String value = value(attributes, name);
+        if (value == null) {
+            throw new IllegalStateException("필수 속성 '" + name + "' 가 없습니다");
+        }
+        return value;
+    }
+
+    private static String value(Attributes attributes, String name) {
+        try {
+            Attribute attribute = attributes.get(name);
+            return attribute == null ? null : (String) attribute.get();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static List<String> values(Attributes attributes, String name) {
+        List<String> result = new ArrayList<>();
+        try {
+            Attribute attribute = attributes.get(name);
+            if (attribute == null) {
+                return result;
+            }
+            NamingEnumeration<?> enumeration = attribute.getAll();
+            while (enumeration.hasMore()) {
+                result.add((String) enumeration.next());
+            }
+        } catch (Exception e) {
+            log.warn("속성 '{}' 을 읽지 못했습니다", name, e);
+        }
+        return result;
+    }
+
+    private static String firstNonBlank(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null && !candidate.isBlank()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private record RawEntry(String id, String dn, String displayName, String email, List<String> members) {
+    }
+}
+```
+
+- [ ] **Step 6: LdapDirectorySnapshotSource 와 설정 작성**
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapDirectorySnapshotSource.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.port.DirectorySnapshotSource;
+import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ldap.core.LdapTemplate;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+/**
+ * LDAP 은 블로킹 프로토콜이므로 boundedElastic 으로 격리한다.
+ * 이벤트 루프에서 직접 호출하면 전체 애플리케이션이 멈춘다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
+
+    private final LdapTemplate template;
+    private final LdapMappingStrategy strategy;
+
+    @Override
+    public Mono<DirectorySnapshot> fetchAll() {
+        return Mono.fromCallable(() -> strategy.read(template))
+                .subscribeOn(Schedulers.boundedElastic())
+                .doOnNext(snapshot -> log.info("LDAP 에서 직원 {}명, 조직 {}개를 읽었다",
+                        snapshot.users().size(), snapshot.groups().size()));
+    }
+}
+```
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapConfig.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import dev.starryeye.organization.ldap.strategy.DitStrategy;
+import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
+import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.ldap.core.LdapTemplate;
+import org.springframework.ldap.core.support.LdapContextSource;
+
+@Configuration
+@EnableConfigurationProperties(LdapProperties.class)
+public class LdapConfig {
+
+    @Bean
+    public LdapContextSource ldapContextSource(LdapProperties properties) {
+        LdapContextSource contextSource = new LdapContextSource();
+        contextSource.setUrl(properties.getUrl());
+        contextSource.setBase(properties.getBaseDn());
+        contextSource.setUserDn(properties.getBindDn());
+        contextSource.setPassword(properties.getBindPassword());
+        return contextSource;
+    }
+
+    @Bean
+    public LdapTemplate ldapTemplate(LdapContextSource contextSource) {
+        LdapTemplate template = new LdapTemplate(contextSource);
+        template.setIgnorePartialResultException(true);
+        return template;
+    }
+
+    @Bean
+    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties) {
+        return "dit".equalsIgnoreCase(properties.getStrategy())
+                ? new DitStrategy(properties)
+                : new GroupOfNamesStrategy(properties);
+    }
+
+    @Bean
+    public LdapDirectorySnapshotSource ldapDirectorySnapshotSource(
+            LdapTemplate template, LdapMappingStrategy strategy) {
+        return new LdapDirectorySnapshotSource(template, strategy);
+    }
+}
+```
+
+> `DitStrategy` 는 Task 13에서 만든다. 이 태스크에서는 `LdapConfig` 의 `DitStrategy` 참조 부분을 잠시 주석 처리하고 `new GroupOfNamesStrategy(properties)` 만 반환한 뒤, Task 13에서 되살린다.
+
+`connector-ldap/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`:
+
+```
+dev.starryeye.organization.ldap.LdapConfig
+```
+
+- [ ] **Step 7: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :connector-ldap:test --tests '*GroupOfNamesStrategyTest*'
+```
+
+Expected: 6개 테스트 모두 PASS.
+
+`멤버_DN을_사람과_그룹으로_분류한다` 가 실패하면 `normalizeDn` 이 만든 키와 `dnOf` 가 만든 키가 어긋난 것이다. 디버깅할 때는 `userIdByDn.keySet()` 과 실제 `member` 값을 나란히 출력해 비교한다. UnboundID 가 반환하는 DN 표기와 우리가 재구성한 DN 표기가 다르면 `dnOf` 대신 `AttributesMapper` 를 `ContextMapper` 로 바꿔 `DirContextAdapter.getDn()` 으로 실제 DN 을 쓴다.
+
+- [ ] **Step 8: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: LDAP groupOfNames 매핑 전략 추가
+
+그룹 엔트리의 member 속성을 읽어 DirectorySnapshot 을 만든다.
+member DN 이 사람인지 그룹인지는 미리 읽어둔 DN 집합으로 판별해
+DN 마다 추가 조회하지 않는다.
+
+조직코드는 cn, 조직명은 description 에서 읽어 분리한다. LDAP 그룹에는
+표시명 전용 표준 속성이 없어 description 을 쓰는 것이 관행이다.
+
+LDAP 은 블로킹 프로토콜이라 boundedElastic 으로 격리했다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
+
+## Task 13: connector-ldap — DIT 전략
+
+**Files:**
+- Create: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/DitStrategy.java`
+- Modify: `connector-ldap/src/main/java/dev/starryeye/organization/ldap/LdapConfig.java` (Task 12에서 주석 처리한 부분 복구)
+- Test: `connector-ldap/src/test/java/dev/starryeye/organization/ldap/DitStrategyTest.java`
+
+**Interfaces:**
+- Consumes: Task 12의 `LdapMappingStrategy`, `LdapProperties.Dit`, `EmbeddedLdapSupport`
+- Produces: `DitStrategy implements LdapMappingStrategy`
+
+**매핑 규칙:** `ou` 트리가 곧 조직 계층이고, 사용자 엔트리의 부모 `ou` 가 소속이다. 직원은 **하나의 조직에만** 속한다. `dit.rootDn` 아래만 훑는다.
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`connector-ldap/src/test/java/dev/starryeye/organization/ldap/DitStrategyTest.java`:
+
+```java
+package dev.starryeye.organization.ldap;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.ldap.strategy.DitStrategy;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DitStrategyTest extends EmbeddedLdapSupport {
+
+    @Override
+    protected String ldif() {
+        return """
+                dn: dc=example,dc=com
+                objectClass: top
+                objectClass: domain
+                dc: example
+
+                dn: ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: company
+                description: 전사
+
+                dn: ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: DEV001
+                description: 개발본부
+
+                dn: ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: DEV002
+                description: 백엔드팀
+
+                dn: ou=OPS001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: OPS001
+
+                dn: uid=choi,ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: choi
+                cn: Choi Jiwoo
+                sn: Choi
+                displayName: 최지우
+                mail: choi@example.com
+
+                dn: uid=park,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: park
+                cn: Park Minsu
+                sn: Park
+                displayName: 박민수
+                mail: park@example.com
+                """;
+    }
+
+    private LdapProperties 기본설정() {
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        properties.setStrategy("dit");
+        var d = properties.getDit();
+        d.setRootDn("ou=company");
+        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setGroupIdAttribute("ou");
+        d.setGroupNameAttribute("description");
+        d.setUserObjectClass("inetOrgPerson");
+        d.setUserIdAttribute("uid");
+        d.setUserNameAttribute("displayName");
+        d.setUserMailAttribute("mail");
+        return properties;
+    }
+
+    @Test
+    @DisplayName("루트 아래의 ou 트리를 모두 조직으로 읽는다")
+    void ou_트리를_조직으로_읽는다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups()).containsOnlyKeys("company", "DEV001", "DEV002", "OPS001");
+    }
+
+    @Test
+    @DisplayName("dn 경로에서 상위 조직을 도출해 하위 조직 멤버로 등록한다")
+    void dn_경로에서_조직_계층을_도출한다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("company").members())
+                .contains(MemberRef.group("DEV001"), MemberRef.group("OPS001"));
+        assertThat(snapshot.groups().get("DEV001").members())
+                .contains(MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("직원은 dn 상의 부모 조직 하나에만 속한다")
+    void 직원은_부모_조직_하나에만_속한다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV002").members()).contains(MemberRef.user("choi"));
+        assertThat(snapshot.groups().get("DEV001").members())
+                .contains(MemberRef.user("park"))
+                .doesNotContain(MemberRef.user("choi"));
+    }
+
+    @Test
+    @DisplayName("조직명은 description 에서 읽고 없으면 조직코드로 대체한다")
+    void 조직명이_없으면_조직코드로_대체한다() {
+        // given — OPS001 에는 description 이 없다
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV001").displayName()).isEqualTo("개발본부");
+        assertThat(snapshot.groups().get("OPS001").displayName()).isEqualTo("OPS001");
+    }
+
+    @Test
+    @DisplayName("직원 정보는 groupOfNames 전략과 같은 형태로 채워진다")
+    void 직원_정보를_읽는다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("choi", "park");
+        assertThat(snapshot.users().get("choi").displayName()).isEqualTo("최지우");
+        assertThat(snapshot.users().get("choi").email()).isEqualTo("choi@example.com");
+        assertThat(snapshot.users().get("choi").active()).isTrue();
+    }
+
+    @Test
+    @DisplayName("두 전략은 서로 다른 방식으로 읽어도 같은 모양의 스냅샷을 만든다")
+    void 두_전략은_같은_모양의_스냅샷을_만든다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 이후 로직(TupleMapper)이 전략을 구분하지 않아도 되는지 확인한다
+        var result = dev.starryeye.organization.core.tuple.TupleMapper.toTuples(snapshot);
+        assertThat(result.tuples()).contains(
+                dev.starryeye.organization.core.model.RelationTuple.directMember("choi", "DEV002"),
+                dev.starryeye.organization.core.model.RelationTuple.child("DEV002", "DEV001"),
+                dev.starryeye.organization.core.model.RelationTuple.child("DEV001", "company"));
+    }
+}
+```
+
+- [ ] **Step 2: 테스트가 실패하는지 확인**
+
+Run:
+
+```bash
+./gradlew :connector-ldap:test --tests '*DitStrategyTest*'
+```
+
+Expected: 컴파일 실패 — `DitStrategy` 가 없다.
+
+- [ ] **Step 3: 구현**
+
+`connector-ldap/src/main/java/dev/starryeye/organization/ldap/strategy/DitStrategy.java`:
+
+```java
+package dev.starryeye.organization.ldap.strategy;
+
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.tuple.IdNormalizer;
+import dev.starryeye.organization.ldap.LdapProperties;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ldap.core.ContextMapper;
+import org.springframework.ldap.core.DirContextAdapter;
+import org.springframework.ldap.core.LdapTemplate;
+import org.springframework.ldap.query.LdapQueryBuilder;
+
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * ou 트리를 조직 계층으로, 사용자 엔트리의 부모 ou 를 소속으로 본다.
+ *
+ * <p>DIT 위치가 곧 소속이므로 직원은 하나의 조직에만 속한다.
+ * groupOfNames 전략과 다른 방식으로 읽지만 같은 {@link DirectorySnapshot} 을 만든다.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class DitStrategy implements LdapMappingStrategy {
+
+    private final LdapProperties properties;
+
+    @Override
+    public DirectorySnapshot read(LdapTemplate template) {
+        LdapProperties.Dit config = properties.getDit();
+
+        List<Entry> orgEntries = template.search(
+                LdapQueryBuilder.query()
+                        .base(config.getRootDn())
+                        .where("objectClass").is(config.getOrgUnitObjectClass()),
+                entryMapper());
+
+        List<Entry> userEntries = template.search(
+                LdapQueryBuilder.query()
+                        .base(config.getRootDn())
+                        .where("objectClass").is(config.getUserObjectClass()),
+                entryMapper());
+
+        // 조직코드 → 상대 DN, 상대 DN → 조직코드 양방향 색인
+        Map<String, String> codeByRdnPath = new LinkedHashMap<>();
+        Map<String, Set<MemberRef>> membersByCode = new LinkedHashMap<>();
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+
+        for (Entry entry : orgEntries) {
+            String code = IdNormalizer.normalize(entry.attribute(config.getGroupIdAttribute()));
+            codeByRdnPath.put(normalize(entry.dn()), code);
+            membersByCode.putIfAbsent(code, new LinkedHashSet<>());
+            String name = firstNonBlank(entry.attribute(config.getGroupNameAttribute()), code);
+            groups.put(code, new DirectoryGroup(code, entry.dn(), name, Set.of()));
+        }
+
+        // 조직 계층: 각 조직의 부모 dn 을 조직코드로 되짚어 하위 조직 멤버로 등록한다
+        for (Entry entry : orgEntries) {
+            String code = codeByRdnPath.get(normalize(entry.dn()));
+            String parentCode = codeByRdnPath.get(normalize(parentDn(entry.dn())));
+            if (parentCode != null && !parentCode.equals(code)) {
+                membersByCode.get(parentCode).add(MemberRef.group(code));
+            }
+        }
+
+        // 직원 소속: 사용자 엔트리의 부모 dn 이 곧 소속 조직이다
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        for (Entry entry : userEntries) {
+            String userId = IdNormalizer.normalize(entry.attribute(config.getUserIdAttribute()));
+            users.put(userId, new DirectoryUser(
+                    userId,
+                    entry.dn(),
+                    userId,
+                    firstNonBlank(entry.attribute(config.getUserNameAttribute()), entry.attribute("cn"), userId),
+                    entry.attribute(config.getUserMailAttribute()),
+                    true));
+
+            String parentCode = codeByRdnPath.get(normalize(parentDn(entry.dn())));
+            if (parentCode == null) {
+                log.warn("직원 '{}' 의 부모 조직을 찾지 못해 소속을 건너뜁니다 (dn={})", userId, entry.dn());
+                continue;
+            }
+            membersByCode.get(parentCode).add(MemberRef.user(userId));
+        }
+
+        membersByCode.forEach((code, members) -> {
+            DirectoryGroup base = groups.get(code);
+            groups.put(code, new DirectoryGroup(base.id(), base.externalId(), base.displayName(), members));
+        });
+
+        return new DirectorySnapshot(users, groups);
+    }
+
+    /** ContextMapper 를 쓰는 이유는 dn 이 필요하기 때문이다. AttributesMapper 에는 dn 이 오지 않는다. */
+    private ContextMapper<Entry> entryMapper() {
+        return context -> {
+            DirContextAdapter adapter = (DirContextAdapter) context;
+            return new Entry(adapter.getDn().toString(), adapter);
+        };
+    }
+
+    /** 첫 RDN 을 떼어 부모 dn 을 만든다. 최상위면 빈 문자열이 된다. */
+    private static String parentDn(String dn) {
+        int comma = dn.indexOf(',');
+        return comma < 0 ? "" : dn.substring(comma + 1);
+    }
+
+    private static String normalize(String dn) {
+        return dn.toLowerCase(java.util.Locale.ROOT).replace(", ", ",").trim();
+    }
+
+    private static String firstNonBlank(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null && !candidate.isBlank()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private record Entry(String dn, DirContextAdapter adapter) {
+
+        String attribute(String name) {
+            return adapter.getStringAttribute(name);
+        }
+    }
+}
+```
+
+> `DirContextAdapter.getDn()` 은 검색 베이스(`LdapContextSource.setBase`)를 제외한 **상대 DN** 을 준다. `parentDn` 과 `codeByRdnPath` 가 모두 같은 상대 DN 을 쓰므로 대조는 성립한다. 테스트가 계층을 못 찾으면 실제 `getDn()` 값을 로그로 찍어 형태를 확인한다.
+
+- [ ] **Step 4: LdapConfig 복구**
+
+Task 12 Step 6에서 주석 처리한 `DitStrategy` 분기를 되살린다:
+
+```java
+    @Bean
+    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties) {
+        return "dit".equalsIgnoreCase(properties.getStrategy())
+                ? new DitStrategy(properties)
+                : new GroupOfNamesStrategy(properties);
+    }
+```
+
+- [ ] **Step 5: 테스트가 통과하는지 확인**
+
+Run:
+
+```bash
+./gradlew :connector-ldap:build
+```
+
+Expected: `GroupOfNamesStrategyTest` 6 + `DitStrategyTest` 6 = 12개 PASS.
+
+마지막 테스트 `두_전략은_같은_모양의_스냅샷을_만든다` 가 이 태스크의 핵심이다. 두 전략이 서로 다른 LDAP 표현을 읽고도 `TupleMapper` 가 구분 없이 같은 튜플을 만들어낸다는 것을 확인한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+feat: LDAP DIT 매핑 전략 추가
+
+ou 트리를 조직 계층으로, 사용자 엔트리의 부모 ou 를 소속으로 읽는다.
+DIT 위치가 곧 소속이므로 직원은 하나의 조직에만 속한다.
+
+dn 이 필요해 AttributesMapper 대신 ContextMapper 를 쓴다.
+
+groupOfNames 전략과 전혀 다른 방식으로 읽지만 같은 DirectorySnapshot 을
+만들어, TupleMapper 이후의 로직은 전략을 구분하지 않는다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+git push origin main
+```
+
+---
