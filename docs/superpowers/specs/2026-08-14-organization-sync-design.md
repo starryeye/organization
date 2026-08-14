@@ -193,7 +193,11 @@ public record TupleDelta(Set<RelationTuple> toWrite, Set<RelationTuple> toDelete
 
 #### 정규화
 
-OpenFGA object id에는 `:`, `#`, 공백, `,` 등을 쓸 수 없다. LDAP DN(`cn=김철수,ou=백엔드,dc=example,dc=com`)을 그대로 쓸 수 없으므로, 위 표의 속성값을 뽑은 뒤 `IdNormalizer`가 허용 문자(`[A-Za-z0-9._@\-]`) 외를 `_`로 치환한다. 원본 DN(LDAP) 또는 IdP 식별자(SCIM)는 `externalId`에 보관한다.
+OpenFGA object id에는 파싱을 깨는 문자를 쓸 수 없다 — `:`(타입 구분자), `#`(userset 구분자), `*`(와일드카드), 공백, `,`. LDAP DN(`cn=김철수,ou=백엔드,dc=example,dc=com`)을 그대로 쓸 수 없으므로, 위 표의 속성값을 뽑은 뒤 `IdNormalizer`가 **금지 문자 `[\s:#*,\\]`만** `_`로 치환한다.
+
+허용 목록이 아니라 금지 목록을 쓰는 이유는 **한글 조직코드를 보존하기 위해서**다. `[A-Za-z0-9._@\-]` 허용 목록을 쓰면 `개발본부`가 `____`가 되어 서로 다른 조직이 같은 id로 뭉갠다.
+
+원본 DN(LDAP) 또는 IdP 식별자(SCIM)는 `externalId`에 보관한다.
 
 치환 후 충돌이 발생하면 해당 엔트리를 스킵하고 경고 로그를 남긴다. 동기화 전체를 실패시키지 않는다.
 
@@ -376,7 +380,7 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 
 | 아이템 | PK | SK | GSI1PK | GSI1SK | 주요 속성 |
 |---|---|---|---|---|---|
-| 직원 | `USER#<empId>` | `META` | – | – | externalId, userName, displayName, email, active, updatedAt |
+| 직원 | `USER#<empId>` | `META` | `USER_INDEX` | `<userName>` | externalId, userName, displayName, email, active, updatedAt |
 | 조직 | `GROUP#<orgCode>` | `META` | `GROUP_INDEX` | `<displayName>` | externalId, displayName, updatedAt |
 | 멤버십(유저) | `GROUP#<gid>` | `MEMBER#USER#<uid>` | `MEMBER#USER#<uid>` | `GROUP#<gid>` | addedAt |
 | 멤버십(하위조직) | `GROUP#<gid>` | `MEMBER#GROUP#<cid>` | `MEMBER#GROUP#<cid>` | `GROUP#<gid>` | addedAt |
@@ -400,7 +404,10 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 | 직전 스냅샷 로드 | 포인터 읽고 → `PK = SNAPSHOT#<sid>, SK begins_with TUPLE#` | LDAP diff |
 | 최근 스냅샷 목록 | GSI1 `GSI1PK = SNAPSHOT_INDEX`, ScanIndexForward=false | 감사 |
 | 최근 실행 이력 | `PK = SYNCRUN#<이번달>`, ScanIndexForward=false. 부족하면 지난달까지 | 관리 API |
-| 전체 로드(`loadAll`) | Scan (아카이빙 배치에서만) | 아카이빙 |
+| 전체 직원 열거 | GSI1 `GSI1PK = USER_INDEX` | `loadAll`, `replaceWith` |
+| 전체 조직 열거 | GSI1 `GSI1PK = GROUP_INDEX` | `loadAll`, `replaceWith` |
+
+**Scan은 쓰지 않는다.** 직원·조직 META 아이템에 각각 `USER_INDEX` / `GROUP_INDEX` 파티션 키를 달아 GSI1 Query로 전체를 열거한다. Scan은 같은 테이블에 있는 스냅샷 튜플(수만 건 가능)까지 읽으므로 열거 용도로는 부적절하다. 멤버십은 조직별 `PK = GROUP#<orgCode>` Query로 모으며, 조직 수만큼의 Query가 발생하지만 제한된 동시성으로 병렬 실행한다.
 
 **`GROUP_INDEX` 파티션에 대하여.** 조직 전부가 한 파티션에 몰리므로 이론상 핫 파티션이다. 조직은 직원보다 한두 자릿수 적어(대기업도 보통 수천 개) 조직 수가 수만을 넘기 전에는 문제가 되지 않는다. 그 규모에 도달하면 검색엔진을 붙여야 하며, 그것은 그 시점의 문제다.
 
