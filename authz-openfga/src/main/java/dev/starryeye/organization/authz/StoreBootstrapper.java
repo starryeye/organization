@@ -74,9 +74,27 @@ public class StoreBootstrapper {
         return resolutionRef.get();
     }
 
-    /** rebuild(store 모드) 전용. store 를 지우고 같은 이름으로 다시 만든다. */
+    /**
+     * rebuild(store 모드) 전용. store 를 지우고 같은 이름으로 다시 만든다.
+     *
+     * <p>store 를 지우는 순간부터 새로 다 만들어질 때까지는 storeIdRef 와 clientRef 가
+     * 모두 비어 있는 창이 생긴다. 이 메서드가 등장하기 전에는 그 창으로 동시에 들어온
+     * {@link #resolveStore()} 호출이 "아직 해석 안 됐다"고 오판해 <b>자기 것대로 또
+     * store 를 하나 더 만들어버렸다</b> — OpenFGA 가 이름 유일성을 강제하지 않기 때문에
+     * 조용히 같은 이름의 store 가 두 개가 된다.
+     *
+     * <p>{@link #sharedResolution()} 이 최초 동시 호출을 다루는 것과 같은 메커니즘
+     * ({@code resolutionRef} 에 진행 중인 Mono 를 게시해 뒤따르는 호출이 합류하게 하는 것)
+     * 을 파괴 작업이 시작되기 <b>전에</b> 적용한다. 그러면 storeIdRef 가 null 이 되는
+     * 순간과 겹치는 {@code resolveStore()} 호출도 {@code resolutionRef} 에서 이 재구성
+     * Mono 를 그대로 보고 합류하지, 자기 것을 새로 만들지 않는다.
+     *
+     * <p>실패해도 {@code doFinally} 가 {@code resolutionRef} 를 비워 다음 시도가 캐시된
+     * 에러 대신 새로 재구성을 시도할 수 있다 — {@link #sharedResolution()} 과 동일한
+     * "실패는 영구히 캐시되지 않는다" 성질을 유지한다.
+     */
     public Mono<String> recreateStore() {
-        return resolveStore()
+        Mono<String> recreation = resolveStore()
                 .flatMap(storeId -> Mono.fromFuture(() -> {
                     try {
                         return client().deleteStore();
@@ -86,10 +104,16 @@ public class StoreBootstrapper {
                 }).then(Mono.fromRunnable(() -> {
                     storeIdRef.set(null);
                     clientRef.set(null);
-                    resolutionRef.set(null);
                 })))
                 .then(Mono.defer(this::createStore))
-                .flatMap(this::attachAndWriteModel);
+                .flatMap(this::attachAndWriteModel)
+                .doFinally(signal -> resolutionRef.set(null))
+                .cache();
+
+        // 파괴 작업(store 삭제 → 캐시 무효화)이 시작되기 전에 먼저 게시해야 한다.
+        // 그래야 그 창으로 겹쳐 들어오는 resolveStore() 가 이 Mono 에 합류한다.
+        resolutionRef.set(recreation);
+        return recreation;
     }
 
     public OpenFgaClient client() {

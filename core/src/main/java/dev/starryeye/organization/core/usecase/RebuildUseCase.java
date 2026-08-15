@@ -47,6 +47,7 @@ public class RebuildUseCase {
 
     public Mono<SyncRun> execute(RebuildMode mode) {
         return runs.start(SyncSource.LDAP, SyncTrigger.REBUILD)
+                .doOnNext(run -> log.info("[{}] 전체 재적재 시작: mode={}", run.runId(), mode))
                 .flatMap(run -> rebuild(mode)
                         .onErrorResume(error -> {
                             log.error("[{}] 전체 재적재 실패", run.runId(), error);

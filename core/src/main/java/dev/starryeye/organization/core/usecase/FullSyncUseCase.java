@@ -50,6 +50,7 @@ public class FullSyncUseCase {
 
     public Mono<SyncRun> execute(SyncTrigger trigger) {
         return runs.start(SyncSource.LDAP, trigger)
+                .doOnNext(run -> log.info("[{}] 전체 동기화 시작: trigger={}", run.runId(), trigger))
                 .flatMap(run -> synchronize(trigger)
                         .onErrorResume(error -> {
                             log.error("[{}] 전체 동기화 실패", run.runId(), error);

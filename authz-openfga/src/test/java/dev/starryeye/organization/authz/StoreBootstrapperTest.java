@@ -5,11 +5,13 @@ import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -49,6 +51,49 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
 
         long matching = countStoresNamed(freshProperties.getStoreName());
         assertThat(matching).as("같은 이름의 store 가 정확히 하나만 존재해야 한다").isEqualTo(1);
+    }
+
+    /**
+     * recreateStore() 는 store 삭제 → storeIdRef/clientRef 초기화 → 재생성 사이에
+     * 두 캐시가 모두 비는 창을 연다. 이 창으로 겹쳐 들어온 resolveStore() 호출(예:
+     * 헬스체크)이 "아직 해석 안 됐다"고 오판해 자기 것대로 store 를 하나 더 만들면
+     * OpenFGA 가 이름 유일성을 강제하지 않으므로 같은 이름의 store 가 조용히 두 개가
+     * 된다. recreateStore() 가 파괴 작업 전에 자신의 in-flight Mono 를 resolutionRef 에
+     * 먼저 게시해 이 창을 막았는지를 검증한다.
+     */
+    @Test
+    @DisplayName("recreateStore 도중 겹치는 resolveStore 호출은 재구성에 합류하고 같은 이름의 store 는 하나만 남는다")
+    void 재구성_도중_겹치는_resolveStore_는_합류한다() {
+        // given — OpenFgaTestSupport 가 이미 최초 해석을 마쳐 둔 bootstrapper.
+        // 파괴 창이 몇 ms 밖에 안 열려 있을 수 있어 한 번의 시도로는 맞힌다는 보장이
+        // 없다. 재구성을 여러 번 반복해 창을 여러 번 노출시켜 우연히 비껴가는 것을 막는다.
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            // when — recreateStore() 가 끝날 때까지 resolveStore() 를 계속 쏴서, 정확한
+            // 타이밍을 몰라도 창과 겹치는 호출이 반드시 섞이게 한다.
+            AtomicBoolean recreating = new AtomicBoolean(true);
+
+            Mono<String> recreate = bootstrapper.recreateStore()
+                    .doFinally(signal -> recreating.set(false));
+
+            // 12개의 워커가 recreating 이 꺼질 때까지 resolveStore() 를 쉬지 않고 반복
+            // 호출한다. 각 호출이 완료된 직후 바로 재구독하므로(자기 페이스) 타이머 기반
+            // backpressure 문제 없이 재구성이 진행되는 내내 호출이 끊이지 않는다.
+            Flux<String> pollingResolves = Flux.range(0, 12)
+                    .flatMap(worker -> Mono.defer(bootstrapper::resolveStore)
+                            .repeat(recreating::get)
+                            .subscribeOn(Schedulers.parallel()));
+
+            List<String> results = Flux.merge(recreate, pollingResolves)
+                    .collectList()
+                    .block();
+
+            // then — 모든 호출이 성공했고, 창을 파고든 호출이 있었더라도 store 는 하나뿐이다
+            assertThat(results).isNotEmpty();
+            long matching = countStoresNamed(properties.getStoreName());
+            assertThat(matching)
+                    .as("%d번째 재구성 창으로 겹쳐 들어온 resolveStore() 가 store 를 추가로 만들면 안 된다", attempt)
+                    .isEqualTo(1);
+        }
     }
 
     private long countStoresNamed(String name) {

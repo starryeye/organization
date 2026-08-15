@@ -17,6 +17,7 @@ public class SyncScheduler {
     private final FullSyncUseCase fullSync;
     private final TupleSnapshotRepository snapshots;
     private final SyncExecutionGuard executionGuard;
+    private final SyncMetrics metrics;
 
     @Scheduled(cron = "${sync.cron}")
     public void 전체동기화() {
@@ -27,8 +28,11 @@ public class SyncScheduler {
         Mono.defer(() -> fullSync.execute(SyncTrigger.SCHEDULED))
                 .doFinally(signal -> executionGuard.release())
                 .subscribe(
-                        run -> log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
-                                run.status(), run.writtenCount(), run.deletedCount(), run.failureCount()),
+                        run -> {
+                            metrics.record(run);
+                            log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
+                                    run.status(), run.writtenCount(), run.deletedCount(), run.failureCount());
+                        },
                         error -> log.error("스케줄 동기화가 예기치 않게 실패했다", error));
     }
 

@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -35,7 +36,8 @@ class AdminSyncControllerTest {
         runs = Mockito.mock(SyncRunRepository.class);
         executionGuard = new SyncExecutionGuard();
         client = WebTestClient.bindToController(
-                new AdminSyncController(fullSync, null, runs, executionGuard)).build();
+                new AdminSyncController(fullSync, null, runs, executionGuard,
+                        new SyncMetrics(new SimpleMeterRegistry()))).build();
     }
 
     private static SyncRun 완료된실행(SyncTrigger trigger, SyncStatus status) {

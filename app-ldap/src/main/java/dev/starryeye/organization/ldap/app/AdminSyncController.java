@@ -28,6 +28,7 @@ public class AdminSyncController {
     private final RebuildUseCase rebuild;
     private final SyncRunRepository runs;
     private final SyncExecutionGuard executionGuard;
+    private final SyncMetrics metrics;
 
     /**
      * @param force true 면 삭제 가드를 건너뛴다. ABORTED 이후 사람이 판단해서 승인하는 통로다
@@ -61,6 +62,7 @@ public class AdminSyncController {
                     HttpStatus.CONFLICT, "동기화가 이미 진행 중입니다"));
         }
         return action
+                .doOnNext(metrics::record)
                 .map(SyncRunResponse::from)
                 .doFinally(signal -> executionGuard.release());
     }
