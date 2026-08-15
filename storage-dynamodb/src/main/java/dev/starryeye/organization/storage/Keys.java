@@ -7,6 +7,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 단일 테이블 설계의 PK/SK/GSI 키를 만들고 파싱한다.
@@ -34,6 +35,15 @@ public final class Keys {
 
     private static final String TUPLE_PREFIX = "TUPLE#";
     private static final String TUPLE_SEPARATOR = "|";
+
+    /**
+     * {@link Instant#toString()} 은 나노초가 정확히 0 이면 소수점 이하를 아예 생략하고,
+     * 그렇지 않으면 3/6/9 자리를 가변적으로 출력한다. 이 가변폭 때문에 같은 초 안에서
+     * 정렬 순서가 뒤집힐 수 있어, 정렬키에는 항상 밀리초 3자리를 고정 출력하는
+     * 포맷터를 쓴다.
+     */
+    private static final DateTimeFormatter SYNC_RUN_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private Keys() {
     }
@@ -80,6 +90,6 @@ public final class Keys {
     }
 
     public static String syncRunSk(Instant startedAt, String runId) {
-        return startedAt.toString() + "#" + runId;
+        return SYNC_RUN_TIME.format(startedAt) + "#" + runId;
     }
 }

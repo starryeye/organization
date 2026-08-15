@@ -43,5 +43,12 @@ subprojects {
         testLogging {
             events 'passed', 'skipped', 'failed'
         }
+
+        // Testcontainers 가 내장한 docker-java 는 Docker 데몬 감지 시 API 버전을
+        // 1.32 로 고정 요청하는데, 최신 Docker Engine(MinAPIVersion 1.40+)이 이를
+        // 거부해 컨테이너 기동 자체가 막히는 문제가 있어 우회한다. 기본값 1.44 는
+        // docker-java 가 지원하는 최신 버전이며, DOCKER_API_VERSION 환경변수로
+        // 다른 환경에 맞게 덮어쓸 수 있다.
+        systemProperty 'api.version', System.getenv('DOCKER_API_VERSION') ?: '1.44'
     }
 }

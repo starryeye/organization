@@ -100,4 +100,21 @@ class KeysTest {
         // then
         assertThat(이른키).isLessThan(늦은키);
     }
+
+    @Test
+    @DisplayName("같은 초 안에서도 밀리초 차이가 정렬 순서를 뒤집지 않는다")
+    void 실행이력_정렬키는_같은_초_안에서도_밀리초로_정렬된다() {
+        // given — Instant.toString() 은 나노초가 0 이면 소수점을 생략해서
+        // "T03:00:00Z" 와 "T03:00:00.500Z" 를 문자열로 비교하면 '.'(0x2E) 이
+        // 'Z'(0x5A) 보다 작아 더 이른 시각이 오히려 뒤로 밀린다.
+        Instant 정각 = Instant.parse("2026-08-14T03:00:00Z");
+        Instant 정각_500밀리초후 = Instant.parse("2026-08-14T03:00:00.500Z");
+
+        // when
+        String 정각키 = Keys.syncRunSk(정각, "run-a");
+        String 이후키 = Keys.syncRunSk(정각_500밀리초후, "run-b");
+
+        // then
+        assertThat(정각키).isLessThan(이후키);
+    }
 }
