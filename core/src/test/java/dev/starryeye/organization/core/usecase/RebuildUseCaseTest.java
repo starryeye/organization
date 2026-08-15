@@ -127,6 +127,28 @@ class RebuildUseCaseTest {
     }
 
     @Test
+    @DisplayName("두 튜플 중 하나만 삭제에 실패하면 실패한 튜플만 남은 스냅샷이 저장된다")
+    void 삭제가_부분_실패하면_실패한_튜플만_남은_스냅샷을_저장한다() {
+        // given — 직전 스냅샷에 두 튜플이 있고, 그중 하나만 삭제에 실패한다
+        var 삭제성공튜플 = RelationTuple.directMember("lee", "DEV002");
+        var 삭제실패튜플 = RelationTuple.directMember("park", "DEV003");
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(삭제성공튜플, 삭제실패튜플))).block();
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.failFor(tuple -> tuple.equals(삭제실패튜플));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then — 스냅샷은 통째로 보존되는 게 아니라, 삭제 실패한 튜플만 남은 스냅샷으로 갱신된다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.resetCount.get()).isZero();
+        var 남은스냅샷 = snapshots.findLatest().block();
+        assertThat(남은스냅샷).isNotNull();
+        assertThat(남은스냅샷.tuples()).containsExactly(삭제실패튜플);
+    }
+
+    @Test
     @DisplayName("store 모드는 store 를 재생성하고 스냅샷을 버린 뒤 전체를 적재한다")
     void store_모드는_store를_재생성한다() {
         // given
