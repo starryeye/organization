@@ -95,9 +95,19 @@ public final class Keys {
         return SNAPSHOT_PREFIX + snapshotId;
     }
 
+    /** {@link #snapshotPk} 로 만든 파티션키에서 스냅샷 아이디만 되돌린다. */
+    public static String parseSnapshotPk(String pk) {
+        return pk.substring(SNAPSHOT_PREFIX.length());
+    }
+
     public static String tupleSk(RelationTuple tuple) {
         return TUPLE_PREFIX + tuple.user() + TUPLE_SEPARATOR + tuple.relation()
                 + TUPLE_SEPARATOR + tuple.object();
+    }
+
+    /** 정렬키가 {@link #tupleSk} 로 만들어진 튜플 아이템인지 판별한다. */
+    public static boolean isTupleSk(String sk) {
+        return sk.startsWith(TUPLE_PREFIX);
     }
 
     public static RelationTuple parseTupleSk(String sk) {

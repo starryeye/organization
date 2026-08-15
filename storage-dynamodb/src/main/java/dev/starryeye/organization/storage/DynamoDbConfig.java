@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -9,6 +10,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
 import java.net.URI;
+import java.time.Clock;
 
 @Configuration
 @EnableConfigurationProperties(DynamoDbProperties.class)
@@ -35,5 +37,17 @@ public class DynamoDbConfig {
     public DynamoDbDirectoryStateRepository dynamoDbDirectoryStateRepository(
             DynamoDbAsyncClient client, DynamoDbProperties properties) {
         return new DynamoDbDirectoryStateRepository(client, properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(Clock.class)
+    public Clock clock() {
+        return Clock.systemUTC();
+    }
+
+    @Bean
+    public DynamoDbTupleSnapshotRepository dynamoDbTupleSnapshotRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbTupleSnapshotRepository(client, properties, clock);
     }
 }
