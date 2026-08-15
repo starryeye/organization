@@ -169,7 +169,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberGsi1Pk(ref))))
                 .build();
 
-        return paginate(request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));
+        return Paginator.queryAll(client, request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));
     }
 
     // ---------- 전체 ----------
@@ -221,7 +221,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(indexPartition)))
                 .build();
 
-        return paginate(request).map(item -> parsePk.apply(Attrs.str(item, Keys.PK)));
+        return Paginator.queryAll(client, request).map(item -> parsePk.apply(Attrs.str(item, Keys.PK)));
     }
 
     // ---------- 공통 ----------
@@ -233,22 +233,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .expressionAttributeNames(Map.of("#pk", Keys.PK))
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
                 .build();
-        return paginate(request);
-    }
-
-    /** LastEvaluatedKey 를 따라가며 전체 페이지를 이어붙인다. */
-    private Flux<Map<String, AttributeValue>> paginate(QueryRequest request) {
-        return Mono.fromFuture(() -> client.query(request))
-                .flatMapMany(response -> {
-                    Flux<Map<String, AttributeValue>> page = Flux.fromIterable(response.items());
-                    if (response.lastEvaluatedKey() == null || response.lastEvaluatedKey().isEmpty()) {
-                        return page;
-                    }
-                    QueryRequest next = request.toBuilder()
-                            .exclusiveStartKey(response.lastEvaluatedKey())
-                            .build();
-                    return page.concatWith(paginate(next));
-                });
+        return Paginator.queryAll(client, request);
     }
 
     private Mono<Void> putItem(Map<String, AttributeValue> item) {

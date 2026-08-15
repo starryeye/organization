@@ -171,7 +171,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .scanIndexForward(false)
                 .build();
 
-        return paginate(request).map(item -> new SnapshotMeta(
+        return Paginator.queryAll(client, request).map(item -> new SnapshotMeta(
                 Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)),
                 Attrs.instant(item, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(item, SOURCE)),
@@ -264,20 +264,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .expressionAttributeNames(Map.of("#pk", Keys.PK))
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
                 .build();
-        return paginate(request);
-    }
-
-    /** LastEvaluatedKey 를 따라가며 전체 페이지를 이어붙인다. */
-    private Flux<Map<String, AttributeValue>> paginate(QueryRequest request) {
-        return Mono.fromFuture(() -> client.query(request))
-                .flatMapMany(response -> {
-                    Flux<Map<String, AttributeValue>> page = Flux.fromIterable(response.items());
-                    if (response.lastEvaluatedKey() == null || response.lastEvaluatedKey().isEmpty()) {
-                        return page;
-                    }
-                    return page.concatWith(paginate(
-                            request.toBuilder().exclusiveStartKey(response.lastEvaluatedKey()).build()));
-                });
+        return Paginator.queryAll(client, request);
     }
 
     private Mono<Void> putItem(Map<String, AttributeValue> item) {

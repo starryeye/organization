@@ -50,13 +50,20 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         var finished = repository.finish(run, outcome).block();
         var recent = repository.findRecent(10).collectList().block();
 
-        // then
+        // then — finish() 의 반환값 자체도 맞아야 하지만,
         assertThat(finished.status()).isEqualTo(SyncStatus.SUCCEEDED);
-        assertThat(finished.writtenCount()).isEqualTo(12);
-        assertThat(finished.deletedCount()).isEqualTo(3);
-        assertThat(finished.snapshotId()).isEqualTo("20260814T030000-LDAP");
+        // 진짜 검증은 DynamoDB 에서 다시 읽은 값이 맞는지다
         assertThat(recent).hasSize(1);
-        assertThat(recent.get(0).runId()).isEqualTo(run.runId());
+        var 조회된_실행 = recent.get(0);
+        assertThat(조회된_실행.runId()).isEqualTo(run.runId());
+        assertThat(조회된_실행.source()).isEqualTo(SyncSource.LDAP);
+        assertThat(조회된_실행.trigger()).isEqualTo(SyncTrigger.SCHEDULED);
+        assertThat(조회된_실행.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(조회된_실행.writtenCount()).isEqualTo(12);
+        assertThat(조회된_실행.deletedCount()).isEqualTo(3);
+        assertThat(조회된_실행.snapshotId()).isEqualTo("20260814T030000-LDAP");
+        assertThat(조회된_실행.finishedAt()).isEqualTo(finished.finishedAt());
+        assertThat(조회된_실행.message()).isNull();
     }
 
     @Test

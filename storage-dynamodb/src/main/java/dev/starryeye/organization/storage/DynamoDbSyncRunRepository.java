@@ -114,9 +114,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
                 .scanIndexForward(false)
                 .build();
 
-        return Mono.fromFuture(() -> client.query(request))
-                .flatMapMany(response -> Flux.fromIterable(response.items()))
-                .map(this::toRun);
+        return Paginator.queryAll(client, request).map(this::toRun);
     }
 
     private SyncRun toRun(Map<String, AttributeValue> item) {
