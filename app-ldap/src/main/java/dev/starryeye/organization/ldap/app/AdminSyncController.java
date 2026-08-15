@@ -4,9 +4,8 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
-// TASK-16: RebuildUseCase 와 RebuildMode 는 Task 16에서 만든다. 그때 아래 두 임포트를 복원한다.
-// import dev.starryeye.organization.core.usecase.RebuildMode;
-// import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.core.usecase.RebuildMode;
+import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -26,8 +25,7 @@ import reactor.core.publisher.Mono;
 public class AdminSyncController {
 
     private final FullSyncUseCase fullSync;
-    // TASK-16: 타입을 RebuildUseCase 로 복원한다. 그 전까지는 생성자 자리만 맞추는 자리표시자다.
-    private final Object rebuild;
+    private final RebuildUseCase rebuild;
     private final SyncRunRepository runs;
     private final SyncExecutionGuard executionGuard;
 
@@ -41,16 +39,15 @@ public class AdminSyncController {
         return guarded(fullSync.execute(trigger));
     }
 
-    // TASK-16: RebuildUseCase 가 만들어지면 이 메서드를 복원한다.
-    // /**
-    //  * @param mode snapshot(기본) 또는 store. 각각의 한계는 설계 문서 §8.2, §8.3 참고
-    //  */
-    // @PostMapping("/rebuild")
-    // public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "snapshot") String mode) {
-    //     RebuildMode rebuildMode = RebuildMode.from(mode);
-    //     log.warn("전체 재적재 요청: mode={}", rebuildMode);
-    //     return guarded(rebuild.execute(rebuildMode));
-    // }
+    /**
+     * @param mode snapshot(기본) 또는 store. 각각의 한계는 설계 문서 §8.2, §8.3 참고
+     */
+    @PostMapping("/rebuild")
+    public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "snapshot") String mode) {
+        RebuildMode rebuildMode = RebuildMode.from(mode);
+        log.warn("전체 재적재 요청: mode={}", rebuildMode);
+        return guarded(rebuild.execute(rebuildMode));
+    }
 
     @GetMapping("/runs")
     public Flux<SyncRunResponse> runs(@RequestParam(defaultValue = "20") int limit) {

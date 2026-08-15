@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -39,5 +40,15 @@ public class UseCaseConfig {
                                            DeletionGuard guard,
                                            Clock clock) {
         return new FullSyncUseCase(source, snapshots, state, writer, runs, guard, clock);
+    }
+
+    @Bean
+    public RebuildUseCase rebuildUseCase(DirectorySnapshotSource source,
+                                         TupleSnapshotRepository snapshots,
+                                         DirectoryStateRepository state,
+                                         RelationTupleWriter writer,
+                                         SyncRunRepository runs,
+                                         Clock clock) {
+        return new RebuildUseCase(source, snapshots, state, writer, runs, clock);
     }
 }
