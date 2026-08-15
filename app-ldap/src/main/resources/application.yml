@@ -4,3 +4,66 @@ server:
 spring:
   application:
     name: organization-ldap
+
+sync:
+  cron: "0 0 3 * * *"
+  purge-cron: "0 0 4 * * *"
+  deletion-guard:
+    enabled: true
+    threshold-ratio: 0.3
+    min-baseline: 10
+
+ldap:
+  url: ldap://localhost:1389
+  base-dn: dc=example,dc=com
+  bind-dn: cn=admin,dc=example,dc=com
+  bind-password: adminpassword
+  page-size: 500
+  strategy: group-of-names
+  group-of-names:
+    user-search-base: ou=people
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+    group-search-base: ou=groups
+    group-object-class: groupOfNames
+    group-id-attribute: cn
+    group-name-attribute: description
+    member-attribute: member
+  dit:
+    root-dn: ou=company
+    org-unit-object-class: organizationalUnit
+    group-id-attribute: ou
+    group-name-attribute: description
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+
+openfga:
+  api-url: http://localhost:8080
+  store-name: organization
+  write-batch-size: 100
+  max-retries: 3
+
+dynamodb:
+  endpoint: http://localhost:8000
+  region: ap-northeast-2
+  table-name: organization
+  create-table-on-startup: true
+  snapshot-retention-days: 7
+  syncrun-retention-days: 30
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    dev.starryeye.organization: DEBUG
