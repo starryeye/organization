@@ -54,19 +54,29 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
 
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        Map<String, String> userDnById = new LinkedHashMap<>();
         for (RawEntry entry : userEntries) {
+            if (DuplicateIdGuard.isDuplicate("직원 아이디", entry.id(), entry.dn(), userDnById)) {
+                continue;
+            }
             userIdByDn.put(normalizeDn(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
                     entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), true));
         }
 
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
+        Map<String, String> groupDnById = new LinkedHashMap<>();
+        Map<String, RawEntry> survivingGroupEntries = new LinkedHashMap<>();
         for (RawEntry entry : groupEntries) {
+            if (DuplicateIdGuard.isDuplicate("조직코드", entry.id(), entry.dn(), groupDnById)) {
+                continue;
+            }
             groupIdByDn.put(normalizeDn(entry.dn()), entry.id());
+            survivingGroupEntries.put(entry.id(), entry);
         }
 
         Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
-        for (RawEntry entry : groupEntries) {
+        for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
                 String key = normalizeDn(memberDn);
