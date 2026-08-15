@@ -48,10 +48,23 @@ public final class Keys {
      * 정렬 순서가 뒤집힐 수 있어, 정렬키에는 항상 밀리초 3자리를 고정 출력하는
      * 포맷터를 쓴다.
      */
-    private static final DateTimeFormatter SYNC_RUN_TIME =
+    private static final DateTimeFormatter SORTABLE_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private Keys() {
+    }
+
+    /**
+     * 정렬키(혹은 GSI 정렬키)에 시각을 넣을 때 반드시 이 메서드를 거친다.
+     * {@link Instant#toString()} 을 직접 쓰면 나노초 자릿수가 가변이라 문자열
+     * 정렬 순서가 실제 시각 순서와 어긋날 수 있다 — 예를 들어 "...T03:00:00Z" 는
+     * 소수점이 없어 "...T03:00:00.500Z" 보다 사전식으로 뒤에 오지만('.' &lt; 'Z'),
+     * 실제로는 더 이른 시각이다. 이 메서드는 항상 밀리초 3자리를 고정 출력해
+     * 그런 역전을 막는다. 원본 정밀도가 필요한 속성값(예: createdAt 속성)에는
+     * 여전히 {@link Instant#toString()} 을 그대로 쓴다 — 정밀도를 잃으면 안 된다.
+     */
+    public static String sortableTimestamp(Instant at) {
+        return SORTABLE_TIMESTAMP.format(at);
     }
 
     public static String userPk(String userId) {
@@ -121,6 +134,6 @@ public final class Keys {
     }
 
     public static String syncRunSk(Instant startedAt, String runId) {
-        return SYNC_RUN_TIME.format(startedAt) + "#" + runId;
+        return sortableTimestamp(startedAt) + "#" + runId;
     }
 }

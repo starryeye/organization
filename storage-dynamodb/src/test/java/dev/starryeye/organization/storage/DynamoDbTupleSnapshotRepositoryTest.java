@@ -141,6 +141,26 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("같은 초 안에서도 밀리초 차이가 최근 목록 정렬을 뒤집지 않는다")
+    void 같은_초_안에서도_밀리초로_최신순이_유지된다() {
+        // given — Instant.toString() 은 나노초가 0 이면 소수점을 생략해서
+        // "T03:00:00Z" 와 "T03:00:00.500Z" 를 문자열로 그대로 비교하면 '.'(0x2E) 이
+        // 'Z'(0x5A) 보다 작아 더 이른 시각(정각)이 오히려 뒤로 밀린다.
+        var 정각스냅샷 = 스냅샷("20260814T030000-LDAP-A", 지금, 튜플들(1));
+        var 반초후스냅샷 = 스냅샷("20260814T030000-LDAP-B", 지금.plusMillis(500), 튜플들(1));
+
+        repository.save(정각스냅샷).block();
+        repository.save(반초후스냅샷).block();
+
+        // when
+        var metas = repository.listRecent(7).collectList().block();
+
+        // then
+        assertThat(metas).extracting(m -> m.id())
+                .containsExactly("20260814T030000-LDAP-B", "20260814T030000-LDAP-A");
+    }
+
+    @Test
     @DisplayName("리셋하면 모든 스냅샷과 최신 포인터가 사라진다")
     void 리셋하면_전부_사라진다() {
         // given

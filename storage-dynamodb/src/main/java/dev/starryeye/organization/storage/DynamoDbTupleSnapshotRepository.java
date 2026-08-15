@@ -42,6 +42,10 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final int BATCH_SIZE = 25;
     private static final int DELETE_CONCURRENCY = 4;
 
+    /** BatchWriteItem 의 UnprocessedItems 재시도 상한. AWS 는 지수 백오프 재시도를 권장한다. */
+    private static final int MAX_BATCH_ATTEMPTS = 5;
+    private static final Duration BATCH_RETRY_BASE_DELAY = Duration.ofMillis(100);
+
     private static final String CREATED_AT = "createdAt";
     private static final String SOURCE = "source";
     private static final String TUPLE_COUNT = "tupleCount";
@@ -93,7 +97,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
         item.put(Keys.GSI1PK, Attrs.s(Keys.SNAPSHOT_INDEX));
-        item.put(Keys.GSI1SK, Attrs.s(snapshot.createdAt().toString()));
+        item.put(Keys.GSI1SK, Attrs.s(Keys.sortableTimestamp(snapshot.createdAt())));
         item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
         item.put(SOURCE, Attrs.s(snapshot.source().name()));
         item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
@@ -218,8 +222,18 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     // ---------- 공통 ----------
 
-    /** UnprocessedItems 가 남으면 다시 보낸다. DynamoDB 는 배치 일부를 거절할 수 있다. */
+    /**
+     * UnprocessedItems 가 남으면 다시 보낸다. DynamoDB 는 배치 일부를 거절할 수 있고,
+     * AWS 는 지수 백오프로 재시도할 것을 권장한다. 재시도 상한을 두지 않으면 지속적인
+     * 스로틀링 아래에서 무한히 돌며 서비스에 핫루프를 거는 셈이라, {@link #MAX_BATCH_ATTEMPTS}
+     * 를 넘기면 남은 건수를 담아 에러로 실패시킨다 — save() 가 실패하면 FullSyncUseCase 가
+     * 이번 실행을 FAILED 로 기록하고 다음 동기화는 온전한 이전 스냅샷을 기준으로 다시 diff 한다.
+     */
     private Mono<Void> batchWrite(List<WriteRequest> requests) {
+        return batchWrite(requests, 1);
+    }
+
+    private Mono<Void> batchWrite(List<WriteRequest> requests, int attempt) {
         if (requests.isEmpty()) {
             return Mono.empty();
         }
@@ -229,7 +243,16 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .flatMap(response -> {
                     List<WriteRequest> unprocessed =
                             response.unprocessedItems().getOrDefault(properties.getTableName(), List.of());
-                    return unprocessed.isEmpty() ? Mono.empty() : batchWrite(unprocessed);
+                    if (unprocessed.isEmpty()) {
+                        return Mono.empty();
+                    }
+                    if (attempt >= MAX_BATCH_ATTEMPTS) {
+                        return Mono.error(new IllegalStateException(
+                                "BatchWriteItem 이 %d회 재시도한 뒤에도 %d건을 처리하지 못했다"
+                                        .formatted(attempt, unprocessed.size())));
+                    }
+                    Duration delay = BATCH_RETRY_BASE_DELAY.multipliedBy(1L << (attempt - 1));
+                    return Mono.delay(delay).then(batchWrite(unprocessed, attempt + 1));
                 })
                 .then();
     }
