@@ -30,4 +30,10 @@ public class DynamoDbConfig {
     public TableInitializer tableInitializer(DynamoDbAsyncClient client, DynamoDbProperties properties) {
         return new TableInitializer(client, properties);
     }
+
+    @Bean
+    public DynamoDbDirectoryStateRepository dynamoDbDirectoryStateRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties) {
+        return new DynamoDbDirectoryStateRepository(client, properties);
+    }
 }
