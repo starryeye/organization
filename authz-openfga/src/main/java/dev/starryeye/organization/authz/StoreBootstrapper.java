@@ -3,13 +3,17 @@ package dev.starryeye.organization.authz;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
+import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
 import dev.openfga.sdk.api.model.CreateStoreRequest;
+import dev.openfga.sdk.api.model.Store;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
 import reactor.core.publisher.Mono;
 
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -151,20 +155,64 @@ public class StoreBootstrapper {
         return client;
     }
 
+    /**
+     * store 목록을 continuation token 이 소진될 때까지 전부 순회한 뒤에 이름을 찾는다.
+     *
+     * <p>{@code listStores()} 는 한 페이지(OpenFGA 기본 50개)만 반환한다. 공유 OpenFGA
+     * 서버에 store 가 그보다 많으면, 첫 페이지에 없다고 곧장 {@code createStore} 로
+     * 넘어가는 것은 위험하다 — 실제로는 다음 페이지에 이름이 이미 존재하는 store 가 있는데
+     * 못 찾은 것뿐이고, OpenFGA 는 이름 유일성을 강제하지 않으므로 조용히 두 번째
+     * store 가 만들어진다. 이후 이 앱은 새로 만든 빈 store 에 튜플을 쓰고, 기존 소비자는
+     * 여전히 첫 번째 store 를 조회하는 완전한 인가 실패로 이어진다.
+     */
     private Mono<String> findStoreIdByName() {
+        return findStoreIdByName(null, new ArrayList<>());
+    }
+
+    private Mono<String> findStoreIdByName(String continuationToken, List<Store> accumulated) {
         return Mono.fromCallable(() -> newClient(null))
                 .flatMap(client -> Mono.fromFuture(() -> {
                     try {
-                        return client.listStores();
+                        ClientListStoresOptions options = new ClientListStoresOptions();
+                        if (continuationToken != null && !continuationToken.isBlank()) {
+                            options.continuationToken(continuationToken);
+                        }
+                        return client.listStores(options);
                     } catch (Exception e) {
                         throw new IllegalStateException("store 목록 조회 실패", e);
                     }
                 }))
-                .flatMap(response -> response.getStores().stream()
-                        .filter(store -> properties.getStoreName().equals(store.getName()))
-                        .findFirst()
-                        .map(store -> Mono.just(store.getId()))
-                        .orElseGet(Mono::empty));
+                .flatMap(response -> {
+                    accumulated.addAll(response.getStores());
+                    String next = response.getContinuationToken();
+                    if (next != null && !next.isBlank()) {
+                        return findStoreIdByName(next, accumulated);
+                    }
+                    return resolveUniqueMatch(accumulated);
+                });
+    }
+
+    /**
+     * 페이지를 전부 모은 뒤에야 판단한다. 같은 이름의 store 가 둘 이상이면 임의로 하나를
+     * 골라 쓰는 대신 에러로 멈춘다 — 이미 이 문제(경쟁으로 인한 중복 store 생성)를 한 번
+     * 겪었다는 신호이므로, 아무거나 골라 쓰면 상황을 더 악화시킬 뿐이다. 사람이 개입해
+     * 정리해야 한다.
+     */
+    private Mono<String> resolveUniqueMatch(List<Store> allStores) {
+        List<Store> matches = allStores.stream()
+                .filter(store -> properties.getStoreName().equals(store.getName()))
+                .toList();
+
+        if (matches.size() > 1) {
+            return Mono.error(new IllegalStateException(
+                    "OpenFGA 에 이름이 '%s' 인 store 가 %d개 있다. 이름 유일성이 깨진 상태이므로 "
+                            .formatted(properties.getStoreName(), matches.size())
+                            + "임의로 하나를 고르는 대신 멈춘다. 수동으로 정리해야 한다."));
+        }
+        if (matches.isEmpty()) {
+            return Mono.empty();
+        }
+        return Mono.just(matches.get(0).getId());
     }
 
     private Mono<String> createStore() {
