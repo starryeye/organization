@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap;
 
+import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -31,11 +32,9 @@ public class LdapConfig {
 
     @Bean
     public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties) {
-        // TASK-13: "dit" 전략은 Task 13에서 DitStrategy 로 복원한다.
-        // return "dit".equalsIgnoreCase(properties.getStrategy())
-        //         ? new DitStrategy(properties)
-        //         : new GroupOfNamesStrategy(properties);
-        return new GroupOfNamesStrategy(properties);
+        return "dit".equalsIgnoreCase(properties.getStrategy())
+                ? new DitStrategy(properties)
+                : new GroupOfNamesStrategy(properties);
     }
 
     @Bean

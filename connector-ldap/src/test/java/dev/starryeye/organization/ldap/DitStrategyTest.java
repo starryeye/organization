@@ -1,0 +1,164 @@
+package dev.starryeye.organization.ldap;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.ldap.strategy.DitStrategy;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DitStrategyTest extends EmbeddedLdapSupport {
+
+    @Override
+    protected String ldif() {
+        return """
+                dn: dc=example,dc=com
+                objectClass: top
+                objectClass: domain
+                dc: example
+
+                dn: ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: company
+                description: 전사
+
+                dn: ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: DEV001
+                description: 개발본부
+
+                dn: ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: DEV002
+                description: 백엔드팀
+
+                dn: ou=OPS001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: OPS001
+
+                dn: uid=choi,ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: choi
+                cn: Choi Jiwoo
+                sn: Choi
+                displayName: 최지우
+                mail: choi@example.com
+
+                dn: uid=park,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: park
+                cn: Park Minsu
+                sn: Park
+                displayName: 박민수
+                mail: park@example.com
+                """;
+    }
+
+    private LdapProperties 기본설정() {
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        properties.setStrategy("dit");
+        var d = properties.getDit();
+        d.setRootDn("ou=company");
+        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setGroupIdAttribute("ou");
+        d.setGroupNameAttribute("description");
+        d.setUserObjectClass("inetOrgPerson");
+        d.setUserIdAttribute("uid");
+        d.setUserNameAttribute("displayName");
+        d.setUserMailAttribute("mail");
+        return properties;
+    }
+
+    @Test
+    @DisplayName("루트 아래의 ou 트리를 모두 조직으로 읽는다")
+    void ou_트리를_조직으로_읽는다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups()).containsOnlyKeys("company", "DEV001", "DEV002", "OPS001");
+    }
+
+    @Test
+    @DisplayName("dn 경로에서 상위 조직을 도출해 하위 조직 멤버로 등록한다")
+    void dn_경로에서_조직_계층을_도출한다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("company").members())
+                .contains(MemberRef.group("DEV001"), MemberRef.group("OPS001"));
+        assertThat(snapshot.groups().get("DEV001").members())
+                .contains(MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("직원은 dn 상의 부모 조직 하나에만 속한다")
+    void 직원은_부모_조직_하나에만_속한다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV002").members()).contains(MemberRef.user("choi"));
+        assertThat(snapshot.groups().get("DEV001").members())
+                .contains(MemberRef.user("park"))
+                .doesNotContain(MemberRef.user("choi"));
+    }
+
+    @Test
+    @DisplayName("조직명은 description 에서 읽고 없으면 조직코드로 대체한다")
+    void 조직명이_없으면_조직코드로_대체한다() {
+        // given — OPS001 에는 description 이 없다
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups().get("DEV001").displayName()).isEqualTo("개발본부");
+        assertThat(snapshot.groups().get("OPS001").displayName()).isEqualTo("OPS001");
+    }
+
+    @Test
+    @DisplayName("직원 정보는 groupOfNames 전략과 같은 형태로 채워진다")
+    void 직원_정보를_읽는다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("choi", "park");
+        assertThat(snapshot.users().get("choi").displayName()).isEqualTo("최지우");
+        assertThat(snapshot.users().get("choi").email()).isEqualTo("choi@example.com");
+        assertThat(snapshot.users().get("choi").active()).isTrue();
+    }
+
+    @Test
+    @DisplayName("두 전략은 서로 다른 방식으로 읽어도 같은 모양의 스냅샷을 만든다")
+    void 두_전략은_같은_모양의_스냅샷을_만든다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 이후 로직(TupleMapper)이 전략을 구분하지 않아도 되는지 확인한다
+        var result = dev.starryeye.organization.core.tuple.TupleMapper.toTuples(snapshot);
+        assertThat(result.tuples()).contains(
+                dev.starryeye.organization.core.model.RelationTuple.directMember("choi", "DEV002"),
+                dev.starryeye.organization.core.model.RelationTuple.child("DEV002", "DEV001"),
+                dev.starryeye.organization.core.model.RelationTuple.child("DEV001", "company"));
+    }
+}
