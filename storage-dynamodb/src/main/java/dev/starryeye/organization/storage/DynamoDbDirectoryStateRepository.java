@@ -21,6 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -136,7 +137,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private Flux<String> existingMemberSks(String groupId) {
         return queryPartition(Keys.groupPk(groupId))
                 .map(item -> Attrs.str(item, Keys.SK))
-                .filter(sk -> sk.startsWith("MEMBER#"));
+                .filter(Keys::isMemberSk);
     }
 
     private DirectoryGroup toGroup(String groupId, List<Map<String, AttributeValue>> items) {
@@ -149,7 +150,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         }
         Set<MemberRef> members = items.stream()
                 .map(item -> Attrs.str(item, Keys.SK))
-                .filter(sk -> sk.startsWith("MEMBER#"))
+                .filter(Keys::isMemberSk)
                 .map(Keys::parseMemberSk)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
@@ -168,19 +169,19 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberGsi1Pk(ref))))
                 .build();
 
-        return paginate(request).map(item -> stripPrefix(Attrs.str(item, Keys.PK), "GROUP#"));
+        return paginate(request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));
     }
 
     // ---------- 전체 ----------
 
     @Override
     public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
-        Mono<Void> removeStaleUsers = enumerateIds(Keys.USER_INDEX, "USER#")
+        Mono<Void> removeStaleUsers = enumerateIds(Keys.USER_INDEX, Keys::parseUserPk)
                 .filter(id -> !snapshot.users().containsKey(id))
                 .flatMap(this::deleteUser, QUERY_CONCURRENCY)
                 .then();
 
-        Mono<Void> removeStaleGroups = enumerateIds(Keys.GROUP_INDEX, "GROUP#")
+        Mono<Void> removeStaleGroups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
                 .filter(id -> !snapshot.groups().containsKey(id))
                 .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
                 .then();
@@ -198,11 +199,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     @Override
     public Mono<DirectorySnapshot> loadAll() {
-        Mono<Map<String, DirectoryUser>> users = enumerateIds(Keys.USER_INDEX, "USER#")
+        Mono<Map<String, DirectoryUser>> users = enumerateIds(Keys.USER_INDEX, Keys::parseUserPk)
                 .flatMap(this::findUser, QUERY_CONCURRENCY)
                 .collect(LinkedHashMap::new, (map, user) -> map.put(user.id(), user));
 
-        Mono<Map<String, DirectoryGroup>> groups = enumerateIds(Keys.GROUP_INDEX, "GROUP#")
+        Mono<Map<String, DirectoryGroup>> groups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
                 .flatMap(this::findGroup, QUERY_CONCURRENCY)
                 .collect(LinkedHashMap::new, (map, group) -> map.put(group.id(), group));
 
@@ -210,8 +211,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(both -> new DirectorySnapshot(both.getT1(), both.getT2()));
     }
 
-    /** GSI1 파티션을 훑어 PK 접두사를 떼고 id 만 뽑는다. Scan 을 쓰지 않는 이유는 스펙 §6.1 참고. */
-    private Flux<String> enumerateIds(String indexPartition, String pkPrefix) {
+    /** GSI1 파티션을 훑어 PK 에서 id 만 뽑는다. Scan 을 쓰지 않는 이유는 스펙 §6.1 참고. */
+    private Flux<String> enumerateIds(String indexPartition, Function<String, String> parsePk) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .indexName(Keys.GSI1)
@@ -220,7 +221,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(indexPartition)))
                 .build();
 
-        return paginate(request).map(item -> stripPrefix(Attrs.str(item, Keys.PK), pkPrefix));
+        return paginate(request).map(item -> parsePk.apply(Attrs.str(item, Keys.PK)));
     }
 
     // ---------- 공통 ----------
@@ -262,9 +263,5 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .tableName(properties.getTableName())
                 .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
                 .build())).then();
-    }
-
-    private static String stripPrefix(String value, String prefix) {
-        return value.startsWith(prefix) ? value.substring(prefix.length()) : value;
     }
 }

@@ -33,7 +33,13 @@ public final class Keys {
     public static final String SNAPSHOT_POINTER = "SNAPSHOT_POINTER";
     public static final String LATEST = "LATEST";
 
-    private static final String TUPLE_PREFIX = "TUPLE#";
+    /** 파티션/정렬키 접두사. 형식이 바뀌어도 이 다섯 상수만 고치면 되도록 여기 한 곳에 모은다. */
+    public static final String USER_PREFIX = "USER#";
+    public static final String GROUP_PREFIX = "GROUP#";
+    public static final String MEMBER_PREFIX = "MEMBER#";
+    public static final String SNAPSHOT_PREFIX = "SNAPSHOT#";
+    public static final String TUPLE_PREFIX = "TUPLE#";
+
     private static final String TUPLE_SEPARATOR = "|";
 
     /**
@@ -49,20 +55,35 @@ public final class Keys {
     }
 
     public static String userPk(String userId) {
-        return "USER#" + userId;
+        return USER_PREFIX + userId;
+    }
+
+    /** {@link #userPk} 로 만든 파티션키에서 직원 아이디만 되돌린다. */
+    public static String parseUserPk(String pk) {
+        return pk.substring(USER_PREFIX.length());
     }
 
     public static String groupPk(String groupId) {
-        return "GROUP#" + groupId;
+        return GROUP_PREFIX + groupId;
+    }
+
+    /** {@link #groupPk} 로 만든 파티션키에서 조직코드만 되돌린다. */
+    public static String parseGroupPk(String pk) {
+        return pk.substring(GROUP_PREFIX.length());
     }
 
     public static String memberSk(MemberRef ref) {
-        return "MEMBER#" + ref.type().name() + "#" + ref.id();
+        return MEMBER_PREFIX + ref.type().name() + "#" + ref.id();
     }
 
     /** 멤버십 아이템의 GSI 파티션키. 정렬키와 같은 문자열이라 역참조가 성립한다. */
     public static String memberGsi1Pk(MemberRef ref) {
         return memberSk(ref);
+    }
+
+    /** 정렬키가 {@link #memberSk} 로 만들어진 멤버십 아이템인지 판별한다. */
+    public static boolean isMemberSk(String sk) {
+        return sk.startsWith(MEMBER_PREFIX);
     }
 
     public static MemberRef parseMemberSk(String sk) {
@@ -71,7 +92,7 @@ public final class Keys {
     }
 
     public static String snapshotPk(String snapshotId) {
-        return "SNAPSHOT#" + snapshotId;
+        return SNAPSHOT_PREFIX + snapshotId;
     }
 
     public static String tupleSk(RelationTuple tuple) {
