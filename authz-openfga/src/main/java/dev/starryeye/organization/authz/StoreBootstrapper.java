@@ -27,6 +27,17 @@ public class StoreBootstrapper {
     private final AtomicReference<OpenFgaClient> clientRef = new AtomicReference<>();
     private final AtomicReference<String> storeIdRef = new AtomicReference<>();
 
+    /**
+     * 진행 중인 해석을 공유하기 위한 in-flight Mono. resolveStore() 를 동시에 여러 곳에서
+     * 호출해도 실제 findStoreIdByName → createStore → attachAndWriteModel 파이프라인은
+     * 한 번만 구성/구독되고, 모든 호출자가 같은 결과를 공유한다.
+     *
+     * <p>성공하면 storeIdRef 가 채워져 이후 호출은 이 필드를 아예 거치지 않는다(빠른 경로).
+     * 실패하면 doFinally 에서 이 필드를 비워, 다음 호출이 캐시된 에러를 영원히 받는 대신
+     * 새로 시도할 수 있게 한다.
+     */
+    private final AtomicReference<Mono<String>> resolutionRef = new AtomicReference<>();
+
     public StoreBootstrapper(OpenFgaProperties properties) {
         this.properties = properties;
     }
@@ -37,9 +48,30 @@ public class StoreBootstrapper {
         if (cached != null) {
             return Mono.just(cached);
         }
-        return findStoreIdByName()
+        return Mono.defer(this::sharedResolution);
+    }
+
+    /**
+     * 진행 중인 해석이 있으면 그것을 공유하고, 없으면 하나만 새로 만들어 등록한다.
+     * compareAndSet 으로 등록 경쟁의 승자만 실제 파이프라인을 구독하게 하고,
+     * 패자는 승자가 등록한 Mono 를 그대로 반환해 같은 storeId 를 받는다.
+     */
+    private Mono<String> sharedResolution() {
+        Mono<String> existing = resolutionRef.get();
+        if (existing != null) {
+            return existing;
+        }
+
+        Mono<String> created = findStoreIdByName()
                 .switchIfEmpty(Mono.defer(this::createStore))
-                .flatMap(this::attachAndWriteModel);
+                .flatMap(this::attachAndWriteModel)
+                .doFinally(signal -> resolutionRef.set(null))
+                .cache();
+
+        if (resolutionRef.compareAndSet(null, created)) {
+            return created;
+        }
+        return resolutionRef.get();
     }
 
     /** rebuild(store 모드) 전용. store 를 지우고 같은 이름으로 다시 만든다. */
@@ -54,6 +86,7 @@ public class StoreBootstrapper {
                 }).then(Mono.fromRunnable(() -> {
                     storeIdRef.set(null);
                     clientRef.set(null);
+                    resolutionRef.set(null);
                 })))
                 .then(Mono.defer(this::createStore))
                 .flatMap(this::attachAndWriteModel);

@@ -43,9 +43,7 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             return Mono.just(TupleWriteResult.empty());
         }
 
-        List<Batch> batches = new ArrayList<>();
-        partition(List.copyOf(delta.toDelete())).forEach(chunk -> batches.add(Batch.deletes(chunk)));
-        partition(List.copyOf(delta.toWrite())).forEach(chunk -> batches.add(Batch.writes(chunk)));
+        List<Batch> batches = batchesFor(delta);
 
         return bootstrapper.resolveStore()
                 .thenMany(Flux.fromIterable(batches).concatMap(this::applyBatch))
@@ -58,7 +56,19 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         return bootstrapper.recreateStore().then();
     }
 
-    /** 삭제를 먼저 처리한다. 같은 델타에 삭제와 생성이 섞였을 때 순서가 뒤집히면 결과가 달라진다. */
+    /**
+     * 델타를 배치 리스트로 나눈다. 삭제 배치가 항상 쓰기 배치보다 앞에 온다.
+     * 같은 델타에 삭제와 생성이 섞였을 때 순서가 뒤집히면 결과가 달라지기 때문이다.
+     *
+     * <p>패키지 전용으로 열어 둔 것은 이 순서를 단위 테스트로 직접 고정하기 위해서다.
+     */
+    List<Batch> batchesFor(TupleDelta delta) {
+        List<Batch> batches = new ArrayList<>();
+        partition(List.copyOf(delta.toDelete())).forEach(chunk -> batches.add(Batch.deletes(chunk)));
+        partition(List.copyOf(delta.toWrite())).forEach(chunk -> batches.add(Batch.writes(chunk)));
+        return batches;
+    }
+
     private List<List<RelationTuple>> partition(List<RelationTuple> tuples) {
         List<List<RelationTuple>> chunks = new ArrayList<>();
         int size = properties.getWriteBatchSize();
@@ -129,7 +139,8 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         return new TupleWriteResult(written, deleted, failures);
     }
 
-    private record Batch(List<RelationTuple> tuples, boolean delete) {
+    /** 패키지 전용. 배치 순서를 검증하는 테스트가 delete() 플래그를 직접 확인한다. */
+    record Batch(List<RelationTuple> tuples, boolean delete) {
 
         static Batch writes(List<RelationTuple> tuples) {
             return new Batch(tuples, false);
