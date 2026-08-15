@@ -38,18 +38,19 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     @Override
     public DirectorySnapshot read(LdapTemplate template) {
         LdapProperties.GroupOfNames config = properties.getGroupOfNames();
+        int pageSize = properties.getPageSize();
 
-        List<RawEntry> userEntries = template.search(
+        List<RawEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
                         .where("objectClass").is(config.getUserObjectClass()),
-                userMapper(config));
+                pageSize, userMapper(config));
 
-        List<RawEntry> groupEntries = template.search(
+        List<RawEntry> groupEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getGroupSearchBase())
                         .where("objectClass").is(config.getGroupObjectClass()),
-                groupMapper(config));
+                pageSize, groupMapper(config));
 
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();

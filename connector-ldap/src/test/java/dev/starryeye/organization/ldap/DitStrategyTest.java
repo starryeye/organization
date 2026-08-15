@@ -146,6 +146,22 @@ class DitStrategyTest extends EmbeddedLdapSupport {
     }
 
     @Test
+    @DisplayName("페이지 크기보다 엔트리가 많아도 페이징으로 전부 읽는다")
+    void 페이지_크기보다_많은_엔트리도_전부_읽는다() {
+        // given — 페이지 크기를 1로 좁혀 조직 4개, 유저 2명 모두 여러 페이지로 나뉘게 한다
+        var properties = 기본설정();
+        properties.setPageSize(1);
+        var strategy = new DitStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 한 페이지만 읽었다면 일부만 남아 잘렸을 것이다
+        assertThat(snapshot.groups()).containsOnlyKeys("company", "DEV001", "DEV002", "OPS001");
+        assertThat(snapshot.users()).containsOnlyKeys("choi", "park");
+    }
+
+    @Test
     @DisplayName("두 전략은 서로 다른 방식으로 읽어도 같은 모양의 스냅샷을 만든다")
     void 두_전략은_같은_모양의_스냅샷을_만든다() {
         // given

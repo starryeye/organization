@@ -35,18 +35,19 @@ public class DitStrategy implements LdapMappingStrategy {
     @Override
     public DirectorySnapshot read(LdapTemplate template) {
         LdapProperties.Dit config = properties.getDit();
+        int pageSize = properties.getPageSize();
 
-        List<Entry> orgEntries = template.search(
+        List<Entry> orgEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
                         .where("objectClass").is(config.getOrgUnitObjectClass()),
-                entryMapper());
+                pageSize, entryMapper());
 
-        List<Entry> userEntries = template.search(
+        List<Entry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
                         .where("objectClass").is(config.getUserObjectClass()),
-                entryMapper());
+                pageSize, entryMapper());
 
         // 조직코드 → 상대 DN, 상대 DN → 조직코드 양방향 색인
         Map<String, String> codeByRdnPath = new LinkedHashMap<>();

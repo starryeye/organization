@@ -163,6 +163,24 @@ class GroupOfNamesStrategyTest extends EmbeddedLdapSupport {
     }
 
     @Test
+    @DisplayName("페이지 크기보다 엔트리가 많아도 페이징으로 전부 읽는다")
+    void 페이지_크기보다_많은_엔트리도_전부_읽는다() {
+        // given — 페이지 크기를 1로 좁혀 유저 3명, 그룹 2개 모두 여러 페이지로 나뉘게 한다
+        var properties = 기본설정();
+        properties.setPageSize(1);
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 한 페이지만 읽었다면 일부만 남아 잘렸을 것이다
+        assertThat(snapshot.users()).containsOnlyKeys("kim", "lee", "park");
+        assertThat(snapshot.groups()).containsOnlyKeys("DEV001", "DEV002");
+        assertThat(snapshot.groups().get("DEV002").members())
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("lee"));
+    }
+
+    @Test
     @DisplayName("직원 아이디 속성을 사번으로 바꾸면 사번 기준으로 읽는다")
     void 직원_아이디_속성을_바꿀_수_있다() {
         // given — 이 LDIF 에는 employeeNumber 가 없으므로 uid 가 없는 상태를 흉내낸다

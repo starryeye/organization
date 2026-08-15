@@ -27,6 +27,10 @@ public class LdapConfig {
     public LdapTemplate ldapTemplate(LdapContextSource contextSource) {
         LdapTemplate template = new LdapTemplate(contextSource);
         template.setIgnorePartialResultException(true);
+        // 기본값(true)으로 두면 서버가 관리 한도(sizeLimit)로 결과를 자른 뒤 예외 없이 조용히
+        // 응답한다 — 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 지워버릴 수 있다. false 로 두면
+        // 그 경우 예외가 올라와 FAILED 로 기록되므로, 페이징을 우회하는 잘림도 안전망으로 잡는다.
+        template.setIgnoreSizeLimitExceededException(false);
         return template;
     }
 
