@@ -50,4 +50,10 @@ public class DynamoDbConfig {
             DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
         return new DynamoDbTupleSnapshotRepository(client, properties, clock);
     }
+
+    @Bean
+    public DynamoDbSyncRunRepository dynamoDbSyncRunRepository(
+            DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbSyncRunRepository(client, properties, clock);
+    }
 }

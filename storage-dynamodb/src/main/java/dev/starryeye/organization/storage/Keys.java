@@ -39,6 +39,7 @@ public final class Keys {
     public static final String MEMBER_PREFIX = "MEMBER#";
     public static final String SNAPSHOT_PREFIX = "SNAPSHOT#";
     public static final String TUPLE_PREFIX = "TUPLE#";
+    public static final String SYNCRUN_PREFIX = "SYNCRUN#";
 
     private static final String TUPLE_SEPARATOR = "|";
 
@@ -130,7 +131,12 @@ public final class Keys {
     }
 
     public static String syncRunPk(Instant at) {
-        return "SYNCRUN#" + YearMonth.from(at.atZone(ZoneOffset.UTC));
+        return syncRunPk(YearMonth.from(at.atZone(ZoneOffset.UTC)));
+    }
+
+    /** {@link #findRecent} 가 월 파티션을 직접 조회할 때 쓴다. */
+    public static String syncRunPk(YearMonth month) {
+        return SYNCRUN_PREFIX + month;
     }
 
     public static String syncRunSk(Instant startedAt, String runId) {
