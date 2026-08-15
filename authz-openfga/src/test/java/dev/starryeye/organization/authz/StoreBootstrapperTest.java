@@ -4,10 +4,12 @@ import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
@@ -94,6 +96,45 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
                     .as("%d번째 재구성 창으로 겹쳐 들어온 resolveStore() 가 store 를 추가로 만들면 안 된다", attempt)
                     .isEqualTo(1);
         }
+    }
+
+    /**
+     * recreateStore() 가 자신의 "현재 store 찾기" 단계로 공개 resolveStore() 를 타면,
+     * cold 상태(storeIdRef == null)에서는 그 단계가 sharedResolution() 으로 넘어간다.
+     * 그런데 recreateStore() 가 파괴 작업 전에 이미 자기 자신을 resolutionRef 에
+     * 게시해 뒀다면, sharedResolution() 은 "진행 중인 해석이 있다"며 그 게시물(자기
+     * 자신)을 그대로 돌려준다 — recreateStore() 가 자기 자신의 완료를 기다리는 자기
+     * 참조가 되어 영원히 끝나지 않는다.
+     *
+     * <p>storeIdRef == null 은 갓 띄운 프로세스의 정상 상태다(시작 시점에 해석해
+     * 두는 훅이 없다면). 그러니 배포 직후 처음 하는 동작이 STORE 모드 재적재라면
+     * (재해복구, 최초 프로비저닝) 이 데드락을 그대로 밟는다.
+     *
+     * <p>OpenFgaTestSupport 의 @BeforeEach 가 모든 테스트에서 resolveStore() 를
+     * 먼저 호출해 두므로, 이 시나리오를 재현하려면 별도의 새 bootstrapper 가 필요하다.
+     */
+    @Test
+    @Timeout(10)
+    @DisplayName("resolveStore 를 먼저 호출하지 않은 cold 상태에서도 recreateStore 는 끝난다")
+    void cold_상태에서도_recreateStore_는_끝난다() {
+        // given — resolveStore() 를 단 한 번도 호출하지 않은 새 bootstrapper
+        OpenFgaProperties coldProperties = new OpenFgaProperties();
+        coldProperties.setApiUrl(properties.getApiUrl());
+        coldProperties.setStoreName("cold-" + UUID.randomUUID());
+        coldProperties.setWriteBatchSize(properties.getWriteBatchSize());
+        coldProperties.setMaxRetries(properties.getMaxRetries());
+        StoreBootstrapper coldBootstrapper = new StoreBootstrapper(coldProperties);
+
+        // when — resolveStore() 없이 곧바로 recreateStore() 를 호출한다.
+        // 자기 참조 데드락이 있다면 이 block(Duration) 이 타임아웃으로 실패한다
+        // (@Timeout 이 그보다 늦게 걸려도 테스트 전체를 강제 종료해 대비한다).
+        String storeId = coldBootstrapper.recreateStore().block(Duration.ofSeconds(5));
+
+        // then — store 가 존재하지 않았을 때도 삭제 단계를 건너뛰고 새로 만든다
+        assertThat(storeId).isNotNull();
+        assertThat(countStoresNamed(coldProperties.getStoreName()))
+                .as("cold 상태에서 recreateStore() 는 store 를 정확히 하나 만들어야 한다")
+                .isEqualTo(1);
     }
 
     private long countStoresNamed(String name) {

@@ -14,6 +14,11 @@ public class OpenFgaConfig {
     }
 
     @Bean
+    public OpenFgaStoreInitializer openFgaStoreInitializer(StoreBootstrapper bootstrapper) {
+        return new OpenFgaStoreInitializer(bootstrapper);
+    }
+
+    @Bean
     public OpenFgaRelationTupleWriter openFgaRelationTupleWriter(
             StoreBootstrapper bootstrapper, OpenFgaProperties properties) {
         return new OpenFgaRelationTupleWriter(bootstrapper, properties);

@@ -89,22 +89,32 @@ public class StoreBootstrapper {
      * 순간과 겹치는 {@code resolveStore()} 호출도 {@code resolutionRef} 에서 이 재구성
      * Mono 를 그대로 보고 합류하지, 자기 것을 새로 만들지 않는다.
      *
+     * <p><b>"현재 store 찾기" 단계는 반드시 {@link #findStoreIdByName()} 을 직접 써야
+     * 한다 — {@link #resolveStore()} 를 타면 안 된다.</b> cold 상태(storeIdRef 가
+     * 아직 null 인, 배포 직후 아무도 resolveStore() 를 먼저 부르지 않은 상태)에서
+     * resolveStore() 를 부르면 {@link #sharedResolution()} 으로 넘어가는데, 그 시점엔
+     * 이미 이 메서드가 자기 자신(recreation)을 resolutionRef 에 게시해 둔 뒤다.
+     * sharedResolution() 은 "진행 중인 해석이 있다"며 그 게시물을 그대로 돌려주므로
+     * recreation 은 자기 자신의 완료를 기다리는 자기 참조가 되어 영원히 끝나지 않는다.
+     * findStoreIdByName() 은 resolutionRef 를 전혀 건드리지 않으므로 이 순환이 없다.
+     * store 가 아직 없으면(cold) 빈 Mono 를 내며, 그 경우 삭제 단계를 건너뛴다.
+     *
+     * <p>{@code resolutionRef} 게시는 {@link #sharedResolution()} 과 대칭으로
+     * compareAndSet 을 쓴다. 동시에 들어온 두 번째 recreateStore() 호출은 자기 것을
+     * 새로 시작하는 대신 먼저 게시된 재구성에 합류한다 — 이 메서드는 호출자가 직렬화를
+     * 보장한다는 가정(현재는 {@code SyncExecutionGuard})에만 기대지 않는다.
+     *
      * <p>실패해도 {@code doFinally} 가 {@code resolutionRef} 를 비워 다음 시도가 캐시된
      * 에러 대신 새로 재구성을 시도할 수 있다 — {@link #sharedResolution()} 과 동일한
      * "실패는 영구히 캐시되지 않는다" 성질을 유지한다.
      */
     public Mono<String> recreateStore() {
-        Mono<String> recreation = resolveStore()
-                .flatMap(storeId -> Mono.fromFuture(() -> {
-                    try {
-                        return client().deleteStore();
-                    } catch (Exception e) {
-                        throw new IllegalStateException("store 삭제 실패", e);
-                    }
-                }).then(Mono.fromRunnable(() -> {
+        Mono<String> recreation = findStoreIdByName()
+                .flatMap(this::deleteStoreById)
+                .then(Mono.fromRunnable(() -> {
                     storeIdRef.set(null);
                     clientRef.set(null);
-                })))
+                }))
                 .then(Mono.defer(this::createStore))
                 .flatMap(this::attachAndWriteModel)
                 .doFinally(signal -> resolutionRef.set(null))
@@ -112,8 +122,25 @@ public class StoreBootstrapper {
 
         // 파괴 작업(store 삭제 → 캐시 무효화)이 시작되기 전에 먼저 게시해야 한다.
         // 그래야 그 창으로 겹쳐 들어오는 resolveStore() 가 이 Mono 에 합류한다.
-        resolutionRef.set(recreation);
-        return recreation;
+        // compareAndSet 은 동시에 들어온 두 번째 recreateStore() 호출도 같은 방식으로
+        // 합류시킨다.
+        if (resolutionRef.compareAndSet(null, recreation)) {
+            return recreation;
+        }
+        return resolutionRef.get();
+    }
+
+    /** storeId 로 직접 client 를 만들어 지운다. clientRef 캐시 상태에 기대지 않는다. */
+    private Mono<Void> deleteStoreById(String storeId) {
+        return Mono.fromCallable(() -> newClient(storeId))
+                .flatMap(client -> Mono.fromFuture(() -> {
+                    try {
+                        return client.deleteStore();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("store 삭제 실패", e);
+                    }
+                }))
+                .then();
     }
 
     public OpenFgaClient client() {
