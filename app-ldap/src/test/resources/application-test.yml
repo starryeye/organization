@@ -1,0 +1,32 @@
+sync:
+  cron: "-"
+  purge-cron: "-"
+  deletion-guard:
+    enabled: true
+    threshold-ratio: 0.3
+    min-baseline: 10
+
+ldap:
+  base-dn: dc=example,dc=com
+  bind-dn: cn=admin,dc=example,dc=com
+  bind-password: adminpassword
+  strategy: group-of-names
+  group-of-names:
+    user-search-base: ou=people
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
+    group-search-base: ou=groups
+    group-object-class: groupOfNames
+    group-id-attribute: cn
+    group-name-attribute: description
+    member-attribute: member
+
+dynamodb:
+  region: ap-northeast-2
+  table-name: organization-e2e
+  create-table-on-startup: true
+
+openfga:
+  store-name: organization-e2e

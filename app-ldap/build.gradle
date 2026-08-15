@@ -13,4 +13,5 @@ dependencies {
 
     testImplementation libs.testcontainers.junit
     testImplementation libs.unboundid.ldapsdk
+    testImplementation libs.openfga.sdk
 }
