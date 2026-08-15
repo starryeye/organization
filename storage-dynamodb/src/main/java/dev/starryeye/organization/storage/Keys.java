@@ -1,0 +1,85 @@
+package dev.starryeye.organization.storage;
+
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.RelationTuple;
+
+import java.time.Instant;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+
+/**
+ * 단일 테이블 설계의 PK/SK/GSI 키를 만들고 파싱한다.
+ * 키 규칙이 여기 한 곳에만 있어야 저장소 구현들이 어긋나지 않는다.
+ */
+public final class Keys {
+
+    public static final String PK = "PK";
+    public static final String SK = "SK";
+    public static final String GSI1PK = "GSI1PK";
+    public static final String GSI1SK = "GSI1SK";
+    public static final String GSI1 = "GSI1";
+
+    public static final String META = "META";
+
+    /** 전체 직원 열거용 GSI 파티션 */
+    public static final String USER_INDEX = "USER_INDEX";
+    /** 전체 조직 열거 + 조직명 검색용 GSI 파티션 */
+    public static final String GROUP_INDEX = "GROUP_INDEX";
+    /** 스냅샷 목록 조회용 GSI 파티션 */
+    public static final String SNAPSHOT_INDEX = "SNAPSHOT_INDEX";
+
+    public static final String SNAPSHOT_POINTER = "SNAPSHOT_POINTER";
+    public static final String LATEST = "LATEST";
+
+    private static final String TUPLE_PREFIX = "TUPLE#";
+    private static final String TUPLE_SEPARATOR = "|";
+
+    private Keys() {
+    }
+
+    public static String userPk(String userId) {
+        return "USER#" + userId;
+    }
+
+    public static String groupPk(String groupId) {
+        return "GROUP#" + groupId;
+    }
+
+    public static String memberSk(MemberRef ref) {
+        return "MEMBER#" + ref.type().name() + "#" + ref.id();
+    }
+
+    /** 멤버십 아이템의 GSI 파티션키. 정렬키와 같은 문자열이라 역참조가 성립한다. */
+    public static String memberGsi1Pk(MemberRef ref) {
+        return memberSk(ref);
+    }
+
+    public static MemberRef parseMemberSk(String sk) {
+        String[] parts = sk.split("#", 3);
+        return new MemberRef(MemberType.valueOf(parts[1]), parts[2]);
+    }
+
+    public static String snapshotPk(String snapshotId) {
+        return "SNAPSHOT#" + snapshotId;
+    }
+
+    public static String tupleSk(RelationTuple tuple) {
+        return TUPLE_PREFIX + tuple.user() + TUPLE_SEPARATOR + tuple.relation()
+                + TUPLE_SEPARATOR + tuple.object();
+    }
+
+    public static RelationTuple parseTupleSk(String sk) {
+        String body = sk.substring(TUPLE_PREFIX.length());
+        String[] parts = body.split("\\" + TUPLE_SEPARATOR, 3);
+        return new RelationTuple(parts[0], parts[1], parts[2]);
+    }
+
+    public static String syncRunPk(Instant at) {
+        return "SYNCRUN#" + YearMonth.from(at.atZone(ZoneOffset.UTC));
+    }
+
+    public static String syncRunSk(Instant startedAt, String runId) {
+        return startedAt.toString() + "#" + runId;
+    }
+}

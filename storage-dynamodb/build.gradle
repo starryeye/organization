@@ -5,3 +5,11 @@ dependencies {
 
     testImplementation libs.testcontainers.junit
 }
+
+tasks.named('test') {
+    // Testcontainers 1.20.4 이 내장한 docker-java 는 Docker 데몬을 처음 감지할 때
+    // API 버전을 1.32 로 고정해 요청한다. 최신 Docker Engine(예: MinAPIVersion 1.40+)은
+    // 이 버전을 지원하지 않아 감지 요청이 400 으로 실패하고 컨테이너 기동 자체가 막힌다.
+    // docker-java 가 지원하는 최신 버전으로 명시해 이 감지 단계를 우회한다.
+    systemProperty 'api.version', '1.44'
+}
