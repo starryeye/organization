@@ -24,6 +24,10 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class AdminSyncController {
 
+    /** GET /admin/sync/runs 의 limit 을 이 범위로 강제한다 — 0 이하나 과도하게 큰 값을 막는다 */
+    private static final int MIN_RUNS_LIMIT = 1;
+    private static final int MAX_RUNS_LIMIT = 100;
+
     private final FullSyncUseCase fullSync;
     private final RebuildUseCase rebuild;
     private final SyncRunRepository runs;
@@ -45,14 +49,20 @@ public class AdminSyncController {
      */
     @PostMapping("/rebuild")
     public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "snapshot") String mode) {
-        RebuildMode rebuildMode = RebuildMode.from(mode);
+        RebuildMode rebuildMode;
+        try {
+            rebuildMode = RebuildMode.from(mode);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "알 수 없는 mode 값: " + mode, e);
+        }
         log.warn("전체 재적재 요청: mode={}", rebuildMode);
         return guarded(rebuild.execute(rebuildMode));
     }
 
     @GetMapping("/runs")
     public Flux<SyncRunResponse> runs(@RequestParam(defaultValue = "20") int limit) {
-        return runs.findRecent(limit).map(SyncRunResponse::from);
+        int clampedLimit = Math.max(MIN_RUNS_LIMIT, Math.min(limit, MAX_RUNS_LIMIT));
+        return runs.findRecent(clampedLimit).map(SyncRunResponse::from);
     }
 
     /** 동기화가 겹쳐 돌지 않게 감싼다. 어떤 경로로 끝나든 반드시 반납한다. */

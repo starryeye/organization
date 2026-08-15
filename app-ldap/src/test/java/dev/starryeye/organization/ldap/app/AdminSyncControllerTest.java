@@ -6,6 +6,8 @@ import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.RebuildMode;
+import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -20,12 +22,15 @@ import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 
 class AdminSyncControllerTest {
 
     private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
 
     private FullSyncUseCase fullSync;
+    private RebuildUseCase rebuild;
     private SyncRunRepository runs;
     private SyncExecutionGuard executionGuard;
     private WebTestClient client;
@@ -33,10 +38,11 @@ class AdminSyncControllerTest {
     @BeforeEach
     void 컨트롤러를_준비한다() {
         fullSync = Mockito.mock(FullSyncUseCase.class);
+        rebuild = Mockito.mock(RebuildUseCase.class);
         runs = Mockito.mock(SyncRunRepository.class);
         executionGuard = new SyncExecutionGuard();
         client = WebTestClient.bindToController(
-                new AdminSyncController(fullSync, null, runs, executionGuard,
+                new AdminSyncController(fullSync, rebuild, runs, executionGuard,
                         new SyncMetrics(new SimpleMeterRegistry()))).build();
     }
 
@@ -155,5 +161,57 @@ class AdminSyncControllerTest {
                 .expectBody()
                 .jsonPath("$[0].runId").isEqualTo("run-1")
                 .jsonPath("$[0].trigger").isEqualTo("SCHEDULED");
+    }
+
+    @Test
+    @DisplayName("limit 이 0 이하면 500 대신 최소값으로 보정해 조회한다")
+    void limit_이_음수면_최소값으로_보정된다() {
+        // given
+        Mockito.when(runs.findRecent(anyInt())).thenReturn(Flux.empty());
+
+        // when, then — Flux.take(-1) 이 조립 시점에 던지던 예외가 더 이상 나오면 안 된다
+        client.get().uri("/admin/sync/runs?limit=-1").exchange()
+                .expectStatus().isOk();
+
+        Mockito.verify(runs).findRecent(eq(1));
+    }
+
+    @Test
+    @DisplayName("limit 이 상한을 넘으면 500 대신 상한값으로 보정해 조회한다")
+    void limit_이_상한을_넘으면_상한값으로_보정된다() {
+        // given
+        Mockito.when(runs.findRecent(anyInt())).thenReturn(Flux.empty());
+
+        // when, then
+        client.get().uri("/admin/sync/runs?limit=100000").exchange()
+                .expectStatus().isOk();
+
+        Mockito.verify(runs).findRecent(eq(100));
+    }
+
+    @Test
+    @DisplayName("rebuild 는 mode 를 해석해 대응하는 모드로 재적재를 실행한다")
+    void rebuild_는_mode_를_해석해_실행한다() {
+        // given
+        Mockito.when(rebuild.execute(RebuildMode.STORE))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.REBUILD, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.post().uri("/admin/sync/rebuild?mode=store").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+
+        Mockito.verify(rebuild).execute(RebuildMode.STORE);
+    }
+
+    @Test
+    @DisplayName("rebuild 에 알 수 없는 mode 를 주면 500 대신 400 으로 거절한다")
+    void 알_수_없는_mode_는_400으로_거절된다() {
+        // when, then
+        client.post().uri("/admin/sync/rebuild?mode=nope").exchange()
+                .expectStatus().isBadRequest();
+
+        Mockito.verifyNoInteractions(rebuild);
     }
 }
