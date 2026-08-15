@@ -105,6 +105,7 @@ class RebuildUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(writer.appliedDeltas).hasSize(1);
         assertThat(writer.appliedDeltas.get(0).toWrite()).hasSize(1);
+        assertThat(snapshots.resetCount.get()).isEqualTo(1);
     }
 
     @Test

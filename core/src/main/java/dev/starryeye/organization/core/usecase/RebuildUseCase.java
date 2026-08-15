@@ -117,7 +117,7 @@ public class RebuildUseCase {
                 committed);
 
         return snapshots.save(snapshot)
-                .then(state.replaceWith(directory))
+                .then(Mono.defer(() -> state.replaceWith(directory)))
                 .thenReturn(result.hasFailure()
                         ? SyncOutcome.partial(result, snapshot.id())
                         : SyncOutcome.succeeded(result, snapshot.id()));
