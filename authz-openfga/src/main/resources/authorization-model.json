@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user",
+      "relations": {},
+      "metadata": {
+        "relations": {}
+      }
+    },
+    {
+      "type": "group",
+      "relations": {
+        "direct_member": {
+          "this": {}
+        },
+        "child": {
+          "this": {}
+        },
+        "member": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "direct_member"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "child"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "direct_member": {
+            "directly_related_user_types": [
+              { "type": "user" }
+            ]
+          },
+          "child": {
+            "directly_related_user_types": [
+              { "type": "group" }
+            ]
+          },
+          "member": {
+            "directly_related_user_types": []
+          }
+        }
+      }
+    }
+  ]
+}
