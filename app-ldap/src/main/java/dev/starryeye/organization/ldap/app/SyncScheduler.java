@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 @Slf4j
 @Component
@@ -23,7 +24,7 @@ public class SyncScheduler {
             log.warn("이전 동기화가 아직 진행 중이라 이번 스케줄을 건너뛴다");
             return;
         }
-        fullSync.execute(SyncTrigger.SCHEDULED)
+        Mono.defer(() -> fullSync.execute(SyncTrigger.SCHEDULED))
                 .doFinally(signal -> executionGuard.release())
                 .subscribe(
                         run -> log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
@@ -37,7 +38,7 @@ public class SyncScheduler {
      */
     @Scheduled(cron = "${sync.purge-cron}")
     public void 만료스냅샷정리() {
-        snapshots.purgeExpired()
+        Mono.defer(snapshots::purgeExpired)
                 .subscribe(
                         count -> log.info("만료 스냅샷 정리 완료: {}건", count),
                         error -> log.error("만료 스냅샷 정리에 실패했다", error));
