@@ -24,12 +24,30 @@ public class ScimUserHandler {
         return request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .map(ScimMapper::toDirectoryUser)
-                .flatMap(user -> state.findUser(user.id())
-                        .flatMap(existing -> Mono.<DirectoryUser>error(ScimException.uniqueness(
-                                "이미 존재하는 직원입니다: " + user.id())))
-                        .switchIfEmpty(Mono.just(user)))
+                .flatMap(this::rejectDuplicate)
                 .flatMap(user -> sync.upsertUser(user)
                         .flatMap(result -> respond(HttpStatus.CREATED, user.id(), result)));
+    }
+
+    /**
+     * 아이디 중복뿐 아니라 {@code userName} 중복도 막는다.
+     *
+     * <p>{@code id} 는 생성 시점의 {@code userName} 에서 발급되고 그 뒤의 {@code userName}
+     * 변경을 따라가지 않는다(SCIM 의 정체성은 {@code id} 라서 의도된 동작이다). 그래서 이름이
+     * 바뀐 사람을 IdP 가 <b>새 {@code userName} 으로</b> 다시 POST 하면 그 아이디로는 아무도
+     * 찾지 못해 같은 사람의 레코드가 둘 생긴다 — 튜플도 두 벌이 되고, 한쪽을 비활성화해도
+     * 다른 쪽 권한이 그대로 남는다.
+     */
+    private Mono<DirectoryUser> rejectDuplicate(DirectoryUser user) {
+        return state.findUser(user.id())
+                .flatMap(existing -> Mono.<DirectoryUser>error(ScimException.uniqueness(
+                        "이미 존재하는 직원입니다: " + user.id())))
+                .switchIfEmpty(Mono.defer(() -> state.findUserIdsByUserName(user.userName())
+                        .next()
+                        .flatMap(duplicateId -> Mono.<DirectoryUser>error(ScimException.uniqueness(
+                                "이미 같은 userName 을 쓰는 직원이 있습니다: userName=%s, id=%s"
+                                        .formatted(user.userName(), duplicateId))))
+                        .switchIfEmpty(Mono.just(user))));
     }
 
     public Mono<ServerResponse> get(ServerRequest request) {

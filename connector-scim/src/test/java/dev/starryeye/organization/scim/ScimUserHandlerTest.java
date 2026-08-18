@@ -29,7 +29,7 @@ class ScimUserHandlerTest {
         var useCase = new IncrementalSyncUseCase(state, writer);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                        new ScimGroupHandler(state, useCase))).build();
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
     }
 
     @Test
@@ -54,6 +54,28 @@ class ScimUserHandlerTest {
                 .jsonPath("$.active").isEqualTo(true);
 
         assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("userName 이 바뀐 뒤 같은 사람을 새 userName 으로 다시 생성하면 409 로 막는다")
+    void userName_중복_생성은_409다() {
+        // given — kim 으로 만들어진 뒤 userName 만 kim.lee 로 바뀐 직원. id 는 SCIM 의 정체성이라
+        // userName 변경을 따라가지 않는다(의도된 동작)
+        state.saveUser(new DirectoryUser("kim", "emp-1001", "kim.lee", "김철수", null, true)).block();
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                 "userName":"kim.lee","displayName":"김철수"}
+                """;
+
+        // when, then — id 로는 못 찾으니 막지 않으면 같은 사람의 레코드가 둘 생긴다
+        client.post().uri("/scim/v2/Users")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isEqualTo(409)
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("uniqueness");
+
+        assertThat(state.users).containsOnlyKeys("kim");
     }
 
     @Test

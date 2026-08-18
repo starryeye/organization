@@ -22,6 +22,16 @@ public class FakeStateRepository implements DirectoryStateRepository {
     }
 
     @Override
+    public Flux<String> findUserIdsByUserName(String userName) {
+        if (userName == null) {
+            return Flux.empty();
+        }
+        return Flux.fromIterable(users.values())
+                .filter(user -> userName.equals(user.userName()))
+                .map(DirectoryUser::id);
+    }
+
+    @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
         return Mono.justOrEmpty(groups.get(groupId));
     }

@@ -75,6 +75,27 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return deleteItem(Keys.userPk(userId), Keys.META);
     }
 
+    /**
+     * {@link #saveUser} 가 GSI1 의 정렬키에 {@code userName} 을 넣어 두므로 Scan 없이
+     * 정확 일치 Query 로 찾을 수 있다.
+     */
+    @Override
+    public Flux<String> findUserIdsByUserName(String userName) {
+        if (userName == null || userName.isBlank()) {
+            return Flux.empty();
+        }
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk AND #sk = :sk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK, "#sk", Keys.GSI1SK))
+                .expressionAttributeValues(Map.of(
+                        ":pk", Attrs.s(Keys.USER_INDEX), ":sk", Attrs.s(userName)))
+                .build();
+
+        return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
+    }
+
     private DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
         return new DirectoryUser(
                 userId,

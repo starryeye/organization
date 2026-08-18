@@ -2,7 +2,9 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.scim.dto.ScimEmail;
 import dev.starryeye.organization.scim.dto.ScimGroup;
 import dev.starryeye.organization.scim.dto.ScimMember;
@@ -14,10 +16,15 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Set;
 
+import reactor.core.publisher.Mono;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimMapperTest {
+
+    /** type 이 명시된 케이스는 이 resolver 를 타지 않는다. 타면 User 로 답한다. */
+    private static final MemberTypeResolver USER_ONLY = id -> Mono.just(MemberType.USER);
 
     @Test
     @DisplayName("직원 아이디는 userName 에서 오고 표시명은 displayName 을 우선한다")
@@ -90,7 +97,7 @@ class ScimMapperTest {
                         new ScimMember("park", "User", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.id()).isEqualTo("DEV001");
@@ -107,7 +114,7 @@ class ScimMapperTest {
                 List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.id()).isEqualTo("DEV009");
@@ -120,7 +127,7 @@ class ScimMapperTest {
         var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, null, "임시팀", List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.id()).isNotBlank().hasSize(36);
@@ -135,7 +142,7 @@ class ScimMapperTest {
                 List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.id()).isEqualTo("개발본부");
@@ -213,7 +220,7 @@ class ScimMapperTest {
                 List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.id()).isEqualTo("DEV_001_main");
@@ -249,19 +256,54 @@ class ScimMapperTest {
     }
 
     @Test
-    @DisplayName("멤버의 type 이 null 이면 User 로 간주한다")
-    void null_type은_User로_간주된다() {
+    @DisplayName("멤버의 type 이 null 이고 현재상태에도 없으면 User 로 둔다")
+    void null_type은_현재상태에_없으면_User가_된다() {
         // given
         var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
                 List.of(new ScimMember("kim", null, null),
                         new ScimMember("DEV002", "Group", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
 
         // then
         assertThat(group.members())
                 .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("멤버의 type 이 없으면 추측하지 않고 현재상태로 하위 조직인지 판정한다")
+    void type이_없으면_현재상태로_판정한다() {
+        // given — RFC 7643 에서 type 은 선택 필드지만 중첩 조직을 표현하는 유일한 수단이기도 하다.
+        // 조직코드와 직원 아이디는 네임스페이스가 달라 겹칠 수 있으므로 User 로 단정하면 안 된다
+        var state = new FakeStateRepository();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", java.util.Set.of())).block();
+        var resolver = new StateMemberTypeResolver(state);
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
+                List.of(new ScimMember("DEV002", null, null)), null);
+
+        // when
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, resolver).block();
+
+        // then
+        assertThat(group.members()).containsExactly(MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("members 의 value 도 userName·externalId 과 같은 규칙으로 정규화된다")
+    void 멤버_value가_정규화된다() {
+        // given — IdP 가 우리가 발급한 id 를 그대로 돌려주지 않는 경우. 정규화하지 않으면
+        // 이 멤버는 저장되고 201 본문에도 실리지만 튜플은 하나도 만들어지지 않는다
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
+                List.of(new ScimMember("kim chul soo", "User", null),
+                        new ScimMember("DEV 002:sub", "Group", null)), null);
+
+        // when
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+
+        // then
+        assertThat(group.members()).containsExactlyInAnyOrder(
+                MemberRef.user("kim_chul_soo"), MemberRef.group("DEV_002_sub"));
     }
 
     @Test
@@ -298,7 +340,7 @@ class ScimMapperTest {
                 List.of(new ScimMember(null, "User", null)), null);
 
         // when & then
-        assertThatThrownBy(() -> ScimMapper.toDirectoryGroup(scim))
+        assertThatThrownBy(() -> ScimMapper.toDirectoryGroup(scim, USER_ONLY).block())
                 .isInstanceOf(ScimException.class)
                 .hasMessage("members 원소에 value 가 없습니다");
     }

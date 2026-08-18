@@ -29,7 +29,7 @@ class ScimGroupHandlerTest {
         var useCase = new IncrementalSyncUseCase(state, writer);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                        new ScimGroupHandler(state, useCase))).build();
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
     }
 
     @Test

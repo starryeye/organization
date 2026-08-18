@@ -16,8 +16,14 @@ public class ScimConfig {
     }
 
     @Bean
-    public ScimGroupHandler scimGroupHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync) {
-        return new ScimGroupHandler(state, sync);
+    public MemberTypeResolver memberTypeResolver(DirectoryStateRepository state) {
+        return new StateMemberTypeResolver(state);
+    }
+
+    @Bean
+    public ScimGroupHandler scimGroupHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync,
+                                             MemberTypeResolver memberTypes) {
+        return new ScimGroupHandler(state, sync, memberTypes);
     }
 
     @Bean

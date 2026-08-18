@@ -12,6 +12,8 @@ import dev.starryeye.organization.scim.dto.ScimMeta;
 import dev.starryeye.organization.scim.dto.ScimName;
 import dev.starryeye.organization.scim.dto.ScimUser;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -47,12 +49,14 @@ public final class ScimMapper {
                 scim.active() == null || scim.active());
     }
 
-    public static DirectoryGroup toDirectoryGroup(ScimGroup scim) {
-        return new DirectoryGroup(
-                organizationCode(scim),
-                scim.externalId(),
-                scim.displayName(),
-                toMemberRefs(scim.members()));
+    /**
+     * {@code type} 이 빠진 멤버가 있으면 {@code resolver} 로 현재상태를 조회해야 하므로
+     * 반환값이 {@link Mono} 다. {@code type} 이 모두 명시돼 있으면 조회는 일어나지 않는다.
+     */
+    public static Mono<DirectoryGroup> toDirectoryGroup(ScimGroup scim, MemberTypeResolver resolver) {
+        String code = organizationCode(scim);
+        return toMemberRefs(scim.members(), resolver)
+                .map(members -> new DirectoryGroup(code, scim.externalId(), scim.displayName(), members));
     }
 
     private static String organizationCode(ScimGroup scim) {
@@ -66,20 +70,36 @@ public final class ScimMapper {
         return generated;
     }
 
-    private static Set<MemberRef> toMemberRefs(List<ScimMember> members) {
-        if (members == null) {
-            return Set.of();
+    /**
+     * {@code members[].value} 도 {@code userName}/{@code externalId} 과 똑같이 정규화한다.
+     * 정규화하지 않으면 IdP 가 우리가 발급한 id 를 그대로 돌려주지 않을 때 그 멤버는
+     * DynamoDB 에 저장되고 201/200 응답에도 실려 나가지만 튜플은 하나도 만들어지지 않는다 —
+     * {@link dev.starryeye.organization.core.tuple.TupleMapper} 가 스냅샷에서 그 id 를 찾지
+     * 못해 경고만 남기고 건너뛰기 때문이다. IdP 는 아무 권한도 주지 못한 프로비저닝을
+     * 성공으로 기록하게 된다.
+     */
+    private static Mono<Set<MemberRef>> toMemberRefs(List<ScimMember> members, MemberTypeResolver resolver) {
+        if (members == null || members.isEmpty()) {
+            return Mono.just(Set.of());
         }
-        Set<MemberRef> refs = new LinkedHashSet<>();
-        for (ScimMember member : members) {
-            if (member.value() == null || member.value().isBlank()) {
-                throw ScimException.invalidSyntax("members 원소에 value 가 없습니다");
-            }
-            // SCIM 에서 type 은 선택 필드다. 없으면 User 로 간주한다.
-            boolean isGroup = member.type() != null && member.type().equalsIgnoreCase("Group");
-            refs.add(isGroup ? MemberRef.group(member.value()) : MemberRef.user(member.value()));
+        return Flux.fromIterable(members)
+                .concatMap(member -> memberRef(member, resolver))
+                .collect(LinkedHashSet<MemberRef>::new, Set::add)
+                .map(refs -> refs);
+    }
+
+    private static Mono<MemberRef> memberRef(ScimMember member, MemberTypeResolver resolver) {
+        if (member.value() == null || member.value().isBlank()) {
+            return Mono.error(ScimException.invalidSyntax("members 원소에 value 가 없습니다"));
         }
-        return refs;
+        String id = IdNormalizer.normalize(member.value());
+        // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고 현재상태로 판정한다.
+        if (member.type() == null || member.type().isBlank()) {
+            return resolver.resolve(id).map(type -> new MemberRef(type, id));
+        }
+        return Mono.just(member.type().equalsIgnoreCase("Group")
+                ? MemberRef.group(id)
+                : MemberRef.user(id));
     }
 
     private static String formatted(ScimUser scim) {
