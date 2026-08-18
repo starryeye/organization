@@ -215,4 +215,115 @@ class IncrementalSyncUseCaseTest {
         assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas).isEmpty();
     }
+
+    @Test
+    @DisplayName("하위 조직을 제거해도 그 하위 조직 자신의 소속 튜플은 건드리지 않는다")
+    void 하위조직_제거가_그_하위조직의_멤버_튜플을_건드리지_않는다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+
+        // when — DEV001 에서 하위 조직 참조를 뗀다. DEV002 자신의 멤버는 그대로다
+        var result = useCase.upsertGroup(조직("DEV001")).block();
+
+        // then — child 튜플만 지워지고, DEV002 의 kim 소속 튜플은 건드리지 않는다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toDelete())
+                .containsExactly(RelationTuple.child("DEV002", "DEV001"));
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("조직을 삭제해도 그 하위 조직 자신의 소속 튜플은 건드리지 않는다")
+    void 조직_삭제가_하위조직의_멤버_튜플을_건드리지_않는다() {
+        // given
+        state.saveUser(직원("park", true)).block();
+        state.saveGroup(조직("DEV003", MemberRef.user("park"))).block();
+        state.saveGroup(조직("DEV002", MemberRef.group("DEV003"))).block();
+
+        // when
+        var result = useCase.removeGroup("DEV002").block();
+
+        // then — DEV002 -> DEV003 child 튜플만 지워지고, DEV003 자신의 park 소속 튜플은 그대로다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toDelete())
+                .containsExactly(RelationTuple.child("DEV003", "DEV002"));
+        assertThat(state.groups.get("DEV003").members()).containsExactly(MemberRef.user("park"));
+        assertThat(state.groups).doesNotContainKey("DEV002");
+    }
+
+    @Test
+    @DisplayName("직원 삭제 중 일부 조직에서 튜플 삭제가 실패하면 반영된 만큼만 상태를 지우고, 재시도가 남은 튜플을 다시 지운다")
+    void 직원_삭제_부분_실패시_재시도가_남은_튜플을_다시_지운다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("OPS001", MemberRef.user("kim"))).block();
+        writer.failFor(tuple -> tuple.object().equals("group:OPS001"));
+
+        // when
+        var result = useCase.removeUser("kim").block();
+
+        // then — 실패했으니 kim 은 삭제하지 않는다. DEV002 는 반영됐고, OPS001 은 실패해 그대로 남는다
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.users).containsKey("kim");
+        assertThat(state.groups.get("DEV002").members()).isEmpty();
+        assertThat(state.groups.get("OPS001").members()).containsExactly(MemberRef.user("kim"));
+
+        // when — 재시도 (실패 조건 해제 전, appliedDeltas 만 확인)
+        writer.appliedDeltas.clear();
+        var retry = useCase.removeUser("kim").block();
+
+        // then — 이번엔 OPS001 튜플만 다시 지우려 시도한다 (DEV002 는 이미 끝났으니 재등장하지 않는다)
+        assertThat(retry.fullyApplied()).isFalse();
+        assertThat(writer.appliedDeltas.get(0).toDelete())
+                .containsExactly(RelationTuple.directMember("kim", "OPS001"));
+    }
+
+    @Test
+    @DisplayName("조직 삭제 중 상위 조직 튜플 삭제가 실패하면 조직을 지우지 않고 재시도를 위해 남겨둔다")
+    void 조직_삭제_부분_실패시_조직을_지우지_않는다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        writer.failFor(tuple -> tuple.relation().equals(RelationTuple.CHILD));
+
+        // when
+        var result = useCase.removeGroup("DEV002").block();
+
+        // then — kim 튜플은 성공적으로 지워졌지만, child 튜플 삭제는 실패해 DEV002 는 지우지 않는다
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.groups).containsKey("DEV002");
+        assertThat(state.groups.get("DEV002").members()).isEmpty();
+        assertThat(state.groups.get("DEV001").members()).containsExactly(MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("비활성화 반영이 전부 실패하면 활성 상태를 되돌려 재시도가 다시 삭제를 시도하게 한다")
+    void 비활성화_전체_실패시_재시도가_다시_삭제를_시도한다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        writer.failFor(tuple -> true);
+
+        // when
+        var result = useCase.upsertUser(직원("kim", false)).block();
+
+        // then — 실패했으니 active 를 되돌려 저장한다. 그대로 false 를 저장하면 다음 diff 가 이미
+        // 같다고 판단해 영원히 재시도하지 못한다
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.users.get("kim").active()).isTrue();
+
+        // when — 재시도 (실패 조건 해제)
+        writer.appliedDeltas.clear();
+        writer.failFor(tuple -> false);
+        var retry = useCase.upsertUser(직원("kim", false)).block();
+
+        // then
+        assertThat(retry.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toDelete())
+                .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+    }
 }
