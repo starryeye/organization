@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimMapperTest {
 
@@ -188,5 +189,132 @@ class ScimMapperTest {
 
         // then
         assertThat(scim.emails()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("userName 에 금지 문자가 있으면 정규화돼 id 에 반영된다")
+    void userName의_금지_문자가_정규화된다() {
+        // given — 공백, 콜론, 해시 등 IdNormalizer 가 제거하는 문자
+        var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "kim lee:admin#1",
+                null, null, List.of(), null, null);
+
+        // when
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+
+        // then
+        assertThat(user.id()).isEqualTo("kim_lee_admin_1");
+    }
+
+    @Test
+    @DisplayName("externalId 에 금지 문자가 있으면 정규화돼 조직코드에 반영된다")
+    void externalId의_금지_문자가_정규화된다() {
+        // given — 공백, 콜론 등 IdNormalizer 가 제거하는 문자
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV 001:main", "개발본부",
+                List.of(), null);
+
+        // when
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+
+        // then
+        assertThat(group.id()).isEqualTo("DEV_001_main");
+    }
+
+    @Test
+    @DisplayName("primary 이메일이 첫 번째가 아니면 primary 를 택한다")
+    void primary_이메일을_우선한다() {
+        // given — 두 이메일 중 두 번째가 primary
+        var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "kim", null, null,
+                List.of(new ScimEmail("a@example.com", "home", false),
+                        new ScimEmail("b@example.com", "work", true)), true, null);
+
+        // when
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+
+        // then
+        assertThat(user.email()).isEqualTo("b@example.com");
+    }
+
+    @Test
+    @DisplayName("displayName 과 name.formatted 가 모두 없으면 userName 을 표시명으로 쓴다")
+    void 세_번째_fallback_userName이_표시명이_된다() {
+        // given
+        var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "kim.lee",
+                null, null, List.of(), null, null);
+
+        // when
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+
+        // then
+        assertThat(user.displayName()).isEqualTo("kim.lee");
+    }
+
+    @Test
+    @DisplayName("멤버의 type 이 null 이면 User 로 간주한다")
+    void null_type은_User로_간주된다() {
+        // given
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
+                List.of(new ScimMember("kim", null, null),
+                        new ScimMember("DEV002", "Group", null)), null);
+
+        // when
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim);
+
+        // then
+        assertThat(group.members())
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("userName 이 없으면 invalidSyntax 예외를 던진다")
+    void userName이_없으면_예외() {
+        // given
+        var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, null,
+                null, null, List.of(), null, null);
+
+        // when & then
+        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim))
+                .isInstanceOf(ScimException.class)
+                .hasMessage("userName 은 필수입니다");
+    }
+
+    @Test
+    @DisplayName("userName 이 빈 문자열이면 invalidSyntax 예외를 던진다")
+    void userName이_빈_문자열이면_예외() {
+        // given
+        var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "   ",
+                null, null, List.of(), null, null);
+
+        // when & then
+        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim))
+                .isInstanceOf(ScimException.class)
+                .hasMessage("userName 은 필수입니다");
+    }
+
+    @Test
+    @DisplayName("멤버의 value 가 없으면 invalidSyntax 예외를 던진다")
+    void 멤버_value가_없으면_예외() {
+        // given
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
+                List.of(new ScimMember(null, "User", null)), null);
+
+        // when & then
+        assertThatThrownBy(() -> ScimMapper.toDirectoryGroup(scim))
+                .isInstanceOf(ScimException.class)
+                .hasMessage("members 원소에 value 가 없습니다");
+    }
+
+    @Test
+    @DisplayName("도메인 유저를 SCIM 으로 변환할 때 id 와 userName 이 구분된다")
+    void 유저_roundtrip_id_userName_구분() {
+        // given
+        var user = new DirectoryUser("kim", "emp-1001", "kim.lee", "김철수", "kim@example.com", true);
+
+        // when
+        ScimUser scim = ScimMapper.toScimUser(user);
+
+        // then
+        assertThat(scim.id()).isEqualTo("kim");
+        assertThat(scim.userName()).isEqualTo("kim.lee");
+        assertThat(scim.externalId()).isEqualTo("emp-1001");
     }
 }
