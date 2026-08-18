@@ -168,6 +168,121 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("상위 조직이 이미 참조 중인 하위 조직이 나중에 생겨도 child 튜플이 생성된다")
+    void 상위조직이_먼저_참조한_하위조직이_나중에_도착해도_child_튜플이_생성된다() {
+        // given — DEV001 이 아직 존재하지 않는 DEV002 를 하위 조직으로 갖고 있다.
+        // (그 시점에는 TupleMapper 가 경고만 남기고 child 엣지를 건너뛰었다)
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+
+        // when — DEV002 가 뒤늦게 도착한다
+        var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // then — 자기 멤버 튜플뿐 아니라 상위 조직에서의 child 엣지도 함께 만들어져야
+        // kim 이 DEV001 로 롤업된다. 최소 스냅샷이 상위 조직을 못 보면 이 엣지가 영영 안 생긴다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite()).containsExactlyInAnyOrder(
+                RelationTuple.directMember("kim", "DEV002"),
+                RelationTuple.child("DEV002", "DEV001"));
+        assertThat(writer.appliedDeltas.get(0).toDelete()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("이미 존재하던 하위 조직을 수정할 때는 상위 조직의 child 튜플을 다시 쓰지 않는다")
+    void 기존_하위조직_수정은_상위_child_튜플을_건드리지_않는다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002")).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+
+        // when — DEV002 자신의 멤버만 바뀐다
+        var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // then — child 엣지는 before/after 양쪽에 있으므로 델타에 나타나지 않는다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite())
+                .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+        assertThat(writer.appliedDeltas.get(0).toDelete()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("새 조직의 튜플 반영이 실패하면 조직 레코드를 만들지 않아 재시도가 다시 시도한다")
+    void 새_조직_반영이_실패하면_레코드를_만들지_않는다() {
+        // given — DEV001 이 아직 없는 DEV002 를 참조 중이고, 튜플 반영이 전부 실패한다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        writer.failFor(tuple -> true);
+
+        // when
+        var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // then — 레코드를 만들어 버리면 다음 diff 의 "이전"에 child 엣지가 이미 포함돼
+        // 그 엣지를 영원히 다시 쓰지 못한다
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.groups).doesNotContainKey("DEV002");
+
+        // when — 재시도 (실패 조건 해제)
+        writer.appliedDeltas.clear();
+        writer.failFor(tuple -> false);
+        var retry = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(retry.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite()).containsExactlyInAnyOrder(
+                RelationTuple.directMember("kim", "DEV002"),
+                RelationTuple.child("DEV002", "DEV001"));
+        assertThat(state.groups).containsKey("DEV002");
+    }
+
+    @Test
+    @DisplayName("순환을 닫는 child 엣지는 최소 스냅샷이 그래프를 못 봐도 기록하지 않는다")
+    void 순환을_닫는_child_엣지는_기록하지_않는다() {
+        // given — A -> B -> C 사슬. 최소 스냅샷에는 C 와 그 상위 B 까지만 실리므로
+        // TupleMapper 의 DFS 만으로는 A 가 C 의 조상이라는 사실을 볼 수 없다(설계 §5.3)
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("B", MemberRef.group("C"))).block();
+        state.saveGroup(조직("A", MemberRef.group("B"))).block();
+
+        // when — C 에 A 를 하위 조직으로 넣어 A -> B -> C -> A 순환을 닫으려 한다
+        var result = useCase.upsertGroup(조직("C", MemberRef.group("A"))).block();
+
+        // then — 전체 스냅샷이었다면 TupleMapper 가 거절했을 엣지다. SCIM 도 거절해야 한다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("자기 자신을 하위 조직으로 넣는 엣지도 기록하지 않는다")
+    void 자기_자신을_하위조직으로_넣는_엣지는_기록하지_않는다() {
+        // given
+        state.saveGroup(조직("DEV002")).block();
+
+        // when
+        var result = useCase.upsertGroup(조직("DEV002", MemberRef.group("DEV002"))).block();
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("순환이 아닌 깊은 계층의 child 엣지는 정상적으로 기록된다")
+    void 순환이_아닌_깊은_계층의_엣지는_기록된다() {
+        // given — A -> B 사슬이 이미 있고, C 는 아직 아무 데도 안 붙어 있다
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("B")).block();
+        state.saveGroup(조직("A", MemberRef.group("B"))).block();
+
+        // when — B 아래에 C 를 붙인다. 순환이 아니므로 그대로 기록돼야 한다
+        var result = useCase.upsertGroup(조직("B", MemberRef.group("C"))).block();
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite())
+                .containsExactly(RelationTuple.child("C", "B"));
+    }
+
+    @Test
     @DisplayName("직원을 삭제하면 소속 튜플이 지워지고 현재상태에서도 사라진다")
     void 직원_삭제가_튜플과_상태를_지운다() {
         // given

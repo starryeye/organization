@@ -19,7 +19,9 @@ import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -33,13 +35,39 @@ import java.util.Set;
  *
  * <p>영향 범위:
  * <ul>
- *   <li>조직 변경 — 그 조직 + 그 조직의 멤버 유저들(활성 여부 판정에 필요) + 멤버로
- *       참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child 엣지를
- *       만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
+ *   <li>조직 변경 — 그 조직 + <b>그 조직을 하위 조직으로 갖는 상위 조직들</b>(멤버 목록까지
+ *       그대로. {@link #upsertGroup} 참고) + 그 조직들의 멤버 유저들(활성 여부 판정에 필요) +
+ *       멤버로 참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child
+ *       엣지를 만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
  *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고)</li>
  *   <li>유저 변경 — 그 유저 + 그 유저가 속한 모든 조직({@code findGroupIdsContaining} 으로
  *       찾음). {@code active} 가 뒤집히면 그 유저의 모든 {@code direct_member} 튜플이
  *       생기거나 사라진다</li>
+ * </ul>
+ *
+ * <p><b>최소 스냅샷이 볼 수 있는 규칙과 볼 수 없는 규칙(설계의 경계).</b>
+ * "튜플 규칙은 {@link TupleMapper} 한 곳에만 있다"는 명제는 <i>멤버 단위</i> 규칙에 대해서만
+ * 무조건 참이다. 최소 스냅샷은 그래프 전체를 싣지 않으므로 <i>그래프 전역</i> 규칙은 그대로는
+ * 성립하지 않는다.
+ * <ul>
+ *   <li><b>스냅샷이 볼 수 있는 것(멤버 단위 규칙, {@link TupleMapper} 가 그대로 담당).</b>
+ *       비활성 유저는 튜플을 만들지 않는다 / 스냅샷에 없는 유저·조직은 경고하고 건너뛴다 /
+ *       조직명은 튜플에 넣지 않는다. 이 규칙들은 한 조직과 그 직속 멤버만 보면 판정되고,
+ *       최소 스냅샷은 언제나 그만큼은 싣는다.</li>
+ *   <li><b>스냅샷이 볼 수 없는 것 1 — child 엣지의 존재 조건.</b> 엣지 {@code (child, parent)}
+ *       는 부모 쪽 멤버 목록에서 나오므로, 자식만 실은 스냅샷에는 아예 나타나지 않는다.
+ *       → {@link #upsertGroup} 이 {@link #parentsOf} 로 <b>상위 조직들을 멤버 목록째로</b>
+ *       both 스냅샷에 싣는 것으로 해결한다. 그래야 "부모가 먼저 참조해 둔 자식이 나중에 도착"
+ *       하는 순서에서도 엣지가 만들어진다. 이때 <b>없던 조직은 before 스냅샷에서 완전히
+ *       빼야</b> 한다 — 멤버 0개짜리 대역을 넣으면 before 에도 엣지가 생겨 델타가 비어버린다.</li>
+ *   <li><b>스냅샷이 볼 수 없는 것 2 — 비순환 보장(설계 §5.3).</b>
+ *       {@link TupleMapper#toTuples} 의 DFS 는 스냅샷 안의 그래프만 훑는다. 참조로 딸려온
+ *       하위 조직은 일부러 멤버를 비워 싣기 때문에({@link #expandWithReferencedGroups})
+ *       두 홉 이상 떨어진 순환은 최소 스냅샷에서 보이지 않는다.
+ *       → 새로 생기는 child 엣지마다 {@link #reaches} 로 저장소를 타고 자손을 훑어
+ *       도달성을 직접 확인하고, 순환을 닫는 엣지는 {@link TupleMapper} 와 같은 문구로 경고하며
+ *       버린다({@link #withoutCycleCreatingEdges}). 조상·자손 전체를 스냅샷에 싣는 방법도
+ *       있지만 요청 한 건마다 비용이 훨씬 크다.</li>
  * </ul>
  *
  * <p>이 유스케이스는 {@code SyncRun} 을 기록하지 않는다. SCIM 은 요청 단위라 이력이 폭증한다.
@@ -94,26 +122,53 @@ public class IncrementalSyncUseCase {
     /**
      * 조직 생성·수정. 멤버 목록을 통째로 교체한다.
      *
+     * <p><b>상위 조직도 함께 싣는다.</b> child 엣지 {@code (group:자식, child, group:부모)} 는
+     * 부모의 멤버 목록에서 나오므로, 이 조직만 실은 스냅샷에는 그 엣지가 아예 등장하지 않는다.
+     * 그래서 부모가 이미 이 조직을 멤버로 적어 둔 채 이 조직이 뒤늦게 도착하면
+     * ({@link TupleMapper} 가 "스냅샷에 없어 건너뜁니다" 로 미뤄 뒀던 경우) 그 엣지를 영원히
+     * 쓰지 못했다. {@link #parentsOf} 로 상위 조직들을 <b>멤버 목록 그대로</b> before/after
+     * 양쪽에 실어 기여를 대칭으로 만든다 — 이미 존재하던 조직이면 엣지가 양쪽에 다 있어
+     * 델타에 나타나지 않고, 새로 생긴 조직이면 after 에만 있어 정확히 그 엣지만 새로 쓰인다.
+     *
+     * <p><b>없던 조직은 before 에서 통째로 뺀다.</b> "멤버 0개인 조직이 있다" 와 "조직이 없다"
+     * 는 서로 다른 상태다. 없는 조직 자리에 멤버 0개짜리 대역을 넣으면
+     * {@link TupleMapper#toTuples} 가 before 에서도 부모의 child 엣지를 만들어 버려 위 델타가
+     * 다시 비어버린다. (유저 쪽 {@link #upsertUser} 의 대역은 <b>비활성</b> 유저라 어느 쪽
+     * 스냅샷에서도 튜플 기여가 0 이므로 같은 문제가 없다 — 확인함.)
+     *
      * <p>부분 실패 시에는 요청된 멤버 목록을 그대로 저장하지 않는다. 실제로 튜플이 반영된
      * 멤버만 추가되고, 실제로 튜플이 지워진 멤버만 제외된다({@link #reconcileGroupMembers}).
+     * 다만 <b>아직 없던 조직</b>은 하나라도 실패하면 레코드 자체를 만들지 않는다. 만들어 두면
+     * 다음 diff 의 "이전"에 부모의 child 엣지가 이미 포함돼 그 엣지를 영원히 다시 쓰지 못한다
+     * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
-        DirectoryGroup emptyLike = new DirectoryGroup(group.id(), group.externalId(), group.displayName(), Set.of());
-
         return state.findGroup(group.id())
-                .defaultIfEmpty(emptyLike)
-                .flatMap(existingGroup -> {
-                    Mono<DirectorySnapshot> before = snapshotOfGroups(Set.of(existingGroup));
-                    Mono<DirectorySnapshot> after = snapshotOfGroups(Set.of(group));
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(existing -> parentsOf(group.id()).flatMap(parents -> {
+                    Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);
+                    existing.ifPresent(beforeGroups::add);
+                    Set<DirectoryGroup> afterGroups = new LinkedHashSet<>(parents);
+                    afterGroups.add(group);
+
+                    Mono<DirectorySnapshot> before = snapshotOfGroups(beforeGroups);
+                    Mono<DirectorySnapshot> after = snapshotOfGroups(afterGroups);
+
+                    DirectoryGroup existingOrEmpty = existing.orElseGet(() -> new DirectoryGroup(
+                            group.id(), group.externalId(), group.displayName(), Set.of()));
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
+                        if (existing.isEmpty() && result.hasFailure()) {
+                            return Mono.empty();
+                        }
                         DirectoryGroup reconciled = reconcileGroupMembers(
-                                existingGroup, group, beforeTuples, afterTuples, result);
+                                existingOrEmpty, group, beforeTuples, afterTuples, result);
                         return Mono.defer(() -> state.saveGroup(reconciled));
                     };
 
                     return diffAndApply(before, after, commit);
-                });
+                }));
     }
 
     /**
@@ -201,23 +256,111 @@ public class IncrementalSyncUseCase {
      * (아무것도 실패하지 않았으므로 각 연산의 커밋 로직이 요청값을 그대로 반영해도 안전하다).
      * 변경이 있으면 실제 {@code writer.apply} 결과로 호출한다 — 성공·부분실패 어느 쪽이든
      * {@code commit} 은 항상 실행된다.
+     *
+     * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
+     * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이
+     * 이미 "실제로 반영된 만큼만" 상태에 남기도록 되어 있어 <b>멤버십은 어차피 그대로 유지</b>
+     * 되고, 그렇게 해서 남는 것은 조직/직원의 META 속성(displayName, email 같은 것)뿐이다.
+     * 이 필드들은 어느 것도 튜플 식별자가 아니라서 저장돼도 다음 diff 를 오염시키지 않는다.
+     * 오히려 이름 변경 같은 튜플과 무관한 수정이 튜플 실패에 발목잡히지 않아 스펙보다 낫다.
+     * 단 하나의 예외가 <b>레코드의 존재 자체</b>다 — 그것은 부모의 child 엣지가 성립하는
+     * 조건이므로 튜플 식별자에 해당한다. 그래서 {@link #upsertGroup} 은 새 조직에 한해,
+     * {@link #removeUser}/{@link #removeGroup} 은 삭제에 한해 실패 시 존재 여부를 건드리지 않는다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             Set<RelationTuple> before = tuplesOf(both.getT1());
-            Set<RelationTuple> after = tuplesOf(both.getT2());
-            TupleDelta delta = TupleDiff.between(before, after);
+            return withoutCycleCreatingEdges(before, tuplesOf(both.getT2())).flatMap(after -> {
+                TupleDelta delta = TupleDiff.between(before, after);
 
-            if (delta.isEmpty()) {
-                return commit.apply(TupleWriteResult.empty(), before, after)
-                        .thenReturn(IncrementalSyncResult.noChange());
-            }
-            return writer.apply(delta)
-                    .flatMap(result -> commit.apply(result, before, after)
-                            .thenReturn(IncrementalSyncResult.of(result)));
+                if (delta.isEmpty()) {
+                    return commit.apply(TupleWriteResult.empty(), before, after)
+                            .thenReturn(IncrementalSyncResult.noChange());
+                }
+                return writer.apply(delta)
+                        .flatMap(result -> commit.apply(result, before, after)
+                                .thenReturn(IncrementalSyncResult.of(result)));
+            });
         });
+    }
+
+    /**
+     * 새로 생기는 child 엣지 가운데 조직 계층에 순환을 만드는 것을 걸러낸다(설계 §5.3).
+     *
+     * <p>{@link TupleMapper#toTuples} 도 같은 보장을 DFS 로 하지만 그것은 <b>스냅샷 안의</b>
+     * 그래프만 본다. 최소 스냅샷은 참조로 딸려온 하위 조직을 일부러 멤버 없이 싣기 때문에
+     * ({@link #expandWithReferencedGroups}) 두 홉 이상 떨어진 순환은 보이지 않는다. 그래서
+     * 여기서 현재상태 저장소를 직접 타고 내려가 도달성을 확인한다 — 새 엣지의 자식으로부터
+     * 부모에 이미 도달할 수 있다면 그 엣지는 순환을 닫는다.
+     *
+     * <p>버려진 엣지는 {@link #reconcileGroupMembers} 입장에서 "애초에 튜플이 필요 없던 멤버"와
+     * 똑같이 취급된다 — 멤버십 자체는 상태에 남고 튜플만 생기지 않는다. 이는 전체 동기화에서
+     * {@link TupleMapper} 가 순환 간선을 버릴 때와 같은 결과다.
+     */
+    private Mono<Set<RelationTuple>> withoutCycleCreatingEdges(Set<RelationTuple> before,
+                                                               Set<RelationTuple> after) {
+        List<RelationTuple> newEdges = after.stream()
+                .filter(tuple -> tuple.relation().equals(RelationTuple.CHILD))
+                .filter(tuple -> !before.contains(tuple))
+                .toList();
+        if (newEdges.isEmpty()) {
+            return Mono.just(after);
+        }
+        return Flux.fromIterable(newEdges)
+                .concatMap(edge -> {
+                    String child = stripType(edge.user());
+                    String parent = stripType(edge.object());
+                    return reaches(child, parent)
+                            .filter(Boolean::booleanValue)
+                            .doOnNext(cycle -> log.warn("튜플 변환 경고: {}",
+                                    "조직 '%s' → '%s' 간선이 순환을 만들어 제외합니다".formatted(parent, child)))
+                            .map(cycle -> edge);
+                })
+                .collect(LinkedHashSet<RelationTuple>::new, Set::add)
+                .map(dropped -> {
+                    if (dropped.isEmpty()) {
+                        return after;
+                    }
+                    Set<RelationTuple> kept = new LinkedHashSet<>(after);
+                    kept.removeAll(dropped);
+                    return kept;
+                });
+    }
+
+    /**
+     * {@code from} 에서 하위 조직 간선을 따라 {@code target} 에 닿는지 현재상태 저장소를 훑어
+     * 확인한다. 자기 자신도 도달한 것으로 본다 — 자기 자신을 하위 조직으로 넣는 것도 순환이다.
+     */
+    private Mono<Boolean> reaches(String from, String target) {
+        if (from.equals(target)) {
+            return Mono.just(true);
+        }
+        Set<String> visited = new LinkedHashSet<>();
+        visited.add(from);
+        return walk(List.of(from), target, visited);
+    }
+
+    private Mono<Boolean> walk(List<String> frontier, String target, Set<String> visited) {
+        if (frontier.isEmpty()) {
+            return Mono.just(false);
+        }
+        return Flux.fromIterable(frontier)
+                .flatMap(state::findGroup, LOAD_CONCURRENCY)
+                .flatMapIterable(DirectoryGroup::members)
+                .filter(member -> member.type() == MemberType.GROUP)
+                .map(MemberRef::id)
+                .filter(visited::add)
+                .collectList()
+                .flatMap(next -> next.contains(target)
+                        ? Mono.just(true)
+                        : walk(next, target, visited));
+    }
+
+    private static String stripType(String typedId) {
+        int separator = typedId.indexOf(':');
+        return separator < 0 ? typedId : typedId.substring(separator + 1);
     }
 
     private Set<RelationTuple> tuplesOf(DirectorySnapshot snapshot) {
