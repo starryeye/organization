@@ -47,12 +47,63 @@ class ScimUserHandlerTest {
                 .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
                 .exchange()
                 .expectStatus().isCreated()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
                 .jsonPath("$.id").isEqualTo("kim")
                 .jsonPath("$.userName").isEqualTo("kim")
                 .jsonPath("$.active").isEqualTo(true);
 
         assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("요청 본문이 비어 있으면 400 invalidSyntax 로 거절한다")
+    void 본문이_비어있으면_400이다() {
+        // given, when, then
+        client.post().uri("/scim/v2/Users")
+                .contentType(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidSyntax")
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+
+        assertThat(state.users).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지원하지 않는 Content-Type 은 500 이 아니라 그 상태코드 그대로 SCIM Error 로 거절한다")
+    void 지원하지_않는_ContentType은_500이_아니다() {
+        // given
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"kim"}
+                """;
+
+        // when, then
+        client.post().uri("/scim/v2/Users")
+                .contentType(MediaType.TEXT_PLAIN).bodyValue(body)
+                .exchange()
+                .expectStatus().isEqualTo(415)
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
+                .expectBody()
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+    }
+
+    @Test
+    @DisplayName("있는 직원을 조회하면 200 과 함께 SCIM User 본문이 돌아온다")
+    void 있는_직원을_조회한다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", "emp-1001", "kim", "김철수",
+                "kim@example.com", true)).block();
+
+        // when, then
+        client.get().uri("/scim/v2/Users/kim")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.id").isEqualTo("kim")
+                .jsonPath("$.userName").isEqualTo("kim")
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.USER);
     }
 
     @Test
@@ -68,6 +119,7 @@ class ScimUserHandlerTest {
                 .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
                 .exchange()
                 .expectStatus().isBadRequest()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("invalidSyntax");
     }

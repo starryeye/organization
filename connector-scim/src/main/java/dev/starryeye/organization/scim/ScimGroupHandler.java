@@ -12,6 +12,8 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
+
 @RequiredArgsConstructor
 public class ScimGroupHandler {
 
@@ -20,6 +22,7 @@ public class ScimGroupHandler {
 
     public Mono<ServerResponse> create(ServerRequest request) {
         return request.bodyToMono(ScimGroup.class)
+                .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .map(ScimMapper::toDirectoryGroup)
                 .flatMap(group -> state.findGroup(group.id())
                         .flatMap(existing -> Mono.<DirectoryGroup>error(ScimException.uniqueness(
@@ -33,14 +36,15 @@ public class ScimGroupHandler {
         String id = request.pathVariable("id");
         return state.findGroup(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .flatMap(group -> ServerResponse.ok().bodyValue(ScimMapper.toScimGroup(group)));
+                .flatMap(group -> ServerResponse.ok().contentType(SCIM_JSON).bodyValue(ScimMapper.toScimGroup(group)));
     }
 
     public Mono<ServerResponse> replace(ServerRequest request) {
         String id = request.pathVariable("id");
         return state.findGroup(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .then(request.bodyToMono(ScimGroup.class))
+                .then(request.bodyToMono(ScimGroup.class)
+                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
                 .map(ScimMapper::toDirectoryGroup)
                 // 경로의 조직코드가 정본이다. 본문의 externalId 가 달라도 리소스를 옮기지 않는다.
                 .map(group -> new DirectoryGroup(id, group.externalId(),
@@ -53,7 +57,8 @@ public class ScimGroupHandler {
         String id = request.pathVariable("id");
         return state.findGroup(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .zipWith(request.bodyToMono(ScimPatchOp.class))
+                .zipWith(request.bodyToMono(ScimPatchOp.class)
+                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
                 .map(both -> ScimPatchApplier.applyToGroup(both.getT1(), both.getT2()))
                 .flatMap(group -> sync.upsertGroup(group)
                         .flatMap(result -> respond(HttpStatus.OK, id, result)));
@@ -80,6 +85,9 @@ public class ScimGroupHandler {
                     "일부 튜플 적용에 실패했습니다. 재시도해 주세요: " + id));
         }
         return state.findGroup(id)
-                .flatMap(saved -> ServerResponse.status(status).bodyValue(ScimMapper.toScimGroup(saved)));
+                .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
+                .flatMap(saved -> ServerResponse.status(status)
+                        .contentType(SCIM_JSON)
+                        .bodyValue(ScimMapper.toScimGroup(saved)));
     }
 }

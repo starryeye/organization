@@ -46,6 +46,7 @@ class ScimGroupHandlerTest {
                 .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
                 .exchange()
                 .expectStatus().isCreated()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
                 .jsonPath("$.id").isEqualTo("DEV001")
                 .jsonPath("$.displayName").isEqualTo("개발본부")
@@ -75,12 +76,66 @@ class ScimGroupHandlerTest {
     }
 
     @Test
+    @DisplayName("요청 본문이 비어 있으면 400 invalidSyntax 로 거절한다")
+    void 본문이_비어있으면_400이다() {
+        // given, when, then
+        client.post().uri("/scim/v2/Groups")
+                .contentType(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidSyntax")
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+
+        assertThat(state.groups).isEmpty();
+    }
+
+    @Test
+    @DisplayName("있는 조직을 조회하면 200 과 함께 SCIM Group 본문이 돌아온다")
+    void 있는_조직을_조회한다() {
+        // given
+        state.saveGroup(new DirectoryGroup("DEV001", "DEV001", "개발본부", Set.of())).block();
+
+        // when, then
+        client.get().uri("/scim/v2/Groups/DEV001")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.id").isEqualTo("DEV001")
+                .jsonPath("$.displayName").isEqualTo("개발본부")
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.GROUP);
+    }
+
+    @Test
+    @DisplayName("PUT 은 조직을 통째로 교체한다")
+    void PUT은_조직을_교체한다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of())).block();
+        String body = "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],"
+                + "\"externalId\":\"DEV002\",\"displayName\":\"신설백엔드팀\","
+                + "\"members\":[{\"value\":\"kim\",\"type\":\"User\"}]}";
+
+        // when, then
+        client.put().uri("/scim/v2/Groups/DEV002")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.displayName").isEqualTo("신설백엔드팀");
+
+        assertThat(state.groups.get("DEV002").displayName()).isEqualTo("신설백엔드팀");
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
     @DisplayName("없는 조직을 조회하면 404 와 SCIM Error 본문이 돌아온다")
     void 없는_조직_조회는_404다() {
         // given, when, then
         client.get().uri("/scim/v2/Groups/DEV999")
                 .exchange()
                 .expectStatus().isNotFound()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("404")
                 .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR)

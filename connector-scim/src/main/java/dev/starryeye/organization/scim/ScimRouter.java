@@ -9,6 +9,7 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
@@ -21,6 +22,9 @@ import java.util.Map;
  */
 @Slf4j
 public final class ScimRouter {
+
+    /** RFC 7644 §3.1 이 규정한 SCIM 응답 미디어 타입. 핸들러의 모든 응답이 이걸 써야 한다. */
+    public static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json");
 
     private ScimRouter() {
     }
@@ -51,6 +55,11 @@ public final class ScimRouter {
         if (error instanceof DecodingException || error instanceof ServerWebInputException) {
             return write(HttpStatus.BAD_REQUEST, "invalidSyntax", "요청 본문을 해석할 수 없습니다");
         }
+        // Content-Type 불일치(415) 등 WebFlux 가 이미 적절한 상태코드를 정해준 예외는 그대로 돌려준다.
+        // 여기를 500 으로 뭉개면 IdP 가 결코 성공할 수 없는 요청을 무한히 재시도하게 된다.
+        if (error instanceof ResponseStatusException rse) {
+            return write(HttpStatus.valueOf(rse.getStatusCode().value()), null, rse.getReason());
+        }
         log.error("SCIM 요청 처리 중 예기치 않은 오류", error);
         return write(HttpStatus.INTERNAL_SERVER_ERROR, null, "내부 오류가 발생했습니다");
     }
@@ -59,7 +68,7 @@ public final class ScimRouter {
         ScimError body = new ScimError(List.of(ScimSchemas.ERROR),
                 String.valueOf(status.value()), scimType, detail);
         return ServerResponse.status(status)
-                .contentType(MediaType.APPLICATION_JSON)
+                .contentType(SCIM_JSON)
                 .bodyValue(body);
     }
 
@@ -77,6 +86,6 @@ public final class ScimRouter {
                 "sort", Map.of("supported", false),
                 "etag", Map.of("supported", false),
                 "authenticationSchemes", List.of());
-        return ServerResponse.ok().bodyValue(config);
+        return ServerResponse.ok().contentType(SCIM_JSON).bodyValue(config);
     }
 }
