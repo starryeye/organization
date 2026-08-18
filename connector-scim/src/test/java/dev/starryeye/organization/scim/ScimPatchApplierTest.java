@@ -223,4 +223,30 @@ class ScimPatchApplierTest {
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("kim"));
     }
+
+    @Test
+    @DisplayName("path 없는 remove 는 invalidSyntax 로 거절한다")
+    void path_없는_remove는_거절한다_group() {
+        // given — RFC 7644 §3.5.2.1 에서 path 는 remove 에 필수다
+        var before = 조직(MemberRef.user("kim"));
+
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.applyToGroup(before,
+                패치("remove", null, Map.of("displayName", "플랫폼팀"))))
+                .isInstanceOf(ScimException.class)
+                .hasMessageContaining("replace");
+    }
+
+    @Test
+    @DisplayName("직원에서도 path 없는 remove 는 invalidSyntax 로 거절한다")
+    void path_없는_remove는_거절한다_user() {
+        // given — RFC 7644 §3.5.2.1 에서 path 는 remove 에 필수다
+        var before = 직원(true);
+
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(before,
+                패치("remove", null, Map.of("active", false))))
+                .isInstanceOf(ScimException.class)
+                .hasMessageContaining("replace");
+    }
 }

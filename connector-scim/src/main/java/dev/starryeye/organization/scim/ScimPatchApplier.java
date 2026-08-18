@@ -59,6 +59,7 @@ public final class ScimPatchApplier {
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
+            requireReplaceOrAdd(op, operation.op());
             return mergeGroupAttributes(group, asAttributeMap(operation.value()));
         }
 
@@ -117,6 +118,7 @@ public final class ScimPatchApplier {
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
+            requireReplaceOrAdd(op, operation.op());
             return mergeUserAttributes(user, asAttributeMap(operation.value()));
         }
 
