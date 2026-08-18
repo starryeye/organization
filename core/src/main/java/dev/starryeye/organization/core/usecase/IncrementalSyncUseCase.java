@@ -67,11 +67,19 @@ public class IncrementalSyncUseCase {
      * <p>반영이 실패하면 {@code active} 를 요청값 그대로 저장하지 않고 이전 값으로 되돌린다.
      * 그대로 저장하면 다음 동기화가 "이미 목표 상태"라고 오판해 실패한 튜플을 영원히
      * 다시 시도하지 못한다.
+     *
+     * <p>아직 한 번도 저장된 적 없는 직원은 <b>비활성으로 취급</b>해 "이전"을 구성한다 —
+     * 존재하지 않는 직원은 튜플을 만들지 않는다는 점에서 비활성 직원과 같다. 이 자리에
+     * 요청값(={@code user}) 자체를 fallback 으로 쓰면 before/after 가 똑같아져 델타가
+     * 비어버리고, 조직이 먼저 참조해 둔 신규 직원의 첫 튜플이 영원히 만들어지지 않는다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
+        DirectoryUser neverStored = new DirectoryUser(
+                user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
+
         return affectedGroupsOf(user.id())
                 .flatMap(groups -> state.findUser(user.id())
-                        .defaultIfEmpty(user)
+                        .defaultIfEmpty(neverStored)
                         .flatMap(existingUser -> {
                             Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(existingUser));
                             Mono<DirectorySnapshot> after = snapshotOf(groups, Mono.just(user));

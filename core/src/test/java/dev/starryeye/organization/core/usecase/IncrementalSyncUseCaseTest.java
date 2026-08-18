@@ -100,6 +100,24 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("멤버가 있는 하위 조직을 추가해도 그 하위 조직 자신의 멤버 튜플은 함께 딸려오지 않는다")
+    void 하위조직_추가시_그_하위조직_자신의_멤버_튜플은_함께_딸려오지_않는다() {
+        // given — DEV002 는 이미 kim 을 멤버로 갖고 있다 (기존 튜플, 이 연산과 무관)
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001")).block();
+
+        // when — DEV001 에 하위 조직 DEV002 를 추가한다
+        var result = useCase.upsertGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+
+        // then — child 튜플만 새로 생기고, DEV002 자신의 kim 소속 튜플(이미 존재)은 델타에 나타나지 않는다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite())
+                .containsExactly(RelationTuple.child("DEV002", "DEV001"));
+        assertThat(writer.appliedDeltas.get(0).toDelete()).isEmpty();
+    }
+
+    @Test
     @DisplayName("직원을 비활성화하면 그 직원이 속한 모든 조직의 튜플이 사라진다")
     void 비활성화가_모든_소속_튜플을_지운다() {
         // given
@@ -129,6 +147,22 @@ class IncrementalSyncUseCaseTest {
         useCase.upsertUser(직원("kim", true)).block();
 
         // then
+        assertThat(writer.appliedDeltas.get(0).toWrite())
+                .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+    }
+
+    @Test
+    @DisplayName("조직이 이미 참조 중인 멤버의 유저 레코드가 나중에 도착해도 소속 튜플이 생성된다")
+    void 조직이_먼저_참조한_유저가_나중에_도착해도_튜플이_생성된다() {
+        // given — DEV002 가 이미 kim 을 멤버로 갖고 있지만, kim 의 유저 레코드는 아직 도착하지 않았다
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // when — kim 의 유저 레코드가 뒤늦게 도착한다
+        var result = useCase.upsertUser(직원("kim", true)).block();
+
+        // then — 저장된 적 없는 유저를 요청값으로 되돌리면(active=true) before/after 가 같아져
+        // 델타가 비어버린다. 아직 없던 유저는 비활성처럼 취급해야 한다
+        assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toWrite())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
     }
