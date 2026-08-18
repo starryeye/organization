@@ -1,0 +1,74 @@
+dn: dc=example,dc=com
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: Example Corp
+
+dn: ou=people,dc=example,dc=com
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=com
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=kim,ou=people,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: kim
+cn: Kim Chulsoo
+sn: Kim
+displayName: 김철수
+mail: kim@example.com
+
+dn: uid=lee,ou=people,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: lee
+cn: Lee Younghee
+sn: Lee
+displayName: 이영희
+mail: lee@example.com
+
+dn: uid=park,ou=people,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: park
+cn: Park Minsu
+sn: Park
+displayName: 박민수
+mail: park@example.com
+
+dn: cn=DEV001,ou=groups,dc=example,dc=com
+objectClass: groupOfNames
+cn: DEV001
+description: 개발본부
+member: cn=DEV002,ou=groups,dc=example,dc=com
+member: uid=park,ou=people,dc=example,dc=com
+
+dn: cn=DEV002,ou=groups,dc=example,dc=com
+objectClass: groupOfNames
+cn: DEV002
+description: 백엔드팀
+member: uid=kim,ou=people,dc=example,dc=com
+member: uid=lee,ou=people,dc=example,dc=com
+
+dn: ou=company,dc=example,dc=com
+objectClass: organizationalUnit
+ou: company
+description: 전사
+
+dn: ou=DEV001,ou=company,dc=example,dc=com
+objectClass: organizationalUnit
+ou: DEV001
+description: 개발본부
+
+dn: ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+objectClass: organizationalUnit
+ou: DEV002
+description: 백엔드팀
+
+dn: uid=choi,ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com
+objectClass: inetOrgPerson
+uid: choi
+cn: Choi Jiwoo
+sn: Choi
+displayName: 최지우
+mail: choi@example.com

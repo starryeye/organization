@@ -1,0 +1,10 @@
+model
+  schema 1.1
+
+type user
+
+type group
+  relations
+    define direct_member: [user]
+    define child: [group]
+    define member: direct_member or member from child

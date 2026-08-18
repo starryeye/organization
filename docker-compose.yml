@@ -1,0 +1,33 @@
+services:
+  openfga:
+    image: openfga/openfga:v1.10.2
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: memory
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "8080:8080"
+      - "3000:3000"
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.3
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8000:8000"
+
+  openldap:
+    # bitnami/openldap:2.6 은 Bitnami 가 무료 이미지 배포를 중단하며 사라졌다.
+    # bitnamilegacy 는 마지막 무료 빌드를 보존해둔 네임스페이스로, 보안 패치가 더 이상 나오지 않는다.
+    # 이 컨테이너는 로컬 수동 검증 전용이며, 자동화 테스트(Task 12/13/18)는 임베디드 UnboundID LDAP 서버를 쓴다.
+    # 이 이미지가 사라지면: LDIF 시딩을 지원하는 다른 OpenLDAP 이미지로 교체하고 환경변수를 그에 맞게 조정한다.
+    image: bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
+    environment:
+      LDAP_ROOT: dc=example,dc=com
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: adminpassword
+      LDAP_SKIP_DEFAULT_TREE: "yes"
+      LDAP_CUSTOM_LDIF_DIR: /ldifs
+    volumes:
+      - ./docker/ldap:/ldifs:ro
+    ports:
+      - "1389:1389"

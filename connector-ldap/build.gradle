@@ -1,0 +1,7 @@
+dependencies {
+    api project(':core')
+    implementation libs.spring.ldap.core
+    implementation 'org.springframework.boot:spring-boot-starter'
+
+    testImplementation libs.unboundid.ldapsdk
+}

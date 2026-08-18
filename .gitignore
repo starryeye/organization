@@ -1,0 +1,10 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.idea/
+*.iml
+.DS_Store
+
+# SDD 작업 공간 (원장, 브리프, 리뷰 패키지) — 커밋 대상 아님
+.superpowers/
+.claude/worktrees/

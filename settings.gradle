@@ -1,0 +1,9 @@
+rootProject.name = 'organization'
+
+include 'core'
+include 'storage-dynamodb'
+include 'authz-openfga'
+include 'connector-ldap'
+include 'connector-scim'
+include 'app-ldap'
+include 'app-scim'

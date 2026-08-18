@@ -1,0 +1,7 @@
+dependencies {
+    api project(':core')
+    implementation libs.openfga.sdk
+    implementation 'org.springframework.boot:spring-boot-starter'
+
+    testImplementation libs.testcontainers.junit
+}
