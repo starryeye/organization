@@ -1,0 +1,11 @@
+sync:
+  archive-cron: "-"
+  purge-cron: "-"
+
+dynamodb:
+  region: ap-northeast-2
+  table-name: organization-scim-e2e
+  create-table-on-startup: true
+
+openfga:
+  store-name: organization-scim-e2e

@@ -18,3 +18,20 @@ dynamodb:
   create-table-on-startup: true
   snapshot-retention-days: 7
   syncrun-retention-days: 30
+
+sync:
+  archive-cron: "0 0 3 * * *"
+  purge-cron: "0 0 4 * * *"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    dev.starryeye.organization: DEBUG
