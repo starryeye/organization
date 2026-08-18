@@ -30,7 +30,10 @@ management:
         include: health,info,metrics,prometheus
   endpoint:
     health:
-      show-details: always
+      # 8082 는 SCIM 엔드포인트와 같은 포트이고 인증이 없다. always 로 두면
+      # openfga.api-url, dynamodb.table-name, Health.down(error) 의 예외 메시지가
+      # 그대로 공개된다.
+      show-details: when-authorized
 
 logging:
   level:

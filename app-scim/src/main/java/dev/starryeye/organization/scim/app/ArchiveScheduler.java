@@ -21,7 +21,7 @@ public class ArchiveScheduler {
      * 그것이 스케줄러 메서드 밖으로 새어나가 아래 에러 컨슈머를 건너뛴다. 그러면 실패가
      * 로그에 남지 않는다.
      */
-    @Scheduled(cron = "${sync.archive-cron}")
+    @Scheduled(cron = "${sync.archive-cron:0 0 3 * * *}")
     public void 스냅샷아카이빙() {
         Mono.defer(archive::execute)
                 .subscribe(
@@ -31,7 +31,7 @@ public class ArchiveScheduler {
     }
 
     /** DynamoDB Local 은 TTL 자동 삭제를 하지 않으므로 명시적으로 정리한다. */
-    @Scheduled(cron = "${sync.purge-cron}")
+    @Scheduled(cron = "${sync.purge-cron:0 0 4 * * *}")
     public void 만료스냅샷정리() {
         Mono.defer(snapshots::purgeExpired)
                 .subscribe(

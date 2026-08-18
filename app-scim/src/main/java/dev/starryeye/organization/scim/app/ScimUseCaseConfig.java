@@ -6,14 +6,12 @@ import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
 
 @Configuration
-@EnableConfigurationProperties(ArchiveProperties.class)
 public class ScimUseCaseConfig {
 
     @Bean

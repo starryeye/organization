@@ -134,9 +134,25 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 **목록 조회(`GET /Users`, `GET /Groups`)와 필터는 지원하지 않는다.**
 
-PATCH는 `members`의 `add`/`remove`/`replace`와 `members[value eq "..."]` 필터 패턴 하나만
-지원한다. 그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는
-반영되지 않은 변경을 반영됐다고 오해하면 안 되기 때문이다.
+지원하는 PATCH는 다음이 전부다.
+
+| 대상 | `path` | 지원 `op` |
+|---|---|---|
+| Group | `members` | `add` / `remove`(전체 비움) / `replace` |
+| Group | `members[value eq "..."]` | `remove` |
+| Group | `displayName` | `replace` / `add` |
+| Group | (path 없음) | `replace` / `add` — 본문을 부분 리소스로 보고 `displayName`·`members`만 병합 |
+| User | `active` / `displayName` / `userName` | `replace` / `add` |
+| User | (path 없음) | `replace` / `add` — `active`·`displayName`·`userName`만 병합 |
+
+그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
+않은 변경을 반영됐다고 오해하면 안 되기 때문이다. `path`는 대소문자를 구분한다.
+
+`members[].value`는 `userName`·`externalId`과 같은 규칙(`IdNormalizer`)으로 정규화한다.
+`members[].type`은 RFC 7643에서 선택 필드라 없을 수 있는데, 그때는 User로 단정하지 않고
+현재상태에서 조직 → 직원 순으로 찾아 판정한다 — 조직코드와 직원 아이디는 네임스페이스가
+달라 겹칠 수 있어서, 잘못 단정하면 IdP가 조직을 중첩하려던 요청이 엉뚱한 직원 소속 튜플이
+된다.
 
 SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기면 이력이 금방 폭증한다. 이력으로
 남는 것은 하루 1회 도는 아카이빙 배치(`trigger=ARCHIVE`)뿐이다.

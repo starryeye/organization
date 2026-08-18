@@ -9,3 +9,10 @@ dynamodb:
 
 openfga:
   store-name: organization-scim-e2e
+
+management:
+  endpoint:
+    health:
+      # 운영 기본값은 when-authorized 다. 테스트에는 인증이 없어 컴포넌트별 상태를
+      # 확인할 수 없으므로 여기서만 되돌린다.
+      show-details: always

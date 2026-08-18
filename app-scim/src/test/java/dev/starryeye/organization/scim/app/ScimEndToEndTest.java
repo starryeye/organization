@@ -240,4 +240,41 @@ class ScimEndToEndTest {
                 .jsonPath("$.components.dynamoDb.status").isEqualTo("UP")
                 .jsonPath("$.components.openFga.status").isEqualTo("UP");
     }
+
+    @Test
+    @Order(9)
+    @DisplayName("상위 조직을 먼저 만들고 하위 조직을 나중에 만들어도 롤업이 성립한다")
+    void 상위조직을_먼저_만들어도_롤업이_성립한다() {
+        // given — 순서 1 은 하위(DEV002) 를 먼저 만들었다. 여기서는 그 거울상,
+        // 즉 아직 존재하지 않는 조직을 멤버로 가진 상위 조직을 먼저 만든다.
+        // 이 시점에는 child 엣지를 만들 수 없어 TupleMapper 가 경고만 남기고 넘어간다
+        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "userName":"choi","displayName":"최지훈","active":true}
+                        """)
+                .exchange().expectStatus().isCreated();
+        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                         "externalId":"QA001","displayName":"품질본부",
+                         "members":[{"value":"QA002","type":"Group"}]}
+                        """)
+                .exchange().expectStatus().isCreated();
+
+        // when — 하위 조직이 뒤늦게 도착한다
+        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                         "externalId":"QA002","displayName":"테스트팀",
+                         "members":[{"value":"choi","type":"User"}]}
+                        """)
+                .exchange().expectStatus().isCreated();
+
+        // then — 직속 소속
+        assertThat(check("user:choi", "member", "group:QA002")).isTrue();
+        // then — 미뤄 뒀던 child 엣지가 이때 만들어져야 롤업이 성립한다. 최소 스냅샷이
+        // 상위 조직을 못 보면 이 엣지는 영영 생기지 않고, 아무도 그것을 고쳐 주지 않는다
+        assertThat(check("user:choi", "member", "group:QA001")).isTrue();
+    }
 }
