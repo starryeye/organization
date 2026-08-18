@@ -148,8 +148,10 @@ SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기
 ```
 
 포트는 8082다. **LDAP 인스턴스와 같은 DynamoDB 테이블·OpenFGA store를 동시에 쓰지 않는다** —
-한 조직도는 하나의 소스로만 동기화한다는 것이 이 서버의 전제다. app-ldap과 app-scim을 동시에
-띄우려면 `dynamodb.table-name`과 `openfga.store-name`을 서로 다르게 설정해야 한다.
+한 조직도는 하나의 소스로만 동기화한다는 것이 이 서버의 전제다. 그래서 app-scim의 기본값은
+app-ldap과 겹치지 않게 `dynamodb.table-name: organization-scim`, `openfga.store-name:
+organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
+테이블·store와는 항상 다르게 유지해야 한다.
 
 ## 테스트
 

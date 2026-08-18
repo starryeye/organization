@@ -7,14 +7,14 @@ spring:
 
 openfga:
   api-url: http://localhost:8080
-  store-name: organization
+  store-name: organization-scim
   write-batch-size: 100
   max-retries: 3
 
 dynamodb:
   endpoint: http://localhost:8000
   region: ap-northeast-2
-  table-name: organization
+  table-name: organization-scim
   create-table-on-startup: true
   snapshot-retention-days: 7
   syncrun-retention-days: 30

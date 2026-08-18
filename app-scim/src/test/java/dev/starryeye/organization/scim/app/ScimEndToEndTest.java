@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim.app;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import org.junit.jupiter.api.DisplayName;
@@ -64,6 +65,7 @@ class ScimEndToEndTest {
     @Autowired DirectoryStateRepository state;
     @Autowired TupleSnapshotRepository snapshots;
     @Autowired SnapshotArchiveUseCase archive;
+    @Autowired SyncRunRepository runs;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -215,6 +217,14 @@ class ScimEndToEndTest {
         assertThat(snapshot.id()).endsWith("-SCIM");
         assertThat(snapshot.tuples())
                 .anyMatch(tuple -> tuple.object().equals("group:DEV001"));
+
+        // then — 이 계획의 핵심 불변식: SCIM push 요청은 SyncRun 에 기록되지 않는다.
+        // 지금까지 순서 1~5 에서 8건의 변경 요청(User 생성 2, Group 생성 2, PATCH 3,
+        // DELETE 1)이 있었지만, 이 아카이빙 배치 하나만 SyncRun 으로 남아야 한다 —
+        // push 경로가 SyncRunRepository 를 부르기 시작하는 회귀가 있었다면 여기서 잡힌다
+        var recentRuns = runs.findRecent(50).collectList().block();
+        assertThat(recentRuns).hasSize(1);
+        assertThat(recentRuns.get(0).trigger().name()).isEqualTo("ARCHIVE");
     }
 
     @Test

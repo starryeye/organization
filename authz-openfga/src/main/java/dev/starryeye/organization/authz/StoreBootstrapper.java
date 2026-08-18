@@ -56,6 +56,27 @@ public class StoreBootstrapper {
     }
 
     /**
+     * 헬스체크 전용 read-only 조회. 캐시된 storeId 가 있으면 그것을 쓰고, 없으면
+     * {@link #findStoreIdByName()} 으로 store 존재 여부만 확인한다 — {@link #resolveStore()}
+     * 와 달리 store 를 만들거나 인가 모델을 쓰지 않는다.
+     *
+     * <p>헬스 프로브는 관찰만 해야지 인프라를 만들면 안 된다. 인증 없는
+     * {@code GET /actuator/health} 는 k8s 프로브·로드밸런서·오타난 {@code openfga.store-name}
+     * 설정 등 무엇이든 호출할 수 있는데, 이 경로가 {@link #resolveStore()} 를 타면 예열이
+     * 아직 안 됐거나 실패한 cold 인스턴스에서 store 를 만들고 인가 모델을 써버린다 —
+     * 오타난 이름은 빈 store 를 새로 만든 채 조용히 UP 을 보고하게 된다. store 가 없으면
+     * {@link Mono#empty()} 를 그대로 돌려주고, DOWN 으로의 번역은 호출자(헬스 인디케이터)
+     * 몫이다.
+     */
+    public Mono<String> findExistingStore() {
+        String cached = storeIdRef.get();
+        if (cached != null) {
+            return Mono.just(cached);
+        }
+        return findStoreIdByName();
+    }
+
+    /**
      * 진행 중인 해석이 있으면 그것을 공유하고, 없으면 하나만 새로 만들어 등록한다.
      * compareAndSet 으로 등록 경쟁의 승자만 실제 파이프라인을 구독하게 하고,
      * 패자는 승자가 등록한 Mono 를 그대로 반환해 같은 storeId 를 받는다.
