@@ -40,7 +40,7 @@ OpenFGA에는 지금 어떤 튜플이 있는지 물어볼 수 있는 read API가
 
 재시도 큐도, 실패 상태를 추적하는 별도 상태머신도 필요 없는 이유가 이것이다. 대가로 **드리프트를
 감지할 수 없다** — 누군가 OpenFGA를 이 서버를 거치지 않고 직접 고치면 스냅샷과 실제가 어긋나도
-알 방법이 없다. 이걸 되돌리는 수단이 `rebuild`(아래 관리 API 참고)다.
+알 방법이 없다. 이걸 되돌리는 수단이 `rebuild`(아래 관리 API 참고)이며, `app-ldap`에만 있다.
 
 현재상태(`DirectoryStateRepository`)와 스냅샷은 서로 다른 것을 기록한다는 점도 중요하다.
 현재상태는 "LDAP/SCIM에서 읽은 사실 그대로", 스냅샷은 "OpenFGA에 실제로 반영된 것"이다. 부분
@@ -106,6 +106,11 @@ docker compose up -d
 
 ## 관리 API
 
+**`/admin/sync`는 `app-ldap`에만 있다.** `AdminSyncController`·`FullSyncUseCase`·`RebuildUseCase`는
+`app-ldap`에만 배선돼 있고 `app-scim`에는 없다. SCIM은 push 모델이라 "전체를 다시 읽어 맞춘다"는
+동작 자체가 성립하지 않기 때문이다(IdP가 보내주기 전에는 전체를 알 수 없다). 아래 표는
+`app-ldap` 기준이고, `app-scim`에는 `/actuator/health`와 조회 API만 있다.
+
 | 요청 | 설명 |
 |---|---|
 | `POST /admin/sync/full` | 즉시 전체 동기화 |
@@ -113,7 +118,7 @@ docker compose up -d
 | `POST /admin/sync/rebuild?mode=snapshot` | 직전 스냅샷으로 전부 지운 뒤 재적재 |
 | `POST /admin/sync/rebuild?mode=store` | store를 재생성한 뒤 재적재 (재적재까지 인가 질의 실패) |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
-| `GET /actuator/health` | DynamoDB / OpenFGA 연결 상태 포함 헬스체크 |
+| `GET /actuator/health` | DynamoDB / OpenFGA 연결 상태 포함 헬스체크 (두 앱 공통) |
 
 `sync.cron`으로 지정한 주기마다 전체 동기화가 자동으로도 돈다. LDAP이 이상 응답(예: 필터 오류로
 0건)을 주면 삭제 가드가 `ABORTED`로 막고, `force=true`로 사람이 확인한 뒤 우회할 수 있다.
@@ -148,13 +153,30 @@ docker compose up -d
 전문 검색은 지원하지 않는다. 조직코드(`orgCode`) 자체의 접두사 검색도 없다 — 조직은
 표시명으로만 검색하고, 정확한 코드를 안다면 `/admin/organizations/{orgCode}`로 바로 조회한다.
 
-**`shouldHaveAccess`와 `openFgaCheck`가 갈리면.** 직원 상세와 조직 멤버 목록의 각 줄은
+**`shouldHaveAccess`와 `openFgaCheck`가 갈리면.** 직원 상세(`paths`)의 각 줄은
 `shouldHaveAccess`(현재상태가 요구하는 값)와 `openFgaCheck`(OpenFGA에 실제로 Check해 받은
-판정)를 함께 싣는다. 이 둘이 다르면 SCIM/LDAP 쓰기 경로의 동시성 결함 등으로 상태와 실제
-인가 튜플이 어긋난 것이다 — 이 API는 그 어긋남을 **감지**할 뿐 고치지 않는다. 대응은
-`POST /admin/sync/rebuild`로 재적재해 튜플을 상태와 다시 맞추는 것이다. `openFgaCheck`가
-`null`이면 Check 호출 자체가 실패한 것이지 판정이 false라는 뜻이 아니다 — 이때도 응답은
-200이고 해당 칸만 비어 있다.
+판정)를 함께 싣는다. 조직 멤버 목록의 줄에는 `shouldHaveAccess`가 없고 `active`와
+`openFgaCheck`가 있다 — 직속 멤버로 이미 걸러진 목록이라 파생값이 곧 `active`다. 이 둘이
+다르면 어긋난 것이다.
+
+어긋남은 SCIM/LDAP 쓰기 경로의 동시성 결함 등으로 상태와 실제 인가 튜플이 갈린 것이다 —
+이 API는 그것을 **감지**할 뿐 고치지 않는다. 대응은 배포마다 다르다.
+
+- **app-ldap** — `POST /admin/sync/rebuild`로 재적재해 튜플을 상태와 다시 맞춘다. 다음
+  `sync.cron` 주기의 전체 동기화도 같은 일을 한다.
+- **app-scim** — **오늘 할 수 있는 자동 교정이 없다.** 이 배포에는 `/admin/sync`가 없고
+  전량 재기록 경로 자체가 없다(위 관리 API 절 참고). 튜플이 다시 맞춰지는 것은 IdP가 그
+  직원이나 조직을 다시 보내줄 때뿐이다. 급하면 IdP 쪽에서 해당 리소스를 다시 push하게
+  하거나, OpenFGA 튜플을 사람이 직접 고쳐야 한다. 감지는 되는데 고칠 손잡이가 없는 이
+  간극은 알려진 상태이며 별도 항목으로 남긴다.
+
+`openFgaCheck`가 `null`이면 Check 호출 자체가 실패한 것이지 판정이 false라는 뜻이 아니다 —
+이때도 응답은 200이고 해당 칸만 비어 있다.
+
+**순환은 드리프트가 아니다.** 저장된 계층에 순환이 있으면 `TupleMapper`가 간선 하나를 일부러
+버리므로 파생값과 실제가 갈린다. 그 줄에는 `"cycle": true`가 붙고, 카운터도
+`authz_drift_detected`가 아니라 `authz_cycle_divergence`로 간다. 재적재해도 같은 간선이 또
+버려지므로 재적재의 근거가 될 수 없다 — 고쳐야 할 것은 조직도 쪽의 순환이다.
 
 **인증이 없다.** `/admin/sync`와 마찬가지로 `/admin/employees`, `/admin/organizations`도
 누구나 호출할 수 있게 열려 있다. 조직도와 소속 정보를 그대로 노출하므로, 실제 운영에
