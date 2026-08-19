@@ -27,7 +27,7 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                         "OpenFGA store 가 아직 없어 Check 를 할 수 없다")))
                 .flatMap(storeId -> Mono.fromFuture(() -> {
                             try {
-                                return bootstrapper.client().check(new ClientCheckRequest()
+                                return bootstrapper.clientFor(storeId).check(new ClientCheckRequest()
                                         .user(tuple.user())
                                         .relation(tuple.relation())
                                         ._object(tuple.object()));
@@ -35,6 +35,8 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                                 throw new IllegalStateException("OpenFGA check 호출 실패", e);
                             }
                         })
-                        .map(response -> Boolean.TRUE.equals(response.getAllowed())));
+                        .map(response -> Boolean.TRUE.equals(response.getAllowed())))
+                .doOnError(error -> log.debug("OpenFGA check 실패: user={}, relation={}, object={}",
+                        tuple.user(), tuple.relation(), tuple.object(), error));
     }
 }

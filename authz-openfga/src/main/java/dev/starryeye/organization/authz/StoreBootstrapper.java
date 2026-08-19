@@ -177,6 +177,27 @@ public class StoreBootstrapper {
     }
 
     /**
+     * storeId 로 직접 client 를 만든다. {@link #deleteStoreById(String)} 과 같은 방식이다 —
+     * {@code clientRef}/{@code storeIdRef} 캐시를 읽지도 쓰지도 않는다.
+     *
+     * <p>{@link #findExistingStore()} 는 store 존재만 확인하고 storeId 를 돌려줄 뿐,
+     * {@code clientRef} 를 채우지 않는다({@link #client()} 는 {@code resolveStore()}/
+     * {@code recreateStore()} 가 인가 모델까지 써야만 채워지는 캐시에 기댄다). 그래서
+     * "store 는 있지만 이 프로세스가 아직 resolveStore() 를 부른 적 없는" 상태에서
+     * {@code findExistingStore()} 뒤에 {@code client()} 를 쓰면 실제로는 store 가 있는데도
+     * "아직 해석되지 않았다" 로 잘못 실패한다.
+     *
+     * <p>이 메서드는 공유 캐시를 전혀 건드리지 않으므로 {@code recreateStore()} 가 진행하는
+     * "캐시 비우기 → 새 client 로 교체" 와 절대 경합하지 않는다 — 읽기 전용 조회가 캐시를
+     * 갱신하거나, 캐시 교체 도중의 값을 관찰해 오래된 client 를 붙들 수 있는 경로 자체가
+     * 없다. 대가로 호출마다 새 {@link OpenFgaClient} 를 만든다 — {@link #findStoreIdByName()}
+     * 과 {@link #deleteStoreById(String)} 도 이미 같은 방식으로 매번 새로 만든다.
+     */
+    public OpenFgaClient clientFor(String storeId) {
+        return newClient(storeId);
+    }
+
+    /**
      * store 목록을 continuation token 이 소진될 때까지 전부 순회한 뒤에 이름을 찾는다.
      *
      * <p>{@code listStores()} 는 한 페이지(OpenFGA 기본 50개)만 반환한다. 공유 OpenFGA

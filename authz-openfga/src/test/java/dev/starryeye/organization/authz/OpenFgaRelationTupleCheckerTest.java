@@ -7,8 +7,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
 
@@ -77,5 +79,46 @@ class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
 
         // then
         assertThat(allowed).isFalse();
+    }
+
+    @Test
+    @DisplayName("resolveStore 를 부른 적 없는 새 StoreBootstrapper 로도 이미 있는 store 를 Check 할 수 있다")
+    void resolve_안한_새_부트스트래퍼로도_Check가_된다() {
+        // given — 기존 bootstrapper 로 store 를 만들고 튜플을 쓴다
+        writer.apply(TupleDelta.writeOnly(Set.of(
+                RelationTuple.directMember("kim", "DEV002")))).block();
+
+        // 이 프로세스 안에서 resolveStore()/recreateStore() 를 한 번도 부른 적 없는
+        // 새 StoreBootstrapper — clientRef 가 비어 있는 상태에서 findExistingStore() 만으로
+        // Check 가 성립해야 한다
+        StoreBootstrapper 새_부트스트래퍼 = new StoreBootstrapper(properties);
+        OpenFgaRelationTupleChecker 새_체커 = new OpenFgaRelationTupleChecker(새_부트스트래퍼);
+
+        // when
+        Boolean allowed = 새_체커.check(
+                new RelationTuple("user:kim", "member", "group:DEV002")).block();
+
+        // then
+        assertThat(allowed).isTrue();
+    }
+
+    @Test
+    @DisplayName("store 가 아예 없으면 Check 는 에러로 끝난다")
+    void store가_없으면_에러로_끝난다() {
+        // given — 이 컨테이너에 존재한 적 없는 store 이름
+        OpenFgaProperties 없는_store_속성 = new OpenFgaProperties();
+        없는_store_속성.setApiUrl(properties.getApiUrl());
+        없는_store_속성.setStoreName("missing-" + UUID.randomUUID());
+        없는_store_속성.setWriteBatchSize(100);
+        없는_store_속성.setMaxRetries(3);
+        StoreBootstrapper 없는_store_부트스트래퍼 = new StoreBootstrapper(없는_store_속성);
+        OpenFgaRelationTupleChecker 없는_store_체커 = new OpenFgaRelationTupleChecker(없는_store_부트스트래퍼);
+
+        // when
+        Throwable thrown = catchThrowable(() -> 없는_store_체커.check(
+                new RelationTuple("user:kim", "member", "group:DEV002")).block());
+
+        // then
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
     }
 }
