@@ -144,6 +144,45 @@ class AdminQueryControllerTest {
     }
 
     @Test
+    @DisplayName("순환으로 설명되는 어긋남은 드리프트가 아니라 순환 카운터로 센다")
+    void 순환은_드리프트로_안_센다() {
+        // given — DEV001 ⊇ DEV002 이고 DEV002 ⊇ DEV001 (순환), OpenFGA 에는 튜플이 없다.
+        // 두 줄 모두 어긋나지만 그중 DEV002 줄에만 cycle 표시가 붙는다.
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀",
+                Set.of(MemberRef.user("kim"), MemberRef.group("DEV001")))).block();
+        state.saveGroup(new DirectoryGroup("DEV001", "y", "플랫폼개발본부",
+                Set.of(MemberRef.group("DEV002")))).block();
+
+        // when
+        client.get().uri("/admin/employees/kim").exchange().expectStatus().isOk();
+
+        // then — 순환 줄은 재적재해도 같은 간선이 또 버려져 영영 안 사라진다. 그걸 재적재 신호에
+        // 섞으면 카운터가 0 으로 돌아오지 않아 알람이 소음이 된다. 숨기지는 않고 이름만 나눈다.
+        assertThat(registry.counter("authz_cycle_divergence").count()).isEqualTo(1.0);
+        assertThat(registry.counter("authz_drift_detected").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("Check 호출 수를 세어 실패율의 분모를 만든다")
+    void Check_호출_수를_센다() {
+        // given — 경로 두 줄 중 하나만 Check 가 실패한다
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        state.saveGroup(new DirectoryGroup("DEV001", "y", "플랫폼개발본부",
+                Set.of(MemberRef.group("DEV002")))).block();
+        checker.failFor(tuple -> tuple.object().equals("group:DEV001"));
+
+        // when
+        client.get().uri("/admin/employees/kim").exchange().expectStatus().isOk();
+
+        // then — 설계 §10 이 요구하는 실패율은 분모가 있어야 계산된다
+        assertThat(registry.counter("authz_checks_total").count()).isEqualTo(2.0);
+        assertThat(registry.counter("authz_check_failed").count()).isEqualTo(1.0);
+    }
+
+    @Test
     @DisplayName("Check 를 못 한 것은 드리프트가 아니라 보류로 센다")
     void 보류는_드리프트로_안_센다() {
         // given
