@@ -3,6 +3,9 @@ package dev.starryeye.organization.core.query;
 import java.util.List;
 
 /**
+ * @param orgCode            조직 코드
+ * @param displayName        조직 표시명
+ * @param externalId         외부 시스템 조직 식별자
  * @param ancestors          상위 계층 전부. 최상위 조직이면 빈 목록
  * @param childOrganizations 직속 하위 조직만 (1 depth)
  * @param members            직속 소속 직원 첫 페이지

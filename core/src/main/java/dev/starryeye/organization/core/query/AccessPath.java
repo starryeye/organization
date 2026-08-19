@@ -3,6 +3,9 @@ package dev.starryeye.organization.core.query;
 /**
  * 한 직원이 한 조직에 접근되는(또는 되어야 하는) 경로 한 줄.
  *
+ * @param orgCode          조직 코드
+ * @param displayName      조직 표시명
+ * @param via              접근 경로 유형 (DIRECT 또는 ROLLUP)
  * @param shouldHaveAccess 현재상태(DynamoDB)가 요구하는 값
  * @param openFgaCheck     OpenFGA 의 실제 판정. Check 호출이 실패하면 null
  * @param cycle            상위 순회 중 이미 본 조직에 다시 닿았는지
