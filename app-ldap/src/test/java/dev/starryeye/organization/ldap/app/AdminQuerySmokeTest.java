@@ -20,8 +20,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * {@code admin-api} 는 app-scim 의 {@code AdminQueryEndToEndTest} 에서만 E2E 로 검증한다.
- * 여기서 확인할 유일한 것은 같은 공유 모듈이 app-ldap 컨텍스트에서도 자동설정으로 잡혀
- * 빈이 뜨는지다.
+ * 여기서 확인할 유일한 것은 같은 공유 모듈의 빈들이 app-ldap 컨텍스트에도 실제로 올라와
+ * 쓸 수 있는 상태인지다 — 즉 이 모듈이 app-ldap 에도 장착돼 있다는 것.
+ *
+ * <p><b>이 테스트는 자동설정(AutoConfiguration.imports)과 컴포넌트 스캔을 구분하지 못한다.</b>
+ * 두 앱 모두 {@code scanBasePackages = "dev.starryeye.organization"} 이라 이미
+ * {@code dev.starryeye.organization.admin} 패키지까지 스캔 범위에 든다. 그래서
+ * {@code AutoConfiguration.imports} 에 {@code AdminQueryConfig} 항목이 없거나 잘못돼 있어도,
+ * 스캔이 {@code @Configuration}({@code AdminQueryConfig})과 {@code @RestController}
+ * ({@code AdminQueryController})를 그대로 찾아내 이 테스트의 두 {@code getBean(...)} 은
+ * 동일하게 통과한다 — imports 파일의 기여가 스캔에 가려져 보이지 않는다. 훗날
+ * {@code scanBasePackages} 를 좁혀 {@code admin} 패키지가 스캔 범위 밖으로 나가면 그때
+ * imports 파일이 다시 유일한 경로가 되고, 그게 깨지면 이 테스트가 비로소 실패로 드러낸다.
  *
  * <p>{@code TableInitializer}(DynamoDB)와 {@code OpenFgaStoreInitializer}(OpenFGA) 가
  * 모두 {@code InitializingBean} 이라 실제 컨테이너 없이는 컨텍스트 자체가 기동하지 않는다 —
@@ -32,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Testcontainers
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@DisplayName("app-ldap 에서도 admin-api 자동설정이 잡힌다")
+@DisplayName("app-ldap 컨텍스트에도 admin-api 의 빈이 올라와 쓸 수 있다")
 class AdminQuerySmokeTest {
 
     @Container
@@ -60,9 +70,10 @@ class AdminQuerySmokeTest {
     @Autowired ApplicationContext context;
 
     @Test
-    @DisplayName("조회 컨트롤러와 유스케이스 빈이 등록된다")
-    void 빈이_등록된다() {
-        // when, then — 공유 모듈이 두 앱 모두에서 잡히는지가 여기서 확인할 전부다
+    @DisplayName("조회 컨트롤러와 유스케이스 빈이 컨텍스트에 존재한다")
+    void 빈이_존재한다() {
+        // when, then — 자동설정이든 컴포넌트 스캔이든, 결과로 이 빈들이 app-ldap 컨텍스트에
+        // 있어 쓸 수 있는지가 여기서 확인할 전부다(클래스 주석 참고 — 경로 자체는 구분 못 한다)
         assertThat(context.getBean(AdminQueryController.class)).isNotNull();
         assertThat(context.getBean(AdminQueryUseCase.class)).isNotNull();
     }
