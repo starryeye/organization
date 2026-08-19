@@ -27,7 +27,7 @@ class AdminQueryUseCaseTest {
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
-        search = new FakeSearchRepository();
+        search = new FakeSearchRepository(state);
         checker = new FakeTupleChecker();
         useCase = new AdminQueryUseCase(state, search, checker);
     }
@@ -249,6 +249,46 @@ class AdminQueryUseCaseTest {
         // 하위의 하위(lee)는 담기지 않는다
         assertThat(detail.members().items()).extracting("employeeId").containsExactly("kim");
         assertThat(detail.members().items()).extracting("openFgaCheck").containsExactly(true);
+    }
+
+    @Test
+    @DisplayName("계층 순회는 이름표만 읽고 다른 조직의 멤버 목록은 읽지 않는다")
+    void 순회는_멤버_목록을_읽지_않는다() {
+        // given — ROOT ⊇ DEV001 ⊇ DEV002 ⊇ {kim, DEV003}
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV003")).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        state.saveGroup(조직("ROOT", MemberRef.group("DEV001"))).block();
+        state.findGroupCalls.clear();
+
+        // when
+        var detail = useCase.organizationDetail("DEV002", 20).block();
+
+        // then — 이름 칸을 채우려고 파티션 전체(META + 멤버십 전부)를 읽던 자리다.
+        // 멤버 목록이 실제로 필요한 것은 조회 대상 조직 자신뿐이다.
+        assertThat(detail.childOrganizations()).extracting("displayName").containsExactly("DEV003-조직");
+        assertThat(detail.ancestors()).extracting("orgCode").containsExactly("DEV001", "ROOT");
+        assertThat(state.findGroupCalls).containsExactly("DEV002");
+        assertThat(search.findGroupSummaryCalls).containsExactlyInAnyOrder("DEV003", "DEV001", "ROOT");
+    }
+
+    @Test
+    @DisplayName("직원 상세의 계층 순회도 조직 멤버 목록을 읽지 않는다")
+    void 직원_상세_순회도_멤버_목록을_읽지_않는다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        state.findGroupCalls.clear();
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — 두 엔드포인트 모두 인증이 없어 증폭을 익명 호출자가 조종할 수 있었다
+        assertThat(detail.paths()).hasSize(2);
+        assertThat(state.findGroupCalls).isEmpty();
+        assertThat(search.findGroupSummaryCalls).containsExactlyInAnyOrder("DEV002", "DEV001");
     }
 
     @Test

@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AdminQueryControllerTest {
 
     private final FakeStateRepository state = new FakeStateRepository();
-    private final FakeSearchRepository search = new FakeSearchRepository();
+    private final FakeSearchRepository search = new FakeSearchRepository(state);
     private final FakeTupleChecker checker = new FakeTupleChecker();
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private WebTestClient client;

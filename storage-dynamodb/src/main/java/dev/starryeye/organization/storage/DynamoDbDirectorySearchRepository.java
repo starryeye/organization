@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 
@@ -46,6 +48,25 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     public Mono<Page<GroupSummary>> searchGroupsByDisplayName(String prefix, String cursor, int limit) {
         return query(Keys.GSI1, Keys.GSI1PK, Keys.GSI1SK, Keys.GROUP_INDEX,
                 prefix, cursor, limit, DynamoDbDirectorySearchRepository::toGroupSummary);
+    }
+
+    /**
+     * 조직 META 아이템 하나만 집어 온다. {@code Query} 가 아니라 {@code GetItem} 인 것이
+     * 핵심이다 — {@code Query(PK=GROUP#code)} 는 같은 파티션의 멤버십 아이템까지 전부
+     * 끌어온다.
+     */
+    @Override
+    public Mono<GroupSummary> findGroupSummary(String orgCode) {
+        GetItemRequest request = GetItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(orgCode)), Keys.SK, Attrs.s(Keys.META)))
+                .projectionExpression("#pk, #displayName")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#displayName", "displayName"))
+                .build();
+
+        return Mono.fromFuture(() -> client.getItem(request))
+                .filter(GetItemResponse::hasItem)
+                .map(response -> toGroupSummary(response.item()));
     }
 
     /**

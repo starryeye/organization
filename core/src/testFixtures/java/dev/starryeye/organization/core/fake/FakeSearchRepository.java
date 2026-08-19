@@ -23,6 +23,39 @@ public class FakeSearchRepository implements DirectorySearchRepository {
     /** 설정되면 모든 검색이 이 예외로 실패한다. 커서 손상 같은 경우를 흉내낸다. */
     public RuntimeException failWith;
 
+    /** {@link #findGroupSummary} 가 불린 순서대로의 조직 id. 읽기 경로를 단언하는 데 쓴다. */
+    public final List<String> findGroupSummaryCalls = new ArrayList<>();
+
+    /**
+     * 실제 배포에서 두 저장소는 같은 테이블을 본다. {@link #findGroupSummary} 가
+     * 상태 저장소에 저장된 조직을 그대로 볼 수 있어야 그 사실이 재현된다.
+     */
+    private final FakeStateRepository state;
+
+    public FakeSearchRepository() {
+        this(null);
+    }
+
+    public FakeSearchRepository(FakeStateRepository state) {
+        this.state = state;
+    }
+
+    @Override
+    public Mono<GroupSummary> findGroupSummary(String orgCode) {
+        return Mono.fromRunnable(() -> findGroupSummaryCalls.add(orgCode))
+                .then(Mono.justOrEmpty(lookupGroup(orgCode)));
+    }
+
+    private GroupSummary lookupGroup(String orgCode) {
+        if (state != null) {
+            var group = state.groups.get(orgCode);
+            return group == null ? null : new GroupSummary(group.id(), group.displayName());
+        }
+        return groups.stream()
+                .filter(summary -> summary.orgCode().equals(orgCode))
+                .findFirst().orElse(null);
+    }
+
     @Override
     public Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);

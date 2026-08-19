@@ -84,18 +84,28 @@ public class AdminQueryUseCase {
      *
      * <p>id 소스 자체를 {@code MAX_PATHS + 1} 로 자른다. 상한은 결과 개수뿐 아니라 <b>일하는
      * 양</b>도 지켜야 한다 — 이 자르기가 없으면 상한을 훨씬 넘는 소속을 가진 직원 하나가
-     * {@code findGroup} 왕복을 소속 개수만큼 전부 치르고 나서야 잘린다. {@code seedDirect} 는
-     * 모인 목록이 {@code MAX_PATHS} 를 넘는지로 "더 있었다" 를 판단해 {@code truncated} 를 세운다.
+     * {@code findGroupSummary} 왕복을 소속 개수만큼 전부 치르고 나서야 잘린다.
+     * {@code seedDirect} 는 모인 목록이 {@code MAX_PATHS} 를 넘는지로 "더 있었다" 를 판단해
+     * {@code truncated} 를 세운다.
      */
-    private Mono<List<DirectoryGroup>> directGroupsOf(String employeeId) {
+    private Mono<List<GroupSummary>> directGroupsOf(String employeeId) {
         return state.findGroupIdsContaining(MemberRef.user(employeeId))
                 .take(MAX_PATHS + 1)
                 .flatMap(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                 .collectList();
     }
 
-    private Mono<DirectoryGroup> loadGroupOrEmpty(String groupId) {
-        return state.findGroup(groupId)
+    /**
+     * 순회에 필요한 두 칸({@code orgCode}, {@code displayName})만 읽는다. 레코드가 없는
+     * 참조는 건너뛴다.
+     *
+     * <p><b>{@code state.findGroup} 을 쓰지 않는다.</b> 그쪽은 {@code GROUP#<code>} 파티션을
+     * 통째로 훑어 멤버십 아이템까지 전부 읽는데, 순회는 이름표 두 칸만 쓴다. 하위 조직 30개
+     * 각각이 멤버 500명이면 이름 칸 30개를 채우려고 15,000 아이템을 읽던 자리다. 두 엔드포인트
+     * 모두 인증이 없어 그 증폭을 익명 호출자가 조종할 수 있었다.
+     */
+    private Mono<GroupSummary> loadGroupOrEmpty(String groupId) {
+        return search.findGroupSummary(groupId)
                 .switchIfEmpty(Mono.fromRunnable(() ->
                         log.warn("조직 '{}' 이 멤버십에서 참조되지만 레코드가 없어 건너뛴다", groupId)));
     }
@@ -138,19 +148,19 @@ public class AdminQueryUseCase {
      * 구분하려면 "전역으로 이미 봤는가" 만으로는 부족하고 "지금 이 경로 위에서 봤는가" 가
      * 필요하다 — {@link #acceptParent} 참고.
      */
-    private record Step(DirectoryGroup group, Set<String> path) {
+    private record Step(GroupSummary group, Set<String> path) {
     }
 
     /** 직속 조직들을 방문 집합에 넣는다. 상한은 직속 단계에서부터 적용한다. */
-    private List<Step> seedDirect(List<DirectoryGroup> direct, Reached reached) {
+    private List<Step> seedDirect(List<GroupSummary> direct, Reached reached) {
         List<Step> seeded = new ArrayList<>();
-        for (DirectoryGroup group : direct) {
+        for (GroupSummary group : direct) {
             if (reached.entries.size() >= MAX_PATHS) {
                 reached.truncated = true;
                 break;
             }
             if (reached.add(group, AccessPath.DIRECT, false)) {
-                seeded.add(new Step(group, Set.of(group.id())));
+                seeded.add(new Step(group, Set.of(group.orgCode())));
             }
         }
         return seeded;
@@ -163,7 +173,7 @@ public class AdminQueryUseCase {
         }
         // acceptParent 는 순환/다이아몬드/상한을 만나면 null 을 돌려준다. Flux#map 은 null 을
         // 허용하지 않으므로(NullPointerException) flatMap + Mono.justOrEmpty 로 흡수한다.
-        return state.findGroupIdsContaining(MemberRef.group(step.group().id()))
+        return state.findGroupIdsContaining(MemberRef.group(step.group().orgCode()))
                 .concatMap(this::loadGroupOrEmpty)
                 .flatMap(parent -> Mono.justOrEmpty(acceptParent(parent, step.path(), reached)));
     }
@@ -179,12 +189,12 @@ public class AdminQueryUseCase {
      * 순환이 아니므로 표시하지 않되, 같은 조직을 두 번 확장하는 낭비를 막기 위해 더 올라가지도
      * 않는다 — 그 갈래는 먼저 닿은 쪽이 이미 끝까지 확장했거나 확장 중이다.
      */
-    private Step acceptParent(DirectoryGroup parent, Set<String> path, Reached reached) {
-        if (path.contains(parent.id())) {
-            reached.markCycle(parent.id());
+    private Step acceptParent(GroupSummary parent, Set<String> path, Reached reached) {
+        if (path.contains(parent.orgCode())) {
+            reached.markCycle(parent.orgCode());
             return null;
         }
-        if (reached.seen.contains(parent.id())) {
+        if (reached.seen.contains(parent.orgCode())) {
             return null; // 다이아몬드 — 순환이 아니며 다시 확장하지 않는다
         }
         if (reached.entries.size() >= MAX_PATHS) {
@@ -193,16 +203,16 @@ public class AdminQueryUseCase {
         }
         reached.add(parent, AccessPath.ROLLUP, false);
         Set<String> nextPath = new LinkedHashSet<>(path);
-        nextPath.add(parent.id());
+        nextPath.add(parent.orgCode());
         return new Step(parent, Set.copyOf(nextPath));
     }
 
     private Mono<EmployeeDetail> toDetail(DirectoryUser user, Reached reached) {
         return Flux.fromIterable(reached.entries)
-                .flatMap(entry -> checkOrNull(memberOf(user.id(), entry.group.id()))
-                                .map(allowed -> new AccessPath(entry.group.id(), entry.group.displayName(),
+                .flatMap(entry -> checkOrNull(memberOf(user.id(), entry.group.orgCode()))
+                                .map(allowed -> new AccessPath(entry.group.orgCode(), entry.group.displayName(),
                                         entry.via, user.active(), allowed, entry.cycle))
-                                .defaultIfEmpty(new AccessPath(entry.group.id(), entry.group.displayName(),
+                                .defaultIfEmpty(new AccessPath(entry.group.orgCode(), entry.group.displayName(),
                                         entry.via, user.active(), null, entry.cycle)),
                         CHECK_CONCURRENCY)
                 .collectList()
@@ -240,23 +250,21 @@ public class AdminQueryUseCase {
     private Mono<List<GroupSummary>> ancestorsOf(DirectoryGroup group) {
         Reached reached = new Reached();
         reached.seen.add(group.id());
-        Step seed = new Step(group, Set.of(group.id()));
+        Step seed = new Step(new GroupSummary(group.id(), group.displayName()), Set.of(group.id()));
         return Flux.just(seed)
                 .expand(step -> expandParents(step, reached))
                 .then(Mono.fromSupplier(() -> {
                     if (reached.truncated) {
                         log.warn("조직 '{}' 의 상위 계층이 상한({})을 넘어 잘렸습니다", group.id(), MAX_PATHS);
                     }
-                    return reached.entries.stream()
-                            .map(entry -> new GroupSummary(entry.group.id(), entry.group.displayName()))
-                            .toList();
+                    return reached.entries.stream().map(entry -> entry.group).toList();
                 }));
     }
 
     /**
      * 직속 하위 조직만(1 depth). 멤버 참조에는 조직코드밖에 없으므로 표시명을 채우려면
      * 각 하위 조직을 읽어야 한다 — 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다.
-     * 하위 조직은 보통 수십 개라 이 정도 읽기는 감당된다.
+     * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이다.
      */
     private Mono<List<GroupSummary>> childrenOf(DirectoryGroup group) {
         return Flux.fromIterable(group.members())
@@ -264,7 +272,6 @@ public class AdminQueryUseCase {
                 .map(MemberRef::id)
                 .sort()
                 .concatMap(this::loadGroupOrEmpty)
-                .map(child -> new GroupSummary(child.id(), child.displayName()))
                 .collectList();
     }
 
@@ -340,8 +347,8 @@ public class AdminQueryUseCase {
         private boolean truncated;
 
         /** 새로 방문한 조직이면 더하고 {@code true} 를 돌려준다. 이미 있던 조직이면 {@code false}. */
-        boolean add(DirectoryGroup group, String via, boolean cycle) {
-            if (seen.add(group.id())) {
+        boolean add(GroupSummary group, String via, boolean cycle) {
+            if (seen.add(group.orgCode())) {
                 entries.add(new Entry(group, via, cycle));
                 return true;
             }
@@ -350,17 +357,17 @@ public class AdminQueryUseCase {
 
         void markCycle(String groupId) {
             entries.stream()
-                    .filter(entry -> entry.group.id().equals(groupId))
+                    .filter(entry -> entry.group.orgCode().equals(groupId))
                     .forEach(entry -> entry.cycle = true);
         }
     }
 
     private static final class Entry {
-        private final DirectoryGroup group;
+        private final GroupSummary group;
         private final String via;
         private boolean cycle;
 
-        Entry(DirectoryGroup group, String via, boolean cycle) {
+        Entry(GroupSummary group, String via, boolean cycle) {
             this.group = group;
             this.via = via;
             this.cycle = cycle;
