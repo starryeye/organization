@@ -102,7 +102,9 @@ public class AdminQueryUseCase {
                     }
                     return Flux.fromIterable(ids);
                 })
-                .flatMap(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
+                // flatMapSequential 이라 병렬로 적재하면서도 소스 id 순서를 지킨다 —
+                // paths 의 직속 구간 순서가 적재 완료 순서에 따라 흔들리지 않는다.
+                .flatMapSequential(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                 .collectList();
     }
 
@@ -226,9 +228,15 @@ public class AdminQueryUseCase {
         return new Step(parent, Set.copyOf(nextPath));
     }
 
+    /**
+     * <p>{@code flatMap} 이 아니라 {@code flatMapSequential} 이다. 둘 다 동시성 제한을 걸고
+     * 병렬로 내지만, {@code flatMap} 은 <b>완료 순서대로</b> 결과를 흘려보내므로 응답의 줄
+     * 순서가 매 요청 달라진다. 설계 §7.2 의 예시와 README 는 직속이 먼저, 상위가 그 뒤로
+     * 나오는 순회 순서를 보여준다 — 순서를 지키는 데 드는 비용이 없으니 지킨다.
+     */
     private Mono<EmployeeDetail> toDetail(DirectoryUser user, Reached reached) {
         return Flux.fromIterable(reached.entries)
-                .flatMap(entry -> checkOrNull(memberOf(user.id(), entry.group.orgCode()))
+                .flatMapSequential(entry -> checkOrNull(memberOf(user.id(), entry.group.orgCode()))
                                 .map(allowed -> new AccessPath(entry.group.orgCode(), entry.group.displayName(),
                                         entry.via, user.active(), allowed, entry.cycle))
                                 .defaultIfEmpty(new AccessPath(entry.group.orgCode(), entry.group.displayName(),
@@ -316,13 +324,17 @@ public class AdminQueryUseCase {
         int to = Math.min(from + limit, userIds.size());
         String next = to < userIds.size() ? String.valueOf(to) : null;
 
+        // 설계 §8.2 는 페이지 단위 Check 를 "동시성 제한을 걸어 병렬로" 내라고 한다.
+        // concatMap 은 그것을 한 줄씩 직렬로 냈다 — 한 페이지(기본 20건)에 findUser 20번과
+        // Check 20번, 도합 40번의 왕복이 줄줄이 이어진다. flatMapSequential 은 병렬로 내면서
+        // 결과는 소스 순서대로 흘려보내므로 페이지 순서도 그대로 지켜진다.
         return Flux.fromIterable(userIds.subList(from, to))
-                .concatMap(userId -> loadUserOrEmpty(userId)
+                .flatMapSequential(userId -> loadUserOrEmpty(userId)
                         .flatMap(user -> checkOrNull(memberOf(user.id(), group.id()))
                                 .map(allowed -> new OrgMember(user.id(), user.displayName(),
                                         user.active(), allowed))
                                 .defaultIfEmpty(new OrgMember(user.id(), user.displayName(),
-                                        user.active(), null))))
+                                        user.active(), null))), CHECK_CONCURRENCY)
                 .collectList()
                 .map(items -> new Page<>(items, next));
     }

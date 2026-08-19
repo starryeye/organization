@@ -12,6 +12,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -430,6 +432,55 @@ class AdminQueryUseCaseTest {
         assertThat(firstPage.nextCursor()).isNotNull();
         assertThat(secondPage.items()).hasSize(1);
         assertThat(secondPage.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("멤버 목록의 Check 는 병렬로 나가되 페이지 순서는 지켜진다")
+    void 멤버_Check는_병렬이고_순서는_지켜진다() {
+        // given — 응답을 늦춰야 직렬/병렬이 구분된다. 늦게 답할수록 앞선 직원이 되게 해서
+        // 완료 순서와 요청 순서를 반대로 만든다.
+        List<MemberRef> members = new java.util.ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            state.saveUser(직원("u" + i, true)).block();
+            members.add(MemberRef.user("u" + i));
+        }
+        state.saveGroup(조직("DEV002", members.toArray(new MemberRef[0]))).block();
+        checker.delayBy(tuple -> {
+            int index = Integer.parseInt(tuple.user().substring("user:u".length()));
+            return Duration.ofMillis(30L * (8 - index));
+        });
+
+        // when
+        var page = useCase.organizationMembers("DEV002", null, 8).block();
+
+        // then — 설계 §8.2 는 동시성 제한을 걸어 병렬로 내라고 한다. 직렬이면 여기가 1 이다.
+        assertThat(checker.maxInFlight.get()).isGreaterThan(1);
+        // 병렬로 내되 페이지 순서는 완료 순서가 아니라 소스 순서를 따라야 한다
+        assertThat(page.items()).extracting("employeeId")
+                .containsExactly("u0", "u1", "u2", "u3", "u4", "u5", "u6", "u7");
+    }
+
+    @Test
+    @DisplayName("직원 상세의 경로는 완료 순서가 아니라 직속-상위 순서로 나온다")
+    void 경로는_직속_상위_순서다() {
+        // given — ROOT ⊇ DEV001 ⊇ DEV002 ⊇ kim. 위로 갈수록 Check 가 빨리 답하게 해서
+        // 완료 순서를 순회 순서의 정확히 반대로 만든다.
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        state.saveGroup(조직("ROOT", MemberRef.group("DEV001"))).block();
+        checker.delayBy(tuple -> switch (tuple.object()) {
+            case "group:DEV002" -> Duration.ofMillis(150);
+            case "group:DEV001" -> Duration.ofMillis(80);
+            default -> Duration.ofMillis(10);
+        });
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — 설계 §7.2 예시와 README 가 보여주는 순서다. 지키는 데 드는 비용이 없다
+        assertThat(detail.paths()).extracting(AccessPath::orgCode)
+                .containsExactly("DEV002", "DEV001", "ROOT");
     }
 
     @Test
