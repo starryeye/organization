@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AdminQueryUseCaseTest {
 
@@ -151,6 +152,41 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
+    @DisplayName("두 하위 조직이 같은 상위를 공유해도 순환으로 오판하지 않는다")
+    void 다이아몬드는_순환이_아니다() {
+        // given — kim 은 DEV002 와 DEV003 양쪽의 직속 멤버이고, 둘 다 DEV001 의 하위다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV003", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.group("DEV002"), MemberRef.group("DEV003"))).block();
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — DEV001 은 두 갈래에서 모두 닿지만 한 번만 나오고 순환 표시가 없다
+        assertThat(detail.paths()).extracting(AccessPath::orgCode)
+                .containsExactlyInAnyOrder("DEV002", "DEV003", "DEV001");
+        assertThat(detail.paths()).noneMatch(AccessPath::cycle);
+    }
+
+    @Test
+    @DisplayName("직원이 조직과 그 상위 조직 양쪽에 직속으로 속해도 순환으로 오판하지 않는다")
+    void 직속_조직과_그_상위에_동시에_속해도_순환이_아니다() {
+        // given — kim 은 DEV002 와 그 상위인 DEV001 양쪽의 직속 멤버다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("DEV001", MemberRef.user("kim"), MemberRef.group("DEV002"))).block();
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — DEV001 은 직속으로 이미 잡혔고, DEV002 를 통해 다시 닿아도 순환이 아니다
+        assertThat(detail.paths()).extracting(AccessPath::orgCode)
+                .containsExactlyInAnyOrder("DEV002", "DEV001");
+        assertThat(detail.paths()).noneMatch(AccessPath::cycle);
+    }
+
+    @Test
     @DisplayName("어느 조직에도 속하지 않은 직원은 빈 경로를 돌려준다")
     void 소속이_없으면_빈_경로다() {
         // given
@@ -202,6 +238,10 @@ class AdminQueryUseCaseTest {
         var detail = useCase.organizationDetail("DEV002", 20).block();
 
         // then
+        // orgCode/displayName/externalId 가 뒤바뀌면(둘 다 연속된 String 필드다) 여기서 잡힌다
+        assertThat(detail.orgCode()).isEqualTo("DEV002");
+        assertThat(detail.displayName()).isEqualTo("DEV002-조직");
+        assertThat(detail.externalId()).isEqualTo("DEV002");
         assertThat(detail.ancestors()).extracting("orgCode").containsExactly("DEV001", "ROOT");
         assertThat(detail.childOrganizations()).extracting("orgCode").containsExactly("DEV003");
         // 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다
@@ -234,7 +274,7 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
-    @DisplayName("경로가 상한을 넘으면 잘라내고 truncated 를 세운다")
+    @DisplayName("직속 소속만으로 상한을 넘으면 정확히 상한만큼만 남기고 truncated 를 세운다")
     void 상한을_넘으면_자른다() {
         // given — kim 이 직속으로 속한 조직을 상한보다 많이 만든다
         state.saveUser(직원("kim", true)).block();
@@ -245,9 +285,94 @@ class AdminQueryUseCaseTest {
         // when
         var detail = useCase.employeeDetail("kim").block();
 
-        // then — 상한 없이 훑는 대신 그 사실을 드러낸다
-        assertThat(detail.paths()).hasSizeLessThanOrEqualTo(AdminQueryUseCase.MAX_PATHS);
+        // then — 상한 없이 훑는 대신 그 사실을 드러낸다. 0개짜리 구현도 통과하면 안 되므로 정확히 센다
+        assertThat(detail.paths()).hasSize(AdminQueryUseCase.MAX_PATHS);
         assertThat(detail.truncated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("상위 계층 사슬만으로 상한을 넘어도 정확히 상한만큼만 남기고 truncated 를 세운다")
+    void 상위_사슬이_상한을_넘으면_자른다() {
+        // given — kim 은 G0 하나에만 직속이고, G0 위로 상한보다 많은 조상이 한 줄로 이어진다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("G0", MemberRef.user("kim"))).block();
+        for (int i = 1; i <= AdminQueryUseCase.MAX_PATHS + 10; i++) {
+            state.saveGroup(조직("G" + i, MemberRef.group("G" + (i - 1)))).block();
+        }
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — 직속 단계가 아니라 상위 확장 도중에 상한에 걸리는 경우도 같게 잘린다
+        assertThat(detail.paths()).hasSize(AdminQueryUseCase.MAX_PATHS);
+        assertThat(detail.truncated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("조직 멤버 목록은 커서로 다음 페이지를 이어간다")
+    void 조직_멤버는_커서로_다음_페이지를_잇는다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveUser(직원("lee", true)).block();
+        state.saveUser(직원("park", true)).block();
+        state.saveGroup(조직("DEV002",
+                MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.user("park"))).block();
+
+        // when
+        var firstPage = useCase.organizationMembers("DEV002", null, 2).block();
+        var secondPage = useCase.organizationMembers("DEV002", firstPage.nextCursor(), 2).block();
+
+        // then
+        assertThat(firstPage.items()).hasSize(2);
+        assertThat(firstPage.nextCursor()).isNotNull();
+        assertThat(secondPage.items()).hasSize(1);
+        assertThat(secondPage.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("상한을 넘는 커서는 예외 대신 빈 마지막 페이지를 준다")
+    void 상한을_넘는_커서는_빈_페이지다() {
+        // given — 낡은 북마크: 멤버가 3명뿐인데 커서는 10번째를 가리킨다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // when
+        var page = useCase.organizationMembers("DEV002", "10", 20).block();
+
+        // then
+        assertThat(page.items()).isEmpty();
+        assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("파싱할 수 없는 커서는 예외를 던진다")
+    void 파싱할_수_없는_커서는_예외다() {
+        // given
+        state.saveGroup(조직("DEV002")).block();
+
+        // when, then
+        assertThatThrownBy(() -> useCase.organizationMembers("DEV002", "abc", 20).block())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("존재하지 않는 조직의 멤버 조회는 빈 Mono 다")
+    void 없는_조직의_멤버_조회는_빈_Mono다() {
+        // when, then
+        assertThat(useCase.organizationMembers("NOPE", null, 20).blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("존재하지 않는 직원을 참조하는 멤버십은 건너뛴다")
+    void 없는_직원_참조는_건너뛴다() {
+        // given — DEV002 가 kim 을 멤버로 갖지만 kim 의 직원 레코드 자체는 없다
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // when
+        var page = useCase.organizationMembers("DEV002", null, 20).block();
+
+        // then
+        assertThat(page.items()).isEmpty();
     }
 
     @Test
