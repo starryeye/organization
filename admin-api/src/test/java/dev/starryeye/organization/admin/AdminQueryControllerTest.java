@@ -183,4 +183,62 @@ class AdminQueryControllerTest {
                 .jsonPath("$.orgCode").isEqualTo("DEV002")
                 .jsonPath("$.ancestors[0].orgCode").isEqualTo("DEV001");
     }
+
+    @Test
+    @DisplayName("조직 멤버 목록을 조회한다")
+    void 조직_멤버_목록을_조회한다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        checker.allowed.add(new RelationTuple("user:kim", "member", "group:DEV002"));
+
+        // when, then
+        client.get().uri("/admin/organizations/DEV002/members")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].employeeId").isEqualTo("kim")
+                .jsonPath("$.items[0].displayName").isEqualTo("김철수")
+                .jsonPath("$.items[0].openFgaCheck").isEqualTo(true);
+    }
+
+    @Test
+    @DisplayName("없는 조직의 멤버 목록은 404 다")
+    void 없는_조직의_멤버_목록은_404다() {
+        // when, then
+        client.get().uri("/admin/organizations/NOPE/members")
+                .exchange().expectStatus().isNotFound();
+    }
+
+    @Test
+    @DisplayName("멤버 목록에서 어긋남을 만나면 드리프트 카운터가 올라간다")
+    void 멤버_목록_드리프트_카운터가_올라간다() {
+        // given — 상태는 소속을 말하는데 OpenFGA 에는 튜플이 없다
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+
+        // when
+        client.get().uri("/admin/organizations/DEV002/members").exchange().expectStatus().isOk();
+
+        // then — employeeDetail 경로와 같은 신호가 멤버 목록 경로에서도 나와야 한다
+        assertThat(registry.counter("authz_drift_detected").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("멤버 목록에서 Check 를 못 한 것은 드리프트가 아니라 보류로 센다")
+    void 멤버_목록_보류는_드리프트로_안_센다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        checker.failFor(tuple -> true);
+
+        // when
+        client.get().uri("/admin/organizations/DEV002/members").exchange().expectStatus().isOk();
+
+        // then — 모른다는 것과 어긋났다는 것은 다르다
+        assertThat(registry.counter("authz_drift_detected").count()).isZero();
+        assertThat(registry.counter("authz_check_failed").count()).isEqualTo(1.0);
+    }
 }
