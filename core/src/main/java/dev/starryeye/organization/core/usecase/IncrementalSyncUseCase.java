@@ -100,6 +100,13 @@ public class IncrementalSyncUseCase {
      * 존재하지 않는 직원은 튜플을 만들지 않는다는 점에서 비활성 직원과 같다. 이 자리에
      * 요청값(={@code user}) 자체를 fallback 으로 쓰면 before/after 가 똑같아져 델타가
      * 비어버리고, 조직이 먼저 참조해 둔 신규 직원의 첫 튜플이 영원히 만들어지지 않는다.
+     *
+     * <p>조직 쪽({@link #upsertGroup})과 달리 여기서는 "없는 직원"과 "멤버가 될 수 없는 직원"을
+     * 같은 대역으로 뭉뚱그려도 안전하다 — 비활성 유저는
+     * {@link TupleMapper#toTuples} 에서 튜플 기여가 0 이고, 스냅샷에 아예 없는 유저도(경고만
+     * 남기고) 기여가 0 이라 두 상태가 튜플 관점에서 구별되지 않기 때문이다. 조직은 그렇지
+     * 않다: 멤버 0개인 조직은 <b>상위 조직의 child 엣지</b>를 성립시키지만 없는 조직은 그렇지
+     * 않아, 같은 대역을 쓰면 델타가 사라진다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
         DirectoryUser neverStored = new DirectoryUser(
