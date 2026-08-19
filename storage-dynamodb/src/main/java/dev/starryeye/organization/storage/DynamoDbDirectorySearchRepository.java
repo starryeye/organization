@@ -45,25 +45,35 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
                 prefix, cursor, limit, DynamoDbDirectorySearchRepository::toGroupSummary);
     }
 
+    /**
+     * {@code Mono.defer} 로 감싸는 이유: {@link Cursor#decode} 는 손상된 커서에서
+     * {@link IllegalArgumentException} 을 던지는데, 감싸지 않으면 이 예외가 Mono 를
+     * 조립하는 시점(메서드 호출 시점)에 곧바로 튀어나온다. 그러면 {@code Mono.zip} 처럼
+     * 여러 Mono 를 조립만 하고 아직 구독하지 않은 코드에서 인자 평가 중에 예외가 터져
+     * Reactor 체인에 진입하지도 못한 채 죽는다. {@code defer} 로 감싸면 구독 시점까지
+     * 평가가 미뤄져 예외가 정상적인 {@code onError} 신호가 된다.
+     */
     private <T> Mono<Page<T>> query(String indexName, String pkName, String skName, String partition,
                                     String prefix, String cursor, int limit,
                                     Function<Map<String, AttributeValue>, T> mapper) {
-        QueryRequest.Builder request = QueryRequest.builder()
-                .tableName(properties.getTableName())
-                .indexName(indexName)
-                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
-                .expressionAttributeNames(Map.of("#pk", pkName, "#sk", skName))
-                .expressionAttributeValues(Map.of(
-                        ":pk", Attrs.s(partition), ":prefix", Attrs.s(prefix)))
-                .limit(limit);
+        return Mono.defer(() -> {
+            QueryRequest.Builder request = QueryRequest.builder()
+                    .tableName(properties.getTableName())
+                    .indexName(indexName)
+                    .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                    .expressionAttributeNames(Map.of("#pk", pkName, "#sk", skName))
+                    .expressionAttributeValues(Map.of(
+                            ":pk", Attrs.s(partition), ":prefix", Attrs.s(prefix)))
+                    .limit(limit);
 
-        Map<String, AttributeValue> start = Cursor.decode(cursor);
-        if (start != null) {
-            request.exclusiveStartKey(start);
-        }
+            Map<String, AttributeValue> start = Cursor.decode(cursor);
+            if (start != null) {
+                request.exclusiveStartKey(start);
+            }
 
-        return Mono.fromFuture(() -> client.query(request.build()))
-                .map(response -> toPage(response, mapper));
+            return Mono.fromFuture(() -> client.query(request.build()))
+                    .map(response -> toPage(response, mapper));
+        });
     }
 
     private <T> Page<T> toPage(QueryResponse response, Function<Map<String, AttributeValue>, T> mapper) {

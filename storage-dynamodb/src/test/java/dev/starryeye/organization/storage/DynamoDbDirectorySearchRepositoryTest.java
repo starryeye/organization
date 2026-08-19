@@ -2,15 +2,21 @@ package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.query.Page;
+import dev.starryeye.organization.core.query.UserSummary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
 
@@ -33,9 +39,9 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // when
         var page = search.searchUsersByDisplayName("홍", null, 20).block();
 
-        // then
-        assertThat(page.items()).extracting("employeeId").containsExactly("gd.hong");
-        assertThat(page.items()).extracting("displayName").containsExactly("홍길동");
+        // then — INCLUDE 프로젝션이 userName·active 까지 실어 오는지 네 필드 전부를 확인한다
+        assertThat(page.items()).containsExactly(
+                new UserSummary("gd.hong", "gd.hong", "홍길동", true));
         assertThat(page.hasNext()).isFalse();
     }
 
@@ -111,5 +117,21 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(page.items()).isEmpty();
         assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("깨진 커서는 Mono 를 만들 때는 던지지 않고, 구독할 때 IllegalArgumentException 으로 나온다")
+    void 깨진_커서는_구독_시점에_실패한다() {
+        // given
+        AtomicReference<Mono<Page<UserSummary>>> built = new AtomicReference<>();
+
+        // when — Mono 조립 자체는 예외 없이 끝나야 한다(Mono.defer 로 감쌌기 때문에 커서
+        // 해석이 구독 시점까지 미뤄진다)
+        assertThatCode(() -> built.set(search.searchUsersByDisplayName("아무개", "!!not-base64!!", 20)))
+                .doesNotThrowAnyException();
+
+        // then — 구독해야 비로소 IllegalArgumentException 이 onError 신호로 나온다
+        assertThatThrownBy(() -> built.get().block())
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }
