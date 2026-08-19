@@ -137,6 +137,23 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("다른 인덱스의 커서를 들고 오면 저장소 오류가 아니라 IllegalArgumentException 이다")
+    void 다른_인덱스의_커서는_IllegalArgumentException_이다() {
+        // given — 계정명 검색(GSI1)이 발급한, 형식은 멀쩡한 커서
+        for (int i = 1; i <= 3; i++) {
+            state.saveUser(new DirectoryUser("u" + i, "e" + i, "u" + i, "가나다" + i, null, true)).block();
+        }
+        String gsi1Cursor = search.searchUsersByUserName("u", null, 1).block().nextCursor();
+        assertThat(gsi1Cursor).isNotNull();
+
+        // when, then — 그대로 흘려보내면 GSI2 는 exclusiveStartKey 모양이 달라
+        // DynamoDbException 으로 거절하고 컨트롤러가 그것을 500 으로 옮긴다.
+        // 설계 §9 는 손상된 커서를 400 으로 규정한다.
+        assertThatThrownBy(() -> search.searchUsersByDisplayName("가", gsi1Cursor, 20).block())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("깨진 커서는 Mono 를 만들 때는 던지지 않고, 구독할 때 IllegalArgumentException 으로 나온다")
     void 깨진_커서는_구독_시점에_실패한다() {
         // given

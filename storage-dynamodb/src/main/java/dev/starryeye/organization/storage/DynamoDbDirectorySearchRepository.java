@@ -80,6 +80,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     private <T> Mono<Page<T>> query(String indexName, String pkName, String skName, String partition,
                                     String prefix, String cursor, int limit,
                                     Function<Map<String, AttributeValue>, T> mapper) {
+        // 인덱스만이 아니라 파티션까지 커서에 담는다 — GSI1 은 USER_INDEX 와 GROUP_INDEX 를
+        // 함께 쓰므로 인덱스 이름만 담으면 두 검색의 커서가 서로 통과해 버린다.
+        String scope = indexName + "/" + partition;
         return Mono.defer(() -> {
             QueryRequest.Builder request = QueryRequest.builder()
                     .tableName(properties.getTableName())
@@ -90,19 +93,20 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
                             ":pk", Attrs.s(partition), ":prefix", Attrs.s(prefix)))
                     .limit(limit);
 
-            Map<String, AttributeValue> start = Cursor.decode(cursor);
+            Map<String, AttributeValue> start = Cursor.decode(scope, cursor);
             if (start != null) {
                 request.exclusiveStartKey(start);
             }
 
             return Mono.fromFuture(() -> client.query(request.build()))
-                    .map(response -> toPage(response, mapper));
+                    .map(response -> toPage(scope, response, mapper));
         });
     }
 
-    private <T> Page<T> toPage(QueryResponse response, Function<Map<String, AttributeValue>, T> mapper) {
+    private <T> Page<T> toPage(String scope, QueryResponse response,
+                               Function<Map<String, AttributeValue>, T> mapper) {
         List<T> items = response.items().stream().map(mapper).toList();
-        return new Page<>(items, Cursor.encode(response.lastEvaluatedKey()));
+        return new Page<>(items, Cursor.encode(scope, response.lastEvaluatedKey()));
     }
 
     private static UserSummary toUserSummary(Map<String, AttributeValue> item) {

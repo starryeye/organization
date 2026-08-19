@@ -69,17 +69,6 @@ public class AdminQueryUseCase {
     }
 
     /**
-     * 롤업까지 한 번에 묻는 튜플. relation 이 {@code direct_member} 가 아니라 {@code member} 다 —
-     * {@code member} 는 {@code direct_member or member from child} 로 정의돼 있어 직속이든
-     * 상위든 한 번의 Check 로 답이 나온다. {@code direct_member} 로 물으면 조상 조직에 대해서는
-     * 항상 false 가 나와 롤업 경로가 전부 드리프트로 보인다. {@code RelationTuple} 에 이 팩토리가
-     * 없어 생성자를 직접 쓴다.
-     */
-    private static RelationTuple memberOf(String employeeId, String orgCode) {
-        return new RelationTuple("user:" + employeeId, "member", "group:" + orgCode);
-    }
-
-    /**
      * 직원이 직접 멤버로 등록된 조직들. 레코드가 없는 참조는 건너뛴다.
      *
      * <p>id 소스 자체를 {@code MAX_PATHS + 1} 로 자른다. 상한은 결과 개수뿐 아니라 <b>일하는
@@ -236,7 +225,7 @@ public class AdminQueryUseCase {
      */
     private Mono<EmployeeDetail> toDetail(DirectoryUser user, Reached reached) {
         return Flux.fromIterable(reached.entries)
-                .flatMapSequential(entry -> checkOrNull(memberOf(user.id(), entry.group.orgCode()))
+                .flatMapSequential(entry -> checkOrNull(RelationTuple.member(user.id(), entry.group.orgCode()))
                                 .map(allowed -> new AccessPath(entry.group.orgCode(), entry.group.displayName(),
                                         entry.via, user.active(), allowed, entry.cycle))
                                 .defaultIfEmpty(new AccessPath(entry.group.orgCode(), entry.group.displayName(),
@@ -330,7 +319,7 @@ public class AdminQueryUseCase {
         // 결과는 소스 순서대로 흘려보내므로 페이지 순서도 그대로 지켜진다.
         return Flux.fromIterable(userIds.subList(from, to))
                 .flatMapSequential(userId -> loadUserOrEmpty(userId)
-                        .flatMap(user -> checkOrNull(memberOf(user.id(), group.id()))
+                        .flatMap(user -> checkOrNull(RelationTuple.member(user.id(), group.id()))
                                 .map(allowed -> new OrgMember(user.id(), user.displayName(),
                                         user.active(), allowed))
                                 .defaultIfEmpty(new OrgMember(user.id(), user.displayName(),

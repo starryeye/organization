@@ -530,6 +530,22 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
+    @DisplayName("Check 에 쓰는 튜플은 RelationTuple 의 접두사 규칙을 따른다")
+    void Check_튜플은_접두사_규칙을_따른다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+
+        // when
+        useCase.employeeDetail("kim").block();
+
+        // then — 조회 경로가 "user:"/"group:" 를 직접 이어 붙이면 규칙이 두 곳에 살게 된다
+        assertThat(checker.checked).containsExactly(RelationTuple.member("kim", "DEV002"));
+        assertThat(RelationTuple.member("kim", "DEV002"))
+                .isEqualTo(new RelationTuple("user:kim", "member", "group:DEV002"));
+    }
+
+    @Test
     @DisplayName("검색은 저장소에 그대로 위임한다")
     void 검색은_그대로_위임한다() {
         // given

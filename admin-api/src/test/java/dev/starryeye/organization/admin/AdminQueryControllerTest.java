@@ -76,9 +76,11 @@ class AdminQueryControllerTest {
     }
 
     @Test
-    @DisplayName("손상된 커서는 400 이다")
-    void 손상된_커서는_400이다() {
-        // given — 저장소가 IllegalArgumentException 을 던지는 상황
+    @DisplayName("저장소의 IllegalArgumentException 은 400 으로 옮겨진다")
+    void 저장소의_IllegalArgumentException_은_400이_된다() {
+        // given — 이 페이크는 커서를 보지 않고 무조건 실패하므로, 이 테스트가 증명하는 것은
+        // "손상된 커서가 예외가 된다" 가 아니라 "그 예외가 400 이 된다" 뿐이다.
+        // 어떤 커서가 실제로 예외를 부르는지는 CursorTest 와 저장소 테스트가 못박는다.
         search.failWith = new IllegalArgumentException("커서를 해석할 수 없다");
 
         // when, then
