@@ -8,7 +8,9 @@ import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 메모리 위에서 접두사 검색과 커서 페이징을 흉내낸다.
@@ -25,6 +27,12 @@ public class FakeSearchRepository implements DirectorySearchRepository {
 
     /** {@link #findGroupSummary} 가 불린 순서대로의 조직 id. 읽기 경로를 단언하는 데 쓴다. */
     public final List<String> findGroupSummaryCalls = new ArrayList<>();
+
+    /**
+     * 여기 담긴 조직코드는 {@link #findGroupSummary} 가 빈 결과를 준다. 멤버십은 그 조직을
+     * 가리키는데 조직 레코드는 사라진 상태(동기화 도중 흔하다)를 흉내낸다.
+     */
+    public final Set<String> missingGroups = new HashSet<>();
 
     /**
      * 실제 배포에서 두 저장소는 같은 테이블을 본다. {@link #findGroupSummary} 가
@@ -47,6 +55,9 @@ public class FakeSearchRepository implements DirectorySearchRepository {
     }
 
     private GroupSummary lookupGroup(String orgCode) {
+        if (missingGroups.contains(orgCode)) {
+            return null;
+        }
         if (state != null) {
             var group = state.groups.get(orgCode);
             return group == null ? null : new GroupSummary(group.id(), group.displayName());

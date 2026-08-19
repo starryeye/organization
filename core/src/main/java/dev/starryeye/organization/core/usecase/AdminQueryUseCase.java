@@ -85,12 +85,23 @@ public class AdminQueryUseCase {
      * <p>id 소스 자체를 {@code MAX_PATHS + 1} 로 자른다. 상한은 결과 개수뿐 아니라 <b>일하는
      * 양</b>도 지켜야 한다 — 이 자르기가 없으면 상한을 훨씬 넘는 소속을 가진 직원 하나가
      * {@code findGroupSummary} 왕복을 소속 개수만큼 전부 치르고 나서야 잘린다.
-     * {@code seedDirect} 는 모인 목록이 {@code MAX_PATHS} 를 넘는지로 "더 있었다" 를 판단해
-     * {@code truncated} 를 세운다.
+     *
+     * <p><b>{@code truncated} 는 읽어 온 id 개수로 판단한다 — 실제로 적재된 조직 개수가
+     * 아니다.</b> 적재 결과로 세면 참조가 끊어진 조직(레코드가 사라진 조직)이 섞였을 때 상한을
+     * 넘긴 직원이 {@code truncated: false} 로 나온다. 자른 사실은 자를 때 알 수 있는 것이지
+     * 적재가 끝난 뒤에 세어 알 수 있는 것이 아니다.
      */
-    private Mono<List<GroupSummary>> directGroupsOf(String employeeId) {
+    private Mono<List<GroupSummary>> directGroupsOf(String employeeId, Reached reached) {
         return state.findGroupIdsContaining(MemberRef.user(employeeId))
                 .take(MAX_PATHS + 1)
+                .collectList()
+                .flatMapMany(ids -> {
+                    if (ids.size() > MAX_PATHS) {
+                        reached.truncated = true;
+                        return Flux.fromIterable(ids.subList(0, MAX_PATHS));
+                    }
+                    return Flux.fromIterable(ids);
+                })
                 .flatMap(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                 .collectList();
     }
@@ -137,7 +148,7 @@ public class AdminQueryUseCase {
      */
     private Mono<Reached> climb(String employeeId) {
         Reached reached = new Reached();
-        return directGroupsOf(employeeId)
+        return directGroupsOf(employeeId, reached)
                 .flatMap(direct -> Flux.fromIterable(seedDirect(direct, reached))
                         .expand(step -> expandParents(step, reached))
                         .then(Mono.just(reached)));
@@ -166,7 +177,14 @@ public class AdminQueryUseCase {
         return seeded;
     }
 
-    /** {@code step} 의 상위 조직들을 찾아, 계속 올라갈 다음 {@link Step} 만 골라 낸다. */
+    /**
+     * {@code step} 의 상위 조직들을 찾아, 계속 올라갈 다음 {@link Step} 만 골라 낸다.
+     *
+     * <p><b>id 소스를 {@code MAX_PATHS + 1} 로 자른다 — {@code directGroupsOf} 와 같은 이유다.</b>
+     * 위의 {@code truncated} 검사는 <b>다음</b> 단계로 넘어가는 것만 막지, 지금 이 단계 안에서
+     * 상한을 넘긴 뒤의 상위 조직들까지 막지는 못한다. 자르지 않으면 상위 조직이 수천 개 달린
+     * 조직 하나가 한 단계 만에 그만큼의 읽기를 전부 치른다.
+     */
     private Flux<Step> expandParents(Step step, Reached reached) {
         if (reached.truncated) {
             return Flux.empty();
@@ -174,6 +192,7 @@ public class AdminQueryUseCase {
         // acceptParent 는 순환/다이아몬드/상한을 만나면 null 을 돌려준다. Flux#map 은 null 을
         // 허용하지 않으므로(NullPointerException) flatMap + Mono.justOrEmpty 로 흡수한다.
         return state.findGroupIdsContaining(MemberRef.group(step.group().orgCode()))
+                .take(MAX_PATHS + 1)
                 .concatMap(this::loadGroupOrEmpty)
                 .flatMap(parent -> Mono.justOrEmpty(acceptParent(parent, step.path(), reached)));
     }
@@ -265,12 +284,23 @@ public class AdminQueryUseCase {
      * 직속 하위 조직만(1 depth). 멤버 참조에는 조직코드밖에 없으므로 표시명을 채우려면
      * 각 하위 조직을 읽어야 한다 — 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다.
      * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이다.
+     *
+     * <p><b>여기에도 상한을 둔다.</b> "보통 수십 개" 는 정상 조직도의 이야기이고, 이 엔드포인트는
+     * 인증이 없어 누구나 부를 수 있다. 하위 조직이 수천 개인 조직이 하나라도 있으면 요청 하나가
+     * 그만큼의 읽기를 무제한으로 낸다. 조용히 짧은 목록을 주는 대신 {@code ancestorsOf} 와 같이
+     * 경고를 남긴다 — {@code OrganizationDetail} 에는 {@code truncated} 를 실을 자리가 없다.
      */
     private Mono<List<GroupSummary>> childrenOf(DirectoryGroup group) {
-        return Flux.fromIterable(group.members())
+        List<String> childIds = group.members().stream()
                 .filter(member -> member.type() == MemberType.GROUP)
                 .map(MemberRef::id)
-                .sort()
+                .sorted()
+                .toList();
+        if (childIds.size() > MAX_PATHS) {
+            log.warn("조직 '{}' 의 직속 하위 조직이 상한({})을 넘어 잘렸습니다", group.id(), MAX_PATHS);
+            childIds = childIds.subList(0, MAX_PATHS);
+        }
+        return Flux.fromIterable(childIds)
                 .concatMap(this::loadGroupOrEmpty)
                 .collectList();
     }

@@ -349,6 +349,69 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
+    @DisplayName("상한을 넘긴 직원의 참조가 일부 끊어져 있어도 truncated 를 세운다")
+    void 끊어진_참조가_섞여도_truncated를_세운다() {
+        // given — 소속은 상한보다 많고, 그중 일부는 조직 레코드가 사라진 상태다
+        state.saveUser(직원("kim", true)).block();
+        for (int i = 0; i < AdminQueryUseCase.MAX_PATHS + 10; i++) {
+            state.saveGroup(조직("G" + i, MemberRef.user("kim"))).block();
+        }
+        for (int i = 0; i < 30; i++) {
+            search.missingGroups.add("G" + i);
+        }
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — 자른 사실은 자를 때 알 수 있는 것이지, 적재된 개수를 세어 알 수 있는 것이
+        // 아니다. 적재 결과로 세면 여기서 조용히 false 가 되어 "전부 보여줬다" 는 거짓말이 된다.
+        assertThat(detail.paths()).hasSizeLessThan(AdminQueryUseCase.MAX_PATHS);
+        assertThat(detail.truncated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("한 단계의 상위 조직이 아무리 많아도 상한만큼만 읽는다")
+    void 상위_확장은_한_단계에서도_상한을_지킨다() {
+        // given — G0 하나에 상위 조직이 상한의 다섯 배 달려 있다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("G0", MemberRef.user("kim"))).block();
+        int 상위_개수 = AdminQueryUseCase.MAX_PATHS * 5;
+        for (int i = 1; i <= 상위_개수; i++) {
+            state.saveGroup(조직("P" + i, MemberRef.group("G0"))).block();
+        }
+        search.findGroupSummaryCalls.clear();
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — truncated 검사는 '다음' 단계만 막는다. 자르지 않으면 이 한 단계 안에서
+        // 상위 조직 전부를 읽고 나서야 잘린다.
+        assertThat(detail.truncated()).isTrue();
+        assertThat(detail.paths()).hasSize(AdminQueryUseCase.MAX_PATHS);
+        assertThat(search.findGroupSummaryCalls).hasSizeLessThanOrEqualTo(AdminQueryUseCase.MAX_PATHS + 2);
+    }
+
+    @Test
+    @DisplayName("직속 하위 조직이 상한을 넘으면 상한만큼만 읽고 자른다")
+    void 직속_하위_조직도_상한을_지킨다() {
+        // given — 하위 조직이 상한보다 많은 조직
+        MemberRef[] children = new MemberRef[AdminQueryUseCase.MAX_PATHS + 10];
+        for (int i = 0; i < children.length; i++) {
+            state.saveGroup(조직("C" + i)).block();
+            children[i] = MemberRef.group("C" + i);
+        }
+        state.saveGroup(조직("BIG", children)).block();
+        search.findGroupSummaryCalls.clear();
+
+        // when
+        var detail = useCase.organizationDetail("BIG", 20).block();
+
+        // then — 인증이 없는 엔드포인트라 이 팬아웃을 익명 호출자가 조종할 수 있다
+        assertThat(detail.childOrganizations()).hasSize(AdminQueryUseCase.MAX_PATHS);
+        assertThat(search.findGroupSummaryCalls).hasSize(AdminQueryUseCase.MAX_PATHS);
+    }
+
+    @Test
     @DisplayName("조직 멤버 목록은 커서로 다음 페이지를 이어간다")
     void 조직_멤버는_커서로_다음_페이지를_잇는다() {
         // given
