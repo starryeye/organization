@@ -5,6 +5,7 @@ dependencies {
     implementation project(':storage-dynamodb')
     implementation project(':authz-openfga')
     implementation project(':connector-ldap')
+    implementation project(':admin-api')
 
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
