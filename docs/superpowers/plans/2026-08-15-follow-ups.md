@@ -108,3 +108,70 @@ app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store �
 정규화되지 않은 FQN, `TableInitializer` 임포트 정렬, README 의 테이블 생성
 서술이 `create-table-on-startup` 게이트를 반영하지 않음, `SyncMetrics` 가
 미완료 실행에도 튜플 카운터 증가(값이 0 이라 무해), `paginate` 재귀 깊이.
+
+## 6. 의도적으로 미룬 설계 결정 — SCIM 쓰기 경로의 동시성
+
+이 항목은 결함 목록이 아니라 **결정 기록**이다. 2026-08-19 브레인스토밍에서
+"지금은 하지 않는다"로 닫았고, 스케일 아웃 시점에 다시 열어야 한다.
+
+**문제.** app-scim 을 N대 액티브-액티브로 띄우면 lost update 가 생기고,
+**오류 신호가 전혀 남지 않는다.** 두 요청이 각자 자기 시점에서 올바르게
+동작하고 둘 다 200 을 반환하는데도 결과가 틀린다:
+
+```
+        A: upsertUser(kim, 비활성)          B: upsertGroup(DEV001 + kim)
+ t1  읽기: kim 활성
+ t2                                      읽기: kim 활성, DEV001 에 kim 없음
+ t3  계산: 지울 튜플 없음
+ t4                                      계산: dm(kim,DEV001) 추가
+ t5  커밋: kim 비활성                        200
+ t6                                      OpenFGA: dm(kim,DEV001) 씀
+ t7                                      커밋: DEV001 에 kim         200
+```
+
+최종 상태("kim 비활성 + DEV001 이 kim 포함")가 요구하는 튜플은 없음인데
+OpenFGA 에는 `dm(kim,DEV001)` 이 남는다. 퇴사자 권한이 살아남는 방향이다.
+
+**애플리케이션 수준 락으로는 안 된다.** 프로세스 내 직렬화는 인스턴스가
+둘이 되는 순간 아무것도 막지 못하면서 막고 있다고 믿게 만든다. ShedLock 이나
+leader election 도 이 문제를 풀지 못한다 — 그것들은 `@Scheduled` 중복 실행을
+막는 도구이고, 여기 문제는 HTTP 요청 경로다.
+
+**흔한 낙관적 락으로도 안 잡힌다.** 아이템 버전 검사는 write-write 충돌을
+잡는다. 그런데 위 시나리오에서 B 가 *쓴* 것은 DEV001 이고 충돌의 원인은 B 가
+*읽기만 한* kim 이다. 읽은 것까지 검증하려면 커밋을 `TransactWriteItems` 로
+바꾸고 읽은 아이템마다 `ConditionCheck` 를 걸어야 하는데, **트랜잭션 100개
+아이템 제한** 때문에 멤버가 수백인 조직 PUT 은 애초에 들어가지 않는다.
+
+**장애는 이미 안전하다(혼동 주의).** OpenFGA 쓰기 성공 후 DynamoDB 커밋이
+실패하면 500 이 나가고, 상태가 안 바뀌었으므로 재시도가 같은 델타를 다시
+계산해 `onDuplicate(IGNORE)` 로 수렴한다. 여기서 미뤄둔 것은 **동시성**이지
+장애 복구가 아니다.
+
+**LDAP 이 안전한 이유(SCIM 에 없는 것).** `FullSyncUseCase` 는 기준선을 상태에서
+유도하지 않고 `TupleSnapshotRepository` 에서 읽으며, 커밋할 스냅샷을
+`baseline - result.deleted() + result.written()` 으로 만든다 — 즉 **OpenFGA 에
+실제 반영된 것**을 기록한다. 게다가 매일 전체를 다시 돌려 차이를 재적용한다.
+SCIM 은 기준선을 상태에서 유도하고(`tuplesOf(snapshotOf(...))`) 전체 재동기화가
+없어서, 한 번 어긋나면 다음 diff 가 "상태 vs 상태"를 비교해 차이를 못 본다.
+
+**딸린 불일치.** `SnapshotArchiveUseCase` 는 `loadAll → TupleMapper` 결과를
+저장하므로 SCIM 스냅샷은 **의도한 튜플**이고, LDAP 스냅샷은 **실제 반영된
+튜플**이다. 같은 `TupleSnapshotRepository` 에 같은 `TupleSnapshot` 타입으로
+들어가는데 의미가 다르다. 설계 §4.4 는 스냅샷을 "OpenFGA 상태를 대신하는 유일한
+기록"이라 부르는데 SCIM 쪽은 그 약속을 지키지 않는다.
+
+**현재 대응.** 관리자가 어긋났다고 판단하면 **OpenFGA store 초기화 + DynamoDB
+상태 전체 재적재**를 수동 실행한다. 자동 감지도, 주기적 대조도 두지 않는다.
+따라서 **SCIM 경로는 수렴을 보장하지 않는다** — 운영자가 실행할 때만 수렴한다.
+실행 트리거는 대체로 사고 이후("권한이 안 나온다"는 문의, 감사에서 퇴사자
+권한 발견)가 된다는 것을 감수한 선택이다.
+
+`RebuildUseCase` 는 그대로 못 쓴다 — `DirectorySnapshotSource`(LDAP 리더)에
+의존하는데 SCIM 의 진실은 DynamoDB 상태 자체다. `state.loadAll()` 을 읽는
+변형이 필요하다. `resetStore()` 는 재적재가 끝날 때까지 **인가 공백**을 만든다
+(설계 §8.2 가 LDAP 쪽에서 다루는 것과 같은 성질).
+
+**다시 열어야 할 시점.** `replicas` 를 2 이상으로 올릴 때. 그때의 후보는
+(1) 주기적 대조로 감지·수렴 — LDAP 이 이미 쓰는 모델, (2) 아웃박스 —
+변경 의도를 상태와 원자적으로 기록하고 별도 적용기가 반영, (3) 저장소 분산 락.
