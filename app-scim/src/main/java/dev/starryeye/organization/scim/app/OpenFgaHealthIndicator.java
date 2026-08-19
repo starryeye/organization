@@ -20,10 +20,6 @@ import reactor.core.publisher.Mono;
  * 아직 안 끝난 cold 인스턴스에서 이 경로를 타면 잘못된 이름의 빈 store 가 조용히
  * 만들어지고 헬스체크는 그 위에서 UP 을 보고한다. {@code findExistingStore()} 는 store 가
  * 없으면 아무것도 만들지 않고 빈 결과를 주므로, 여기서는 그 경우를 DOWN 으로 번역한다.
- *
- * <p>app-ldap 의 동일 클래스는 아직 {@code resolveStore()} 를 직접 쓰는 이전 형태다 —
- * {@code docs/superpowers/plans/2026-08-15-follow-ups.md} 에 추적 중이며 이 계획의
- * 범위 밖이다.
  */
 @Component("openFga")
 @RequiredArgsConstructor

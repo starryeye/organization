@@ -37,9 +37,10 @@ baseline 분기, `GroupOfNamesStrategy` 의 중복 id 경로(DIT 만 픽스처 �
 
 ## 2. 실패가 조용한 곳
 
-**`OpenFgaHealthIndicator` 가 아직 `resolveStore()` 를 직접 부른다.** 시작
-예열이 정상 경로에서는 이 문제를 없애지만, 예열이 실패했고 동기화도 아직
-안 돌았다면 헬스 프로브가 store 를 만들고 인가 모델을 쓸 수 있다.
+~~**`OpenFgaHealthIndicator` 가 아직 `resolveStore()` 를 직접 부른다.**~~ 해결됨 —
+SCIM 브랜치에서 `StoreBootstrapper.findExistingStore()` (read-only) 를 추가하고
+app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store 가 없으면
+아무것도 만들지 않고 DOWN 을 보고한다.
 
 **두 헬스 인디케이터에 `.timeout()` 없음** — DynamoDB/OpenFGA 연결이 매달리면
 프로브가 DOWN 을 보고하는 대신 함께 매달린다.

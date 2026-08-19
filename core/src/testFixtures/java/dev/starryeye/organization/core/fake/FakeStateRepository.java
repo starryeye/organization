@@ -8,13 +8,22 @@ import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class FakeStateRepository implements DirectoryStateRepository {
 
     public final Map<String, DirectoryUser> users = new LinkedHashMap<>();
     public final Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+
+    /**
+     * {@link #findGroup} 이 불린 순서대로의 조직 id. 읽기 횟수 자체를 단언하고 싶은
+     * 테스트(요청 단위 캐시가 실제로 먹는지 등)를 위한 계측이며, 그 밖의 동작에는
+     * 영향을 주지 않는다.
+     */
+    public final List<String> findGroupCalls = new ArrayList<>();
 
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
@@ -33,7 +42,8 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
-        return Mono.justOrEmpty(groups.get(groupId));
+        return Mono.fromRunnable(() -> findGroupCalls.add(groupId))
+                .then(Mono.justOrEmpty(groups.get(groupId)));
     }
 
     @Override

@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class IncrementalSyncUseCaseTest {
 
@@ -280,6 +281,46 @@ class IncrementalSyncUseCaseTest {
         assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toWrite())
                 .containsExactly(RelationTuple.child("C", "B"));
+    }
+
+    @Test
+    @DisplayName("순환 검사가 조직 상한을 넘기면 조용히 추측하지 않고 요청을 실패시킨다")
+    void 순환_검사는_상한을_넘기면_실패한다() {
+        // given — 상한(10,000)보다 긴 사슬을 만든다. G0 -> G1 -> ... -> G10100
+        int depth = 10_100;
+        for (int i = depth; i >= 1; i--) {
+            state.saveGroup(조직("G" + i, MemberRef.group("G" + (i + 1)))).block();
+        }
+        state.saveGroup(조직("G" + (depth + 1))).block();
+        state.saveGroup(조직("TOP")).block();
+
+        // when — TOP 아래에 사슬의 머리를 붙이면 순환 검사가 사슬 전체를 훑어야 한다
+        var 실행 = useCase.upsertGroup(조직("TOP", MemberRef.group("G1")));
+
+        // then — 못 본 채로 엣지를 쓰지 않고 에러로 끝난다
+        assertThatThrownBy(실행::block)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("순환 검사");
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("같은 조직을 여러 엣지가 훑어도 저장소는 한 번만 읽는다")
+    void 순환_검사는_같은_조직을_다시_읽지_않는다() {
+        // given — SHARED 하나를 두 신규 하위 조직이 각각 가리킨다
+        state.saveGroup(조직("SHARED", MemberRef.group("LEAF"))).block();
+        state.saveGroup(조직("LEAF")).block();
+        state.saveGroup(조직("X", MemberRef.group("SHARED"))).block();
+        state.saveGroup(조직("Y", MemberRef.group("SHARED"))).block();
+        state.findGroupCalls.clear();
+
+        // when — 새 엣지 두 개(X, Y)가 각각 SHARED -> LEAF 를 훑는다
+        var result = useCase.upsertGroup(조직("TOP", MemberRef.group("X"), MemberRef.group("Y"))).block();
+
+        // then — 캐시가 없으면 SHARED/LEAF 를 엣지마다 한 번씩 두 번 읽는다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.findGroupCalls).filteredOn("SHARED"::equals).hasSize(1);
+        assertThat(state.findGroupCalls).filteredOn("LEAF"::equals).hasSize(1);
     }
 
     @Test

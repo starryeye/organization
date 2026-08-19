@@ -188,7 +188,7 @@ public record TupleDelta(Set<RelationTuple> toWrite, Set<RelationTuple> toDelete
 두 프로토콜의 비대칭에 주의할 점이 있다.
 
 - **LDAP 그룹/OU에는 표시명 전용 표준 속성이 없다.** `displayName`은 `inetOrgPerson`(사람)에만 있다. 그래서 `groupOfNames`/`organizationalUnit`의 `description`을 조직명으로 쓰는 것이 관행이다(`cn=DEV001`, `description=개발본부`). 커스텀 스키마를 쓰는 환경을 위해 `group-name-attribute`로 교체할 수 있게 한다.
-- **SCIM `Group`에는 코드와 이름을 나눌 칸이 없다.** 필드가 `id`, `externalId`, `displayName`, `members` 넷뿐이다. Okta/Azure AD가 `externalId`로 소스 시스템의 식별자를 보내므로 이를 조직코드로 채택한다. `POST /Groups`에 `externalId`가 있으면 그 값을 리소스 `id`로 발급하고, 없으면 UUID를 발급한 뒤 경고 로그를 남긴다(이후 IdP는 발급된 `id`로 호출하므로 일관성은 유지되지만, 코드가 우리 쪽에서 만들어진 값이 된다).
+- **SCIM `Group`에는 코드와 이름을 나눌 칸이 없다.** 필드가 `id`, `externalId`, `displayName`, `members` 넷뿐이다. Okta/Azure AD가 `externalId`로 소스 시스템의 식별자를 보내므로 이를 조직코드로 채택한다. `POST /Groups`에 `externalId`가 있으면 그 값을 리소스 `id`로 발급하고, 없으면 IdP가 보낸 `Group.id`를 쓰고, 그것마저 없을 때만 UUID를 발급한 뒤 경고 로그를 남긴다(이후 IdP는 발급된 `id`로 호출하므로 일관성은 유지되지만, 코드가 우리 쪽에서 만들어진 값이 된다). `Group.id`를 건너뛰고 바로 UUID로 가면, IdP가 이미 알고 있는 `id`를 다시 보냈을 때 같은 조직에 새 코드를 발급해 중복 조직을 만든다.
 - 사번(`employeeNumber`)을 직원 아이디로 쓰고 싶은 환경을 위해 LDAP은 `user-id-attribute`로 교체 가능하다. SCIM에서는 Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)의 `employeeNumber`를 읽어야 하는데, **이번 범위에서는 확장 스키마를 파싱하지 않는다.** 필요해지면 매핑 설정에 추가한다.
 
 #### 정규화
@@ -693,7 +693,7 @@ IdP가 그룹 멤버 변경에 실제로 쓰는 경로만 구현한다.
 | `User.displayName` / `name.formatted` | `DirectoryUser.displayName` | |
 | `User.emails[primary].value` | `DirectoryUser.email` | |
 | `User.active` | `DirectoryUser.active` | |
-| `Group.id` | `DirectoryGroup.id` | **조직코드**. `POST` 시 `externalId`로 발급, 없으면 UUID + 경고 |
+| `Group.id` | `DirectoryGroup.id` | **조직코드**. `Group.externalId` → 없으면 `Group.id` → 둘 다 없으면 UUID + 경고 (§4.3 과 동일) |
 | `Group.externalId` | `DirectoryGroup.externalId` | |
 | `Group.displayName` | `DirectoryGroup.displayName` | **조직명**. 튜플에 사용하지 않음 |
 | `Group.members[].value` + `type` | `Set<MemberRef>` | |

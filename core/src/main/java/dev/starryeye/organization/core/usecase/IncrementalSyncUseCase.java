@@ -86,6 +86,9 @@ public class IncrementalSyncUseCase {
 
     private static final int LOAD_CONCURRENCY = 8;
 
+    /** 요청 하나의 순환 검사가 훑을 수 있는 조직 수 상한. {@link CycleScan} 참고. */
+    private static final int MAX_GRAPH_EXPANSIONS = 10_000;
+
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
 
@@ -315,11 +318,12 @@ public class IncrementalSyncUseCase {
         if (newEdges.isEmpty()) {
             return Mono.just(after);
         }
+        CycleScan scan = new CycleScan();
         return Flux.fromIterable(newEdges)
                 .concatMap(edge -> {
                     String child = stripType(edge.user());
                     String parent = stripType(edge.object());
-                    return reaches(child, parent)
+                    return reaches(child, parent, scan)
                             .filter(Boolean::booleanValue)
                             .doOnNext(cycle -> log.warn("튜플 변환 경고: {}",
                                     "조직 '%s' → '%s' 간선이 순환을 만들어 제외합니다".formatted(parent, child)))
@@ -337,32 +341,67 @@ public class IncrementalSyncUseCase {
     }
 
     /**
+     * 한 요청 안에서 일어나는 모든 순환 검사가 공유하는 작업 공간.
+     *
+     * <p><b>인접 리스트는 공유하고 visited 는 공유하지 않는다.</b> 어떤 조직의 하위 조직 목록은
+     * 현재상태의 순수한 함수라서 요청 하나 안에서는 몇 번을 물어도 같은 답이다 — 그래서
+     * 캐시해도 안전하고, 이게 실제 비용(DynamoDB 파티션 조회)의 대부분이다. 반면 visited 는
+     * 엣지마다 출발점과 목표가 달라서 공유하면 답이 틀린다: 앞선 엣지가 훑고 지나간 노드를
+     * 뒤 엣지가 건너뛰면, 그 노드 너머에 있는 목표에 도달하지 못했다고 잘못 결론 내린다.
+     *
+     * <p>{@code budget} 은 요청 하나가 펼칠 수 있는 노드 수의 상한이다. 캐시 덕분에 같은 조직을
+     * 두 번 펼치지는 않으므로, 이 값은 사실상 "요청 하나가 훑을 수 있는 조직 수"다. 현실의
+     * 조직도는 수천 개 규모라 {@value #MAX_GRAPH_EXPANSIONS} 를 넘길 일이 없다 — 넘긴다면
+     * 병리적인 그래프이거나 버그이므로, 조용히 추측하는 대신 요청을 실패시킨다.
+     */
+    private static final class CycleScan {
+        private final Map<String, List<String>> childIds = new LinkedHashMap<>();
+        private int budget = MAX_GRAPH_EXPANSIONS;
+    }
+
+    /**
      * {@code from} 에서 하위 조직 간선을 따라 {@code target} 에 닿는지 현재상태 저장소를 훑어
      * 확인한다. 자기 자신도 도달한 것으로 본다 — 자기 자신을 하위 조직으로 넣는 것도 순환이다.
      */
-    private Mono<Boolean> reaches(String from, String target) {
+    private Mono<Boolean> reaches(String from, String target, CycleScan scan) {
         if (from.equals(target)) {
             return Mono.just(true);
         }
         Set<String> visited = new LinkedHashSet<>();
         visited.add(from);
-        return walk(List.of(from), target, visited);
+        // 너비 우선 확장을 Flux.expand 에 맡긴다. 레벨마다 walk 를 재귀 호출하면 계층 깊이만큼
+        // 연산자가 중첩돼, 깊은 사슬에서 예산 검사가 걸리기도 전에 StackOverflowError 가 난다.
+        // expand 는 내부적으로 반복 처리하므로 깊이가 스택을 쓰지 않고, any 는 목표를 만나는
+        // 즉시 상위를 취소해 나머지 계층을 읽지 않는다.
+        return Flux.just(from)
+                .expand(groupId -> childIdsOf(groupId, scan)
+                        .flatMapIterable(ids -> ids)
+                        .filter(visited::add))
+                .any(target::equals);
     }
 
-    private Mono<Boolean> walk(List<String> frontier, String target, Set<String> visited) {
-        if (frontier.isEmpty()) {
-            return Mono.just(false);
+    /**
+     * 한 조직의 하위 조직 id 목록을 돌려준다. 요청 단위 캐시에 없을 때만 저장소를 읽고,
+     * 읽을 때마다 예산을 하나 쓴다. 없는 조직은 빈 목록으로 캐시한다 — 부모가 참조하지만
+     * 아직 도착하지 않은 조직이 흔하고, 그때마다 다시 읽을 이유가 없다.
+     */
+    private Mono<List<String>> childIdsOf(String groupId, CycleScan scan) {
+        List<String> cached = scan.childIds.get(groupId);
+        if (cached != null) {
+            return Mono.just(cached);
         }
-        return Flux.fromIterable(frontier)
-                .flatMap(state::findGroup, LOAD_CONCURRENCY)
-                .flatMapIterable(DirectoryGroup::members)
-                .filter(member -> member.type() == MemberType.GROUP)
-                .map(MemberRef::id)
-                .filter(visited::add)
-                .collectList()
-                .flatMap(next -> next.contains(target)
-                        ? Mono.just(true)
-                        : walk(next, target, visited));
+        if (scan.budget-- <= 0) {
+            return Mono.error(new IllegalStateException(
+                    "조직 계층 순환 검사가 %d개 조직을 넘겼습니다. 계층이 비정상적으로 크거나 깊습니다: %s"
+                            .formatted(MAX_GRAPH_EXPANSIONS, groupId)));
+        }
+        return state.findGroup(groupId)
+                .map(group -> group.members().stream()
+                        .filter(member -> member.type() == MemberType.GROUP)
+                        .map(MemberRef::id)
+                        .toList())
+                .defaultIfEmpty(List.of())
+                .doOnNext(ids -> scan.childIds.put(groupId, ids));
     }
 
     private static String stripType(String typedId) {
