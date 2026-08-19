@@ -1,0 +1,14 @@
+dependencies {
+    api project(':core')
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    implementation 'io.micrometer:micrometer-core'
+
+    testImplementation testFixtures(project(':core'))
+}
+
+// app-ldap 등 부트 애플리케이션은 org.springframework.boot 플러그인이 -parameters 를 자동으로
+// 넣어 주지만, 이 모듈은 라이브러리라 그 플러그인을 쓰지 않는다. @RequestParam/@PathVariable 이
+// 이름을 명시하지 않고 리플렉션으로 파라미터명을 읽으므로 직접 켜 준다.
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << '-parameters'
+}

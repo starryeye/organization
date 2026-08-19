@@ -20,13 +20,18 @@ public class FakeSearchRepository implements DirectorySearchRepository {
     public final List<UserSummary> users = new ArrayList<>();
     public final List<GroupSummary> groups = new ArrayList<>();
 
+    /** 설정되면 모든 검색이 이 예외로 실패한다. 커서 손상 같은 경우를 흉내낸다. */
+    public RuntimeException failWith;
+
     @Override
     public Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit) {
+        if (failWith != null) return Mono.error(failWith);
         return Mono.just(page(users, UserSummary::userName, prefix, cursor, limit));
     }
 
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
+        if (failWith != null) return Mono.error(failWith);
         // displayName 이 없는 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
         List<UserSummary> indexed = users.stream().filter(u -> u.displayName() != null).toList();
         return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit));
@@ -34,6 +39,7 @@ public class FakeSearchRepository implements DirectorySearchRepository {
 
     @Override
     public Mono<Page<GroupSummary>> searchGroupsByDisplayName(String prefix, String cursor, int limit) {
+        if (failWith != null) return Mono.error(failWith);
         return Mono.just(page(groups, GroupSummary::displayName, prefix, cursor, limit));
     }
 
