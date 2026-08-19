@@ -21,6 +21,10 @@ public final class Keys {
     public static final String GSI1SK = "GSI1SK";
     public static final String GSI1 = "GSI1";
 
+    public static final String GSI2PK = "GSI2PK";
+    public static final String GSI2SK = "GSI2SK";
+    public static final String GSI2 = "GSI2";
+
     public static final String META = "META";
 
     /** 전체 직원 열거용 GSI 파티션 */
@@ -29,6 +33,8 @@ public final class Keys {
     public static final String GROUP_INDEX = "GROUP_INDEX";
     /** 스냅샷 목록 조회용 GSI 파티션 */
     public static final String SNAPSHOT_INDEX = "SNAPSHOT_INDEX";
+    /** 직원 표시명 검색용 GSI2 파티션 */
+    public static final String USER_DISPLAY_NAME_INDEX = "USER_DISPLAY_NAME_INDEX";
 
     public static final String SNAPSHOT_POINTER = "SNAPSHOT_POINTER";
     public static final String LATEST = "LATEST";
