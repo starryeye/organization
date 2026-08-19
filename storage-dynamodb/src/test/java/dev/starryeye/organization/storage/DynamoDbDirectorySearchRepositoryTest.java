@@ -59,6 +59,23 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("같은 표시명 인덱스를 공유하는 조직은 직원 표시명 검색에 섞이지 않는다")
+    void 조직은_직원_표시명_검색에_안_섞인다() {
+        // given — GSI2 는 GSI1PK 를 파티션키로 공유하므로 조직 META 도 이 인덱스에 실린다.
+        // 이름까지 같은 접두사로 겹치게 두어, 파티션으로 갈리는지 실제로 확인한다.
+        state.saveUser(new DirectoryUser("gd.hong", "e1", "gd.hong", "홍길동", null, true)).block();
+        state.saveGroup(new DirectoryGroup("PR001", "g1", "홍보팀", Set.of())).block();
+
+        // when
+        var users = search.searchUsersByDisplayName("홍", null, 20).block();
+        var groups = search.searchGroupsByDisplayName("홍", null, 20).block();
+
+        // then — 직원 검색에는 직원만, 조직 검색에는 조직만
+        assertThat(users.items()).extracting(UserSummary::employeeId).containsExactly("gd.hong");
+        assertThat(groups.items()).extracting("orgCode").containsExactly("PR001");
+    }
+
+    @Test
     @DisplayName("계정명 접두사로 직원을 찾는다")
     void 계정명_접두사로_찾는다() {
         // given

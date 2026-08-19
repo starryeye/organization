@@ -35,7 +35,10 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
-        return query(Keys.GSI2, Keys.GSI2PK, Keys.GSI2SK, Keys.USER_DISPLAY_NAME_INDEX,
+        // 파티션이 USER_INDEX 인 것은 오타가 아니다 — GSI2 는 GSI1 과 같은 파티션키 속성을
+        // 쓰고 정렬키만 displayName 으로 바꾼 인덱스다(Keys.GSI2PK 참고). 그래서 이 질의는
+        // 조직 META(GROUP_INDEX)를 건드리지 않고 직원만 본다.
+        return query(Keys.GSI2, Keys.GSI2PK, Keys.GSI2SK, Keys.USER_INDEX,
                 prefix, cursor, limit, DynamoDbDirectorySearchRepository::toUserSummary);
     }
 

@@ -21,9 +21,32 @@ public final class Keys {
     public static final String GSI1SK = "GSI1SK";
     public static final String GSI1 = "GSI1";
 
-    public static final String GSI2PK = "GSI2PK";
-    public static final String GSI2SK = "GSI2SK";
     public static final String GSI2 = "GSI2";
+
+    /**
+     * GSI2 는 <b>자기만의 키 속성을 만들지 않는다</b>. 파티션키로 {@link #GSI1PK} 를 그대로
+     * 쓰고, 정렬키로 아이템이 이미 갖고 있는 {@code displayName} 속성을 그대로 쓴다.
+     *
+     * <p><b>왜 전용 속성(GSI2PK/GSI2SK)을 쓰지 않나.</b> DynamoDB 는 인덱스의 키 속성을
+     * <b>전부</b> 가진 아이템만 그 인덱스에 싣는다. 전용 속성을 새로 도입하면 그 속성을 쓰기
+     * 시작하기 <b>전에</b> 저장된 아이템은 인덱스 추가 시점의 백필에서도 통째로 빠진다 —
+     * 즉 이 인덱스가 배포되는 순간 기존 직원 전원이 표시명 검색에서 사라진다. app-ldap 은
+     * 주기적 전체 동기화가 전원을 다시 써서 저절로 나아지지만, <b>app-scim 에는 전량 재기록
+     * 경로 자체가 없어</b>({@code FullSyncUseCase} 도 {@code RebuildUseCase} 도 배선돼 있지
+     * 않다) 영영 회복되지 않는다. 이미 모든 아이템이 갖고 있는 속성을 키로 삼으면 DynamoDB
+     * 자신의 백필이 기존 아이템을 그대로 실어 주고, 마이그레이션이 필요 없다는 설계의 주장이
+     * 실제로 참이 된다.
+     *
+     * <p>대가는 쓰기 증폭이다. {@code GSI1PK} 파티션에는 {@link #GROUP_INDEX}(조직 META)도
+     * 있고 그쪽도 {@code displayName} 을 가지므로 조직 아이템이 GSI2 에 함께 실린다. 조회는
+     * 파티션으로 갈리므로 표시명 직원 검색은 {@link #USER_INDEX} 파티션만 본다.
+     *
+     * <p>{@code displayName} 이 없는 직원이 표시명 검색에 안 잡히는 성질은 그대로다 —
+     * 정렬키 속성이 없으면 여전히 인덱스에 실리지 않는다.
+     */
+    public static final String GSI2PK = GSI1PK;
+    /** @see #GSI2PK — 아이템 속성 {@code displayName} 그 자체다. */
+    public static final String GSI2SK = "displayName";
 
     public static final String META = "META";
 
@@ -33,8 +56,6 @@ public final class Keys {
     public static final String GROUP_INDEX = "GROUP_INDEX";
     /** 스냅샷 목록 조회용 GSI 파티션 */
     public static final String SNAPSHOT_INDEX = "SNAPSHOT_INDEX";
-    /** 직원 표시명 검색용 GSI2 파티션 */
-    public static final String USER_DISPLAY_NAME_INDEX = "USER_DISPLAY_NAME_INDEX";
 
     public static final String SNAPSHOT_POINTER = "SNAPSHOT_POINTER";
     public static final String LATEST = "LATEST";
