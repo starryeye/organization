@@ -1,3 +1,5 @@
+apply plugin: 'java-test-fixtures'
+
 dependencies {
     api libs.reactor.core
     api libs.slf4j.api

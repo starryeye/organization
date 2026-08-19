@@ -52,7 +52,7 @@
 | 정합성 | OpenFGA 먼저 → 성공분만 스냅샷 커밋 | 실패가 다음 sync diff에서 자동 재시도됨 |
 | 안전장치 | 삭제 임계치 가드 (기본 30%) | 필터 오류·부분 응답으로 전직원 권한 소실 방지 |
 | SCIM 스냅샷 | 하루 1회 아카이빙만 (diff 미사용) | 감사·수동복구용 |
-| FGA 호출 | **Write/Delete만** 사용 | Read/Check/ListObjects 미사용 |
+| FGA 호출 | 쓰기는 **Write/Delete만**. `Check`는 제한 없음 | **열거 API(`Read`/`ListObjects`)만 금지.** `Check`는 점 조회라 열거를 대체하지 못하므로 아래 설계들을 바꾸지 않는다 — 동기화 경로에서도 쓸 수 있다 |
 | storeId/modelId | 앱이 다루지 않음 | store-name으로 런타임 해석, model id는 생략(서버가 최신 사용) |
 | SCIM 이력 | SyncRun 미기록 | 요청 단위 이력 폭증 방지. 로그/메트릭만 |
 | 관리 API | 4종 포함 | 수동 sync / 가드 강제 / rebuild(2방식) / 실행이력 조회 |
@@ -61,7 +61,11 @@
 
 ### 감수하는 트레이드오프
 
-OpenFGA read API를 쓰지 않으므로 **드리프트를 감지할 수 없다.** 누군가 OpenFGA를 직접 수정하면 스냅샷과 실제가 어긋나도 알 수 없고, diff는 계속 스냅샷 기준으로만 계산된다. 이를 되돌리는 수단이 `rebuild`(store 재생성 모드)다.
+열거 API(`Read`/`ListObjects`)를 쓰지 않으므로 **드리프트를 전수로 감지할 수 없다.** 누군가 OpenFGA를 직접 수정하면 스냅샷과 실제가 어긋나도 전체 대조가 불가능하고, diff는 계속 스냅샷 기준으로만 계산된다. 이를 되돌리는 수단이 `rebuild`(store 재생성 모드)다.
+
+다만 `Check`는 허용되므로 **표본 검증은 가능하다** — 스냅샷에서 튜플 N개를 뽑아 `Check`로 확인하면 전수 열거 없이 확률적으로 어긋남을 잡는다. 아직 구현하지 않았다.
+
+> **정정 이력 (2026-08-19).** 이 문서와 실행 완료된 계획서들은 한동안 이 제약을 "Write/Delete만 사용, Check는 테스트 전용"으로 잘못 적고 있었다. 실제 제약은 **열거 API만 금지**이며 `Check`는 동기화 경로를 포함해 어디서든 쓸 수 있다. 스펙과 코드 주석은 바로잡았고, 이미 실행된 계획서(`2026-08-14-foundation-and-ldap-sync.md`, `2026-08-15-scim-connector.md`)는 당시 실행 기록이므로 그대로 둔다 — 그 문서들의 해당 문장은 이 절이 대체한다. 잘못된 제약이 실제로 묶은 설계는 없었다. `Check`는 점 조회라 열거를 대체하지 못해, 스냅샷 기준선·diff·삭제 가드·rebuild는 어느 쪽 해석에서도 동일하다.
 
 ---
 
@@ -188,7 +192,7 @@ public record TupleDelta(Set<RelationTuple> toWrite, Set<RelationTuple> toDelete
 두 프로토콜의 비대칭에 주의할 점이 있다.
 
 - **LDAP 그룹/OU에는 표시명 전용 표준 속성이 없다.** `displayName`은 `inetOrgPerson`(사람)에만 있다. 그래서 `groupOfNames`/`organizationalUnit`의 `description`을 조직명으로 쓰는 것이 관행이다(`cn=DEV001`, `description=개발본부`). 커스텀 스키마를 쓰는 환경을 위해 `group-name-attribute`로 교체할 수 있게 한다.
-- **SCIM `Group`에는 코드와 이름을 나눌 칸이 없다.** 필드가 `id`, `externalId`, `displayName`, `members` 넷뿐이다. Okta/Azure AD가 `externalId`로 소스 시스템의 식별자를 보내므로 이를 조직코드로 채택한다. `POST /Groups`에 `externalId`가 있으면 그 값을 리소스 `id`로 발급하고, 없으면 UUID를 발급한 뒤 경고 로그를 남긴다(이후 IdP는 발급된 `id`로 호출하므로 일관성은 유지되지만, 코드가 우리 쪽에서 만들어진 값이 된다).
+- **SCIM `Group`에는 코드와 이름을 나눌 칸이 없다.** 필드가 `id`, `externalId`, `displayName`, `members` 넷뿐이다. Okta/Azure AD가 `externalId`로 소스 시스템의 식별자를 보내므로 이를 조직코드로 채택한다. `POST /Groups`에 `externalId`가 있으면 그 값을 리소스 `id`로 발급하고, 없으면 IdP가 보낸 `Group.id`를 쓰고, 그것마저 없을 때만 UUID를 발급한 뒤 경고 로그를 남긴다(이후 IdP는 발급된 `id`로 호출하므로 일관성은 유지되지만, 코드가 우리 쪽에서 만들어진 값이 된다). `Group.id`를 건너뛰고 바로 UUID로 가면, IdP가 이미 알고 있는 `id`를 다시 보냈을 때 같은 조직에 새 코드를 발급해 중복 조직을 만든다.
 - 사번(`employeeNumber`)을 직원 아이디로 쓰고 싶은 환경을 위해 LDAP은 `user-id-attribute`로 교체 가능하다. SCIM에서는 Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)의 `employeeNumber`를 읽어야 하는데, **이번 범위에서는 확장 스키마를 파싱하지 않는다.** 필요해지면 매핑 설정에 추가한다.
 
 #### 정규화
@@ -693,7 +697,7 @@ IdP가 그룹 멤버 변경에 실제로 쓰는 경로만 구현한다.
 | `User.displayName` / `name.formatted` | `DirectoryUser.displayName` | |
 | `User.emails[primary].value` | `DirectoryUser.email` | |
 | `User.active` | `DirectoryUser.active` | |
-| `Group.id` | `DirectoryGroup.id` | **조직코드**. `POST` 시 `externalId`로 발급, 없으면 UUID + 경고 |
+| `Group.id` | `DirectoryGroup.id` | **조직코드**. `Group.externalId` → 없으면 `Group.id` → 둘 다 없으면 UUID + 경고 (§4.3 과 동일) |
 | `Group.externalId` | `DirectoryGroup.externalId` | |
 | `Group.displayName` | `DirectoryGroup.displayName` | **조직명**. 튜플에 사용하지 않음 |
 | `Group.members[].value` + `type` | `Set<MemberRef>` | |
@@ -844,7 +848,7 @@ dynamodb:
 | `core` | 순수 단위 테스트. `TupleMapper`, `TupleDiff`, `DeletionGuard`, `IdNormalizer`, 유스케이스(포트는 fake). **가장 촘촘하게** — 실제 로직 전부가 여기 있다 |
 | `connector-ldap` | UnboundID in-memory LDAP + LDIF 시드. 두 전략 각각 |
 | `storage-dynamodb` | Testcontainers `amazon/dynamodb-local` |
-| `authz-openfga` | Testcontainers `openfga/openfga`. 인가 모델 검증은 실제 `Check`로 하되, **프로덕션 코드에는 Check를 두지 않는다**(테스트 전용) |
+| `authz-openfga` | Testcontainers `openfga/openfga`. 인가 모델 검증은 실제 `Check`로 한다 (프로덕션 코드에서도 `Check`는 허용 — 위 제약 표 참고) |
 | `connector-scim` | `WebTestClient` + fake 포트 |
 | `app-ldap` / `app-scim` | 전 컨테이너 띄운 end-to-end 각 1~2개 |
 

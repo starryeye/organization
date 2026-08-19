@@ -38,6 +38,13 @@ subprojects {
         testImplementation libs.reactor.test
     }
 
+    plugins.withId('java-test-fixtures') {
+        dependencies {
+            testFixturesCompileOnly libs.lombok
+            testFixturesAnnotationProcessor libs.lombok
+        }
+    }
+
     tasks.named('test') {
         useJUnitPlatform()
         testLogging {

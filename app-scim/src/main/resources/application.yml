@@ -7,14 +7,34 @@ spring:
 
 openfga:
   api-url: http://localhost:8080
-  store-name: organization
+  store-name: organization-scim
   write-batch-size: 100
   max-retries: 3
 
 dynamodb:
   endpoint: http://localhost:8000
   region: ap-northeast-2
-  table-name: organization
+  table-name: organization-scim
   create-table-on-startup: true
   snapshot-retention-days: 7
   syncrun-retention-days: 30
+
+sync:
+  archive-cron: "0 0 3 * * *"
+  purge-cron: "0 0 4 * * *"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # 8082 는 SCIM 엔드포인트와 같은 포트이고 인증이 없다. always 로 두면
+      # openfga.api-url, dynamodb.table-name, Health.down(error) 의 예외 메시지가
+      # 그대로 공개된다.
+      show-details: when-authorized
+
+logging:
+  level:
+    dev.starryeye.organization: DEBUG

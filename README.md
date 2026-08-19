@@ -23,8 +23,7 @@ LDAP와 SCIM은 성격이 정반대라 같은 코드로 다룰 수 없다.
   필요 없다.
 
 두 커넥터는 이 차이만 흡수하고, 그 이후의 파이프라인(`TupleDelta` → OpenFGA 쓰기 → DynamoDB 반영)은
-완전히 공유한다. `connector-scim`과 `app-scim`은 이 저장소에 자리만 잡혀 있고 아직 비어 있다 —
-별도 계획에서 구현한다.
+완전히 공유한다.
 
 ## 스냅샷이 왜 있는가
 
@@ -81,9 +80,9 @@ type group
 | `storage-dynamodb` | 현재상태 / 스냅샷 / 실행이력 저장소 |
 | `authz-openfga` | store 해석, 인가 모델 등록, 멱등 튜플 쓰기 |
 | `connector-ldap` | groupOfNames / DIT 두 매핑 전략 |
-| `connector-scim` | SCIM 2.0 엔드포인트 (별도 계획에서 구현, 현재 비어 있음) |
+| `connector-scim` | SCIM 2.0 엔드포인트 |
 | `app-ldap` | LDAP 동기화 인스턴스 (8081) |
-| `app-scim` | SCIM 수신 인스턴스 (8082, 별도 계획에서 구현, 현재 비어 있음) |
+| `app-scim` | SCIM 수신 인스턴스 (8082) |
 
 의존 방향은 항상 `app-*` → 어댑터(`storage-dynamodb`/`authz-openfga`/`connector-*`) → `core`다.
 `core`는 스프링 컨텍스트도, 어떤 구체 어댑터도 모른다.
@@ -119,6 +118,57 @@ docker compose up -d
 `sync.cron`으로 지정한 주기마다 전체 동기화가 자동으로도 돈다. LDAP이 이상 응답(예: 필터 오류로
 0건)을 주면 삭제 가드가 `ABORTED`로 막고, `force=true`로 사람이 확인한 뒤 우회할 수 있다.
 
+## SCIM
+
+SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP가 보내는 요청은 항상 리소스
+하나의 변경이므로, 그 **영향 범위만 담은 최소 스냅샷**을 변경 전후로 각각 만들어 튜플로 바꾼 뒤
+그 둘을 diff한다.
+
+지원 엔드포인트:
+
+| 리소스 | POST | GET (단건) | PUT | PATCH | DELETE |
+|---|---|---|---|---|---|
+| `/scim/v2/Users` | O | O | O | O | O |
+| `/scim/v2/Groups` | O | O | O | O | O |
+| `/scim/v2/ServiceProviderConfig` | - | O | - | - | - |
+
+**목록 조회(`GET /Users`, `GET /Groups`)와 필터는 지원하지 않는다.**
+
+지원하는 PATCH는 다음이 전부다.
+
+| 대상 | `path` | 지원 `op` |
+|---|---|---|
+| Group | `members` | `add` / `remove`(전체 비움) / `replace` |
+| Group | `members[value eq "..."]` | `remove` |
+| Group | `displayName` | `replace` / `add` |
+| Group | (path 없음) | `replace` / `add` — 본문을 부분 리소스로 보고 `displayName`·`members`만 병합 |
+| User | `active` / `displayName` / `userName` | `replace` / `add` |
+| User | (path 없음) | `replace` / `add` — `active`·`displayName`·`userName`만 병합 |
+
+그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
+않은 변경을 반영됐다고 오해하면 안 되기 때문이다. `path`는 대소문자를 구분한다.
+
+`members[].value`는 `userName`·`externalId`과 같은 규칙(`IdNormalizer`)으로 정규화한다.
+`members[].type`은 RFC 7643에서 선택 필드라 없을 수 있는데, 그때는 User로 단정하지 않고
+현재상태에서 조직 → 직원 순으로 찾아 판정한다 — 조직코드와 직원 아이디는 네임스페이스가
+달라 겹칠 수 있어서, 잘못 단정하면 IdP가 조직을 중첩하려던 요청이 엉뚱한 직원 소속 튜플이
+된다.
+
+SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기면 이력이 금방 폭증한다. 이력으로
+남는 것은 하루 1회 도는 아카이빙 배치(`trigger=ARCHIVE`)뿐이다.
+
+실행:
+
+```bash
+./gradlew :app-scim:bootRun
+```
+
+포트는 8082다. **LDAP 인스턴스와 같은 DynamoDB 테이블·OpenFGA store를 동시에 쓰지 않는다** —
+한 조직도는 하나의 소스로만 동기화한다는 것이 이 서버의 전제다. 그래서 app-scim의 기본값은
+app-ldap과 겹치지 않게 `dynamodb.table-name: organization-scim`, `openfga.store-name:
+organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
+테이블·store와는 항상 다르게 유지해야 한다.
+
 ## 테스트
 
 ```bash
@@ -129,6 +179,8 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 서버로 띄운다. `app-ldap`의 `LdapSyncEndToEndTest`는 이 셋을 모두 띄운 뒤 관리 API를 통해서만
 시스템을 구동해, LDAP → 도메인 → 튜플 → OpenFGA/DynamoDB 전 구간이 실제로 이어지는지 확인한다 —
 개별 모듈 단위 테스트가 전부 통과해도 결선이 틀리면 아무것도 동작하지 않기 때문이다.
+`app-scim`의 `ScimEndToEndTest`도 같은 방식으로, SCIM 요청을 HTTP로 실제 보내 롤업·비활성화·
+조직 삭제·아카이빙까지 순서에 의존하는 시나리오로 확인한다.
 
 ## 요구 버전
 
