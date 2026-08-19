@@ -24,7 +24,8 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 델타를 OpenFGA 에 반영한다. 읽기 API 는 호출하지 않는다.
+ * 델타를 OpenFGA 에 반영한다. 쓰기 전용 어댑터라 조회는 하지 않는다 — 인가 판정이
+ * 필요하면 {@code RelationTupleChecker} 를 쓴다.
  *
  * <p>멱등 옵션(on_duplicate / on_missing = IGNORE)을 항상 켜므로 중복 write 나
  * 없는 튜플 delete 로 배치가 통째로 실패하지 않는다. 튜플 단위 보상 로직이 필요 없는 이유다.

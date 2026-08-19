@@ -8,7 +8,10 @@ import reactor.core.publisher.Mono;
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
  *
- * <p>OpenFGA read API 를 쓰지 않으므로 이것이 OpenFGA 상태를 대신하는 유일한 기록이다.
+ * <p>OpenFGA 의 <b>열거</b> API(Read/ListObjects)를 쓰지 않으므로 이것이 OpenFGA 상태를
+ * 대신하는 유일한 기록이다. {@code Check} 는 허용되지만 점 조회라 열거를 대체하지 못한다 —
+ * "kim 이 개발본부의 member 인가"에는 답해도 "지금 어떤 튜플들이 있나"에는 답하지 못하므로,
+ * diff 의 기준선은 여전히 이 기록에서 와야 한다.
  */
 public interface TupleSnapshotRepository {
 
