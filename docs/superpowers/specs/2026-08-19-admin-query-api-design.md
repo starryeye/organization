@@ -139,16 +139,22 @@ public interface RelationTupleChecker {
 
 ### GSI2
 
-- `GSI2PK = USER_DISPLAY_NAME_INDEX` (상수), `GSI2SK = displayName`
-- 프로젝션 `INCLUDE(userName, displayName, active)`
+- **키 속성을 새로 만들지 않는다.** 파티션키는 기존 `GSI1PK` 를 그대로 쓰고, 정렬키는 아이템 속성 `displayName` 그 자체다
+- 프로젝션 `INCLUDE(userName, active)` — `displayName` 은 이제 키 속성이라 여기 넣으면 `ValidationException` 이다
 
-파티션 키가 상수라 단일 파티션에 몰리지만, 기존 GSI1 의 `USER_INDEX`/`GROUP_INDEX` 가 이미 같은 구조이고 조회 중심이라 이 규모에서 문제되지 않는다.
+**전용 속성(`GSI2PK`/`GSI2SK`)을 쓰면 안 되는 이유.** DynamoDB 는 인덱스의 키 속성을 **전부** 가진 아이템만 인덱스에 투영한다. 전용 파티션키를 새로 만들면 그 속성은 이 기능이 배포된 뒤에 쓰인 아이템에만 있으므로, **배포 이전에 저장된 직원은 하나도 인덱싱되지 않는다.** `UpdateTable` 의 백필도 그들을 건너뛴다.
+
+그 결과가 배포마다 다르고 한쪽은 영구적이다. app-ldap 은 `FullSyncUseCase` 가 매 실행마다 `replaceWith` 로 전원을 다시 써서 첫 스케줄 동기화 뒤 스스로 낫는다. 반면 **app-scim 에는 대량 쓰기 경로가 아예 없다** — `IncrementalSyncUseCase` 와 `SnapshotArchiveUseCase` 뿐이고 후자는 읽기만 한다. 즉 SCIM 배포에서는 표시명 검색이 기존 직원 전체에 대해 영구히 비어 나오고, IdP 가 개별 직원을 건드릴 때만 하나씩 채워진다. 아이디·계정명 검색은 정상 동작하므로 "그 직원은 표시명이 없나 보다" 로 보여 진단도 어렵다.
+
+기존 속성 위에 얹으면 이 문제가 사라진다 — 모든 아이템이 이미 `GSI1PK` 를 갖고 있어 `UpdateTable` 백필이 그대로 덮는다. **마이그레이션이 필요 없다는 말은 이 키 설계에서만 참이다.**
+
+**대가: 조직 아이템도 GSI2 에 실린다.** 조직 META 의 `GSI1PK` 는 `GROUP_INDEX` 이고 그쪽도 `displayName` 을 가지므로 함께 인덱싱된다. 직원 검색은 파티션 `USER_INDEX` 만 읽으므로 섞이지 않는다(테스트가 이름 접두사를 겹치게 해서 못박는다). 조직당 인덱스 쓰기 하나가 늘 뿐이다.
+
+**`displayName` 이 없는 직원은 GSI2 에 실리지 않는다.** 정렬키 속성이 없는 아이템은 인덱스에 들어가지 않는다 — 위 규칙의 같은 면이다. `saveUser` 가 `putIfPresent` 로 쓰므로 이름 없는 직원은 표시명 검색에 안 잡힌다. 의도한 동작이며, 계정명·아이디로는 여전히 찾힌다.
 
 프로젝션을 `KEYS_ONLY` 로 줄이면 결과 20건마다 `GetItem` 20번이 붙어 오히려 손해다. `ALL` 은 검색 결과 한 줄을 그리는 데 필요 없는 속성까지 복제한다.
 
-**`displayName` 이 없는 직원은 GSI2 에 실리지 않는다.** DynamoDB 는 정렬키 속성이 없는 아이템을 인덱스에 넣지 않는다. `saveUser` 가 `putIfPresent` 로 쓰므로 이름 없는 직원은 표시명 검색에 안 잡힌다 — 의도한 동작이며, 계정명·아이디로는 여전히 찾힌다.
-
-**마이그레이션은 없다.** `displayName` 은 이미 아이템 속성으로 저장돼 있어 GSI 를 추가하면 DynamoDB 가 백필한다.
+> **정정 이력 (2026-08-20).** 이 절은 원래 `GSI2PK = USER_DISPLAY_NAME_INDEX` 라는 전용 상수 속성을 지정하면서 동시에 "마이그레이션은 없다 — DynamoDB 가 백필한다" 고 적고 있었다. 그 둘은 양립할 수 없다. 전체 브랜치 리뷰가 잡아냈고, 태스크별 리뷰 6번이 전부 통과시킨 이유는 구현이 계획을 충실히 따랐고 계획이 이 스펙을 충실히 따랐기 때문이다.
 
 ---
 

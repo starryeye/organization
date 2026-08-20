@@ -182,6 +182,23 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
      * 조회하는 store 와 이 앱이 쓰는 store 가 어긋날 수 있어 상황을 더 악화시킨다.
      */
     @Test
+    @DisplayName("clientFor 는 같은 storeId 에 대해 client 를 다시 만들지 않는다")
+    void clientFor_는_storeId_별로_client_를_재사용한다() {
+        // given — Check 는 응답 한 줄마다 이 메서드를 부른다. 경로 200개짜리 직원 상세
+        // 하나가 커넥션 풀과 셀렉터 스레드를 200벌 만들던 자리다.
+        StoreBootstrapper bootstrapper = new StoreBootstrapper(properties);
+
+        // when
+        OpenFgaClient first = bootstrapper.clientFor("store-a");
+        OpenFgaClient again = bootstrapper.clientFor("store-a");
+        OpenFgaClient other = bootstrapper.clientFor("store-b");
+
+        // then — storeId 로 키를 잡으므로 격리 성질은 그대로다. 다른 store 는 다른 client 다
+        assertThat(again).isSameAs(first);
+        assertThat(other).isNotSameAs(first);
+    }
+
+    @Test
     @DisplayName("같은 이름의 store 가 이미 둘 이상이면 임의로 고르지 않고 에러로 멈춘다")
     void 같은_이름의_store_가_이미_여러개면_에러로_멈춘다() throws Exception {
         // given — 이름이 같은 store 두 개를 미리 만들어 경쟁으로 이미 어긋난 상태를 흉내낸다

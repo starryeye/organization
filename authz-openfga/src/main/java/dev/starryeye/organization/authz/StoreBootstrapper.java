@@ -14,6 +14,8 @@ import reactor.core.publisher.Mono;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -30,6 +32,12 @@ public class StoreBootstrapper {
     private final OpenFgaProperties properties;
     private final AtomicReference<OpenFgaClient> clientRef = new AtomicReference<>();
     private final AtomicReference<String> storeIdRef = new AtomicReference<>();
+
+    /**
+     * {@link #clientFor(String)} 이 돌려주는 읽기 전용 client 를 storeId 별로 재사용한다.
+     * {@code clientRef} 와는 완전히 별개의 캐시이며 {@code recreateStore()} 가 건드리지 않는다.
+     */
+    private final ConcurrentMap<String, OpenFgaClient> readOnlyClients = new ConcurrentHashMap<>();
 
     /**
      * 진행 중인 해석을 공유하기 위한 in-flight Mono. resolveStore() 를 동시에 여러 곳에서
@@ -174,6 +182,36 @@ public class StoreBootstrapper {
             throw new IllegalStateException("store 가 아직 해석되지 않았다. resolveStore() 를 먼저 호출하라");
         }
         return client;
+    }
+
+    /**
+     * storeId 에 묶인 읽기 전용 client 를 준다. {@code clientRef}/{@code storeIdRef} 캐시를
+     * 읽지도 쓰지도 않는다.
+     *
+     * <p>{@link #findExistingStore()} 는 store 존재만 확인하고 storeId 를 돌려줄 뿐,
+     * {@code clientRef} 를 채우지 않는다({@link #client()} 는 {@code resolveStore()}/
+     * {@code recreateStore()} 가 인가 모델까지 써야만 채워지는 캐시에 기댄다). 그래서
+     * "store 는 있지만 이 프로세스가 아직 resolveStore() 를 부른 적 없는" 상태에서
+     * {@code findExistingStore()} 뒤에 {@code client()} 를 쓰면 실제로는 store 가 있는데도
+     * "아직 해석되지 않았다" 로 잘못 실패한다.
+     *
+     * <p>이 메서드는 {@code clientRef}/{@code storeIdRef} 를 전혀 건드리지 않으므로
+     * {@code recreateStore()} 가 진행하는 "캐시 비우기 → 새 client 로 교체" 와 절대 경합하지
+     * 않는다 — 읽기 전용 조회가 그 캐시를 갱신하거나, 캐시 교체 도중의 값을 관찰해 오래된
+     * client 를 붙들 수 있는 경로 자체가 없다.
+     *
+     * <p><b>storeId 별로 client 를 재사용한다.</b> 전에는 호출마다 새로 만들었는데, 그 근거로
+     * 든 {@link #findStoreIdByName()} · {@link #deleteStoreById(String)} 은 동기화나 재적재당
+     * 한 번 도는 경로다. 이쪽은 <b>응답 한 줄당 한 번</b> 돈다 — 경로 200개짜리 직원 상세
+     * 하나가 인증 없는 GET 한 번에 커넥션 풀과 셀렉터 스레드를 200벌 만든다.
+     *
+     * <p>캐시를 storeId 로 키잡는 것이 위의 격리 성질을 그대로 지킨다. {@code recreateStore()}
+     * 는 새 store 를 새 id 로 만들므로 그 뒤의 조회는 다른 키를 찾고, 이전 id 에 붙어 있던
+     * client 를 실수로 물려받을 수 없다. 엔트리는 이 프로세스가 본 서로 다른 storeId 마다
+     * 하나이며 — 즉 재적재 횟수만큼 — 사실상 손에 꼽는다.
+     */
+    public OpenFgaClient clientFor(String storeId) {
+        return readOnlyClients.computeIfAbsent(storeId, this::newClient);
     }
 
     /**

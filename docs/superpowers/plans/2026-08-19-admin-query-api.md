@@ -1069,7 +1069,7 @@ public class AdminQueryUseCase {
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `./gradlew :core:test --tests '*AdminQueryUseCaseTest*'`
-Expected: PASS 13개
+Expected: PASS 14개
 
 - [ ] **Step 5: 전체 빌드**
 
@@ -2159,7 +2159,7 @@ public class AdminQueryConfig {
 - [ ] **Step 6: 테스트 통과 확인**
 
 Run: `./gradlew :admin-api:test`
-Expected: 테스트 10개 통과
+Expected: 테스트 12개 통과
 
 - [ ] **Step 7: 전체 빌드와 커밋**
 

@@ -60,6 +60,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(Keys.SK, Attrs.s(Keys.META));
         item.put(Keys.GSI1PK, Attrs.s(Keys.USER_INDEX));
         item.put(Keys.GSI1SK, Attrs.s(user.userName() == null ? user.id() : user.userName()));
+        // GSI2(표시명 검색)를 위해 따로 쓸 것이 없다 — 파티션키는 위의 GSI1PK 를 그대로 쓰고
+        // 정렬키는 아래 putIfPresent 가 쓰는 displayName 속성 그 자체다(Keys.GSI2PK 참고).
+        // 표시명이 없는 직원은 그 속성이 아예 없어 GSI2 에 실리지 않는다 — DynamoDB 는 정렬키
+        // 속성이 없는 아이템을 인덱스에 넣지 않는다. 의도한 동작이며, 아이디·계정명으로는
+        // 여전히 찾힌다.
         item.put(ACTIVE, Attrs.bool(user.active()));
         item.put(UPDATED_AT, Attrs.s(Instant.now().toString()));
         Attrs.putIfPresent(item, EXTERNAL_ID, user.externalId());

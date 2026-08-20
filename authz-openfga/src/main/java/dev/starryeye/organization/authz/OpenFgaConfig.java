@@ -1,5 +1,6 @@
 package dev.starryeye.organization.authz;
 
+import dev.starryeye.organization.core.port.RelationTupleChecker;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -22,5 +23,10 @@ public class OpenFgaConfig {
     public OpenFgaRelationTupleWriter openFgaRelationTupleWriter(
             StoreBootstrapper bootstrapper, OpenFgaProperties properties) {
         return new OpenFgaRelationTupleWriter(bootstrapper, properties);
+    }
+
+    @Bean
+    public RelationTupleChecker relationTupleChecker(StoreBootstrapper bootstrapper) {
+        return new OpenFgaRelationTupleChecker(bootstrapper);
     }
 }
