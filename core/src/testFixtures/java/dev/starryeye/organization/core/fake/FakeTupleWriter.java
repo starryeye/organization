@@ -21,6 +21,18 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
+    private RuntimeException resetStoreError;
+    private Runnable applyHook;
+
+    /** 설정하면 {@link #resetStore()} 가 이 예외로 실패한다. 초기화 실패 경로를 보는 데 쓴다. */
+    public void failResetStore(RuntimeException error) {
+        this.resetStoreError = error;
+    }
+
+    /** {@link #apply} 가 불릴 때 함께 실행된다. 작업 도중의 상태(게이트 등)를 들여다보는 데 쓴다. */
+    public void onApply(Runnable hook) {
+        this.applyHook = hook;
+    }
 
     public void failFor(Predicate<RelationTuple> failWhen) {
         this.failWhen = failWhen;
@@ -28,6 +40,9 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     @Override
     public Mono<TupleWriteResult> apply(TupleDelta delta) {
+        if (applyHook != null) {
+            applyHook.run();
+        }
         appliedDeltas.add(delta);
 
         Set<RelationTuple> written = new HashSet<>();
@@ -53,7 +68,12 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     @Override
     public Mono<Void> resetStore() {
-        resetStoreCount.incrementAndGet();
-        return Mono.empty();
+        return Mono.defer(() -> {
+            if (resetStoreError != null) {
+                return Mono.error(resetStoreError);
+            }
+            resetStoreCount.incrementAndGet();
+            return Mono.empty();
+        });
     }
 }

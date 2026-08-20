@@ -93,6 +93,13 @@ public class IncrementalSyncUseCase {
     private final RelationTupleWriter writer;
 
     /**
+     * 재적재가 도는 동안 변경을 막는 문. 확인을 이 네 변경 메서드 안에 두면 <b>모든 변경 경로가
+     * 자동으로 덮인다</b> — 핸들러마다 검사를 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
+     * 그 빠진 곳이 하필 재적재와 경합한다.
+     */
+    private final MutationGate gate;
+
+    /**
      * 직원 생성·수정. 활성 여부가 바뀌면 그 직원이 속한 모든 조직의 튜플이 함께 움직인다.
      *
      * <p>반영이 실패하면 {@code active} 를 요청값 그대로 저장하지 않고 이전 값으로 되돌린다.
@@ -112,6 +119,10 @@ public class IncrementalSyncUseCase {
      * 않아, 같은 대역을 쓰면 델타가 사라진다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
+        return gate.requireOpen().then(Mono.defer(() -> upsertUserInternal(user)));
+    }
+
+    private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user) {
         DirectoryUser neverStored = new DirectoryUser(
                 user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
 
@@ -153,6 +164,10 @@ public class IncrementalSyncUseCase {
      * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
+        return gate.requireOpen().then(Mono.defer(() -> upsertGroupInternal(group)));
+    }
+
+    private Mono<IncrementalSyncResult> upsertGroupInternal(DirectoryGroup group) {
         return state.findGroup(group.id())
                 .map(Optional::of)
                 .defaultIfEmpty(Optional.empty())
@@ -189,6 +204,10 @@ public class IncrementalSyncUseCase {
      * "이전"이 사라져 남은 튜플을 영원히 다시 잡지 못한다.
      */
     public Mono<IncrementalSyncResult> removeUser(String userId) {
+        return gate.requireOpen().then(Mono.defer(() -> removeUserInternal(userId)));
+    }
+
+    private Mono<IncrementalSyncResult> removeUserInternal(String userId) {
         return state.findUser(userId)
                 .flatMap(user -> affectedGroupsOf(userId).flatMap(groups -> {
                     Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(user));
@@ -221,6 +240,10 @@ public class IncrementalSyncUseCase {
      * "멤버 없는 목표"로 재사용). 하나라도 실패하면 이 조직 레코드 자체는 지우지 않는다.
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
+        return gate.requireOpen().then(Mono.defer(() -> removeGroupInternal(groupId)));
+    }
+
+    private Mono<IncrementalSyncResult> removeGroupInternal(String groupId) {
         return state.findGroup(groupId)
                 .flatMap(group -> parentsOf(groupId).flatMap(parents -> {
                     Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);

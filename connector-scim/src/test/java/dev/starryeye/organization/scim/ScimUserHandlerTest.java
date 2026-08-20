@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
+import dev.starryeye.organization.core.usecase.MutationGate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -20,13 +21,15 @@ class ScimUserHandlerTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private MutationGate gate;
     private WebTestClient client;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        var useCase = new IncrementalSyncUseCase(state, writer);
+        gate = new MutationGate();
+        var useCase = new IncrementalSyncUseCase(state, writer, gate);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
@@ -202,5 +205,35 @@ class ScimUserHandlerTest {
                 .expectStatus().isOk();
 
         assertThat(state.users.get("kim").email()).isEqualTo("new@example.com");
+    }
+
+    @Test
+    @DisplayName("재적재가 도는 동안의 변경은 503 이고 SCIM 에러 형식을 지킨다")
+    void 재적재_중_변경은_503이다() {
+        // given
+        gate.acquire();
+
+        // when, then — IdP 는 503 을 재시도 신호로 보므로 프로비저닝이 유실되지 않는다
+        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "userName":"gd.hong","displayName":"홍길동"}""")
+                .exchange()
+                .expectStatus().isEqualTo(503)
+                .expectBody()
+                .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
+                .jsonPath("$.status").isEqualTo("503");
+    }
+
+    @Test
+    @DisplayName("재적재 중에도 조회는 통과한다")
+    void 재적재_중_조회는_통과한다() {
+        // given — 무슨 일이 벌어지는지 들여다보는 것이 그 순간 가장 필요한 일이다
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        gate.acquire();
+
+        // when, then
+        client.get().uri("/scim/v2/Users/kim")
+                .exchange().expectStatus().isOk();
     }
 }

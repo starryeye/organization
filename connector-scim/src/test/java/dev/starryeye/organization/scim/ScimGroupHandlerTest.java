@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
+import dev.starryeye.organization.core.usecase.MutationGate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -20,13 +21,15 @@ class ScimGroupHandlerTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private MutationGate gate;
     private WebTestClient client;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        var useCase = new IncrementalSyncUseCase(state, writer);
+        gate = new MutationGate();
+        var useCase = new IncrementalSyncUseCase(state, writer, gate);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();

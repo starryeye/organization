@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.usecase.MutationsSuspendedException;
 import dev.starryeye.organization.scim.dto.ScimError;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.codec.DecodingException;
@@ -50,6 +51,12 @@ public final class ScimRouter {
     private static Mono<ServerResponse> toScimError(Throwable error, ServerRequest request) {
         if (error instanceof ScimException scim) {
             return write(scim.getStatus(), scim.getScimType(), scim.getMessage());
+        }
+        // 재적재가 도는 동안의 변경은 503 이다. IdP 는 503 을 재시도 신호로 보므로 프로비저닝이
+        // 유실되지 않고, 재시도 시점에는 재적재가 끝난 깨끗한 상태 위에서 처리된다.
+        // 400 이나 500 으로 뭉개면 IdP 가 영구 실패로 판단해 포기하거나 무한히 재시도한다.
+        if (error instanceof MutationsSuspendedException suspended) {
+            return write(HttpStatus.SERVICE_UNAVAILABLE, null, suspended.getMessage());
         }
         // 본문 파싱 실패 등 SCIM 이 모르는 예외는 400 으로 번역한다.
         if (error instanceof DecodingException || error instanceof ServerWebInputException) {
