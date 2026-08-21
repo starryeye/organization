@@ -106,10 +106,11 @@ docker compose up -d
 
 ## 관리 API
 
-**`/admin/sync`는 `app-ldap`에만 있다.** `AdminSyncController`·`FullSyncUseCase`·`RebuildUseCase`는
-`app-ldap`에만 배선돼 있고 `app-scim`에는 없다. SCIM은 push 모델이라 "전체를 다시 읽어 맞춘다"는
-동작 자체가 성립하지 않기 때문이다(IdP가 보내주기 전에는 전체를 알 수 없다). 아래 표는
-`app-ldap` 기준이고, `app-scim`에는 `/actuator/health`와 조회 API만 있다.
+**두 앱의 `/admin/sync`는 표면이 다르다.** `app-ldap`은 언제든 LDAP을 다시 읽어올 수 있어
+전체 동기화가 성립하지만, SCIM은 push 모델이라 "전체를 다시 달라"고 말할 상대가 없다. 그래서
+`app-scim`에는 `full`이 없고 재적재와 이력 조회만 있다.
+
+**app-ldap**
 
 | 요청 | 설명 |
 |---|---|
@@ -118,7 +119,56 @@ docker compose up -d
 | `POST /admin/sync/rebuild?mode=snapshot` | 직전 스냅샷으로 전부 지운 뒤 재적재 |
 | `POST /admin/sync/rebuild?mode=store` | store를 재생성한 뒤 재적재 (재적재까지 인가 질의 실패) |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
-| `GET /actuator/health` | DynamoDB / OpenFGA 연결 상태 포함 헬스체크 (두 앱 공통) |
+
+**app-scim**
+
+| 요청 | 설명 |
+|---|---|
+| `POST /admin/sync/rebuild?mode=tuples` | store를 재생성하고 **현재상태(DynamoDB)가 요구하는 튜플을 전부 다시 쓴다.** 조직도는 건드리지 않는다 |
+| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | store와 **조직도까지 전부 지운다.** 되돌릴 수 없다 — 아래 경고 참고 |
+| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 (재적재 + 하루 1회 아카이빙) |
+
+`GET /actuator/health`는 두 앱 공통이며 DynamoDB / OpenFGA 연결 상태를 포함한다.
+
+### app-scim 재적재를 부를 때 알아야 할 것
+
+**재적재가 도는 동안 SCIM 변경 요청은 503이다.** IdP는 503을 재시도 신호로 보므로
+프로비저닝이 유실되지 않고, 재시도 시점에는 재적재가 끝난 상태 위에서 처리된다. 조회
+(SCIM GET, 관리자 조회 API)는 그대로 통과한다 — 무슨 일이 벌어지는지 들여다보는 것이 그
+순간 가장 필요한 일이기 때문이다. 재적재끼리 겹치면 두 번째 요청이 409로 거절된다.
+
+**인가 공백이 생긴다.** store를 재생성하는 순간부터 재적재가 끝날 때까지 **모든 인가 질의가
+false**다. 조직 규모에 비례해 길어진다. 그동안 관리자 조회 API를 열어보면 모든 행이
+`shouldHaveAccess: true` / `openFgaCheck: false`로 보이는데, 이는 실제 어긋남이 아니라
+재적재 중이라는 뜻이다.
+
+**중간에 실패하면 권한이 없는 채로 남는다.** store를 이미 비운 뒤 쓰기가 실패하면 그 상태로
+끝나고 `SyncRun`에 `FAILED`로 남는다. 자동 롤백은 없다 — 되돌릴 이전 상태가 이미 지워졌기
+때문이다. 운영자가 다시 실행해야 한다.
+
+**요청이 그동안 매달려 있다.** 동기 호출이라 재적재가 끝나야 응답이 온다. 앞단 프록시의
+타임아웃이 먼저 날 수 있는데, 그래도 재적재 자체는 계속 돌고 `GET /admin/sync/runs`로
+결과를 확인할 수 있다.
+
+### ⚠️ `mode=wipe`는 되돌릴 수 없다
+
+`wipe`는 OpenFGA뿐 아니라 **DynamoDB의 직원·조직을 전부 지운다.** SCIM 배포에서 DynamoDB는
+조직도의 **유일한 사본**이다. 스냅샷에는 튜플의 식별자만 있어 이름·이메일·계정명·재직 여부를
+복원할 수 없다.
+
+**실행 뒤 반드시 IdP 콘솔에서 전체 재프로비저닝을 걸어야 조직도가 돌아온다**(Okta의 Force
+Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 우리가 시작할 수 없다. 잊거나
+실패하면 조직도가 빈 채로 남는다.
+
+그래서 `confirm`에 DynamoDB 테이블명을 그대로 적어야 실행된다. 불리언 플래그는 손가락이
+미끄러지면 눌리지만, 테이블명은 관리자가 자기가 무엇을 지우는지 찾아보게 만든다.
+
+지우는 순서는 **OpenFGA 먼저, DynamoDB 나중**이다. 중간에 실패하면 조직도는 온전하고 권한만
+없는 상태로 남아 `mode=tuples` 한 번이면 복구된다. 순서를 뒤집으면 조직도가 사라진 채 낡은
+권한만 살아남는다 — 지워진 사람들의 권한만 남는 셈이라 최악이다.
+
+**감사 이력은 지우지 않는다.** 스냅샷과 실행 이력은 그대로 남는다. 사고 뒤에 무슨 일이
+있었는지 볼 유일한 기록이기 때문이다.
 
 `sync.cron`으로 지정한 주기마다 전체 동기화가 자동으로도 돈다. LDAP이 이상 응답(예: 필터 오류로
 0건)을 주면 삭제 가드가 `ABORTED`로 막고, `force=true`로 사람이 확인한 뒤 우회할 수 있다.
@@ -164,11 +214,13 @@ docker compose up -d
 
 - **app-ldap** — `POST /admin/sync/rebuild`로 재적재해 튜플을 상태와 다시 맞춘다. 다음
   `sync.cron` 주기의 전체 동기화도 같은 일을 한다.
-- **app-scim** — **오늘 할 수 있는 자동 교정이 없다.** 이 배포에는 `/admin/sync`가 없고
-  전량 재기록 경로 자체가 없다(위 관리 API 절 참고). 튜플이 다시 맞춰지는 것은 IdP가 그
-  직원이나 조직을 다시 보내줄 때뿐이다. 급하면 IdP 쪽에서 해당 리소스를 다시 push하게
-  하거나, OpenFGA 튜플을 사람이 직접 고쳐야 한다. 감지는 되는데 고칠 손잡이가 없는 이
-  간극은 알려진 상태이며 별도 항목으로 남긴다.
+- **app-scim** — `POST /admin/sync/rebuild?mode=tuples`로 재적재한다. store를 비우고
+  현재상태가 요구하는 튜플을 전부 다시 쓰므로, 튜플 쪽 어긋남은 무엇이든 사라진다.
+  조직도는 건드리지 않는다.
+
+**조직도 자체가 틀렸다면 재적재로 고쳐지지 않는다.** `mode=tuples`는 "상태가 진실"이라는
+전제로 돌기 때문에, 상태가 틀렸으면 틀린 채로 다시 밀 뿐이다. 그 경우는 IdP 쪽에서 다시
+push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저닝을 해야 한다.
 
 `openFgaCheck`가 `null`이면 Check 호출 자체가 실패한 것이지 판정이 false라는 뜻이 아니다 —
 이때도 응답은 200이고 해당 칸만 비어 있다.

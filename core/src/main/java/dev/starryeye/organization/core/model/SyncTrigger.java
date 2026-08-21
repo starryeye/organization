@@ -10,5 +10,7 @@ public enum SyncTrigger {
     /** 전체 재적재 */
     REBUILD,
     /** SCIM 인스턴스의 일 1회 스냅샷 아카이빙 */
-    ARCHIVE
+    ARCHIVE,
+    /** 조직도까지 전부 비우는 초기화. 되돌릴 수 없고 IdP 재푸시가 뒤따라야 한다 */
+    RESET
 }

@@ -1,4 +1,4 @@
-package dev.starryeye.organization.ldap.app;
+package dev.starryeye.organization.admin;
 
 import dev.starryeye.organization.core.model.SyncRun;
 

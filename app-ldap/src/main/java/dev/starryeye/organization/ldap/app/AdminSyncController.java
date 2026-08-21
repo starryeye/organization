@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;

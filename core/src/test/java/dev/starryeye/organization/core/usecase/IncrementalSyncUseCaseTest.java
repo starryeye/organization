@@ -19,13 +19,15 @@ class IncrementalSyncUseCaseTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private MutationGate gate;
     private IncrementalSyncUseCase useCase;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        useCase = new IncrementalSyncUseCase(state, writer);
+        gate = new MutationGate();
+        useCase = new IncrementalSyncUseCase(state, writer, gate);
     }
 
     private static DirectoryUser 직원(String id, boolean active) {
@@ -515,5 +517,58 @@ class IncrementalSyncUseCaseTest {
         assertThat(retry.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toDelete())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+    }
+
+    @Test
+    @DisplayName("재적재가 도는 동안에는 네 변경 경로가 모두 거절된다")
+    void 재적재_중에는_변경이_거절된다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        gate.acquire();
+
+        // when, then — 핸들러가 아니라 유스케이스에서 막으므로 네 경로가 빠짐없이 덮인다
+        assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
+                .isInstanceOf(MutationsSuspendedException.class);
+        assertThatThrownBy(() -> useCase.upsertGroup(조직("DEV002")).block())
+                .isInstanceOf(MutationsSuspendedException.class);
+        assertThatThrownBy(() -> useCase.removeUser("kim").block())
+                .isInstanceOf(MutationsSuspendedException.class);
+        assertThatThrownBy(() -> useCase.removeGroup("DEV002").block())
+                .isInstanceOf(MutationsSuspendedException.class);
+
+        // 거절된 요청은 아무것도 건드리지 않는다
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("게이트가 열리면 변경이 다시 처리된다")
+    void 게이트가_열리면_다시_처리된다() {
+        // given
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        gate.acquire();
+        gate.release();
+
+        // when
+        var result = useCase.upsertUser(직원("kim", false)).block();
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("게이트 확인은 구독 시점에 일어난다")
+    void 게이트_확인은_구독_시점이다() {
+        // given — Mono 를 만든 뒤에 재적재가 시작되는 경우다
+        state.saveUser(직원("kim", true)).block();
+        var 대기중 = useCase.upsertUser(직원("kim", false));
+        gate.acquire();
+
+        // when, then — 조립 시점의 상태를 붙들고 있으면 재적재와 경합한다
+        assertThatThrownBy(대기중::block)
+                .isInstanceOf(MutationsSuspendedException.class);
     }
 }
