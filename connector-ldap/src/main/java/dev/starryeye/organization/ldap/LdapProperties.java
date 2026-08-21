@@ -15,6 +15,15 @@ public class LdapProperties {
     private String bindPassword;
     private int pageSize = 500;
 
+    /**
+     * LDAP 읽기 실패 시 재시도 횟수 (설계 §9). OpenFGA 어댑터와 같은 이름·같은 기본값을 쓴다.
+     *
+     * <p>재시도가 걸리는 것은 <b>예외</b>뿐이다. LDAP 이 성공적으로 잘못된 답을 주는 경우
+     * (필터 오류로 0건을 반환하는 것 같은)는 정상 응답이라 여기 걸리지 않는다 — 그건
+     * 삭제 가드가 잡을 일이고, 이 재시도가 그 경계를 흐리지 않는다.
+     */
+    private int maxRetries = 3;
+
     /** group-of-names | dit */
     private String strategy = "group-of-names";
 

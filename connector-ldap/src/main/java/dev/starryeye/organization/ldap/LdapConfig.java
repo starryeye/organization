@@ -43,7 +43,7 @@ public class LdapConfig {
 
     @Bean
     public LdapDirectorySnapshotSource ldapDirectorySnapshotSource(
-            LdapTemplate template, LdapMappingStrategy strategy) {
-        return new LdapDirectorySnapshotSource(template, strategy);
+            LdapTemplate template, LdapMappingStrategy strategy, LdapProperties properties) {
+        return new LdapDirectorySnapshotSource(template, strategy, properties);
     }
 }
