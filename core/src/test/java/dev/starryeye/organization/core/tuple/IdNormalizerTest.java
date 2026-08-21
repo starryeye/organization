@@ -73,4 +73,19 @@ class IdNormalizerTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("식별자");
     }
+
+    @Test
+    @DisplayName("파이프는 정규화로 걸러진다 — 스냅샷 정렬키의 구분자이기 때문이다")
+    void 파이프는_걸러진다() {
+        // given — Keys.tupleSk 가 user|relation|object 로 잇고 parseTupleSk 가 그대로 되읽는다.
+        // user 값에 파이프가 남으면 되읽을 때 경계가 밀려 전혀 다른 튜플이 된다.
+        String raw = "a|b";
+
+        // when
+        String normalized = IdNormalizer.normalize(raw);
+
+        // then
+        assertThat(normalized).isEqualTo("a_b");
+        assertThat(normalized).doesNotContain("|");
+    }
 }

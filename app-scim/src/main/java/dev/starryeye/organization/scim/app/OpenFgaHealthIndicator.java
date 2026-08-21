@@ -8,6 +8,8 @@ import org.springframework.boot.actuate.health.ReactiveHealthIndicator;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
+
 /**
  * store 가 이미 존재하는지만 read-only 로 확인한다. storeId 는 authz-openfga 안에만
  * 머물러야 하므로 응답에 담지 않는다.
@@ -24,6 +26,13 @@ import reactor.core.publisher.Mono;
 @Component("openFga")
 @RequiredArgsConstructor
 public class OpenFgaHealthIndicator implements ReactiveHealthIndicator {
+    /**
+     * 프로브가 응답 없이 매달리지 않게 상한을 둔다. 매달린 프로브는 죽은 것보다 나쁘다 —
+     * 오케스트레이터는 DOWN 을 보면 재시작하지만, 아무 답도 없으면 그 판단조차 못 한다.
+     * 상한을 넘으면 {@code onErrorResume} 이 그것을 DOWN 으로 옮긴다.
+     */
+    private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(2);
+
 
     private final StoreBootstrapper bootstrapper;
     private final OpenFgaProperties properties;
@@ -41,6 +50,7 @@ public class OpenFgaHealthIndicator implements ReactiveHealthIndicator {
                         .withDetail("apiUrl", properties.getApiUrl())
                         .withDetail("reason", "store 가 아직 존재하지 않는다")
                         .build()))
+                .timeout(PROBE_TIMEOUT)
                 .onErrorResume(error -> Mono.just(Health.down(error).build()));
     }
 }

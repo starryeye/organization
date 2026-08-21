@@ -11,8 +11,19 @@ import java.util.regex.Pattern;
  */
 public final class IdNormalizer {
 
-    /** OpenFGA 파싱을 깨는 문자: 공백류, 타입 구분자(:), userset 구분자(#), 와일드카드(*), 쉼표, 역슬래시 */
-    private static final Pattern FORBIDDEN = Pattern.compile("[\\s:#*,\\\\]");
+    /**
+     * 걸러내는 문자.
+     *
+     * <p>앞의 여섯은 <b>OpenFGA 파싱</b>을 깬다 — 공백류, 타입 구분자({@code :}),
+     * userset 구분자({@code #}), 와일드카드({@code *}), 쉼표, 역슬래시.
+     *
+     * <p>마지막 {@code |} 는 OpenFGA 가 아니라 <b>우리 저장소 키</b> 때문이다.
+     * {@code Keys.tupleSk} 가 튜플을 {@code user|relation|object} 로 잇고
+     * {@code parseTupleSk} 가 그대로 되읽는데, {@code user} 값에 파이프가 남으면
+     * 경계가 밀려 <b>전혀 다른 튜플로 되읽힌다</b>. 그 값이 스냅샷에 들어가면 다음 diff 의
+     * 기준선이 오염되고, 그때부터 쓰기·삭제가 엉뚱한 대상으로 간다 — 조용히.
+     */
+    private static final Pattern FORBIDDEN = Pattern.compile("[\\s:#*,\\\\|]");
 
     private IdNormalizer() {
     }
