@@ -144,23 +144,36 @@ class TupleMapperTest {
     }
 
     @Test
-    @DisplayName("조직 계층에 순환이 있으면 순환을 만드는 간선만 제외하고 나머지는 유지한다")
+    @DisplayName("조직 계층에 순환이 있으면 순환을 만드는 간선만 제외하고 순환 밖 간선은 유지한다")
     void 순환_참조는_간선을_제외하고_동기화를_완주한다() {
-        // given — A -> B -> C -> A 로 순환하고, B 아래에 직원이 하나 있다
+        // given — A -> B -> C -> A 로 순환하고, 그 순환 밖에 B -> D 간선이 하나 더 있다.
+        // 순환 밖 간선을 넣어야 "너무 많이 지운다"는 결함이 드러난다 — 순환 간선만 있는
+        // 픽스처에서는 어느 두 개가 남든 개수만 맞으면 통과해버린다.
         var snapshot = 스냅샷(
                 Set.of(활성직원("kim")),
                 Set.of(조직("A", "가", MemberRef.group("B")),
-                       조직("B", "나", MemberRef.group("C"), MemberRef.user("kim")),
-                       조직("C", "다", MemberRef.group("A"))));
+                       조직("B", "나", MemberRef.group("C"), MemberRef.group("D"), MemberRef.user("kim")),
+                       조직("C", "다", MemberRef.group("A")),
+                       조직("D", "라")));
 
         // when
         var result = TupleMapper.toTuples(snapshot);
 
-        // then — child 간선 3개 중 순환을 닫는 1개만 빠지고 2개가 남는다
         var childTuples = result.tuples().stream()
                 .filter(t -> t.relation().equals("child"))
                 .collect(Collectors.toSet());
-        assertThat(childTuples).hasSize(2);
+        var 순환간선 = Set.of(
+                new RelationTuple("group:B", "child", "group:A"),
+                new RelationTuple("group:C", "child", "group:B"),
+                new RelationTuple("group:A", "child", "group:C"));
+
+        // then — 순환 밖 간선은 반드시 살아남는다
+        assertThat(childTuples).contains(new RelationTuple("group:D", "child", "group:B"));
+        // 순환 간선 셋 중 정확히 하나만 버려진다
+        assertThat(childTuples.stream().filter(순환간선::contains)).hasSize(2);
+        // child 총 4개 중 3개가 남는다 — 순환 밖 1 + 순환 안 2
+        assertThat(childTuples).hasSize(3);
+        // 직원 소속은 순환과 무관하게 유지된다
         assertThat(result.tuples())
                 .contains(new RelationTuple("user:kim", "direct_member", "group:B"));
         assertThat(result.warnings())

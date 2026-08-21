@@ -115,7 +115,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             return new RawEntry(
                     code,
                     dnOf(attributes, config.getGroupIdAttribute(), config.getGroupSearchBase()),
-                    firstNonBlank(value(attributes, config.getGroupNameAttribute()), code),
+                    // 폴백은 정규화된 code 가 아니라 원본이다 — 금지 문자가 있으면 code 에는
+                    // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
+                    firstNonBlank(value(attributes, config.getGroupNameAttribute()),
+                            required(attributes, config.getGroupIdAttribute())),
                     null,
                     values(attributes, config.getMemberAttribute()));
         };

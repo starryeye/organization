@@ -68,7 +68,10 @@ public class DitStrategy implements LdapMappingStrategy {
             }
             codeByRdnPath.put(normalize(entry.dn()), code);
             membersByCode.putIfAbsent(code, new LinkedHashSet<>());
-            String name = firstNonBlank(entry.attribute(config.getGroupNameAttribute()), code);
+            // 폴백은 정규화된 code 가 아니라 원본 속성이다 — 금지 문자가 있으면 code 에는
+            // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
+            String name = firstNonBlank(entry.attribute(config.getGroupNameAttribute()),
+                    entry.attribute(config.getGroupIdAttribute()));
             groups.put(code, new DirectoryGroup(code, entry.dn(), name, Set.of()));
         }
 
@@ -98,7 +101,9 @@ public class DitStrategy implements LdapMappingStrategy {
                     userId,
                     entry.dn(),
                     userId,
-                    firstNonBlank(entry.attribute(config.getUserNameAttribute()), entry.attribute("cn"), userId),
+                    // 마지막 폴백도 정규화된 userId 가 아니라 원본 uid 다 (위 조직명과 같은 이유)
+                    firstNonBlank(entry.attribute(config.getUserNameAttribute()), entry.attribute("cn"),
+                            entry.attribute(config.getUserIdAttribute())),
                     entry.attribute(config.getUserMailAttribute()),
                     true));
 

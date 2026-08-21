@@ -19,16 +19,25 @@ Critical/Important 로 분류돼 병합 전에 처리된 6건은 여기 없다 �
 → UnboundID 에 서버측 엔트리 상한을 건 픽스처를 추가해 공백을 닫을 것.
 `ignoreSizeLimitExceededException(false)` 방어선도 현재 어떤 테스트도 안 탄다.
 
-**순환/self-loop 테스트가 "간선 몇 개 남았나"만 단언한다.** 어느 간선이
-빠졌는지는 단언하지 않는다. `containsExactlyInAnyOrder` 로 살아남은 튜플
-집합을 못박으면, 정렬 순회 계약을 `ImmutableCollections` 내부 구현에 기대는
-현재 해시 충돌 기법(`"Aa"`/`"BB"`)의 단일 실패점을 없앨 수 있다.
+~~**순환/self-loop 테스트가 "간선 몇 개 남았나"만 단언한다.**~~ 해결됨 — 순환
+픽스처에 **순환 밖 간선**(`B -> D`)을 더해 "너무 많이 지운다"가 드러나게 했다.
+살아남은 집합을 통째로 못박는 대신 그 방식을 택한 이유는, 순환 간선 셋 중
+*어느* 하나가 버려지는지는 `Set.copyOf` 반복 순서에 달려 있고 그 순서는 JDK 가
+보장하지 않기 때문이다 — 셋 중 무엇을 버려도 정답이므로 특정 간선을 못박으면
+코드가 멀쩡한데도 JDK 판올림에 깨진다. 대신 순환 밖 간선의 생존, 순환 간선
+정확히 2개 생존, 총 3개를 단언한다. `TupleMapper` 를 "간선 하나 더 버리게"
+변이시켜 실제로 실패하는 것을 확인했다. self-loop 테스트는 원래 정확했다.
 
 **§14.2 가 요구한 음성 테스트 미작성** — "rebuild(snapshot) 후 스냅샷에 없던
 잔여 튜플이 남는다". 알려진 한계가 문서화만 되고 고정되지 않았다.
 
-**`두_전략은_같은_모양의_스냅샷을_만든다`(DitStrategyTest) 가 이름만 그렇고
-DIT 만 실행한다.** 두 전략을 비교하지 않으므로 그 불변식은 이름으로만 단언된 상태.
+~~**`두_전략은_같은_모양의_스냅샷을_만든다`(DitStrategyTest) 가 이름만 그렇고
+DIT 만 실행한다.**~~ 해결됨 — 같은 조직도를 DIT 와 groupOfNames 두 모양으로 담은
+LDIF 로 `TwoStrategiesSameShapeTest` 를 만들어 **실제로 두 전략을 돌려 비교**한다.
+비교 대상은 `TupleMapper` 의 출력이다. 원본 레코드는 `externalId` 가 상대/절대 DN
+으로 갈리는데(§4 의 별도 항목), 정말 지켜져야 하는 계약은 "이후 로직이 전략을
+구분하지 않아도 된다" 이고 그것을 결정하는 것은 튜플이기 때문이다. 옛 테스트는
+`DIT_스냅샷은_TupleMapper가_소화한다` 로 이름을 고쳐 실제로 하는 일과 맞췄다.
 
 **미검증 분기들**: `TupleDiff.between` 의 null 폴백, `DeletionGuard` 의 null
 baseline 분기, `GroupOfNamesStrategy` 의 중복 id 경로(DIT 만 픽스처 있음),
@@ -42,8 +51,10 @@ SCIM 브랜치에서 `StoreBootstrapper.findExistingStore()` (read-only) 를 추
 app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store 가 없으면
 아무것도 만들지 않고 DOWN 을 보고한다.
 
-**두 헬스 인디케이터에 `.timeout()` 없음** — DynamoDB/OpenFGA 연결이 매달리면
-프로브가 DOWN 을 보고하는 대신 함께 매달린다.
+~~**두 헬스 인디케이터에 `.timeout()` 없음**~~ 해결됨 — 두 앱의 네 인디케이터
+모두 `PROBE_TIMEOUT`(2초)을 걸었고, 상한 초과가 기존 `onErrorResume` 을 타고
+DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHealthIndicatorTest`
+로 못박았으며, 타임아웃을 제거하면 그 테스트만 실패하는 것을 확인했다.
 
 **LDAP 읽기에 재시도 없음.** 설계 §9 는 "백오프 3회 → FAILED" 를 지시하는데,
 `authz-openfga` 와 AWS SDK 는 재시도가 있고 LDAP 만 없다. 파이프라인에서
@@ -58,10 +69,10 @@ app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store �
 
 ## 3. 데이터 무결성 여지
 
-**`IdNormalizer` 금지 목록에 `|` 없음.** `Keys.tupleSk` 가 `|` 를 구분자로
-쓰고 `parseTupleSk` 의 `split(..., 3)` 은 **마지막** 컴포넌트만 보호한다.
-`RelationTuple.user()` 값에 `|` 가 들어가면 파싱이 조용히 다른 튜플을 만든다.
-가장 싼 봉쇄는 금지 목록에 `|` 추가.
+~~**`IdNormalizer` 금지 목록에 `|` 없음.**~~ 해결됨 — 금지 목록에 `|` 를 더했다.
+그대로 두었다면 `userName = "a|b"` 하나로 정렬키의 경계가 밀려 전혀 다른 튜플로
+되읽히고, 그 값이 스냅샷에 들어가는 순간 다음 diff 의 기준선이 오염돼 쓰기·삭제가
+엉뚱한 대상으로 갔다. 이 목록에서 가장 위험한 항목이었다.
 
 **`SnapshotIds` 가 초 단위**. 같은 초의 두 실행이 한 스냅샷 파티션에 두 튜플
 집합의 합집합을 만든다. 현재는 `SyncExecutionGuard` 가 막지만, 그 id 가
@@ -73,18 +84,20 @@ app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store �
 
 ## 4. 일관성·유지보수
 
-**`mode=snapshot` 의 인가 공백이 문서화되지 않음.** snapshot 모드도 `T_old`
-전체를 지운 뒤 다시 쓰므로 store 모드와 같은 공백이 있는데, 경고는 store
-모드에만 있다(§8.2 는 snapshot 을 "안전하고 되돌리기 쉽다"고만 서술).
+~~**`mode=snapshot` 의 인가 공백이 문서화되지 않음.**~~ 해결됨 — 설계 §8.2 에
+공백이 store 모드와 같다는 것을 명시하고, "안전하고 되돌리기 쉽다"가 뜻하는 바
+(storeId 유지, 되돌릴 범위가 `T_old` 로 한정)를 공백 유무와 분리해 적었다.
 
 **`DynamoDbDirectoryStateRepository` 만 `Clock` 미주입** — `Instant.now()` 직접
 호출이라 `updatedAt`/`addedAt` 이 고정 시계로 테스트 불가. 형제 저장소 둘은
 주입받는다. `Clock` 빈이 `storage-dynamodb` 에 있는데 `app-ldap` 이 그걸로
 `core` 유스케이스를 만드는 구조도 함께 볼 것.
 
-**`externalId` 형식이 두 전략 간 불일치** — DIT 는 상대 DN, groupOfNames 는
-절대 DN. 지금은 아무도 안 읽지만, SCIM 의 `externalId` 는 조직코드로 쓰이므로
-(§10.2) SCIM 착수 전에 계약을 정할 것.
+~~**`externalId` 형식이 두 전략 간 불일치**~~ 해당 없음으로 종결 — "SCIM 착수 전에
+계약을 정할 것" 이 조건이었는데 SCIM 이 완료됐고, 두 배포가 서로 다른 테이블·store
+를 쓰므로 두 형식이 한 데이터에서 섞일 일이 없다. LDAP 두 전략 사이의 불일치는
+남아 있으나 이 값을 읽는 코드가 없다(`TwoStrategiesSameShapeTest` 가 튜플만
+비교하는 이유이기도 하다).
 
 **`saveGroup` 이 변경 없는 멤버의 `addedAt` 을 매번 갱신** — "최초 합류"가
 아니라 "마지막 전체 동기화"를 의미하게 된다.
@@ -97,8 +110,11 @@ app-scim·app-ldap 두 인디케이터를 모두 그쪽으로 옮겼다. store �
 **`findStoreIdByName`/`createStore` 가 일회용 클라이언트 생성** — 첫
 부트스트랩에 클라이언트 3개. 누수는 아님(이 SDK 버전은 `Closeable` 미구현).
 
-**그룹 표시명 폴백이 원본 `cn` 이 아니라 정규화된 코드를 쓴다** — 금지 문자가
-있으면 사람이 읽는 필드에 밑줄이 노출된다.
+~~**그룹 표시명 폴백이 원본 `cn` 이 아니라 정규화된 코드를 쓴다**~~ 해결됨 —
+두 전략 모두 폴백을 원본 속성으로 바꿨다. DIT 는 조직명뿐 아니라 **직원 표시명**
+폴백도 같은 문제였다(정규화된 `userId` 로 폴백). `DisplayNameFallbackTest` 가
+세 경로를 모두 덮는다 — 처음 쓴 픽스처는 금지 문자가 없거나 `cn` 이 있어 폴백까지
+도달하지 못해 통과해버렸고, 그것을 고쳐 셋 다 RED 로 만든 뒤 수정했다.
 
 ## 5. 미관
 

@@ -161,16 +161,20 @@ class DitStrategyTest extends EmbeddedLdapSupport {
         assertThat(snapshot.users()).containsOnlyKeys("choi", "park");
     }
 
+    /**
+     * 두 전략이 정말로 같은 튜플을 만드는지는 {@link TwoStrategiesSameShapeTest} 가 확인한다 —
+     * 이 테스트는 DIT 하나만 실행하므로 그 비교를 할 수 없다.
+     */
     @Test
-    @DisplayName("두 전략은 서로 다른 방식으로 읽어도 같은 모양의 스냅샷을 만든다")
-    void 두_전략은_같은_모양의_스냅샷을_만든다() {
+    @DisplayName("DIT 가 만든 스냅샷을 TupleMapper 가 그대로 소화한다")
+    void DIT_스냅샷은_TupleMapper가_소화한다() {
         // given
         var strategy = new DitStrategy(기본설정());
 
         // when
         var snapshot = strategy.read(ldapTemplate);
 
-        // then — 이후 로직(TupleMapper)이 전략을 구분하지 않아도 되는지 확인한다
+        // then — 트리 위치로 읽은 소속이 튜플의 방향(하위 -> 상위)으로 옮겨졌는지 본다
         var result = dev.starryeye.organization.core.tuple.TupleMapper.toTuples(snapshot);
         assertThat(result.tuples()).contains(
                 dev.starryeye.organization.core.model.RelationTuple.directMember("choi", "DEV002"),
