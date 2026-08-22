@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
@@ -35,7 +36,7 @@ class SyncSchedulerGuardReleaseTest {
         var guard = new SyncExecutionGuard();
         // 만료 스냅샷 정리 경로는 이 테스트가 다루는 시나리오와 무관하다.
         var scheduler = new SyncScheduler(new ThrowingFullSyncUseCase(), null, guard,
-                new SyncMetrics(new SimpleMeterRegistry()));
+                new SyncMetrics(new SimpleMeterRegistry()), ObservationRegistry.NOOP);
 
         // when
         assertThatCode(scheduler::전체동기화).doesNotThrowAnyException();

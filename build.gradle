@@ -36,6 +36,10 @@ subprojects {
 
         testImplementation 'org.springframework.boot:spring-boot-starter-test'
         testImplementation libs.reactor.test
+        // Gradle 이 번들한 junit-platform-launcher 는 Boot BOM 이 관리하는
+        // junit-platform-engine 보다 낡아서 테스트 탐색 자체가 실패한다.
+        // BOM 이 버전을 맞추도록 명시적으로 올려둔다.
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 
     plugins.withId('java-test-fixtures') {
