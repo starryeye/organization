@@ -221,13 +221,15 @@ class LdapSyncEndToEndTest {
 
     @Test
     @Order(6)
-    @DisplayName("헬스체크가 DynamoDB 와 OpenFGA 연결을 모두 UP 으로 보고한다")
+    @DisplayName("헬스체크가 LDAP·DynamoDB·OpenFGA 세 의존성을 모두 UP 으로 보고한다")
     void 헬스체크가_UP이다() {
-        // given, when, then
+        // given, when, then — 설계 §12.3 이 요구하는 셋을 모두 확인한다.
+        // 전에는 둘만 단언해, LDAP 인디케이터가 아예 없다는 사실을 이 테스트가 덮고 있었다.
         client.get().uri("/actuator/health").exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("UP")
+                .jsonPath("$.components.ldap.status").isEqualTo("UP")
                 .jsonPath("$.components.dynamoDb.status").isEqualTo("UP")
                 .jsonPath("$.components.openFga.status").isEqualTo("UP");
     }

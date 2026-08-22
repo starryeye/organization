@@ -20,7 +20,7 @@ class SnapshotIdsTest {
         var id = SnapshotIds.generate(at, SyncSource.LDAP);
 
         // then
-        assertThat(id).isEqualTo("20260814T030000-LDAP");
+        assertThat(id).isEqualTo("20260814T030000000-LDAP");
     }
 
     @Test
@@ -36,5 +36,22 @@ class SnapshotIdsTest {
 
         // then
         assertThat(이른아이디).isLessThan(늦은아이디);
+    }
+
+    @Test
+    @DisplayName("같은 초 안의 두 실행도 서로 다른 아이디를 받는다")
+    void 같은_초라도_아이디가_갈린다() {
+        // given — 초 단위였을 때 두 실행이 한 스냅샷 파티션을 공유하던 상황이다.
+        // 합쳐진 튜플 집합은 어느 실행의 결과도 아니라, 다음 diff 의 기준선을 통째로 망친다.
+        var 앞선실행 = Instant.parse("2026-08-14T03:00:00.120Z");
+        var 뒤이은실행 = Instant.parse("2026-08-14T03:00:00.870Z");
+
+        // when
+        var 앞선아이디 = SnapshotIds.generate(앞선실행, SyncSource.LDAP);
+        var 뒤이은아이디 = SnapshotIds.generate(뒤이은실행, SyncSource.LDAP);
+
+        // then
+        assertThat(앞선아이디).isNotEqualTo(뒤이은아이디);
+        assertThat(앞선아이디).isLessThan(뒤이은아이디);
     }
 }

@@ -5,6 +5,12 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import org.junit.jupiter.api.BeforeEach;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -16,10 +22,30 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
     private DynamoDbDirectoryStateRepository repository;
+    /** 시간을 손으로 옮길 수 있어야 addedAt 이 보존되는지 볼 수 있다. */
+    private MutableClock clock;
 
     @BeforeEach
     void 저장소를_준비한다() {
-        repository = new DynamoDbDirectoryStateRepository(client, properties);
+        clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        repository = new DynamoDbDirectoryStateRepository(client, properties, clock);
+    }
+
+    /** 테스트가 지시할 때만 움직이는 시계. */
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void 앞으로(Duration amount) {
+            now = now.plus(amount);
+        }
+
+        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return now; }
     }
 
     private static DirectoryUser 직원(String id) {
@@ -191,5 +217,55 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(found).isEqualTo(조직도);
+    }
+
+    /** 멤버 아이템의 addedAt 을 직접 읽는다. 저장소 API 는 이 값을 노출하지 않는다. */
+    private String addedAt(String groupId, MemberRef member) {
+        var response = client.getItem(builder -> builder
+                .tableName(properties.getTableName())
+                .key(java.util.Map.of(
+                        Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                        Keys.SK, Attrs.s(Keys.memberSk(member))))).join();
+        return response.item().get("addedAt").s();
+    }
+
+    @Test
+    @DisplayName("이미 소속된 멤버의 addedAt 은 다시 동기화해도 최초 합류 시각 그대로다")
+    void 기존_멤버의_addedAt은_보존된다() {
+        // given — kim 이 1월 1일에 합류했다
+        var kim = MemberRef.user("kim");
+        repository.saveGroup(조직("DEV001", "개발본부", kim)).block();
+        String 최초합류 = addedAt("DEV001", kim);
+
+        // when — 한 달 뒤, 다른 사람이 들어오면서 같은 조직이 다시 저장된다
+        clock.앞으로(Duration.ofDays(31));
+        var park = MemberRef.user("park");
+        repository.saveGroup(조직("DEV001", "개발본부", kim, park)).block();
+
+        // then — kim 의 합류 시각은 그대로다. 덮어쓰면 "최초 합류" 가 아니라
+        // "마지막 전체 동기화" 를 뜻하게 되어, 매일 도는 스케줄이 값을 무의미하게 만든다.
+        assertThat(addedAt("DEV001", kim)).isEqualTo(최초합류);
+        // 새로 온 사람은 지금 시각을 갖는다
+        assertThat(addedAt("DEV001", park)).isNotEqualTo(최초합류);
+    }
+
+    @Test
+    @DisplayName("떠났다가 다시 합류하면 addedAt 이 새로 찍힌다")
+    void 재합류하면_addedAt이_갱신된다() {
+        // given
+        var kim = MemberRef.user("kim");
+        repository.saveGroup(조직("DEV001", "개발본부", kim)).block();
+        String 최초합류 = addedAt("DEV001", kim);
+
+        // when — 빠졌다가
+        clock.앞으로(Duration.ofDays(10));
+        repository.saveGroup(조직("DEV001", "개발본부")).block();
+        // 다시 들어온다
+        clock.앞으로(Duration.ofDays(10));
+        repository.saveGroup(조직("DEV001", "개발본부", kim)).block();
+
+        // then — 이때는 갱신되는 것이 맞다. 보존 로직이 "한 번 쓰면 영원히" 가
+        // 되어버리면 이 경우를 틀리게 만든다.
+        assertThat(addedAt("DEV001", kim)).isNotEqualTo(최초합류);
     }
 }

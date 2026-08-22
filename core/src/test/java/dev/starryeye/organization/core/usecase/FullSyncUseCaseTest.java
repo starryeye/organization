@@ -102,9 +102,9 @@ class FullSyncUseCaseTest {
 
         // then
         assertThat(snapshots.saved).hasSize(1);
-        assertThat(snapshots.saved.get(0).id()).isEqualTo("20260814T030000-LDAP");
+        assertThat(snapshots.saved.get(0).id()).isEqualTo("20260814T030000000-LDAP");
         assertThat(snapshots.saved.get(0).source()).isEqualTo(SyncSource.LDAP);
-        assertThat(run.snapshotId()).isEqualTo("20260814T030000-LDAP");
+        assertThat(run.snapshotId()).isEqualTo("20260814T030000000-LDAP");
         assertThat(state.users).containsKey("kim");
         assertThat(state.groups).containsKey("DEV002");
     }

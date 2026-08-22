@@ -25,7 +25,7 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
 
     @BeforeEach
     void 저장소를_준비한다() {
-        state = new DynamoDbDirectoryStateRepository(client, properties);
+        state = new DynamoDbDirectoryStateRepository(client, properties, java.time.Clock.systemUTC());
         search = new DynamoDbDirectorySearchRepository(client, properties);
     }
 
