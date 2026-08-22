@@ -54,7 +54,7 @@ class SnapshotArchiveUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(snapshots.saved).hasSize(1);
         assertThat(snapshots.saved.get(0).source()).isEqualTo(SyncSource.SCIM);
-        assertThat(snapshots.saved.get(0).id()).isEqualTo("20260815T030000-SCIM");
+        assertThat(snapshots.saved.get(0).id()).isEqualTo("20260815T030000000-SCIM");
         assertThat(snapshots.saved.get(0).tuples())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
     }

@@ -127,4 +127,19 @@ class DeletionGuardTest {
         // then
         assertThat(decision.aborted()).isFalse();
     }
+
+    @Test
+    @DisplayName("기준 스냅샷이 아예 null 이어도 가드가 터지지 않고 진행한다")
+    void 기준이_null이어도_진행한다() {
+        // given — 첫 동기화에는 스냅샷 자체가 없다. 이 분기를 지금까지 어떤 테스트도 타지 않았고,
+        // 여기서 NPE 가 나면 최초 동기화가 통째로 실패한다.
+        var guard = new DeletionGuard(DeletionGuardPolicy.defaults());
+        var delta = TupleDelta.writeOnly(튜플들(500));
+
+        // when
+        var decision = guard.evaluate(delta, null);
+
+        // then — 기준선 크기를 0 으로 보고 minBaseline 미만이라 가드를 적용하지 않는다
+        assertThat(decision.aborted()).isFalse();
+    }
 }

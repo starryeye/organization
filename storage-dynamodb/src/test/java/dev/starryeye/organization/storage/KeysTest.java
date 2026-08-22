@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class KeysTest {
 
@@ -116,5 +117,18 @@ class KeysTest {
 
         // then
         assertThat(정각키).isLessThan(이후키);
+    }
+
+    @Test
+    @DisplayName("직원 파티션키가 아닌 값을 되돌리려 하면 조용히 자르지 않고 거부한다")
+    void 잘못된_파티션키는_거부한다() {
+        // given, when, then — 무조건 substring 하면 "GRO" 같은 쓰레기 아이디가 나오고,
+        // 그 값이 스냅샷에 들어가면 다음 diff 의 기준선이 오염된다.
+        assertThatThrownBy(() -> Keys.parseUserPk(Keys.groupPk("DEV001")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.parseGroupPk(Keys.userPk("kim")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.parseUserPk(null))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

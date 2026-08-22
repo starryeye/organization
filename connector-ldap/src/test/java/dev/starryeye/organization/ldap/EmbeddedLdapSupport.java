@@ -27,12 +27,26 @@ public abstract class EmbeddedLdapSupport {
     /** 각 테스트가 자기 조직도 LDIF 를 준다 */
     protected abstract String ldif();
 
+    /**
+     * 서버측 엔트리 상한. 0 이면 무제한이다.
+     *
+     * <p>실제 디렉터리(Active Directory 의 {@code MaxPageSize} 등)는 상한을 두고, 그 위로는
+     * 결과를 자른 뒤 {@code SIZE_LIMIT_EXCEEDED} 를 붙여 응답한다. 상한이 없는 서버에서는
+     * 페이징 없는 검색도 전체를 반환하므로, "조용한 잘림" 이라는 원래 결함을 재현할 수 없다.
+     */
+    protected int maxSizeLimit() {
+        return 0;
+    }
+
     @BeforeEach
     void LDAP서버를_띄운다() throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
         config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("test", 0));
         config.setSchema(null);
+        if (maxSizeLimit() > 0) {
+            config.setMaxSizeLimit(maxSizeLimit());
+        }
 
         server = new InMemoryDirectoryServer(config);
         server.importFromLDIF(true,
@@ -49,6 +63,9 @@ public abstract class EmbeddedLdapSupport {
 
         ldapTemplate = new LdapTemplate(contextSource);
         ldapTemplate.setIgnorePartialResultException(true);
+        // 프로덕션 LdapConfig 와 같은 설정. 이것이 false 여야 서버가 결과를 자른 사실이
+        // 예외로 올라온다 — true 로 두면 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 지운다.
+        ldapTemplate.setIgnoreSizeLimitExceededException(false);
     }
 
     @AfterEach

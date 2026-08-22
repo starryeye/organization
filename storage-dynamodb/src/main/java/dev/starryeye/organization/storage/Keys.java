@@ -99,8 +99,18 @@ public final class Keys {
         return USER_PREFIX + userId;
     }
 
-    /** {@link #userPk} 로 만든 파티션키에서 직원 아이디만 되돌린다. */
+    /**
+     * {@link #userPk} 로 만든 파티션키에서 직원 아이디만 되돌린다.
+     *
+     * <p>접두사를 확인하고 자른다. 무조건 {@code substring} 하면 다른 종류의 키가 흘러들었을 때
+     * <b>조용히 잘린 쓰레기 아이디</b>를 돌려준다 — 그 값이 스냅샷에 들어가는 순간 다음 diff 의
+     * 기준선이 오염된다. 현 호출부는 GSI1 파티션에서만 값을 받아 도달하지 않지만,
+     * 이 함수가 그 사실에 기대고 있다는 것 자체가 위험하다.
+     */
     public static String parseUserPk(String pk) {
+        if (pk == null || !pk.startsWith(USER_PREFIX)) {
+            throw new IllegalArgumentException("직원 파티션키가 아니다: " + pk);
+        }
         return pk.substring(USER_PREFIX.length());
     }
 
@@ -108,8 +118,14 @@ public final class Keys {
         return GROUP_PREFIX + groupId;
     }
 
-    /** {@link #groupPk} 로 만든 파티션키에서 조직코드만 되돌린다. */
+    /**
+     * {@link #groupPk} 로 만든 파티션키에서 조직코드만 되돌린다.
+     * {@link #parseUserPk} 와 같은 이유로 접두사를 확인한다.
+     */
     public static String parseGroupPk(String pk) {
+        if (pk == null || !pk.startsWith(GROUP_PREFIX)) {
+            throw new IllegalArgumentException("조직 파티션키가 아니다: " + pk);
+        }
         return pk.substring(GROUP_PREFIX.length());
     }
 

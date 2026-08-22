@@ -36,8 +36,8 @@ public class DynamoDbConfig {
 
     @Bean
     public DynamoDbDirectoryStateRepository dynamoDbDirectoryStateRepository(
-            DynamoDbAsyncClient client, DynamoDbProperties properties) {
-        return new DynamoDbDirectoryStateRepository(client, properties);
+            DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbDirectoryStateRepository(client, properties, clock);
     }
 
     @Bean

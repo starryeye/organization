@@ -14,6 +14,7 @@ import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -42,6 +43,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
+    /** 형제 저장소 둘과 맞춘다. 고정 시계를 넣어야 updatedAt/addedAt 을 테스트할 수 있다. */
+    private final Clock clock;
 
     // ---------- 직원 ----------
 
@@ -66,7 +69,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         // 속성이 없는 아이템을 인덱스에 넣지 않는다. 의도한 동작이며, 아이디·계정명으로는
         // 여전히 찾힌다.
         item.put(ACTIVE, Attrs.bool(user.active()));
-        item.put(UPDATED_AT, Attrs.s(Instant.now().toString()));
+        item.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
         Attrs.putIfPresent(item, EXTERNAL_ID, user.externalId());
         Attrs.putIfPresent(item, USER_NAME, user.userName());
         Attrs.putIfPresent(item, DISPLAY_NAME, user.displayName());
@@ -127,19 +130,34 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         meta.put(Keys.SK, Attrs.s(Keys.META));
         meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
         meta.put(Keys.GSI1SK, Attrs.s(group.displayName() == null ? group.id() : group.displayName()));
-        meta.put(UPDATED_AT, Attrs.s(Instant.now().toString()));
+        meta.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
         Attrs.putIfPresent(meta, EXTERNAL_ID, group.externalId());
         Attrs.putIfPresent(meta, DISPLAY_NAME, group.displayName());
 
         Set<String> targetSks = group.members().stream().map(Keys::memberSk).collect(Collectors.toSet());
 
         return existingMemberSks(group.id())
-                .filter(sk -> !targetSks.contains(sk))
-                .flatMap(sk -> deleteItem(Keys.groupPk(group.id()), sk), QUERY_CONCURRENCY)
-                .then(putItem(meta))
-                .then(Flux.fromIterable(group.members())
-                        .flatMap(member -> putItem(memberItem(group.id(), member)), QUERY_CONCURRENCY)
-                        .then());
+                .collectList()
+                .flatMap(existing -> {
+                    Set<String> existingSks = Set.copyOf(existing);
+                    List<String> 떠난멤버 = existing.stream()
+                            .filter(sk -> !targetSks.contains(sk))
+                            .toList();
+                    // 이미 있는 멤버는 건드리지 않는다. 다시 put 하면 addedAt 이 덮여
+                    // "최초 합류" 가 아니라 "마지막 전체 동기화" 를 뜻하게 된다.
+                    // 나머지 속성(GSI 키)은 groupId·member 로만 정해져 바뀔 것이 없다.
+                    List<MemberRef> 새로온멤버 = group.members().stream()
+                            .filter(member -> !existingSks.contains(Keys.memberSk(member)))
+                            .toList();
+
+                    return Flux.fromIterable(떠난멤버)
+                            .flatMap(sk -> deleteItem(Keys.groupPk(group.id()), sk), QUERY_CONCURRENCY)
+                            .then(putItem(meta))
+                            .then(Flux.fromIterable(새로온멤버)
+                                    .flatMap(member -> putItem(memberItem(group.id(), member)),
+                                            QUERY_CONCURRENCY)
+                                    .then());
+                });
     }
 
     @Override
@@ -156,7 +174,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
         item.put(Keys.GSI1PK, Attrs.s(Keys.memberGsi1Pk(member)));
         item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
-        item.put("addedAt", Attrs.s(Instant.now().toString()));
+        item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
         return item;
     }
 
