@@ -5,8 +5,11 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.openfga.sdk.api.client.model.ClientTupleKey;
+import dev.openfga.sdk.api.client.model.ClientWriteRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -127,6 +130,7 @@ class LdapSyncEndToEndTest {
     @Autowired StoreBootstrapper bootstrapper;
     @Autowired TupleSnapshotRepository snapshots;
     @Autowired DirectoryStateRepository state;
+    @Autowired SyncRunRepository runs;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -193,8 +197,44 @@ class LdapSyncEndToEndTest {
         assertThat(snapshots.findLatest().block().tuples()).hasSize(3);
     }
 
+    /** 스냅샷에 없는 튜플을 OpenFGA 에 직접 심는다. 동기화 경로를 거치지 않으므로 상태에도 없다. */
+    private void 잔여튜플을_심는다(String user, String relation, String object) {
+        try {
+            bootstrapper.client().write(
+                    new ClientWriteRequest().writes(java.util.List.of(new ClientTupleKey()
+                            .user(user).relation(relation)._object(object)))).get();
+        } catch (Exception e) {
+            throw new IllegalStateException("잔여 튜플 심기 실패", e);
+        }
+    }
+
     @Test
     @Order(4)
+    @DisplayName("snapshot 모드 재적재는 스냅샷에 없던 잔여 튜플을 지우지 못한다 — 알려진 한계 (설계 §14.2)")
+    void snapshot_모드는_잔여_튜플을_남긴다() {
+        // given — 어긋남을 흉내낸다. 예컨대 과거의 부분 실패로 남은 튜플,
+        // 혹은 사람이 손으로 넣은 튜플이 이런 모습이다.
+        잔여튜플을_심는다("user:ghost", "direct_member", "group:DEV001");
+        assertThat(check("user:ghost", "member", "group:DEV001")).isTrue();
+
+        // when — 스냅샷 기준 재적재
+        client.post().uri("/admin/sync/rebuild?mode=snapshot").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+
+        // then — 여전히 남아 있다. snapshot 모드는 "스냅샷이 요구하는 것을 다시 쓴다" 이지
+        // "스냅샷에 없는 것을 지운다" 가 아니다. 스냅샷에 애초에 없는 튜플은
+        // 지울 대상으로 인식되지 않는다 — 고치려는 바로 그 상황에서 듣지 않는 이유다.
+        assertThat(check("user:ghost", "member", "group:DEV001"))
+                .as("설계 §14.2 가 명시적 검증을 요구한 한계. 이것이 false 가 되면 한계가 해소된 것이니 문서를 고칠 것")
+                .isTrue();
+        // 정상 튜플은 그대로다
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+    }
+
+    @Test
+    @Order(5)
     @DisplayName("store 모드 재적재는 store 를 비우고 다시 채운다")
     void store_모드_재적재가_동작한다() {
         // given, when
@@ -205,10 +245,20 @@ class LdapSyncEndToEndTest {
 
         // then
         assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+        // snapshot 모드가 못 지운 잔여 튜플은 store 모드가 쓸어낸다.
+        // 어긋남을 실제로 고치려면 이쪽이어야 한다는 뜻이다.
+        assertThat(check("user:ghost", "member", "group:DEV001")).isFalse();
+
+        // and — 개수까지 확인한다. Check 만 보면 "필요한 것이 있다" 는 알 수 있어도
+        // "필요 없는 것이 없다" 는 모른다. 조직도가 요구하는 튜플은 정확히 3개다
+        // (kim→DEV002, park→DEV001, DEV002→DEV001).
+        assertThat(snapshots.findLatest().block().tuples())
+                .as("재적재 뒤 스냅샷은 조직도가 요구하는 것만 담아야 한다")
+                .hasSize(3);
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     @DisplayName("실행 이력에 지금까지의 동기화가 최신순으로 남아 있다")
     void 실행_이력이_남는다() {
         // given, when, then
@@ -217,10 +267,19 @@ class LdapSyncEndToEndTest {
                 .expectBody()
                 .jsonPath("$.length()").value(len -> assertThat((Integer) len).isGreaterThanOrEqualTo(4))
                 .jsonPath("$[0].source").isEqualTo("LDAP");
+
+        // and — 트리거 종류가 실제로 갈려 기록되는지 본다. 전부 MANUAL 로 뭉개져도
+        // 위 단언은 통과하는데, 그러면 "누가 이 동기화를 시작했나" 를 이력에서 알 수 없다.
+        var 트리거들 = runs.findRecent(10).collectList().block().stream()
+                .map(run -> run.trigger().name())
+                .toList();
+        assertThat(트리거들)
+                .as("수동 동기화(MANUAL)와 재적재(REBUILD)가 서로 다른 트리거로 남아야 한다")
+                .contains("MANUAL", "REBUILD");
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     @DisplayName("헬스체크가 LDAP·DynamoDB·OpenFGA 세 의존성을 모두 UP 으로 보고한다")
     void 헬스체크가_UP이다() {
         // given, when, then — 설계 §12.3 이 요구하는 셋을 모두 확인한다.

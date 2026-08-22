@@ -9,15 +9,13 @@ Critical/Important 로 분류돼 병합 전에 처리된 6건은 여기 없다 �
 
 ## 1. 테스트가 결함을 재현하지 못하는 곳
 
-**LDAP 페이징 테스트가 원래 결함을 재현하지 않는다.** 최종 재리뷰어가
-저장소 사본을 만들어 두 전략을 수정 전으로 되돌린 뒤 새 페이징 테스트를
-그대로 돌렸는데 **통과했다**. UnboundID 인메모리 서버에 서버측 크기 제한이
-없어서, 페이징 없는 평범한 검색도 전체를 반환하기 때문이다. 테스트는
-페이징 *기계장치*가 동작함(`page-size=1` 로 실제 다중 왕복)을 증명할 뿐,
-"조용한 잘림"이라는 원래 결함이 닫혔음은 증명하지 못한다.
-프로덕션 코드는 독립 검증됨(코드 독해 + spring-ldap 바이트코드 분석).
-→ UnboundID 에 서버측 엔트리 상한을 건 픽스처를 추가해 공백을 닫을 것.
-`ignoreSizeLimitExceededException(false)` 방어선도 현재 어떤 테스트도 안 탄다.
+~~**LDAP 페이징 테스트가 원래 결함을 재현하지 않는다.**~~ 해결됨 —
+`EmbeddedLdapSupport` 에 `maxSizeLimit()` 훅을 열고 `PagingUnderServerSizeLimitTest`
+를 추가했다. 서버 상한 20 에 직원 50명을 넣어 페이징 없이는 절대 다 못 읽게 만들었다.
+페이징을 걷어내는 변이로 실제로 깨지는 것을 확인했다 — 기존 테스트가 하지 못하던 바로 그것이다.
+`ignoreSizeLimitExceededException(false)` 방어선도 같은 픽스처에서 `page-size=0` 으로
+탄다. `EmbeddedLdapSupport` 가 그 설정을 프로덕션 `LdapConfig` 와 맞추도록 고쳤다 —
+테스트 템플릿이 프로덕션과 다르면 그 차이만큼 검증이 비는 셈이다.
 
 ~~**순환/self-loop 테스트가 "간선 몇 개 남았나"만 단언한다.**~~ 해결됨 — 순환
 픽스처에 **순환 밖 간선**(`B -> D`)을 더해 "너무 많이 지운다"가 드러나게 했다.
@@ -28,8 +26,10 @@ Critical/Important 로 분류돼 병합 전에 처리된 6건은 여기 없다 �
 정확히 2개 생존, 총 3개를 단언한다. `TupleMapper` 를 "간선 하나 더 버리게"
 변이시켜 실제로 실패하는 것을 확인했다. self-loop 테스트는 원래 정확했다.
 
-**§14.2 가 요구한 음성 테스트 미작성** — "rebuild(snapshot) 후 스냅샷에 없던
-잔여 튜플이 남는다". 알려진 한계가 문서화만 되고 고정되지 않았다.
+~~**§14.2 가 요구한 음성 테스트 미작성**~~ 해결됨 — E2E 에 잔여 튜플을 OpenFGA 에
+직접 심고 `rebuild(snapshot)` 뒤에도 살아남는 것을 단언한다. 같은 흐름에서 `rebuild(store)`
+가 그것을 쓸어내는 것까지 이어 보여, 한계와 해법이 한자리에서 읽힌다.
+이 단언이 false 가 되면 한계가 해소된 것이니 설계 문서를 고쳐야 한다.
 
 ~~**`두_전략은_같은_모양의_스냅샷을_만든다`(DitStrategyTest) 가 이름만 그렇고
 DIT 만 실행한다.**~~ 해결됨 — 같은 조직도를 DIT 와 groupOfNames 두 모양으로 담은
@@ -39,10 +39,15 @@ LDIF 로 `TwoStrategiesSameShapeTest` 를 만들어 **실제로 두 전략을 �
 구분하지 않아도 된다" 이고 그것을 결정하는 것은 튜플이기 때문이다. 옛 테스트는
 `DIT_스냅샷은_TupleMapper가_소화한다` 로 이름을 고쳐 실제로 하는 일과 맞췄다.
 
-**미검증 분기들**: `TupleDiff.between` 의 null 폴백, `DeletionGuard` 의 null
-baseline 분기, `GroupOfNamesStrategy` 의 중복 id 경로(DIT 만 픽스처 있음),
-`DuplicateIdGuard` 경고 로그가 두 DN 을 모두 담는지, store 모드 rebuild 의
-튜플 개수, 실행 이력의 트리거 종류.
+~~**미검증 분기들**~~ 해결됨 — 여섯 개를 모두 덮었다.
+`TupleDiffNullBaselineTest`(첫 동기화의 null 기준선 — 여기가 틀리면 최초 동기화가
+전체를 삭제 대상으로 계산한다), `DeletionGuardTest` 의 null baseline,
+`GroupOfNamesDuplicateIdTest`(정규화가 `kim lee` 와 `kim*lee` 를 뭉개는 경로 +
+경고가 두 DN 을 모두 담는지), store 모드 rebuild 의 튜플 개수, 실행 이력의 트리거 종류.
+
+중복 id 테스트는 처음 쓴 단언(`containsOnlyKeys`)이 **공허하게 통과**했다 — 가드가
+없어도 뒤 엔트리가 앞을 덮어써서 키는 어차피 하나다. 가드를 걷어내는 변이로 그것을
+확인하고, "가드가 유지하기로 한 dn 이 실제로 스냅샷에 남는가" 로 바꿔 다시 물게 했다.
 
 ## 2. 실패가 조용한 곳
 
@@ -62,8 +67,9 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 잘못된 답(필터 오류로 0건 등)을 주는 경우는 여전히 삭제 가드가 잡는다 — 두 방어선의
 경계를 흐리지 않는다.
 
-**§12.3 의 LDAP 헬스 인디케이터 미구현.** E2E 가 존재하는 둘만 단언해
-그 공백을 고착시켰다.
+~~**§12.3 의 LDAP 헬스 인디케이터 미구현.**~~ 해결됨 — `LdapHealthIndicator` 를 만들고
+E2E 가 셋을 모두 단언하도록 고쳤다. 검색이 아니라 바인드만 한다(디렉터리 크기에 비례하는
+프로브는 헬스체크가 서버에 부담을 주는 본말전도다). 형제 인디케이터와 같은 2초 상한을 둔다.
 
 ~~**§12.4 MDC runId 가 수동 접두사 4곳뿐.**~~ 해결됨 — runId 를 MDC 에 넣는 대신
 표준 트레이싱(`traceId`/`spanId`)을 모든 로그 줄에 붙였다. runId 안은 폐기했다:
@@ -80,13 +86,14 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 되읽히고, 그 값이 스냅샷에 들어가는 순간 다음 diff 의 기준선이 오염돼 쓰기·삭제가
 엉뚱한 대상으로 갔다. 이 목록에서 가장 위험한 항목이었다.
 
-**`SnapshotIds` 가 초 단위**. 같은 초의 두 실행이 한 스냅샷 파티션에 두 튜플
-집합의 합집합을 만든다. 현재는 `SyncExecutionGuard` 가 막지만, 그 id 가
-유일한 방어선이다.
+~~**`SnapshotIds` 가 초 단위**~~ 해결됨 — 밀리초까지 담는다. 고정 너비·0 패딩이라
+사전순 정렬은 그대로 시간순이다. `SyncExecutionGuard` 는 인스턴스 하나 안에서만
+유효하므로(§6) id 자체가 갈려야 한다.
 
-**`Keys.parseUserPk`/`parseGroupPk` 가 무조건 `substring`** — 제거된
-`stripPrefix` 는 `startsWith` 로 방어했다. 현 호출부는 GSI1 파티션에서만
-값을 받아 도달 불가.
+~~**`Keys.parseUserPk`/`parseGroupPk` 가 무조건 `substring`**~~ 해결됨 — 접두사를
+확인하고 자른다. 다른 종류의 키가 흘러들면 조용히 잘린 쓰레기 아이디를 돌려주고,
+그 값이 스냅샷에 들어가면 기준선이 오염된다. 현 호출부는 도달하지 않지만
+함수가 그 사실에 기대는 것 자체가 위험했다.
 
 ## 4. 일관성·유지보수
 
@@ -94,10 +101,10 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 공백이 store 모드와 같다는 것을 명시하고, "안전하고 되돌리기 쉽다"가 뜻하는 바
 (storeId 유지, 되돌릴 범위가 `T_old` 로 한정)를 공백 유무와 분리해 적었다.
 
-**`DynamoDbDirectoryStateRepository` 만 `Clock` 미주입** — `Instant.now()` 직접
-호출이라 `updatedAt`/`addedAt` 이 고정 시계로 테스트 불가. 형제 저장소 둘은
-주입받는다. `Clock` 빈이 `storage-dynamodb` 에 있는데 `app-ldap` 이 그걸로
-`core` 유스케이스를 만드는 구조도 함께 볼 것.
+~~**`DynamoDbDirectoryStateRepository` 만 `Clock` 미주입**~~ 해결됨 — 형제 저장소
+둘과 맞췄다. 고정 시계가 있어야 `addedAt` 보존을 검증할 수 있었다.
+`Clock` 빈이 `storage-dynamodb` 에 있는데 `app-ldap` 이 그걸로 `core` 유스케이스를
+만드는 구조는 남아 있다 — 동작에 문제가 없어 미관 항목으로 남긴다.
 
 ~~**`externalId` 형식이 두 전략 간 불일치**~~ 해당 없음으로 종결 — "SCIM 착수 전에
 계약을 정할 것" 이 조건이었는데 SCIM 이 완료됐고, 두 배포가 서로 다른 테이블·store
@@ -105,8 +112,10 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 남아 있으나 이 값을 읽는 코드가 없다(`TwoStrategiesSameShapeTest` 가 튜플만
 비교하는 이유이기도 하다).
 
-**`saveGroup` 이 변경 없는 멤버의 `addedAt` 을 매번 갱신** — "최초 합류"가
-아니라 "마지막 전체 동기화"를 의미하게 된다.
+~~**`saveGroup` 이 변경 없는 멤버의 `addedAt` 을 매번 갱신**~~ 해결됨 — 이미 있는
+멤버는 다시 쓰지 않는다. 나머지 속성은 `groupId`·`member` 로만 정해져 바뀔 것이 없어
+건너뛰어도 안전하고, 무변경 동기화의 쓰기량도 줄었다. 떠났다가 재합류하면 갱신되는
+것이 맞고 그 경우도 함께 고정했다. 보존 로직을 되돌려 테스트가 깨지는 것을 확인했다.
 
 **`findUser` 가 PK+SK 를 다 아는데 `GetItem` 대신 Query + 클라이언트 필터.**
 
@@ -123,6 +132,10 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 도달하지 못해 통과해버렸고, 그것을 고쳐 셋 다 RED 로 만든 뒤 수정했다.
 
 ## 5. 미관
+
+> 2026-08-22: 아래 항목들과 성능 3건은 이번 배치(스펙 미구현 + 정합성 + 테스트 공백)의
+> 범위 밖이라 그대로 둔다.
+
 
 `Flux.defer(() -> queryMonth(lastMonth))` 중복(무해), 루트 `build.gradle` 이
 `java-library` 를 app 모듈에도 적용, `TupleMapper.visit` 파라미터 들여쓰기,
