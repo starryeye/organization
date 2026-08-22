@@ -160,8 +160,12 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .filter(meta -> !meta.createdAt().isBefore(from));
     }
 
-    /** GSI1 SNAPSHOT_INDEX 파티션을 createdAt 역순으로 훑는다. */
-    private Flux<SnapshotMeta> snapshotMetas() {
+    /**
+     * GSI1 SNAPSHOT_INDEX 파티션을 createdAt 역순으로 훑어 <b>원본 아이템</b>을 돌려준다.
+     * 이 인덱스는 {@code ProjectionType.ALL} 이라 {@code expiresAt} 을 포함한 모든 속성이
+     * 이미 실려 온다 — 그것을 쓰는 곳은 다시 읽지 않아도 된다.
+     */
+    private Flux<Map<String, AttributeValue>> snapshotIndexItems() {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .indexName(Keys.GSI1)
@@ -171,11 +175,20 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .scanIndexForward(false)
                 .build();
 
-        return Paginator.queryAll(client, request).map(item -> new SnapshotMeta(
+        return Paginator.queryAll(client, request);
+    }
+
+    /** GSI1 SNAPSHOT_INDEX 파티션을 createdAt 역순으로 훑는다. */
+    private Flux<SnapshotMeta> snapshotMetas() {
+        return snapshotIndexItems().map(DynamoDbTupleSnapshotRepository::toMeta);
+    }
+
+    private static SnapshotMeta toMeta(Map<String, AttributeValue> item) {
+        return new SnapshotMeta(
                 Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)),
                 Attrs.instant(item, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(item, SOURCE)),
-                Attrs.integer(item, TUPLE_COUNT)));
+                Attrs.integer(item, TUPLE_COUNT));
     }
 
     @Override
@@ -185,26 +198,24 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .then(deleteItem(Keys.SNAPSHOT_POINTER, Keys.LATEST));
     }
 
+    /**
+     * 후보마다 {@code GetItem} 으로 {@code expiresAt} 을 다시 읽던 것을 걷어냈다.
+     * GSI 가 {@code ProjectionType.ALL} 이라 그 값은 이미 손에 있었다 — 스냅샷 N 개면
+     * 왕복이 N 번 더 붙었고, 그 왕복이 하는 일은 이미 가진 값을 또 가져오는 것뿐이었다.
+     */
     @Override
     public Mono<Integer> purgeExpired() {
         long now = clock.instant().getEpochSecond();
-        return snapshotMetas()
-                .filterWhen(meta -> isExpired(meta.id(), now))
-                .flatMap(meta -> deleteSnapshot(meta.id()).thenReturn(1), DELETE_CONCURRENCY)
+        return snapshotIndexItems()
+                .filter(item -> Attrs.longValue(item, EXPIRES_AT) <= now)
+                .map(item -> Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)))
+                .flatMap(id -> deleteSnapshot(id).thenReturn(1), DELETE_CONCURRENCY)
                 .reduce(0, Integer::sum)
                 .doOnNext(count -> {
                     if (count > 0) {
                         log.info("만료된 스냅샷 {}건을 정리했다", count);
                     }
                 });
-    }
-
-    private Mono<Boolean> isExpired(String snapshotId, long nowEpochSecond) {
-        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
-                        .tableName(properties.getTableName())
-                        .key(Map.of(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)), Keys.SK, Attrs.s(Keys.META)))
-                        .build()))
-                .map(response -> Attrs.longValue(response.item(), EXPIRES_AT) <= nowEpochSecond);
     }
 
     private Mono<Void> deleteSnapshot(String snapshotId) {
