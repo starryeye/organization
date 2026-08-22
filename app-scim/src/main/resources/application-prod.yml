@@ -1,0 +1,15 @@
+# 프로덕션에서만 로그를 JSON 으로 낸다. 로컬은 평문이라 사람이 읽기 쉽고,
+# 프로덕션은 수집기가 필드를 그대로 파싱한다.
+#
+# ecs = Elastic Common Schema. Spring Boot 3.4 부터 내장이라 별도 인코더 의존성
+# (logstash-logback-encoder)도 logback-spring.xml 도 필요 없다.
+# 수집 백엔드가 정해지면 gelf/logstash 로 바꾸거나 커스텀 포맷을 지정하면 된다.
+#
+# traceId/spanId 는 이 포맷에서 자동으로 최상위 필드가 된다 —
+# 평문 로그의 [traceId-spanId] 자리와 같은 값이다.
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    dev.starryeye.organization: INFO

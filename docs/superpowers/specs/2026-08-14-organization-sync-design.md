@@ -774,7 +774,53 @@ Actuator `/actuator/health`에 DynamoDB 연결, OpenFGA 연결, (app-ldap만) LD
 
 ### 12.4 로깅
 
-동기화 1회에 `runId`를 MDC에 넣어 전 로그에 붙인다.
+모든 로그 줄에 `traceId` / `spanId` 를 붙인다. 표준(W3C Trace Context)을 그대로 쓰고,
+자바 코드는 건드리지 않는다.
+
+```groovy
+implementation 'io.micrometer:micrometer-tracing-bridge-otel'   // exporter 는 넣지 않는다
+```
+
+```yaml
+spring:
+  reactor:
+    context-propagation: auto     # 없으면 traceId 가 한 줄도 안 찍힌다
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+```
+
+**내보내기(exporter)는 붙이지 않는다.** span 은 만들어지고 버려지며, 쓰는 것은 로그에
+찍히는 상관관계 id 뿐이다. 수집 백엔드가 정해지면 exporter 의존성과 endpoint 설정만
+더하면 되고 코드는 그대로다.
+
+**JSON 출력은 프로덕션 프로파일에만**(`application-prod.yml` 의 `logging.structured.format.console: ecs`).
+로컬은 평문이라 사람이 읽고, 프로덕션은 수집기가 파싱한다. Spring Boot 3.4+ 내장 기능이라
+별도 인코더 의존성이 필요 없다.
+
+#### 두 가지 함정 — 둘 다 실측으로 확인했다
+
+**(1) `context-propagation` 기본값으로는 아무것도 안 찍힌다.**
+trace 컨텍스트는 Reactor Context 를 타고 항상 흐르지만 Logback 이 읽는 것은 ThreadLocal(MDC)이다.
+기본값 `limited` 는 `handle`/`tap`/`doOnEach` 에서만 그 둘을 잇는데 우리 체인에는 그런 게 없다.
+`auto` 는 `Hooks.enableAutomaticContextPropagation()` 을 부르는 **JVM 전역 스위치**이므로,
+이 프로세스의 모든 Reactor 연산자에 걸린다는 점을 알고 켠다.
+
+**(2) 예약 작업은 자동으로 안 된다.**
+`traceId` 는 들어오는 HTTP 요청이 시작한다. `@Scheduled` 에는 그 요청이 없고, 메서드가
+void 라 구독만 걸고 즉시 반환하므로 관측 스코프가 작업보다 먼저 닫힌다.
+그래서 `SyncScheduler`/`ArchiveScheduler` 가 **직접 관측을 열어 Reactor Context 에 실어 보낸다.**
+app-ldap 은 통째로 예약 작업이라 이걸 빼면 정작 필요한 곳이 전부 빈칸이 된다.
+
+이 두 가지는 설정/구조에만 걸려 있어 빠져도 컴파일과 테스트가 통과한다.
+그래서 양쪽 앱의 `TraceCorrelationTest` 가 회귀로 고정한다.
+
+> **정정 이력(2026-08-22).** 원래 이 절은 "동기화 1회에 `runId` 를 MDC 에 넣는다" 였다.
+> 실제로는 세 실행 경로가 모두 한 번에 하나씩만 도는 구조라 시간만으로도 구분이 되고,
+> 정작 동시에 들어오는 SCIM push 에는 설계상 `runId` 가 없어 그 경로를 못 덮는다.
+> 표준 트레이싱이 두 문제를 한꺼번에 해결하므로 `runId` MDC 안은 폐기한다.
+> (`runId` 자체는 실행 이력 식별자로 그대로 남는다.)
 
 ---
 

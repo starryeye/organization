@@ -65,8 +65,13 @@ DOWN 으로 흐른다. 응답하지 않는 클라이언트를 물린 `DynamoDbHe
 **§12.3 의 LDAP 헬스 인디케이터 미구현.** E2E 가 존재하는 둘만 단언해
 그 공백을 고착시켰다.
 
-**§12.4 MDC runId 가 수동 접두사 4곳뿐.** 상관관계가 가장 필요한 로그
-(`OpenFgaRelationTupleWriter` 배치 실패, `TupleMapper` 스킵 경고)에 runId 가 없다.
+~~**§12.4 MDC runId 가 수동 접두사 4곳뿐.**~~ 해결됨 — runId 를 MDC 에 넣는 대신
+표준 트레이싱(`traceId`/`spanId`)을 모든 로그 줄에 붙였다. runId 안은 폐기했다:
+세 실행 경로가 모두 한 번에 하나씩만 돌아 시간만으로 구분되는 반면, 정작 동시에
+들어오는 SCIM push 에는 설계상 runId 가 없어 그 경로를 못 덮기 때문이다.
+설계 §12.4 참고. 남은 것은 아래 두 함정이고 둘 다 회귀 테스트로 고정했다 —
+`spring.reactor.context-propagation: auto` 가 없으면 한 줄도 안 찍히고,
+예약 작업은 스케줄러가 직접 관측을 열어야 한다.
 
 ## 3. 데이터 무결성 여지
 

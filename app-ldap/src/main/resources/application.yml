@@ -4,6 +4,17 @@ server:
 spring:
   application:
     name: organization-ldap
+  reactor:
+    # trace 컨텍스트는 Reactor Context 를 타고 항상 흐르지만, Logback 이 읽는 것은
+    # ThreadLocal(MDC)이다. 그 둘을 잇는 다리를 언제 건널지가 이 값이다.
+    # 기본값 limited 는 handle/tap/doOnEach 에서만 건너므로, 우리 체인에서는
+    # traceId 가 한 줄도 안 찍힌다(실측 확인).
+    #
+    # 주의: auto 는 Hooks.enableAutomaticContextPropagation() 을 부른다 —
+    # JVM 전역 스위치이고 이 프로세스의 모든 Reactor 연산자에 걸린다.
+    # 우리 코드뿐 아니라 Spring·AWS SDK 의 리액티브 경로까지 포함된다.
+    # I/O 대기가 지배적인 워크로드라 비용을 감수할 만하다고 보고 켠다.
+    context-propagation: auto
 
 sync:
   cron: "0 0 3 * * *"
@@ -63,6 +74,12 @@ management:
   endpoint:
     health:
       show-details: always
+
+  tracing:
+    sampling:
+      # 내보내는 곳이 없으므로 샘플링을 줄일 이유가 없다. 100% 여야
+      # 모든 로그 줄에 traceId 가 붙는다.
+      probability: 1.0
 
 logging:
   level:
