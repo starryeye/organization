@@ -24,7 +24,6 @@ public class DynamoDbHealthIndicator implements ReactiveHealthIndicator {
      */
     private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(2);
 
-
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
 

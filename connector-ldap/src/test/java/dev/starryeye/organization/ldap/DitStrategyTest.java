@@ -1,6 +1,8 @@
 package dev.starryeye.organization.ldap;
 
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -175,10 +177,10 @@ class DitStrategyTest extends EmbeddedLdapSupport {
         var snapshot = strategy.read(ldapTemplate);
 
         // then — 트리 위치로 읽은 소속이 튜플의 방향(하위 -> 상위)으로 옮겨졌는지 본다
-        var result = dev.starryeye.organization.core.tuple.TupleMapper.toTuples(snapshot);
+        var result = TupleMapper.toTuples(snapshot);
         assertThat(result.tuples()).contains(
-                dev.starryeye.organization.core.model.RelationTuple.directMember("choi", "DEV002"),
-                dev.starryeye.organization.core.model.RelationTuple.child("DEV002", "DEV001"),
-                dev.starryeye.organization.core.model.RelationTuple.child("DEV001", "company"));
+                RelationTuple.directMember("choi", "DEV002"),
+                RelationTuple.child("DEV002", "DEV001"),
+                RelationTuple.child("DEV001", "company"));
     }
 }

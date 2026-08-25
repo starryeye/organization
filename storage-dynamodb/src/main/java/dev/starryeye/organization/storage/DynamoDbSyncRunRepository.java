@@ -91,9 +91,11 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
 
     /**
      * 이번 달 파티션을 최신순으로 읽고, 모자라면 지난달까지 이어 읽는다.
-     * 파티션을 월 단위로 나눈 대가로 조회가 두 번 나뉜다. 지난달 조회는
-     * {@link Flux#defer} 로 감싸 이번 달 결과만으로 limit 이 채워지면
-     * 실행되지 않게 한다.
+     * 파티션을 월 단위로 나눈 대가로 조회가 두 번 나뉜다.
+     *
+     * <p>이번 달 결과만으로 {@code limit} 이 채워지면 지난달 조회는 <b>실행되지 않는다</b> —
+     * {@code concatWith} 는 앞이 끝나야 뒤를 구독하고, {@code take} 가 그 전에 끊기 때문이다.
+     * {@code queryMonth} 자체는 요청 객체만 만들 뿐 구독 전에는 아무 일도 하지 않는다.
      */
     @Override
     public Flux<SyncRun> findRecent(int limit) {
@@ -101,7 +103,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         YearMonth lastMonth = thisMonth.minusMonths(1);
 
         return queryMonth(thisMonth)
-                .concatWith(Flux.defer(() -> queryMonth(lastMonth)))
+                .concatWith(queryMonth(lastMonth))
                 .take(limit);
     }
 

@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
+import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.BillingMode;
@@ -19,7 +20,6 @@ import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
-import reactor.core.publisher.Mono;
 
 @Slf4j
 @RequiredArgsConstructor

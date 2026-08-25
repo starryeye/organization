@@ -117,13 +117,17 @@ E2E 가 셋을 모두 단언하도록 고쳤다. 검색이 아니라 바인드�
 건너뛰어도 안전하고, 무변경 동기화의 쓰기량도 줄었다. 떠났다가 재합류하면 갱신되는
 것이 맞고 그 경우도 함께 고정했다. 보존 로직을 되돌려 테스트가 깨지는 것을 확인했다.
 
-**`findUser` 가 PK+SK 를 다 아는데 `GetItem` 대신 Query + 클라이언트 필터.**
+~~**`findUser` 가 PK+SK 를 다 아는데 `GetItem` 대신 Query + 클라이언트 필터.**~~ 해결됨 —
+`GetItem` 한 건으로 바꿨다. 결과는 같지만 읽는 양과 소비 RCU 가 파티션 크기를 따라가지 않는다.
 
-**`purgeExpired` 가 후보마다 `GetItem` 재조회** — GSI 가 `ProjectionType.ALL`
-이라 이미 `expiresAt` 을 갖고 있는데 버린다.
+~~**`purgeExpired` 가 후보마다 `GetItem` 재조회**~~ 해결됨 — 인덱스가 이미 실어 보낸
+`expiresAt` 을 그대로 쓴다. 원본 아이템을 돌려주는 `snapshotIndexItems()` 를 뽑고
+`snapshotMetas()` 가 그 위에 얹히게 했다.
 
-**`findStoreIdByName`/`createStore` 가 일회용 클라이언트 생성** — 첫
-부트스트랩에 클라이언트 3개. 누수는 아님(이 SDK 버전은 `Closeable` 미구현).
+~~**`findStoreIdByName`/`createStore` 가 일회용 클라이언트 생성**~~ 해결됨 —
+storeId 없는 클라이언트를 한 번만 만들어 재사용한다. `findStoreIdByName` 은 재귀 페이징이라
+페이지마다 하나씩 생기고 있었다. 이 클라이언트는 어떤 store 에도 묶여 있지 않아 상태가 없으므로
+재사용해도 안전하고, `recreateStore()` 가 무효화할 이유도 없다.
 
 ~~**그룹 표시명 폴백이 원본 `cn` 이 아니라 정규화된 코드를 쓴다**~~ 해결됨 —
 두 전략 모두 폴백을 원본 속성으로 바꿨다. DIT 는 조직명뿐 아니라 **직원 표시명**
@@ -133,16 +137,36 @@ E2E 가 셋을 모두 단언하도록 고쳤다. 검색이 아니라 바인드�
 
 ## 5. 미관
 
-> 2026-08-22: 아래 항목들과 성능 3건은 이번 배치(스펙 미구현 + 정합성 + 테스트 공백)의
-> 범위 밖이라 그대로 둔다.
+~~`Flux.defer(() -> queryMonth(lastMonth))` 중복~~ 걷어냈다. `queryMonth` 는 요청 객체만
+만들 뿐 구독 전에는 아무 일도 하지 않아 늦출 것이 없었다. 지난달 조회를 건너뛰는 것은
+`defer` 가 아니라 `concatWith` + `take` 가 하는 일이라, 그렇게 설명하도록 주석도 고쳤다.
 
+~~루트 `build.gradle` 이 `java-library` 를 app 모듈에도 적용~~ 라이브러리 모듈에만 적용한다.
+이 플러그인이 주는 것은 `api` 구성인데 부트 애플리케이션은 아무도 의존하지 않아 노출할 API 가 없다.
 
-`Flux.defer(() -> queryMonth(lastMonth))` 중복(무해), 루트 `build.gradle` 이
-`java-library` 를 app 모듈에도 적용, `TupleMapper.visit` 파라미터 들여쓰기,
-`TupleMapperTest` 불필요한 빈 줄, `DitStrategyTest`/`RebuildUseCaseTest` 의
-정규화되지 않은 FQN, `TableInitializer` 임포트 정렬, README 의 테이블 생성
-서술이 `create-table-on-startup` 게이트를 반영하지 않음, `SyncMetrics` 가
-미완료 실행에도 튜플 카운터 증가(값이 0 이라 무해), `paginate` 재귀 깊이.
+~~`TupleMapperTest` 불필요한 빈 줄~~ 실제로 연속 빈 줄이 남아 있던 곳은 네 개의 헬스
+인디케이터였다. 저장소 전체를 훑어 정리했다.
+
+~~`DitStrategyTest` 의 정규화되지 않은 FQN~~, ~~`TableInitializer` 임포트 정렬~~ 정리했다.
+`RebuildUseCaseTest` 에는 해당 FQN 이 남아 있지 않았다.
+
+~~README 의 테이블 생성 서술~~ `create-table-on-startup` 게이트를 반영했고, 실제 AWS 에서는
+끄는 것을 전제로 한다는 점(테이블 수명주기는 배포 도구의 몫, §7 참고)을 함께 적었다.
+헬스체크 서술에 LDAP 인디케이터도 더했다.
+
+~~`SyncMetrics` 가 미완료 실행에도 튜플 카운터 증가~~ 미완료면 아무것도 기록하지 않고
+빠져나온다. 지금은 카운트가 0 이라 값이 안 바뀌지만 그건 우연이고, 부분 집계를 중간에
+노출하게 되는 순간 조용히 이중 계상이 된다.
+
+~~`paginate` 재귀 깊이~~ `Flux.expand` 로 평탄화했다. 전에는 페이지 수만큼 `concatWith` 가
+중첩돼, 페이지가 몇 개일 때는 보이지 않다가 큰 테이블에서 신호 전파가 깊어졌다.
+`concatMapIterable` 이어야 한다 — 페이지 순서가 곧 정렬 순서라
+(`scanIndexForward=false` + `take(limit)` 조합이 그것에 기댄다) 뒤섞이면 "최신 N건" 이
+최신이 아니게 된다.
+
+**`TupleMapper.visit` 파라미터 들여쓰기는 그대로 둔다.** 현재는 여는 괄호에 맞춘 정렬이고,
+그 자체로 흔한 스타일이다. 본문 소스에 다른 줄바꿈 파라미터 목록이 없어 맞출 하우스 스타일도
+없다 — 바꾸면 얻는 것 없이 diff 만 늘어난다.
 
 ## 6. 의도적으로 미룬 설계 결정 — SCIM 쓰기 경로의 동시성
 

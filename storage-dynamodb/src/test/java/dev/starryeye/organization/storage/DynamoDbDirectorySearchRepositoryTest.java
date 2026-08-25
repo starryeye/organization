@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
+import java.time.Clock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,7 +26,7 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
 
     @BeforeEach
     void 저장소를_준비한다() {
-        state = new DynamoDbDirectoryStateRepository(client, properties, java.time.Clock.systemUTC());
+        state = new DynamoDbDirectoryStateRepository(client, properties, Clock.systemUTC());
         search = new DynamoDbDirectorySearchRepository(client, properties);
     }
 

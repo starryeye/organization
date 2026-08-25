@@ -95,7 +95,12 @@ docker compose up -d
 ```
 
 `docker-compose.yml`은 OpenFGA, DynamoDB Local, (수동 검증용) OpenLDAP을 띄운다. app-ldap을
-띄우면 시작 시점에 OpenFGA store와 인가 모델, DynamoDB 테이블이 자동으로 준비된다.
+띄우면 시작 시점에 OpenFGA store와 인가 모델이 자동으로 준비된다.
+
+DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때만 만들어진다. 로컬
+기본값은 `true` 이고, **실제 AWS 에서는 끄는 것을 전제로 한다** — 테이블 수명주기는 배포
+도구가 관리해야 하고, 애플리케이션이 부팅할 때마다 스키마를 만들려 드는 것은 인덱스 구성이
+바뀔 때 특히 위험하다(follow-ups §7).
 
 | 서비스 | 주소 |
 |---|---|
@@ -129,6 +134,7 @@ docker compose up -d
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 (재적재 + 하루 1회 아카이빙) |
 
 `GET /actuator/health`는 두 앱 공통이며 DynamoDB / OpenFGA 연결 상태를 포함한다.
+app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다.
 
 ### app-scim 재적재를 부를 때 알아야 할 것
 

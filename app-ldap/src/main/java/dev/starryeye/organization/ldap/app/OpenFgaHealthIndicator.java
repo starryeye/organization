@@ -33,7 +33,6 @@ public class OpenFgaHealthIndicator implements ReactiveHealthIndicator {
      */
     private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(2);
 
-
     private final StoreBootstrapper bootstrapper;
     private final OpenFgaProperties properties;
 
