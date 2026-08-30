@@ -11,7 +11,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -104,8 +107,8 @@ class GroupOfNamesDuplicateIdTest extends EmbeddedLdapSupport {
 
     /** 경고 메시지에서 작은따옴표로 감싼 dn 들을 뽑는다. */
     private static List<String> dn들(String message) {
-        var matcher = java.util.regex.Pattern.compile("dn='([^']*)'").matcher(message);
-        List<String> found = new java.util.ArrayList<>();
+        var matcher = Pattern.compile("dn='([^']*)'").matcher(message);
+        List<String> found = new ArrayList<>();
         while (matcher.find()) {
             found.add(matcher.group(1));
         }

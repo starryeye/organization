@@ -20,13 +20,18 @@ public class SyncMetrics {
     public void record(SyncRun run) {
         String source = run.source().name();
 
-        if (run.finishedAt() != null) {
-            registry.timer("sync.duration",
-                            "source", source,
-                            "trigger", run.trigger().name(),
-                            "status", run.status().name())
-                    .record(Duration.between(run.startedAt(), run.finishedAt()));
+        // 아직 끝나지 않은 실행은 소요 시간도, 튜플 집계도 확정되지 않았다.
+        // 지금은 미완료 실행의 카운트가 0 이라 더해도 값이 안 바뀌지만, 그건 우연이다 —
+        // 부분 집계를 중간에 노출하게 되는 순간 조용히 이중 계상이 된다.
+        if (run.finishedAt() == null) {
+            return;
         }
+
+        registry.timer("sync.duration",
+                        "source", source,
+                        "trigger", run.trigger().name(),
+                        "status", run.status().name())
+                .record(Duration.between(run.startedAt(), run.finishedAt()));
 
         registry.counter("sync.tuples.written", "source", source).increment(run.writtenCount());
         registry.counter("sync.tuples.deleted", "source", source).increment(run.deletedCount());

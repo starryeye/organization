@@ -11,6 +11,8 @@ import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
@@ -48,12 +50,20 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 직원 ----------
 
+    /**
+     * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 한 건만 집어온다.
+     * 전에는 파티션 전체를 Query 로 읽고 클라이언트에서 META 만 골라냈다 — 결과는 같지만
+     * 읽는 양과 소비 RCU 가 파티션 크기를 따라간다. 조회 API 가 직원 단건을 자주 부른다.
+     */
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
-        return queryPartition(Keys.userPk(userId))
-                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
-                .next()
-                .map(item -> toUser(userId, item));
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.userPk(userId)),
+                                Keys.SK, Attrs.s(Keys.META)))
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(response -> toUser(userId, response.item()));
     }
 
     @Override

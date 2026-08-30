@@ -31,6 +31,17 @@ public class StoreBootstrapper {
 
     private final OpenFgaProperties properties;
     private final AtomicReference<OpenFgaClient> clientRef = new AtomicReference<>();
+
+    /**
+     * storeId 가 없는 클라이언트. store 를 찾거나 만들 때만 쓴다.
+     *
+     * <p>전에는 부를 때마다 새로 만들었다. {@code findStoreIdByName} 은 재귀 페이징이라
+     * <b>페이지마다</b> 하나씩 생겼고, 첫 부트스트랩 한 번에 여러 개가 만들어졌다.
+     * 이 클라이언트는 어떤 store 에도 묶여 있지 않아 상태가 없으므로 재사용해도 안전하고,
+     * {@code recreateStore()} 가 무효화할 이유도 없다 —
+     * 무효화 대상은 storeId 에 묶인 {@code clientRef} 쪽이다.
+     */
+    private final AtomicReference<OpenFgaClient> storelessClientRef = new AtomicReference<>();
     private final AtomicReference<String> storeIdRef = new AtomicReference<>();
 
     /**
@@ -229,7 +240,7 @@ public class StoreBootstrapper {
     }
 
     private Mono<String> findStoreIdByName(String continuationToken, List<Store> accumulated) {
-        return Mono.fromCallable(() -> newClient(null))
+        return Mono.fromCallable(this::storelessClient)
                 .flatMap(client -> Mono.fromFuture(() -> {
                     try {
                         ClientListStoresOptions options = new ClientListStoresOptions();
@@ -276,7 +287,7 @@ public class StoreBootstrapper {
 
     private Mono<String> createStore() {
         log.info("OpenFGA store '{}' 을 생성한다", properties.getStoreName());
-        return Mono.fromCallable(() -> newClient(null))
+        return Mono.fromCallable(this::storelessClient)
                 .flatMap(client -> Mono.fromFuture(() -> {
                     try {
                         return client.createStore(new CreateStoreRequest().name(properties.getStoreName()));
@@ -311,6 +322,16 @@ public class StoreBootstrapper {
         } catch (Exception e) {
             throw new IllegalStateException(MODEL_RESOURCE + " 를 읽을 수 없다", e);
         }
+    }
+
+    /** 없으면 만들고, 있으면 그대로 쓴다. 경합해서 둘이 만들어져도 한쪽만 남고 나머지는 버려진다. */
+    private OpenFgaClient storelessClient() {
+        OpenFgaClient existing = storelessClientRef.get();
+        if (existing != null) {
+            return existing;
+        }
+        OpenFgaClient created = newClient(null);
+        return storelessClientRef.compareAndSet(null, created) ? created : storelessClientRef.get();
     }
 
     private OpenFgaClient newClient(String storeId) {

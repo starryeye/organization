@@ -4,7 +4,7 @@ plugins {
 }
 
 subprojects {
-    apply plugin: 'java-library'
+    apply plugin: 'java'
     apply plugin: 'io.spring.dependency-management'
 
     group = 'dev.starryeye'
@@ -40,6 +40,13 @@ subprojects {
         // junit-platform-engine 보다 낡아서 테스트 탐색 자체가 실패한다.
         // BOM 이 버전을 맞추도록 명시적으로 올려둔다.
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    // 실행 모듈(app-*)에는 java-library 를 적용하지 않는다. 이 플러그인이 주는 것은
+    // 'api' 구성 — 이 모듈을 의존하는 쪽에 무엇을 노출할지 가르는 장치인데,
+    // 부트 애플리케이션은 아무도 의존하지 않으므로 노출할 API 자체가 없다.
+    if (!name.startsWith('app-')) {
+        apply plugin: 'java-library'
     }
 
     plugins.withId('java-test-fixtures') {
