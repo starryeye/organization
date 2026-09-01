@@ -39,7 +39,7 @@ class IncrementalSyncDriftTest {
         lock = new FakeMutationLock();
         // 재시도 0회. 락 획득 실패를 곧바로 관찰하기 위한 것이고, 재시도 자체는
         // 실제 대기가 필요해 여기서 볼 대상이 아니다.
-        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0);
+        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0, IncrementalSyncUseCase.DriftObserver.NOOP);
     }
 
     private static DirectoryUser 직원(String id, boolean active) {

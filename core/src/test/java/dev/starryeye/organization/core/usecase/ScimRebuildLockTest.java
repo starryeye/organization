@@ -20,8 +20,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 재적재가 SCIM 쓰기와 <b>같은</b> 분산 락을 잡는다 (설계 §4.5).
  *
- * <p>전에는 인메모리 {@code MutationGate} 였다. 인스턴스가 둘이면 재적재가 도는 사실 자체를
- * 다른 인스턴스가 몰라 쓰기가 그대로 통과했다 — 막고 있다고 믿지만 안 막혔다.
+ * <p>전에는 인메모리 {@code MutationGate} 였다(이제는 삭제됐다). 인스턴스가 둘이면 재적재가
+ * 도는 사실 자체를 다른 인스턴스가 몰라 쓰기가 그대로 통과했다 — 막고 있다고 믿지만 안 막혔다.
  */
 class ScimRebuildLockTest {
 

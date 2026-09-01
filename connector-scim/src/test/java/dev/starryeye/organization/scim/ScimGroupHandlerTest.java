@@ -33,7 +33,7 @@ class ScimGroupHandlerTest {
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
-        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0);
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0, IncrementalSyncUseCase.DriftObserver.NOOP);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();

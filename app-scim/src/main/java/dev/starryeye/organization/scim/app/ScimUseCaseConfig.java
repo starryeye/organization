@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import dev.starryeye.organization.storage.DynamoDbProperties;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,13 +20,19 @@ import java.time.Clock;
 public class ScimUseCaseConfig {
 
     @Bean
+    public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry) {
+        return new ScimSyncMetrics(registry);
+    }
+
+    @Bean
     public IncrementalSyncUseCase incrementalSyncUseCase(DirectoryStateRepository state,
                                                           RelationTupleWriter writer,
                                                           RelationTupleChecker checker,
                                                           MutationLock lock,
-                                                          DynamoDbProperties dynamoDb) {
+                                                          DynamoDbProperties dynamoDb,
+                                                          ScimSyncMetrics driftMetrics) {
         int acquireRetries = (int) (dynamoDb.getLockAcquireTimeout().toMillis() / 200);
-        return new IncrementalSyncUseCase(state, writer, checker, lock, acquireRetries);
+        return new IncrementalSyncUseCase(state, writer, checker, lock, acquireRetries, driftMetrics);
     }
 
     @Bean

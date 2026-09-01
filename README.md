@@ -291,6 +291,36 @@ app-ldap과 겹치지 않게 `dynamodb.table-name: organization-scim`, `openfga.
 organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
 테이블·store와는 항상 다르게 유지해야 한다.
 
+### app-scim 여러 대 띄우기(동시성 제어)
+
+**`app-scim`은 여러 인스턴스를 액티브-액티브로 띄울 수 있다.** IdP가 여러 인스턴스로 요청을
+분산해도 안전하도록, SCIM 쓰기 하나(`upsertUser`/`upsertGroup`/`removeUser`/`removeGroup`)와
+재적재(`POST /admin/sync/rebuild`)는 **DynamoDB 조건부 쓰기로 만든 전역 락**을 잡은 뒤에만
+진행한다. 인스턴스가 몇 대든, 그리고 그 인스턴스가 SCIM 쓰기든 재적재든, 서로 겹치지 않고
+직렬화된다 — 인메모리 락(예전의 `MutationGate`)은 인스턴스 하나 안에서만 유효해 여러 대를
+띄우는 순간 조용히 뚫렸는데, 이 락은 저장소를 공유하므로 그렇지 않다.
+
+락 관련 설정 세 개(`dynamodb` 아래):
+
+| 설정 | 의미 |
+|---|---|
+| `dynamodb.lock-ttl` (기본 30초) | 락 리스 길이. SCIM 쓰기 p99보다 한참 길어야 한다 — 짧으면 아직 일하는 중인데 만료돼 다른 인스턴스가 가져간다 |
+| `dynamodb.lock-acquire-timeout` (기본 3초) | 락 획득 대기 한도. 넘으면 503을 돌려주고 IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다) |
+| `dynamodb.lock-renew-interval` (기본 10초) | 재적재처럼 오래 쥐는 작업이 리스를 갱신하는 주기. TTL보다 충분히 짧아야 한다 |
+
+이 락은 완벽한 상호 배제를 보장하지 않는다(반납 자체의 실패, 구독 취소 등 좁은 틈이 있다) —
+그래서 다음의 어긋남 지표가 따로 있다.
+
+**`scim.drift.detected`(Counter, 태그 `kind=extra|missing`)** — SCIM 쓰기 경로는 델타를
+계산할 때 이미 OpenFGA에 `Check`를 던져 **실제 있는 튜플**을 얻는다. 여기에 상태(DynamoDB)가
+요구하는 **있어야 할 튜플**을 나란히 두면, 둘이 다른 것 자체가 어긋남이다 — 별도 스캔 없이
+쓰기 경로가 지나가면서 알려준다. `kind=extra`는 있어선 안 될 튜플(예: 퇴사자의 잔여 권한),
+`kind=missing`은 있어야 하는데 빠진 튜플이다.
+
+이 값이 계속 오르면(0이 아니면) **`POST /admin/sync/rebuild?mode=tuples`로 재적재를 실행하라**는
+신호다 — 다만 이 지표는 "누군가 다시 건드린 리소스"에서만 드러난다. 아무도 건드리지 않는
+어긋남까지 잡는 주기적 대조는 아직 없다(아래 follow-ups 참고).
+
 ## 테스트
 
 ```bash
@@ -303,6 +333,9 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 개별 모듈 단위 테스트가 전부 통과해도 결선이 틀리면 아무것도 동작하지 않기 때문이다.
 `app-scim`의 `ScimEndToEndTest`도 같은 방식으로, SCIM 요청을 HTTP로 실제 보내 롤업·비활성화·
 조직 삭제·아카이빙까지 순서에 의존하는 시나리오로 확인한다. `app-scim`의
+`ScimDriftHealingEndToEndTest`는 경합이 남겼을 잔여 튜플(퇴사자의 잔여 권한)을 OpenFGA에
+직접 심어 두고, 그 다음 SCIM 쓰기 한 번이 그 튜플을 실제로 걷어내는지 확인한다 — 타이밍에
+기대 경합 자체를 재현하는 대신 경합이 남길 결과를 직접 심어 결정적으로 만든다. `app-scim`의
 `AdminQueryEndToEndTest`는 SCIM으로 만든 데이터를 조회 API로 검증하고, OpenFGA 튜플을 직접
 지워 `shouldHaveAccess`와 `openFgaCheck`가 실제로 갈리는지까지 확인한다 — 조회 API가 존재하는
 이유 그 자체다. `app-ldap`의 `AdminQuerySmokeTest`는 같은 공유 모듈이 app-ldap 컨텍스트에서도

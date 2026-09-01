@@ -104,6 +104,20 @@ public class IncrementalSyncUseCase {
     private final RelationTupleChecker checker;
     private final MutationLock lock;
     private final int acquireRetries;
+    private final DriftObserver driftObserver;
+
+    /**
+     * 어긋남을 발견했을 때 부른다. 기본은 아무것도 하지 않는다.
+     *
+     * <p>{@code core} 가 Micrometer 를 알지 않게 하려고 콜백으로 받는다 — 이 모듈의 의존성은
+     * reactor 와 slf4j 뿐이고, 그 경계를 지표 때문에 허물지 않는다.
+     */
+    public interface DriftObserver {
+        void observed(int extra, int missing);
+
+        DriftObserver NOOP = (extra, missing) -> {
+        };
+    }
 
     /**
      * 직원 생성·수정. 활성 여부가 바뀌면 그 직원이 속한 모든 조직의 튜플이 함께 움직인다.
@@ -294,7 +308,9 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
      * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 네 경로가 빠짐없이 덮이고
-     * 경로가 늘어도 자동으로 포함된다({@code MutationGate} 가 같은 이유로 여기 있었다).
+     * 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
+     * 같은 이유로 여기(구 버전의 이 자리)에 있었지만, 인스턴스가 둘이면 아무것도 막지 못했다
+     * (설계 §4.5). 지금은 그 자리를 이 분산 락이 대신한다.
      *
      * <p><b>{@code work} 가 끝나면 반납한다 — 단, 두 틈은 이것으로 못 막는다.</b>
      * {@code work} 자체가 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가
@@ -366,28 +382,40 @@ public class IncrementalSyncUseCase {
             candidates.addAll(TupleMapper.candidateTuples(beforeSnapshot));
             candidates.addAll(TupleMapper.candidateTuples(afterSnapshot));
 
-            return checker.existing(candidates).flatMap(actual ->
-                    withoutCycleCreatingEdges(actual, tuplesOf(afterSnapshot)).flatMap(after -> {
-                        TupleDelta delta = TupleDiff.between(actual, after);
+            return checker.existing(candidates).flatMap(actual -> {
+                // 상태 기준선(있어야 했던 것)과 Check 기준선(실제 있는 것)을 비교한다 —
+                // 이 둘이 다르면 그것이 곧 어긋남이다(설계 §7). 델타 계산 자체는 여전히
+                // Check 기준선(actual)을 쓴다; 여기서는 오직 관측만 한다.
+                Set<RelationTuple> 상태기준선 = tuplesOf(beforeSnapshot);
+                int extra = (int) actual.stream().filter(t -> !상태기준선.contains(t)).count();
+                int missing = (int) 상태기준선.stream().filter(t -> !actual.contains(t)).count();
+                if (extra > 0 || missing > 0) {
+                    log.warn("OpenFGA 어긋남 발견: 있어선 안 될 튜플 {}건, 빠진 튜플 {}건", extra, missing);
+                    driftObserver.observed(extra, missing);
+                }
 
-                        if (delta.isEmpty()) {
-                            return commit.apply(TupleWriteResult.empty(), actual, after)
-                                    .thenReturn(IncrementalSyncResult.noChange());
-                        }
-                        // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
-                        // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
-                        // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
-                        // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
-                        // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
-                        // writer.apply(delta) 를 Mono.defer 로 감싼다 — 감싸지 않으면 이 Java
-                        // 표현식이 .then() 호출 시점에 곧바로 평가돼, renew 가 실패해도 그
-                        // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
-                        // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
-                        return lock.renew(lease)
-                                .then(Mono.defer(() -> writer.apply(delta)))
-                                .flatMap(result -> commit.apply(result, actual, after)
-                                        .thenReturn(IncrementalSyncResult.of(result)));
-                    }));
+                return withoutCycleCreatingEdges(actual, tuplesOf(afterSnapshot)).flatMap(after -> {
+                    TupleDelta delta = TupleDiff.between(actual, after);
+
+                    if (delta.isEmpty()) {
+                        return commit.apply(TupleWriteResult.empty(), actual, after)
+                                .thenReturn(IncrementalSyncResult.noChange());
+                    }
+                    // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
+                    // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
+                    // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
+                    // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
+                    // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
+                    // writer.apply(delta) 를 Mono.defer 로 감싼다 — 감싸지 않으면 이 Java
+                    // 표현식이 .then() 호출 시점에 곧바로 평가돼, renew 가 실패해도 그
+                    // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
+                    // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
+                    return lock.renew(lease)
+                            .then(Mono.defer(() -> writer.apply(delta)))
+                            .flatMap(result -> commit.apply(result, actual, after)
+                                    .thenReturn(IncrementalSyncResult.of(result)));
+                });
+            });
         });
     }
 
