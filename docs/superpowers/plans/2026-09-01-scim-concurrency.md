@@ -1276,6 +1276,25 @@ class IncrementalSyncDriftTest {
     }
 
     @Test
+    @DisplayName("쓰기 직전에 리스를 잃었으면 OpenFGA 에 쓰지 않는다")
+    void 리스를_잃으면_쓰지_않는다() {
+        // given — 계산은 끝났는데 그 사이 GC 정지 등으로 리스가 만료돼 남이 가져간 상황.
+        // 늦은 쓰기가 나가면 두 인스턴스가 동시에 쓰는 바로 그 창이다(설계 §4.7).
+        state.users.put("kim", 직원("kim", true));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("kim"))));
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV001"));
+        lock.failRenew = true;
+
+        // when, then
+        assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThat(writer.written).isEmpty();
+        assertThat(writer.deleted).isEmpty();
+        assertThat(lock.released).as("실패해도 락은 반납된다").hasValue(1);
+    }
+
+    @Test
     @DisplayName("BatchCheck 가 실패하면 상태 기준선으로 폴백하지 않고 실패한다")
     void Check_실패는_폴백하지_않는다() {
         // given — 폴백하면 조용히 옛 동작으로 돌아가고, 그게 하필 어긋남이 생기는 순간이다
@@ -1294,6 +1313,14 @@ class IncrementalSyncDriftTest {
 }
 ```
 
+> **`FakeMutationLock` 에 `failRenew` 플래그를 더해야 한다.** Task 1 이 만든 가짜에는
+> 없다. `failAcquire` 와 같은 모양으로 더하고, `renew` 가 그 플래그를 먼저 본다:
+>
+> ```java
+>     /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
+>     public boolean failRenew = false;
+> ```
+>
 > **`FakeTupleWriter` 에 `written`/`deleted` 누적 필드를 더해야 한다.** 지금은
 > `appliedDeltas`(List<TupleDelta>)만 있어 위 테스트가 컴파일되지 않는다. `apply` 안에서
 > 이미 만들고 있는 두 지역 집합을 공개 필드에 함께 누적시키면 된다:
@@ -1330,9 +1357,12 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
 
 ```java
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
-        return withLock(() -> upsertUserInternal(user));
+        return withLock(lease -> upsertUserInternal(user, lease));
     }
 ```
+
+네 개의 `*Internal` 메서드는 `LockLease lease` 를 마지막 파라미터로 받아
+그대로 `diffAndApply` 에 넘긴다.
 
 그리고 공통 헬퍼를 더한다:
 
@@ -1347,7 +1377,7 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
      * <p><b>반드시 반납한다.</b> 새면 리스가 만료될 때까지 모든 변경이 막힌다.
      * 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가 반납한다.
      */
-    private Mono<IncrementalSyncResult> withLock(Supplier<Mono<IncrementalSyncResult>> work) {
+    private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return lock.acquire(MutationLock.LockPurpose.WRITE)
                 // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
                 // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
@@ -1355,7 +1385,7 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
                         .filter(LockUnavailableException.class::isInstance))
                 .onErrorMap(Exceptions::isRetryExhausted,
                         error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
-                .flatMap(lease -> Mono.defer(work)
+                .flatMap(lease -> Mono.defer(() -> work.apply(lease))
                         .doFinally(signal -> lock.release(lease).subscribe()));
     }
 ```
@@ -1371,7 +1401,7 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
 `dynamoDb.getLockAcquireTimeout().toMillis() / 200` 으로 계산해 넘긴다 —
 기본 3초면 15회다.
 
-임포트: `java.util.function.Supplier`, `java.time.Duration`,
+임포트: `java.util.function.Function`, `java.time.Duration`,
 `reactor.util.retry.Retry`, `reactor.core.Exceptions`.
 
 - [ ] **Step 5: 기준선을 Check 로 바꾼다**
@@ -1394,6 +1424,7 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
+                                                      LockLease lease,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
@@ -1411,7 +1442,13 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
                             return commit.apply(TupleWriteResult.empty(), actual, after)
                                     .thenReturn(IncrementalSyncResult.noChange());
                         }
-                        return writer.apply(delta)
+                        // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
+                        // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
+                        // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
+                        // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
+                        // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
+                        return lock.renew(lease)
+                                .then(writer.apply(delta))
                                 .flatMap(result -> commit.apply(result, actual, after)
                                         .thenReturn(IncrementalSyncResult.of(result)));
                     }));
