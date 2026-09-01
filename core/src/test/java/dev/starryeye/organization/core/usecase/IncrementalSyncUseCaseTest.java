@@ -1,11 +1,15 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.tuple.TupleMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,15 +23,30 @@ class IncrementalSyncUseCaseTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
-    private MutationGate gate;
+    private FakeTupleChecker checker;
+    private FakeMutationLock lock;
     private IncrementalSyncUseCase useCase;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        gate = new MutationGate();
-        useCase = new IncrementalSyncUseCase(state, writer, gate);
+        checker = new FakeTupleChecker();
+        lock = new FakeMutationLock();
+        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0);
+    }
+
+    /**
+     * 이 스위트는 Check 기준선 자체가 아니라 diff 계산 규칙을 검증하는 것이 목적이라,
+     * OpenFGA(={@link #checker})가 지금까지의 상태와 어긋남 없이 일치한다고 가정한다.
+     * 실제 어긋남을 다루는 시나리오는 {@code IncrementalSyncDriftTest} 가 따로 본다.
+     *
+     * <p>{@code checker.allowed} 는 이번 연산의 최소 스냅샷에 실제로 등장하는 후보에 대해서만
+     * 걸러져 쓰이므로, 여기서 전체 상태의 튜플을 다 넣어 둬도 무관한 후보는 그냥 무시된다.
+     */
+    private void openFga를_상태와_맞춘다() {
+        DirectorySnapshot snapshot = state.loadAll().block();
+        checker.allowed.addAll(TupleMapper.toTuples(snapshot).tuples());
     }
 
     private static DirectoryUser 직원(String id, boolean active) {
@@ -44,6 +63,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002")).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -63,6 +83,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveUser(직원("lee", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"), MemberRef.user("lee"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -79,6 +100,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002")).block();
+        openFga를_상태와_맞춘다();
 
         // when
         useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -93,6 +115,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveGroup(조직("DEV002")).block();
         state.saveGroup(조직("DEV001")).block();
+        openFga를_상태와_맞춘다();
 
         // when
         useCase.upsertGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
@@ -109,6 +132,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("DEV001")).block();
+        openFga를_상태와_맞춘다();
 
         // when — DEV001 에 하위 조직 DEV002 를 추가한다
         var result = useCase.upsertGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
@@ -127,6 +151,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("OPS001", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.upsertUser(직원("kim", false)).block();
@@ -145,6 +170,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", false)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         useCase.upsertUser(직원("kim", true)).block();
@@ -159,6 +185,7 @@ class IncrementalSyncUseCaseTest {
     void 조직이_먼저_참조한_유저가_나중에_도착해도_튜플이_생성된다() {
         // given — DEV002 가 이미 kim 을 멤버로 갖고 있지만, kim 의 유저 레코드는 아직 도착하지 않았다
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — kim 의 유저 레코드가 뒤늦게 도착한다
         var result = useCase.upsertUser(직원("kim", true)).block();
@@ -177,6 +204,7 @@ class IncrementalSyncUseCaseTest {
         // (그 시점에는 TupleMapper 가 경고만 남기고 child 엣지를 건너뛰었다)
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — DEV002 가 뒤늦게 도착한다
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -197,6 +225,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002")).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — DEV002 자신의 멤버만 바뀐다
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -214,6 +243,7 @@ class IncrementalSyncUseCaseTest {
         // given — DEV001 이 아직 없는 DEV002 를 참조 중이고, 튜플 반영이 전부 실패한다
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
         writer.failFor(tuple -> true);
 
         // when
@@ -245,6 +275,7 @@ class IncrementalSyncUseCaseTest {
         state.saveGroup(조직("C")).block();
         state.saveGroup(조직("B", MemberRef.group("C"))).block();
         state.saveGroup(조직("A", MemberRef.group("B"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — C 에 A 를 하위 조직으로 넣어 A -> B -> C -> A 순환을 닫으려 한다
         var result = useCase.upsertGroup(조직("C", MemberRef.group("A"))).block();
@@ -259,6 +290,7 @@ class IncrementalSyncUseCaseTest {
     void 자기_자신을_하위조직으로_넣는_엣지는_기록하지_않는다() {
         // given
         state.saveGroup(조직("DEV002")).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.group("DEV002"))).block();
@@ -275,6 +307,7 @@ class IncrementalSyncUseCaseTest {
         state.saveGroup(조직("C")).block();
         state.saveGroup(조직("B")).block();
         state.saveGroup(조직("A", MemberRef.group("B"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — B 아래에 C 를 붙인다. 순환이 아니므로 그대로 기록돼야 한다
         var result = useCase.upsertGroup(조직("B", MemberRef.group("C"))).block();
@@ -314,6 +347,7 @@ class IncrementalSyncUseCaseTest {
         state.saveGroup(조직("LEAF")).block();
         state.saveGroup(조직("X", MemberRef.group("SHARED"))).block();
         state.saveGroup(조직("Y", MemberRef.group("SHARED"))).block();
+        openFga를_상태와_맞춘다();
         state.findGroupCalls.clear();
 
         // when — 새 엣지 두 개(X, Y)가 각각 SHARED -> LEAF 를 훑는다
@@ -331,6 +365,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.removeUser("kim").block();
@@ -350,6 +385,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.removeGroup("DEV002").block();
@@ -369,6 +405,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.upsertGroup(조직("DEV002", MemberRef.user("kim"))).block();
@@ -385,6 +422,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveUser(직원("lee", true)).block();
         state.saveGroup(조직("DEV002")).block();
+        openFga를_상태와_맞춘다();
         writer.failFor(tuple -> tuple.user().equals("user:lee"));
 
         // when
@@ -415,6 +453,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
 
         // when — DEV001 에서 하위 조직 참조를 뗀다. DEV002 자신의 멤버는 그대로다
         var result = useCase.upsertGroup(조직("DEV001")).block();
@@ -433,6 +472,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("park", true)).block();
         state.saveGroup(조직("DEV003", MemberRef.user("park"))).block();
         state.saveGroup(조직("DEV002", MemberRef.group("DEV003"))).block();
+        openFga를_상태와_맞춘다();
 
         // when
         var result = useCase.removeGroup("DEV002").block();
@@ -452,6 +492,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("OPS001", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
         writer.failFor(tuple -> tuple.object().equals("group:OPS001"));
 
         // when
@@ -480,6 +521,7 @@ class IncrementalSyncUseCaseTest {
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
         state.saveGroup(조직("DEV001", MemberRef.group("DEV002"))).block();
+        openFga를_상태와_맞춘다();
         writer.failFor(tuple -> tuple.relation().equals(RelationTuple.CHILD));
 
         // when
@@ -498,6 +540,7 @@ class IncrementalSyncUseCaseTest {
         // given
         state.saveUser(직원("kim", true)).block();
         state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
         writer.failFor(tuple -> true);
 
         // when
@@ -517,58 +560,5 @@ class IncrementalSyncUseCaseTest {
         assertThat(retry.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toDelete())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
-    }
-
-    @Test
-    @DisplayName("재적재가 도는 동안에는 네 변경 경로가 모두 거절된다")
-    void 재적재_중에는_변경이_거절된다() {
-        // given
-        state.saveUser(직원("kim", true)).block();
-        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
-        gate.acquire();
-
-        // when, then — 핸들러가 아니라 유스케이스에서 막으므로 네 경로가 빠짐없이 덮인다
-        assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
-                .isInstanceOf(MutationsSuspendedException.class);
-        assertThatThrownBy(() -> useCase.upsertGroup(조직("DEV002")).block())
-                .isInstanceOf(MutationsSuspendedException.class);
-        assertThatThrownBy(() -> useCase.removeUser("kim").block())
-                .isInstanceOf(MutationsSuspendedException.class);
-        assertThatThrownBy(() -> useCase.removeGroup("DEV002").block())
-                .isInstanceOf(MutationsSuspendedException.class);
-
-        // 거절된 요청은 아무것도 건드리지 않는다
-        assertThat(writer.appliedDeltas).isEmpty();
-        assertThat(state.users).containsKey("kim");
-    }
-
-    @Test
-    @DisplayName("게이트가 열리면 변경이 다시 처리된다")
-    void 게이트가_열리면_다시_처리된다() {
-        // given
-        state.saveUser(직원("kim", true)).block();
-        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
-        gate.acquire();
-        gate.release();
-
-        // when
-        var result = useCase.upsertUser(직원("kim", false)).block();
-
-        // then
-        assertThat(result.fullyApplied()).isTrue();
-        assertThat(writer.appliedDeltas).hasSize(1);
-    }
-
-    @Test
-    @DisplayName("게이트 확인은 구독 시점에 일어난다")
-    void 게이트_확인은_구독_시점이다() {
-        // given — Mono 를 만든 뒤에 재적재가 시작되는 경우다
-        state.saveUser(직원("kim", true)).block();
-        var 대기중 = useCase.upsertUser(직원("kim", false));
-        gate.acquire();
-
-        // when, then — 조립 시점의 상태를 붙들고 있으면 재적재와 경합한다
-        assertThatThrownBy(대기중::block)
-                .isInstanceOf(MutationsSuspendedException.class);
     }
 }

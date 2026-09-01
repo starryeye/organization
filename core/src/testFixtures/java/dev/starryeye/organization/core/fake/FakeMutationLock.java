@@ -23,6 +23,9 @@ public class FakeMutationLock implements MutationLock {
     /** 켜면 획득이 항상 실패한다 — 503 경로를 재현하는 데 쓴다. */
     public boolean failAcquire = false;
 
+    /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
+    public boolean failRenew = false;
+
     private final AtomicReference<String> heldToken = new AtomicReference<>();
 
     @Override
@@ -52,6 +55,9 @@ public class FakeMutationLock implements MutationLock {
     @Override
     public Mono<LockLease> renew(LockLease lease) {
         return Mono.defer(() -> {
+            if (failRenew) {
+                return Mono.error(new LockUnavailableException("리스를 잃었다(테스트)"));
+            }
             if (!lease.token().equals(heldToken.get())) {
                 return Mono.error(new LockUnavailableException("리스를 잃었다(테스트)"));
             }

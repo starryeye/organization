@@ -9,20 +9,27 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * SCIM 이 보낸 단건 변경을 튜플에 반영한다.
@@ -89,15 +96,14 @@ public class IncrementalSyncUseCase {
     /** 요청 하나의 순환 검사가 훑을 수 있는 조직 수 상한. {@link CycleScan} 참고. */
     private static final int MAX_GRAPH_EXPANSIONS = 10_000;
 
+    /** 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 {@code acquireRetries} 다. */
+    private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
+
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
-
-    /**
-     * 재적재가 도는 동안 변경을 막는 문. 확인을 이 네 변경 메서드 안에 두면 <b>모든 변경 경로가
-     * 자동으로 덮인다</b> — 핸들러마다 검사를 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
-     * 그 빠진 곳이 하필 재적재와 경합한다.
-     */
-    private final MutationGate gate;
+    private final RelationTupleChecker checker;
+    private final MutationLock lock;
+    private final int acquireRetries;
 
     /**
      * 직원 생성·수정. 활성 여부가 바뀌면 그 직원이 속한 모든 조직의 튜플이 함께 움직인다.
@@ -119,10 +125,10 @@ public class IncrementalSyncUseCase {
      * 않아, 같은 대역을 쓰면 델타가 사라진다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
-        return gate.requireOpen().then(Mono.defer(() -> upsertUserInternal(user)));
+        return withLock(lease -> upsertUserInternal(user, lease));
     }
 
-    private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user) {
+    private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user, LockLease lease) {
         DirectoryUser neverStored = new DirectoryUser(
                 user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
 
@@ -136,7 +142,7 @@ public class IncrementalSyncUseCase {
                             Commit commit = (result, beforeTuples, afterTuples) ->
                                     Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
 
-                            return diffAndApply(before, after, commit);
+                            return diffAndApply(before, after, lease, commit);
                         }));
     }
 
@@ -164,10 +170,10 @@ public class IncrementalSyncUseCase {
      * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
-        return gate.requireOpen().then(Mono.defer(() -> upsertGroupInternal(group)));
+        return withLock(lease -> upsertGroupInternal(group, lease));
     }
 
-    private Mono<IncrementalSyncResult> upsertGroupInternal(DirectoryGroup group) {
+    private Mono<IncrementalSyncResult> upsertGroupInternal(DirectoryGroup group, LockLease lease) {
         return state.findGroup(group.id())
                 .map(Optional::of)
                 .defaultIfEmpty(Optional.empty())
@@ -192,7 +198,7 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroup(reconciled));
                     };
 
-                    return diffAndApply(before, after, commit);
+                    return diffAndApply(before, after, lease, commit);
                 }));
     }
 
@@ -204,10 +210,10 @@ public class IncrementalSyncUseCase {
      * "이전"이 사라져 남은 튜플을 영원히 다시 잡지 못한다.
      */
     public Mono<IncrementalSyncResult> removeUser(String userId) {
-        return gate.requireOpen().then(Mono.defer(() -> removeUserInternal(userId)));
+        return withLock(lease -> removeUserInternal(userId, lease));
     }
 
-    private Mono<IncrementalSyncResult> removeUserInternal(String userId) {
+    private Mono<IncrementalSyncResult> removeUserInternal(String userId, LockLease lease) {
         return state.findUser(userId)
                 .flatMap(user -> affectedGroupsOf(userId).flatMap(groups -> {
                     Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(user));
@@ -226,7 +232,7 @@ public class IncrementalSyncUseCase {
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)));
                     };
 
-                    return diffAndApply(before, after, commit);
+                    return diffAndApply(before, after, lease, commit);
                 }))
                 .defaultIfEmpty(IncrementalSyncResult.noChange());
     }
@@ -240,10 +246,10 @@ public class IncrementalSyncUseCase {
      * "멤버 없는 목표"로 재사용). 하나라도 실패하면 이 조직 레코드 자체는 지우지 않는다.
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
-        return gate.requireOpen().then(Mono.defer(() -> removeGroupInternal(groupId)));
+        return withLock(lease -> removeGroupInternal(groupId, lease));
     }
 
-    private Mono<IncrementalSyncResult> removeGroupInternal(String groupId) {
+    private Mono<IncrementalSyncResult> removeGroupInternal(String groupId, LockLease lease) {
         return state.findGroup(groupId)
                 .flatMap(group -> parentsOf(groupId).flatMap(parents -> {
                     Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);
@@ -270,7 +276,7 @@ public class IncrementalSyncUseCase {
                         return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId)));
                     };
 
-                    return diffAndApply(before, after, commit);
+                    return diffAndApply(before, after, lease, commit);
                 }))
                 .defaultIfEmpty(IncrementalSyncResult.noChange());
     }
@@ -284,11 +290,39 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 변경 전후 스냅샷을 튜플로 바꿔 diff 하고, OpenFGA 에 먼저 적용한 뒤 {@code commit} 으로
-     * 상태를 커밋한다. 변경이 없으면 {@link TupleWriteResult#empty()} 로 {@code commit} 을 호출한다
-     * (아무것도 실패하지 않았으므로 각 연산의 커밋 로직이 요청값을 그대로 반영해도 안전하다).
-     * 변경이 있으면 실제 {@code writer.apply} 결과로 호출한다 — 성공·부분실패 어느 쪽이든
-     * {@code commit} 은 항상 실행된다.
+     * 변경 하나를 락 안에서 실행한다 (설계 §4).
+     *
+     * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
+     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 네 경로가 빠짐없이 덮이고
+     * 경로가 늘어도 자동으로 포함된다({@code MutationGate} 가 같은 이유로 여기 있었다).
+     *
+     * <p><b>반드시 반납한다.</b> 새면 리스가 만료될 때까지 모든 변경이 막힌다.
+     * 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가 반납한다.
+     */
+    private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
+        return lock.acquire(MutationLock.LockPurpose.WRITE)
+                // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
+                // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
+                .retryWhen(Retry.fixedDelay(acquireRetries, ACQUIRE_RETRY_DELAY)
+                        .filter(LockUnavailableException.class::isInstance))
+                .onErrorMap(Exceptions::isRetryExhausted,
+                        error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
+                .flatMap(lease -> Mono.defer(() -> work.apply(lease))
+                        .doFinally(signal -> lock.release(lease).subscribe()));
+    }
+
+    /**
+     * 기준선을 <b>OpenFGA 에 물어서</b> 만든다 (설계 §5).
+     *
+     * <p>전에는 {@code TupleMapper(변경 전 상태)} 를 기준선으로 썼다. 그것은 "있어야 했던 것"
+     * 이라, 어긋난 튜플이 있어도 양쪽에서 똑같이 빠져 델타가 비었다 — 계산은 매번 정확하고
+     * 틀린 곳을 볼 방법만 없었다.
+     *
+     * <p>후보는 {@code TupleMapper.candidateTuples} 로 뽑는다. `active` 필터를 적용하기 전의
+     * 멤버십이어야 비활성 직원의 잘못 남은 튜플이 확인 대상에 들어온다.
+     *
+     * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
+     * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
      *
      * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
      * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이
@@ -302,20 +336,38 @@ public class IncrementalSyncUseCase {
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
+                                                      LockLease lease,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
-            Set<RelationTuple> before = tuplesOf(both.getT1());
-            return withoutCycleCreatingEdges(before, tuplesOf(both.getT2())).flatMap(after -> {
-                TupleDelta delta = TupleDiff.between(before, after);
+            DirectorySnapshot beforeSnapshot = both.getT1();
+            DirectorySnapshot afterSnapshot = both.getT2();
 
-                if (delta.isEmpty()) {
-                    return commit.apply(TupleWriteResult.empty(), before, after)
-                            .thenReturn(IncrementalSyncResult.noChange());
-                }
-                return writer.apply(delta)
-                        .flatMap(result -> commit.apply(result, before, after)
-                                .thenReturn(IncrementalSyncResult.of(result)));
-            });
+            Set<RelationTuple> candidates = new LinkedHashSet<>();
+            candidates.addAll(TupleMapper.candidateTuples(beforeSnapshot));
+            candidates.addAll(TupleMapper.candidateTuples(afterSnapshot));
+
+            return checker.existing(candidates).flatMap(actual ->
+                    withoutCycleCreatingEdges(actual, tuplesOf(afterSnapshot)).flatMap(after -> {
+                        TupleDelta delta = TupleDiff.between(actual, after);
+
+                        if (delta.isEmpty()) {
+                            return commit.apply(TupleWriteResult.empty(), actual, after)
+                                    .thenReturn(IncrementalSyncResult.noChange());
+                        }
+                        // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
+                        // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
+                        // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
+                        // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
+                        // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
+                        // writer.apply(delta) 를 Mono.defer 로 감싼다 — 감싸지 않으면 이 Java
+                        // 표현식이 .then() 호출 시점에 곧바로 평가돼, renew 가 실패해도 그
+                        // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
+                        // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
+                        return lock.renew(lease)
+                                .then(Mono.defer(() -> writer.apply(delta)))
+                                .flatMap(result -> commit.apply(result, actual, after)
+                                        .thenReturn(IncrementalSyncResult.of(result)));
+                    }));
         });
     }
 
