@@ -10,6 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 
@@ -40,6 +41,7 @@ class ScimRebuildLockTest {
                 new FakeSnapshotRepository(),
                 new FakeSyncRunRepository(NOW),
                 lock,
+                Duration.ofSeconds(10),
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 

@@ -17,6 +17,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Set;
@@ -43,7 +44,7 @@ class ScimRebuildUseCaseTest {
         runs = new FakeSyncRunRepository(NOW);
         lock = new FakeMutationLock();
         useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Duration.ofSeconds(10), Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private static DirectoryUser 직원(String id, boolean active) {

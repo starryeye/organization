@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
@@ -19,9 +20,12 @@ import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.core.tuple.TupleMappingResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Set;
 
@@ -49,32 +53,55 @@ public class ScimRebuildUseCase {
     private final TupleSnapshotRepository snapshots;
     private final SyncRunRepository runs;
     private final MutationLock lock;
+    private final Duration renewInterval;
     private final Clock clock;
 
     /**
      * {@code WIPE} 의 확인값 검증은 호출자(컨트롤러)의 몫이다. 여기까지 왔다는 것은 이미
      * 확인됐다는 뜻이므로 값 자체는 받지 않는다 — 안 쓸 값을 받으면 다음 사람이 이 유스케이스가
      * 검증도 한다고 믿는다.
-     *
-     * <p>리스 갱신은 하지 않는다 — 재적재가 TTL(30초)보다 오래 걸리면 리스를 잃는다.
-     * 갱신은 Task 7 에서 붙인다.
      */
     public Mono<SyncRun> execute(ScimRebuildMode mode) {
         log.warn("SCIM 재적재 요청: mode={}", mode);
 
         return lock.acquire(MutationLock.LockPurpose.REBUILD)
-                .flatMap(lease -> runs.start(SyncSource.SCIM, triggerFor(mode))
-                        .flatMap(run -> rebuild(mode)
-                                .onErrorResume(error -> {
-                                    log.error("SCIM 재적재 실패: mode={}", mode, error);
-                                    return Mono.just(SyncOutcome.failed(error.getMessage()));
-                                })
-                                .flatMap(outcome -> runs.finish(run, outcome)))
-                        .doFinally(signal -> lock.release(lease).subscribe()));
+                .flatMap(lease -> {
+                    Disposable heartbeat = 리스를_갱신한다(lease);
+                    return runs.start(SyncSource.SCIM, triggerFor(mode))
+                            .flatMap(run -> rebuild(mode)
+                                    .onErrorResume(error -> {
+                                        log.error("SCIM 재적재 실패: mode={}", mode, error);
+                                        return Mono.just(SyncOutcome.failed(error.getMessage()));
+                                    })
+                                    .flatMap(outcome -> runs.finish(run, outcome)))
+                            .doFinally(signal -> {
+                                heartbeat.dispose();
+                                lock.release(lease).subscribe();
+                            });
+                });
     }
 
     private static SyncTrigger triggerFor(ScimRebuildMode mode) {
         return mode == ScimRebuildMode.WIPE ? SyncTrigger.RESET : SyncTrigger.REBUILD;
+    }
+
+    /**
+     * 재적재가 도는 동안 리스를 계속 미룬다 (설계 §4.4).
+     *
+     * <p>TTL 은 30초인데 재적재는 몇 분 걸린다. 갱신하지 않으면 도중에 리스를 잃고, 그 순간
+     * 다른 인스턴스의 쓰기가 <b>반쯤 재적재된 OpenFGA</b> 위로 들어온다.
+     *
+     * <p>갱신이 실패하면 이미 리스를 잃은 것이다. 재적재를 되돌릴 방법이 없으므로 경고만
+     * 남기고 하던 일을 마친다 — 그 상태는 재적재가 실패했을 때와 같아
+     * {@code mode=tuples} 를 한 번 더 실행하면 복구된다.
+     */
+    private Disposable 리스를_갱신한다(LockLease lease) {
+        return Flux.interval(renewInterval, renewInterval)
+                .concatMap(tick -> lock.renew(lease)
+                        .doOnError(error -> log.error(
+                                "재적재 도중 변경 락 리스를 잃었다. 다른 인스턴스의 쓰기가 들어올 수 있다", error))
+                        .onErrorResume(error -> Mono.empty()))
+                .subscribe();
     }
 
     /**

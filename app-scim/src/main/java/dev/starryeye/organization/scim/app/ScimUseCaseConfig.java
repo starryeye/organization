@@ -34,8 +34,10 @@ public class ScimUseCaseConfig {
                                                  TupleSnapshotRepository snapshots,
                                                  SyncRunRepository runs,
                                                  MutationLock lock,
+                                                 DynamoDbProperties dynamoDb,
                                                  Clock clock) {
-        return new ScimRebuildUseCase(state, writer, snapshots, runs, lock, clock);
+        return new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
+                dynamoDb.getLockRenewInterval(), clock);
     }
 
     @Bean
