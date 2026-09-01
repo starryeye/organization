@@ -17,7 +17,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -109,16 +108,29 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
     }
 
     /**
-     * 응답 중 하나라도 개별 오류({@code getError() != null})를 실었으면 그 항목을
-     * "없음" 으로 넘기지 않고 전체를 실패시킨다.
+     * 응답이 <b>물어본 것을 빠짐없이, 오류 없이</b> 답했을 때만 결과를 돌려준다. 하나라도
+     * 어긋나면 청크 전체를 실패시킨다.
      *
-     * <p>서버가 배치 자체는 받아들이고도 특정 항목의 판정에는 실패할 수 있다. 그 항목은
-     * {@code isAllowed()} 필터를 그냥 통과해 "확인했고, 없다" 와 구별되지 않게 된다 — 이는
-     * 설계 §6 이 금지하는 상태 기준선 폴백과 같은 결이다: diff 의 기준선이 되는 이 결과에서
-     * 조용히 "없음" 으로 내려가면, 실제로 있는 튜플을 다시 쓰거나(무해) 실제로 지워야 할
-     * 튜플의 삭제를 건너뛰는(유해) 쪽으로 이어질 수 있다. 그래서 폴백하지 않고 예외로 멈춘다.
+     * <p>세 가지를 본다.
+     * <ol>
+     *   <li><b>개별 오류</b>({@code getError() != null}) — 서버가 배치 자체는 받아들이고도 특정
+     *       항목의 판정에는 실패할 수 있다.</li>
+     *   <li><b>응답 개수</b> — 물어본 수보다 적으면 빠진 항목은 아무 데도 나타나지 않는다.</li>
+     *   <li><b>correlationId 해석</b> — 모르는 id 가 오면 그 항목이 어느 튜플의 답인지 알 수
+     *       없다. 전에는 {@code filter(Objects::nonNull)} 로 조용히 버렸다.</li>
+     * </ol>
+     *
+     * <p><b>셋 다 같은 방향으로 틀린다.</b> 답을 못 받은 항목은 {@code isAllowed()} 필터를 그냥
+     * 통과해 "확인했고, 없다" 와 구별되지 않는다 — 설계 §6 이 금지하는 상태 기준선 폴백과 같은
+     * 결이다. diff 의 기준선이 되는 이 결과에서 조용히 "없음" 으로 내려가면, 실제로 있는 튜플을
+     * 다시 쓰거나(무해) <b>실제로 지워야 할 튜플의 삭제를 건너뛴다</b>(유해). 그래서 폴백하지
+     * 않고 예외로 멈춘다 — IdP 가 재시도한다.
+     *
+     * <p>{@code correlationId} 로 짝짓는 것 자체도 여기서 못박힌다. 응답 순서는 보장되지 않아
+     * 인덱스로 짝지으면 <b>엉뚱한 튜플이 있다고 판단</b>하는데, 실서버는 대개 순서를 지켜서
+     * 통합 테스트만으로는 두 방식이 구별되지 않는다.
      */
-    private static List<RelationTuple> toFound(
+    static List<RelationTuple> toFound(
             ClientBatchCheckResponse response, Map<String, RelationTuple> byCorrelationId) {
         List<ClientBatchCheckSingleResponse> results = response.getResult();
 
@@ -134,10 +146,24 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                             .formatted(errored.size(), firstMessage));
         }
 
-        return results.stream()
-                .filter(ClientBatchCheckSingleResponse::isAllowed)
-                .map(single -> byCorrelationId.get(single.getCorrelationId()))
-                .filter(Objects::nonNull)
-                .toList();
+        if (results.size() != byCorrelationId.size()) {
+            throw new IllegalStateException(
+                    "OpenFGA batchCheck 가 %d건을 물었는데 %d건만 답했다 — 빠진 항목을 '없음'으로 격하하지 않는다"
+                            .formatted(byCorrelationId.size(), results.size()));
+        }
+
+        List<RelationTuple> found = new ArrayList<>();
+        for (ClientBatchCheckSingleResponse single : results) {
+            RelationTuple tuple = byCorrelationId.get(single.getCorrelationId());
+            if (tuple == null) {
+                throw new IllegalStateException(
+                        "OpenFGA batchCheck 응답의 correlationId '%s' 가 요청에 없다 — 어느 튜플의 답인지 알 수 없다"
+                                .formatted(single.getCorrelationId()));
+            }
+            if (single.isAllowed()) {
+                found.add(tuple);
+            }
+        }
+        return found;
     }
 }
