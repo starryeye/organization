@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,7 +34,7 @@ class IncrementalSyncUseCaseTest {
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
-        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0, IncrementalSyncUseCase.DriftObserver.NOOP);
+        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP);
     }
 
     /**

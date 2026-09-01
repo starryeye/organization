@@ -96,15 +96,25 @@ public class IncrementalSyncUseCase {
     /** 요청 하나의 순환 검사가 훑을 수 있는 조직 수 상한. {@link CycleScan} 참고. */
     private static final int MAX_GRAPH_EXPANSIONS = 10_000;
 
-    /** 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 {@code acquireRetries} 다. */
+    /** 획득 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 재시도 횟수다. */
     private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
 
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
     private final RelationTupleChecker checker;
     private final MutationLock lock;
-    private final int acquireRetries;
+    /**
+     * 락 획득을 포기하기까지의 대기 한도 (설계 §4.4). 재시도 <b>횟수</b>가 아니라 한도를
+     * 받는다 — 횟수를 받으면 그것을 계산한 쪽이 {@link #ACQUIRE_RETRY_DELAY} 를 따로 알고
+     * 있어야 하고, 컴파일러가 이어주지 않는 그 중복 때문에 한쪽만 바뀌면 획득 예산이
+     * 조용히 달라진다.
+     */
+    private final Duration acquireTimeout;
     private final DriftObserver driftObserver;
+
+    private long acquireRetries() {
+        return acquireTimeout.toMillis() / ACQUIRE_RETRY_DELAY.toMillis();
+    }
 
     /**
      * 어긋남을 발견했을 때 부른다. 기본은 아무것도 하지 않는다.
@@ -156,7 +166,7 @@ public class IncrementalSyncUseCase {
                             Commit commit = (result, beforeTuples, afterTuples) ->
                                     Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
 
-                            return diffAndApply(before, after, lease, commit);
+                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), lease, commit);
                         }));
     }
 
@@ -212,7 +222,7 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroup(reconciled));
                     };
 
-                    return diffAndApply(before, after, lease, commit);
+                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), lease, commit);
                 }));
     }
 
@@ -246,7 +256,7 @@ public class IncrementalSyncUseCase {
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)));
                     };
 
-                    return diffAndApply(before, after, lease, commit);
+                    return diffAndApply(before, after, RelationTuple.userRef(userId), lease, commit);
                 }))
                 .defaultIfEmpty(IncrementalSyncResult.noChange());
     }
@@ -290,7 +300,7 @@ public class IncrementalSyncUseCase {
                         return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId)));
                     };
 
-                    return diffAndApply(before, after, lease, commit);
+                    return diffAndApply(before, after, RelationTuple.groupRef(groupId), lease, commit);
                 }))
                 .defaultIfEmpty(IncrementalSyncResult.noChange());
     }
@@ -332,7 +342,7 @@ public class IncrementalSyncUseCase {
         return lock.acquire(MutationLock.LockPurpose.WRITE)
                 // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
                 // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
-                .retryWhen(Retry.fixedDelay(acquireRetries, ACQUIRE_RETRY_DELAY)
+                .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
                         .filter(LockUnavailableException.class::isInstance))
                 .onErrorMap(Exceptions::isRetryExhausted,
                         error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
@@ -348,7 +358,8 @@ public class IncrementalSyncUseCase {
      * 틀린 곳을 볼 방법만 없었다.
      *
      * <p>후보는 {@code TupleMapper.candidateTuples} 로 뽑는다. `active` 필터를 적용하기 전의
-     * 멤버십이어야 비활성 직원의 잘못 남은 튜플이 확인 대상에 들어온다.
+     * 멤버십이어야 비활성 직원의 잘못 남은 튜플이 확인 대상에 들어온다. 거기서 다시
+     * {@code focus}(이번 연산의 초점 엔티티)를 언급하는 것만 남긴다 — {@link #mentioning} 참고.
      *
      * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
      * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
@@ -372,21 +383,26 @@ public class IncrementalSyncUseCase {
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
+                                                      String focus,
                                                       LockLease lease,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
             DirectorySnapshot afterSnapshot = both.getT2();
 
-            Set<RelationTuple> candidates = new LinkedHashSet<>();
-            candidates.addAll(TupleMapper.candidateTuples(beforeSnapshot));
-            candidates.addAll(TupleMapper.candidateTuples(afterSnapshot));
+            Set<RelationTuple> 모든후보 = new LinkedHashSet<>();
+            모든후보.addAll(TupleMapper.candidateTuples(beforeSnapshot));
+            모든후보.addAll(TupleMapper.candidateTuples(afterSnapshot));
+            Set<RelationTuple> candidates = mentioning(모든후보, focus);
 
             return checker.existing(candidates).flatMap(actual -> {
                 // 상태 기준선(있어야 했던 것)과 Check 기준선(실제 있는 것)을 비교한다 —
                 // 이 둘이 다르면 그것이 곧 어긋남이다(설계 §7). 델타 계산 자체는 여전히
                 // Check 기준선(actual)을 쓴다; 여기서는 오직 관측만 한다.
-                Set<RelationTuple> 상태기준선 = tuplesOf(beforeSnapshot);
+                // 상태 기준선도 같은 술어로 좁힌다 — actual 이 초점 밖 튜플을 아예 담지
+                // 않으므로, 좁히지 않으면 이 연산이 보지도 않은 튜플이 전부 missing 으로
+                // 세어져 지표가 거짓말을 한다.
+                Set<RelationTuple> 상태기준선 = mentioning(tuplesOf(beforeSnapshot), focus);
                 int extra = (int) actual.stream().filter(t -> !상태기준선.contains(t)).count();
                 int missing = (int) 상태기준선.stream().filter(t -> !actual.contains(t)).count();
                 if (extra > 0 || missing > 0) {
@@ -394,7 +410,8 @@ public class IncrementalSyncUseCase {
                     driftObserver.observed(extra, missing);
                 }
 
-                return withoutCycleCreatingEdges(actual, tuplesOf(afterSnapshot)).flatMap(after -> {
+                Set<RelationTuple> 원하는것 = mentioning(tuplesOf(afterSnapshot), focus);
+                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after -> {
                     TupleDelta delta = TupleDiff.between(actual, after);
 
                     if (delta.isEmpty()) {
@@ -530,6 +547,34 @@ public class IncrementalSyncUseCase {
     private static String stripType(String typedId) {
         int separator = typedId.indexOf(':');
         return separator < 0 ? typedId : typedId.substring(separator + 1);
+    }
+
+    /**
+     * 이번 연산의 <b>초점 엔티티</b>를 언급하는 튜플만 남긴다 (설계 §5.2).
+     *
+     * <p>최소 스냅샷은 영향 조직을 <b>멤버 목록째로</b> 싣는다 — child 엣지의 존재 조건과
+     * 활성 판정에 필요하기 때문이다. 그래서 {@code candidateTuples} 를 그대로 쓰면 영향 조직의
+     * <i>모든</i> 멤버가 후보가 되고, {@code PUT /Users/kim} 한 번이 5000명 조직 전체를
+     * BatchCheck 하게 된다 — 전역 락을 쥔 채로. 설계 §5.2 는 정반대를 요구한다:
+     * <i>"upsertUser 가 소속 조직의 전체 멤버를 확인하지 않는 것이 중요하다"</i>,
+     * <i>"무관한 튜플까지 확인하면 비용만 늘고 삭제 범위만 위험해진다"</i>.
+     *
+     * <p><b>후보와 목표를 같은 술어로 좁혀야 한다.</b> 후보만 좁히면 {@code actual} 에는 없고
+     * {@code after} 에는 있는 튜플이 생겨, 실제로는 멀쩡히 있는 튜플을 델타가 매번 다시 쓴다.
+     * 관측용 상태 기준선도 같이 좁힌다 — 그래야 {@code extra}/{@code missing} 이 이 연산이
+     * 실제로 본 범위를 뜻한다.
+     *
+     * <p>양쪽 자리를 다 보는 이유는 {@link RelationTuple#mentions} 참고 — {@code upsertGroup}
+     * 의 후보에는 {@code child(DEV001, 상위조직)} 처럼 초점이 user 자리인 것도 들어간다.
+     */
+    private static Set<RelationTuple> mentioning(Set<RelationTuple> tuples, String focus) {
+        Set<RelationTuple> narrowed = new LinkedHashSet<>();
+        for (RelationTuple tuple : tuples) {
+            if (tuple.mentions(focus)) {
+                narrowed.add(tuple);
+            }
+        }
+        return narrowed;
     }
 
     private Set<RelationTuple> tuplesOf(DirectorySnapshot snapshot) {

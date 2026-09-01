@@ -34,4 +34,26 @@ public record RelationTuple(String user, String relation, String object) {
     public static RelationTuple member(String userId, String groupId) {
         return new RelationTuple(USER_TYPE + ":" + userId, MEMBER, GROUP_TYPE + ":" + groupId);
     }
+
+    /** 튜플의 한 자리에 들어가는 직원 참조: {@code user:U} */
+    public static String userRef(String userId) {
+        return USER_TYPE + ":" + userId;
+    }
+
+    /** 튜플의 한 자리에 들어가는 조직 참조: {@code group:G} */
+    public static String groupRef(String groupId) {
+        return GROUP_TYPE + ":" + groupId;
+    }
+
+    /**
+     * 이 튜플이 <b>어느 쪽 자리로든</b> 그 엔티티를 언급하는가.
+     *
+     * <p>양쪽을 다 보는 것이 핵심이다. 조직 {@code DEV001} 을 건드리는 연산의 후보에는
+     * {@code dm(m,DEV001)}·{@code child(m,DEV001)} 처럼 DEV001 이 object 인 것뿐 아니라
+     * 상위 조직으로의 {@code child(DEV001,parent)} — DEV001 이 user 자리인 것 — 도 들어가야
+     * 한다 (설계 §5.2 표).
+     */
+    public boolean mentions(String typedId) {
+        return user.equals(typedId) || object.equals(typedId);
+    }
 }

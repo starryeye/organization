@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,7 +34,7 @@ class ScimUserHandlerTest {
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
-        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, 0, IncrementalSyncUseCase.DriftObserver.NOOP);
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();

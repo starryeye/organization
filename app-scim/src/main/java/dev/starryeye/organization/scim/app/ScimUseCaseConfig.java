@@ -31,8 +31,8 @@ public class ScimUseCaseConfig {
                                                           MutationLock lock,
                                                           DynamoDbProperties dynamoDb,
                                                           ScimSyncMetrics driftMetrics) {
-        int acquireRetries = (int) (dynamoDb.getLockAcquireTimeout().toMillis() / 200);
-        return new IncrementalSyncUseCase(state, writer, checker, lock, acquireRetries, driftMetrics);
+        return new IncrementalSyncUseCase(state, writer, checker, lock,
+                dynamoDb.getLockAcquireTimeout(), driftMetrics);
     }
 
     @Bean
