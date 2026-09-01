@@ -1251,7 +1251,7 @@ class IncrementalSyncDriftTest {
         state.users.put("kim", 직원("kim", true));
         state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
                 Set.of(MemberRef.user("kim"))));
-        writer.failAll = true;
+        writer.failFor(tuple -> true);
 
         // when
         assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
@@ -1294,9 +1294,18 @@ class IncrementalSyncDriftTest {
 }
 ```
 
-> `FakeTupleWriter` 에 `failAll` 플래그와 `written`/`deleted` 필드가 있는지 먼저 확인할 것:
-> `cat core/src/testFixtures/java/dev/starryeye/organization/core/fake/FakeTupleWriter.java`
-> 없으면 이 태스크에서 같은 이름으로 더한다.
+> **`FakeTupleWriter` 에 `written`/`deleted` 누적 필드를 더해야 한다.** 지금은
+> `appliedDeltas`(List<TupleDelta>)만 있어 위 테스트가 컴파일되지 않는다. `apply` 안에서
+> 이미 만들고 있는 두 지역 집합을 공개 필드에 함께 누적시키면 된다:
+>
+> ```java
+>     /** 지금까지 실제로 쓰인/지워진 튜플. appliedDeltas 로도 볼 수 있지만 단언이 읽기 어려워진다. */
+>     public final Set<RelationTuple> written = new LinkedHashSet<>();
+>     public final Set<RelationTuple> deleted = new LinkedHashSet<>();
+> ```
+>
+> **`failAll` 플래그는 더하지 않는다.** 이미 있는 `failFor(tuple -> true)` 가 같은 일을 한다 —
+> 장치를 둘 두면 그 자체가 중복이다.
 
 - [ ] **Step 2: 실패를 확인한다**
 
@@ -1414,7 +1423,7 @@ Expected: FAIL — 생성자 시그니처 불일치로 컴파일 실패
 
 - [ ] **Step 6: 배선을 고친다**
 
-`ScimUseCaseConfig.java` 에서 `mutationGate()` 빈을 지우고 `incrementalSyncUseCase` 를 바꾼다:
+`ScimUseCaseConfig.java` 의 `incrementalSyncUseCase` 를 바꾼다. **`mutationGate()` 빈은 그대로 둔다** — 아래 주석 참고:
 
 ```java
     @Bean
@@ -1646,6 +1655,11 @@ git commit -m "refactor: 재적재를 분산 락으로 옮기고 MutationGate �
 **Interfaces:**
 - Consumes: `MutationLock.renew` (Task 1)
 - Produces: `ScimRebuildUseCase(..., MutationLock lock, Duration renewInterval, Clock clock)`
+
+> **먼저 읽을 것.** 이 태스크는 `ScimRebuildUseCase` 생성자에 `Duration renewInterval` 을
+> 더한다(위치: `lock` 다음, `clock` 앞). Task 6 이 만든 `ScimRebuildLockTest` 의 6인자
+> 생성자 호출이 깨지므로 **함께 고친다** — `Duration.ofSeconds(10)` 을 넣으면 된다.
+> `ScimUseCaseConfig` 의 배선도 같이 고친다.
 
 - [ ] **Step 1: 실패 테스트를 쓴다**
 
