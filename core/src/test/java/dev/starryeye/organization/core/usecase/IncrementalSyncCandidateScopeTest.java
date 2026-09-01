@@ -47,7 +47,7 @@ class IncrementalSyncCandidateScopeTest {
         checker = new FakeTupleChecker();
         useCase = new IncrementalSyncUseCase(
                 state, writer, checker, new FakeMutationLock(), Duration.ZERO,
-                IncrementalSyncUseCase.DriftObserver.NOOP);
+                IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
     }
 
     private static DirectoryUser 직원(String id, boolean active) {

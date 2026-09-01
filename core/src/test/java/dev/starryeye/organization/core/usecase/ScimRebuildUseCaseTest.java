@@ -44,7 +44,7 @@ class ScimRebuildUseCaseTest {
         runs = new FakeSyncRunRepository(NOW);
         lock = new FakeMutationLock();
         useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
-                Duration.ofSeconds(10), Clock.fixed(NOW, ZoneOffset.UTC));
+                Duration.ofSeconds(10), LockObserver.NOOP, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private static DirectoryUser 직원(String id, boolean active) {

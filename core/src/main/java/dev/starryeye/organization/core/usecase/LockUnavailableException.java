@@ -9,4 +9,13 @@ public class LockUnavailableException extends RuntimeException {
     public LockUnavailableException(String message) {
         super(message);
     }
+
+    /**
+     * 락 자체의 문제가 아니라 저장소 장애로 획득에 실패했을 때 쓴다 (설계 §6 두 번째 행).
+     * 원인을 물고 가야 한다 — 여기서 끊으면 로그에 "락을 얻는 중 오류" 만 남고 DynamoDB 가
+     * 무엇을 던졌는지가 사라진다.
+     */
+    public LockUnavailableException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

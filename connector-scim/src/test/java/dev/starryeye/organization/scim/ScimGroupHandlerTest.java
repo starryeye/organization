@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
+import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -34,7 +35,7 @@ class ScimGroupHandlerTest {
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
-        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP);
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();

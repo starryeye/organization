@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
+import dev.starryeye.organization.core.model.SyncStatus;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -34,7 +35,7 @@ class ScimRebuildRenewTest {
         var useCase = new ScimRebuildUseCase(
                 new FakeStateRepository(), writer,
                 new FakeSnapshotRepository(), new FakeSyncRunRepository(NOW),
-                lock, Duration.ofMillis(100),
+                lock, Duration.ofMillis(100), LockObserver.NOOP,
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
         // when
@@ -59,7 +60,7 @@ class ScimRebuildRenewTest {
         var useCase = new ScimRebuildUseCase(
                 new FakeStateRepository(), writer,
                 new FakeSnapshotRepository(), new FakeSyncRunRepository(NOW),
-                lock, Duration.ofMillis(50),
+                lock, Duration.ofMillis(50), LockObserver.NOOP,
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
         // when
@@ -75,5 +76,34 @@ class ScimRebuildRenewTest {
         // 갱신이 계속 돌면 반납된 락을 갱신하려 들어 로그가 오염된다 — 시도 횟수가 더 늘지 않아야 한다
         await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
                 .untilAsserted(() -> assertThat(lock.renewAttempted.get()).isEqualTo(끝난직후));
+    }
+
+    @Test
+    @DisplayName("재적재 도중 리스를 잃으면 중단하고 FAILED 로 기록한다")
+    void 리스를_잃으면_중단하고_FAILED_다() {
+        // given — 갱신이 실패하는 순간 이미 리스는 남의 것이다. 재적재는 몇 분짜리라
+        // 그 뒤로도 계속 쓰면 남이 쓰고 있는 OpenFGA 위에 겹쳐 쓴다.
+        var lock = new FakeMutationLock();
+        var writer = new FakeTupleWriter();
+        writer.delay = Duration.ofMillis(400);
+        var runs = new FakeSyncRunRepository(NOW);
+        var useCase = new ScimRebuildUseCase(
+                new FakeStateRepository(), writer,
+                new FakeSnapshotRepository(), runs,
+                lock, Duration.ofMillis(50), LockObserver.NOOP,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        lock.failRenew = true;
+
+        // when
+        var run = useCase.execute(ScimRebuildMode.TUPLES).block();
+
+        // then — 실행 기록이 운영자가 가진 유일한 신호다. SUCCEEDED 로 남기면
+        // "mode=tuples 를 한 번 더 돌려야 한다" 와 "할 일 없다" 가 구별되지 않는다.
+        assertThat(run.status())
+                .as("반쯤 재적재된 저장소 위에 남의 쓰기가 들어왔을 수 있는 실행을 초록으로 남기면 안 된다")
+                .isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("리스");
+        assertThat(runs.finished).hasSize(1);
+        assertThat(lock.released).as("중단해도 락은 반납을 시도한다").hasValue(1);
     }
 }

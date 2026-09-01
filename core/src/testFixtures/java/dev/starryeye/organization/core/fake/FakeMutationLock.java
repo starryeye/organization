@@ -33,6 +33,12 @@ public class FakeMutationLock implements MutationLock {
     /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
     public boolean failRenew = false;
 
+    /**
+     * 켜면 반납이 항상 실패한다 — 스로틀·네트워크 오류로 리스가 만료될 때까지 묶이는
+     * 상황을 재현하는 데 쓴다. 이 실패는 응답에 나타나지 않으므로 지표로만 보인다.
+     */
+    public boolean failRelease = false;
+
     private final AtomicReference<String> heldToken = new AtomicReference<>();
 
     @Override
@@ -52,10 +58,14 @@ public class FakeMutationLock implements MutationLock {
 
     @Override
     public Mono<Void> release(LockLease lease) {
-        return Mono.fromRunnable(() -> {
+        return Mono.defer(() -> {
+            if (failRelease) {
+                return Mono.error(new IllegalStateException("반납 실패(테스트)"));
+            }
             if (heldToken.compareAndSet(lease.token(), null)) {
                 released.incrementAndGet();
             }
+            return Mono.empty();
         });
     }
 

@@ -42,6 +42,7 @@ class ScimRebuildLockTest {
                 new FakeSyncRunRepository(NOW),
                 lock,
                 Duration.ofSeconds(10),
+                LockObserver.NOOP,
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 

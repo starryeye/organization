@@ -20,6 +20,7 @@ import lombok.extern.slf4j.Slf4j;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
@@ -111,6 +113,7 @@ public class IncrementalSyncUseCase {
      */
     private final Duration acquireTimeout;
     private final DriftObserver driftObserver;
+    private final LockObserver lockObserver;
 
     private long acquireRetries() {
         return acquireTimeout.toMillis() / ACQUIRE_RETRY_DELAY.toMillis();
@@ -336,18 +339,55 @@ public class IncrementalSyncUseCase {
      *       이미 저장소에 반영된 채로 남는다.
      * </ol>
      * 두 경우 모두 락이 TTL 이 지날 때까지 묶인다 — 완벽한 상호 배제가 아니라는 설계 §4 의
-     * 전제와 같은 종류의 틈이다.
+     * 전제와 같은 종류의 틈이다. <b>막지는 못해도 세기는 한다</b>: 둘 다
+     * {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다. 응답에는
+     * 아무 흔적도 남지 않는 사건이라, 지표가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
+     *
+     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
+     * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
+     * {@code ScimRouter} 의 기본 분기가 500 을 내고, IdP 는 500 을 <b>영구 실패</b>로 읽어
+     * 프로비저닝을 버린다. 재시도해야 할 바로 그 순간에. 그래서 획득 구간의 모든 에러를
+     * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
-        return lock.acquire(MutationLock.LockPurpose.WRITE)
-                // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
-                // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
-                .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
-                        .filter(LockUnavailableException.class::isInstance))
-                .onErrorMap(Exceptions::isRetryExhausted,
-                        error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
-                .flatMap(lease -> Mono.defer(() -> work.apply(lease))
-                        .doFinally(signal -> lock.release(lease).subscribe()));
+        return Mono.defer(() -> {
+            long 시작 = System.nanoTime();
+            AtomicBoolean 경합했다 = new AtomicBoolean();
+
+            return lock.acquire(MutationLock.LockPurpose.WRITE)
+                    // retryWhen 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
+                    .doOnError(LockUnavailableException.class, error -> 경합했다.set(true))
+                    // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
+                    // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
+                    .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
+                            .filter(LockUnavailableException.class::isInstance))
+                    .onErrorMap(Exceptions::isRetryExhausted,
+                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
+                    // DynamoDB 장애 등 락 이외의 예외도 503 으로 옮긴다 (설계 §6).
+                    .onErrorMap(error -> !(error instanceof LockUnavailableException),
+                            error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
+                    .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
+                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
+                    // 획득이 성공한 뒤 리스가 전달되기 전에 취소되면 그 리스는 손에 들어오지
+                    // 않은 채로 TTL 만큼 샌다(위 2번). 취소 자체는 막을 수 없으니 세기라도 한다.
+                    .doFinally(signal -> {
+                        if (signal == SignalType.CANCEL) {
+                            lockObserver.leaseLost("획득 도중 취소 — 리스가 새어 TTL 까지 묶일 수 있다");
+                        }
+                    })
+                    .flatMap(lease -> Mono.defer(() -> work.apply(lease))
+                            .doFinally(signal -> lock.release(lease).subscribe(
+                                    released -> {
+                                    },
+                                    error -> {
+                                        log.warn("변경 락 반납이 실패했다. 리스가 만료될 때까지 아무도 잡지 못한다", error);
+                                        lockObserver.leaseLost("반납 실패");
+                                    })));
+        });
+    }
+
+    private static Duration 경과(long 시작나노) {
+        return Duration.ofNanos(System.nanoTime() - 시작나노);
     }
 
     /**
@@ -428,6 +468,7 @@ public class IncrementalSyncUseCase {
                     // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
                     // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
                     return lock.renew(lease)
+                            .doOnError(error -> lockObserver.leaseLost("쓰기 직전 리스 재확인 실패"))
                             .then(Mono.defer(() -> writer.apply(delta)))
                             .flatMap(result -> commit.apply(result, actual, after)
                                     .thenReturn(IncrementalSyncResult.of(result)));

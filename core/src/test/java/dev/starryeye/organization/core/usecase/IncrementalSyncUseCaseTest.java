@@ -34,7 +34,7 @@ class IncrementalSyncUseCaseTest {
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
-        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP);
+        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
     }
 
     /**

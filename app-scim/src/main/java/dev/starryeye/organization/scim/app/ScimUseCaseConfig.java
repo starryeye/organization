@@ -30,9 +30,9 @@ public class ScimUseCaseConfig {
                                                           RelationTupleChecker checker,
                                                           MutationLock lock,
                                                           DynamoDbProperties dynamoDb,
-                                                          ScimSyncMetrics driftMetrics) {
+                                                          ScimSyncMetrics metrics) {
         return new IncrementalSyncUseCase(state, writer, checker, lock,
-                dynamoDb.getLockAcquireTimeout(), driftMetrics);
+                dynamoDb.getLockAcquireTimeout(), metrics, metrics);
     }
 
     @Bean
@@ -42,9 +42,10 @@ public class ScimUseCaseConfig {
                                                  SyncRunRepository runs,
                                                  MutationLock lock,
                                                  DynamoDbProperties dynamoDb,
+                                                 ScimSyncMetrics metrics,
                                                  Clock clock) {
         return new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
-                dynamoDb.getLockRenewInterval(), clock);
+                dynamoDb.getLockRenewInterval(), metrics, clock);
     }
 
     @Bean
