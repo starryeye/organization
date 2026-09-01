@@ -8,9 +8,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * BatchCheck 로 "OpenFGA 에 실제로 있는 튜플" 을 읽어온다 (설계 §5.3).
@@ -50,11 +52,38 @@ class OpenFgaBatchCheckTest extends OpenFgaTestSupport {
     @Test
     @DisplayName("후보가 비면 OpenFGA 를 부르지 않고 빈 집합을 준다")
     void 후보가_비면_빈_집합이다() {
+        // given — 아무도 듣고 있지 않은 호스트를 가리키는 checker.
+        // 네트워크를 실제로 탔다면(store 해석이든 batchCheck 든) 연결 실패로 반드시 예외가 난다.
+        OpenFgaProperties 닿지_않는_속성 = new OpenFgaProperties();
+        닿지_않는_속성.setApiUrl("http://127.0.0.1:1");
+        닿지_않는_속성.setStoreName("unreachable-" + UUID.randomUUID());
+        닿지_않는_속성.setWriteBatchSize(100);
+        닿지_않는_속성.setMaxRetries(3);
+        StoreBootstrapper 닿지_않는_부트스트래퍼 = new StoreBootstrapper(닿지_않는_속성);
+        OpenFgaRelationTupleChecker 닿지_않는_체커 = new OpenFgaRelationTupleChecker(닿지_않는_부트스트래퍼);
+
         // when
-        Set<RelationTuple> 실제 = checker.existing(Set.of()).block();
+        Set<RelationTuple> 실제 = 닿지_않는_체커.existing(Set.of()).block();
+
+        // then — 네트워크를 탔다면 이 지점까지 오지 못했을 것이다
+        assertThat(실제).isEmpty();
+    }
+
+    @Test
+    @DisplayName("배치 응답에 개별 오류가 섞여 있으면 그 항목을 없음으로 넘기지 않고 전체를 실패시킨다")
+    void 개별_오류가_있으면_전체가_실패한다() {
+        // given — 모델에 없는 relation 은 서버가 그 항목만 개별 오류로 응답한다(실측 확인함).
+        // 나머지 항목은 정상적으로 판정되는데도, 오류가 섞였다는 이유만으로 전체가 실패해야 한다 —
+        // 그 항목을 "확인했고 없다" 로 조용히 내려보내면 diff 기준선이 거짓말을 하게 된다.
+        var 정상 = RelationTuple.directMember("kim", "DEV001");
+        var 오류나는것 = new RelationTuple("user:kim", "no_such_relation", "group:DEV001");
+        튜플을_심는다(List.of(정상));
+
+        // when
+        Throwable thrown = catchThrowable(() -> checker.existing(Set.of(정상, 오류나는것)).block());
 
         // then
-        assertThat(실제).isEmpty();
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
     }
 
     @Test
