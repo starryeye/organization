@@ -1,6 +1,7 @@
 package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
+import dev.starryeye.organization.core.port.MutationLock;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -62,5 +63,16 @@ public class DynamoDbConfig {
     public DirectorySearchRepository directorySearchRepository(DynamoDbAsyncClient client,
                                                                DynamoDbProperties properties) {
         return new DynamoDbDirectorySearchRepository(client, properties);
+    }
+
+    /**
+     * 인스턴스 식별자. 배제 판단에는 쓰지 않고 "누가 쥐고 있나" 를 로그로 보기 위한 값이라
+     * 재시작마다 달라져도 무방하다.
+     */
+    @Bean
+    public MutationLock mutationLock(DynamoDbAsyncClient client, DynamoDbProperties properties,
+                                     Clock clock) {
+        return new DynamoDbMutationLock(client, properties, clock,
+                java.util.UUID.randomUUID().toString());
     }
 }

@@ -68,6 +68,9 @@ public final class Keys {
     public static final String TUPLE_PREFIX = "TUPLE#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
 
+    /** 전역 변경 락. 파티션 하나에 아이템 하나다 (설계 §4.2). */
+    public static final String LOCK_PK = "LOCK#SCIM_WRITE";
+
     private static final String TUPLE_SEPARATOR = "|";
 
     /**
