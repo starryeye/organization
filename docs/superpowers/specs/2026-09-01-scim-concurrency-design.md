@@ -97,12 +97,12 @@ SCIM 쓰기 요청
 
 | | 변경 |
 |---|---|
-| `core` | `MutationLock` 포트 추가, `RelationTupleReader` 포트 추가 |
+| `core` | `MutationLock` 포트 추가, `RelationTupleChecker` 에 배치 메서드 추가 |
 | `core` | **`MutationGate` 삭제** — 분산 락이 흡수 |
 | `core` | `IncrementalSyncUseCase` 의 기준선 출처 변경, 락 획득 |
 | `core` | `ScimRebuildUseCase` 가 같은 락을 잡음 |
 | `storage-dynamodb` | `MutationLock` 의 DynamoDB 구현 |
-| `authz-openfga` | `RelationTupleReader` 의 BatchCheck 구현 |
+| `authz-openfga` | `OpenFgaRelationTupleChecker` 에 BatchCheck 구현 |
 
 새 인프라는 없다. 락은 **기존 단일 테이블에 아이템 하나**로 얹는다.
 
@@ -263,16 +263,23 @@ OpenFGA 는 **펜싱 토큰을 지원하지 않아** 원천 차단이 불가능�
 
 ### 5.3 포트
 
+새 포트를 만들지 않는다. 조회 API 슬라이드에서 만든 `RelationTupleChecker` 에 배치
+메서드를 얹는다 — 같은 일(OpenFGA 에 묻기)을 하는 포트가 둘이 되면 어느 쪽을 쓸지가
+매번 판단거리가 된다.
+
 ```java
-// core
-public interface RelationTupleReader {
+// core — 기존 포트에 추가
+public interface RelationTupleChecker {
+
+    Mono<Boolean> check(RelationTuple tuple);              // 기존
+
     /** 후보 중 OpenFGA 에 실제로 있는 것만 돌려준다. */
     Mono<Set<RelationTuple>> existing(Set<RelationTuple> candidates);
 }
 ```
 
-`authz-openfga` 구현이 `OpenFgaClient.batchCheck` 로 채운다. 서버 기본 상한(배치당
-50건)이 있어 청크로 나눠 보낸다.
+`OpenFgaRelationTupleChecker` 가 `OpenFgaClient.batchCheck` 로 채운다. 서버 기본
+상한(배치당 50건)이 있어 청크로 나눠 보낸다.
 
 `direct_member` 와 `child` 는 모델에서 직접 관계이므로 Check 가 "그 튜플이
 존재하는가" 를 그대로 답한다.
