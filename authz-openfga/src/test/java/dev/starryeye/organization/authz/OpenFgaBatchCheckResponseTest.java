@@ -79,6 +79,20 @@ class OpenFgaBatchCheckResponseTest {
     }
 
     @Test
+    @DisplayName("같은 correlationId 가 두 번 오면 개수가 맞아도 실패시킨다")
+    void 중복된_correlationId는_실패다() {
+        // given — 개수(2)도 맞고 두 id 모두 요청에 있는 id 다. 그런데 c1 은 답을 받지 못했고,
+        // 개수 검사와 "해석되는가" 검사는 둘 다 이것을 통과시킨다 — park 가 조용히 "없다" 가
+        // 되어 지워야 할 튜플의 삭제를 건너뛴다. M2 가 닫으려던 방향이 다른 문으로 들어온다.
+        var response = new ClientBatchCheckResponse(List.of(답("c0", true), 답("c0", true)));
+
+        // when, then
+        assertThatThrownBy(() -> OpenFgaRelationTupleChecker.toFound(response, 요청(KIM, PARK)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("두 번");
+    }
+
+    @Test
     @DisplayName("빠짐없이 답하면 allowed 인 것만 돌려준다")
     void 정상_응답은_allowed만_돌려준다() {
         // given

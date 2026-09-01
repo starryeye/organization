@@ -116,8 +116,10 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
      *   <li><b>개별 오류</b>({@code getError() != null}) — 서버가 배치 자체는 받아들이고도 특정
      *       항목의 판정에는 실패할 수 있다.</li>
      *   <li><b>응답 개수</b> — 물어본 수보다 적으면 빠진 항목은 아무 데도 나타나지 않는다.</li>
-     *   <li><b>correlationId 해석</b> — 모르는 id 가 오면 그 항목이 어느 튜플의 답인지 알 수
-     *       없다. 전에는 {@code filter(Objects::nonNull)} 로 조용히 버렸다.</li>
+     *   <li><b>correlationId 의 일대일 대응</b> — 모르는 id 가 오면 그 항목이 어느 튜플의 답인지
+     *       알 수 없고, 같은 id 가 두 번 오면 개수만 맞은 채 다른 튜플 하나가 답 없이 남는다.
+     *       그래서 "해석된다" 로는 부족하고 <b>요청 하나가 정확히 한 번씩 소진</b>돼야 한다 —
+     *       맵에서 빼면서 읽는 이유다. 전에는 {@code filter(Objects::nonNull)} 로 조용히 버렸다.</li>
      * </ol>
      *
      * <p><b>셋 다 같은 방향으로 틀린다.</b> 답을 못 받은 항목은 {@code isAllowed()} 필터를 그냥
@@ -152,13 +154,16 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                             .formatted(byCorrelationId.size(), results.size()));
         }
 
+        // 빼면서 읽는다 — 요청 하나가 정확히 한 번씩 소진돼야 한다. 개수가 같은데 어떤 id 가
+        // 두 번 오면, 그만큼 다른 튜플 하나가 답 없이 남아 "확인했고, 없다" 로 격하된다.
+        Map<String, RelationTuple> 답을_기다리는것 = new LinkedHashMap<>(byCorrelationId);
         List<RelationTuple> found = new ArrayList<>();
         for (ClientBatchCheckSingleResponse single : results) {
-            RelationTuple tuple = byCorrelationId.get(single.getCorrelationId());
+            RelationTuple tuple = 답을_기다리는것.remove(single.getCorrelationId());
             if (tuple == null) {
                 throw new IllegalStateException(
-                        "OpenFGA batchCheck 응답의 correlationId '%s' 가 요청에 없다 — 어느 튜플의 답인지 알 수 없다"
-                                .formatted(single.getCorrelationId()));
+                        ("OpenFGA batchCheck 응답의 correlationId '%s' 가 요청에 없거나 두 번 왔다 "
+                                + "— 어느 튜플의 답인지 알 수 없다").formatted(single.getCorrelationId()));
             }
             if (single.isAllowed()) {
                 found.add(tuple);
