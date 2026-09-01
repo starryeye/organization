@@ -49,20 +49,31 @@ class ScimRebuildRenewTest {
     @Test
     @DisplayName("재적재가 끝나면 갱신도 멈춘다")
     void 끝나면_갱신도_멈춘다() {
-        // given
+        // given — 갱신 주기보다 오래 걸리게 해 하트비트가 최소 한 번은 돌고 나서 끝나게 한다.
+        // 성공 횟수(renewed) 로는 못 본다 — 반납 뒤에는 토큰이 안 맞아 매 tick 이 실패하므로
+        // 새는 하트비트도 renewed 를 그대로 두어 "안 도는 것"과 구분이 안 된다. 그래서 시도
+        // 자체를 세는 renewAttempted 로 본다.
         var lock = new FakeMutationLock();
+        var writer = new FakeTupleWriter();
+        writer.delay = Duration.ofMillis(150);
         var useCase = new ScimRebuildUseCase(
-                new FakeStateRepository(), new FakeTupleWriter(),
+                new FakeStateRepository(), writer,
                 new FakeSnapshotRepository(), new FakeSyncRunRepository(NOW),
                 lock, Duration.ofMillis(50),
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
         // when
         useCase.execute(ScimRebuildMode.TUPLES).block();
-        int 끝난직후 = lock.renewed.get();
+        int 끝난직후 = lock.renewAttempted.get();
 
-        // then — 갱신이 계속 돌면 반납된 락을 갱신하려 들어 로그가 오염된다
+        // then — 재적재 도중 최소 한 번은 갱신을 시도했어야 한다. 0 이면 이 뒤의 "더 안 늘어난다"
+        // 단언이 트리비얼하게 통과해버려 아무것도 증명하지 못한다.
+        assertThat(끝난직후)
+                .as("재적재가 갱신 주기보다 짧게 끝나면 이 검증 자체가 무의미해진다")
+                .isGreaterThan(0);
+
+        // 갱신이 계속 돌면 반납된 락을 갱신하려 들어 로그가 오염된다 — 시도 횟수가 더 늘지 않아야 한다
         await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertThat(lock.renewed.get()).isEqualTo(끝난직후));
+                .untilAsserted(() -> assertThat(lock.renewAttempted.get()).isEqualTo(끝난직후));
     }
 }
