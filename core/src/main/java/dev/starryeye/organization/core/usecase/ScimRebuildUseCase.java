@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
@@ -47,29 +48,29 @@ public class ScimRebuildUseCase {
     private final RelationTupleWriter writer;
     private final TupleSnapshotRepository snapshots;
     private final SyncRunRepository runs;
-    private final MutationGate gate;
+    private final MutationLock lock;
     private final Clock clock;
 
     /**
      * {@code WIPE} 의 확인값 검증은 호출자(컨트롤러)의 몫이다. 여기까지 왔다는 것은 이미
      * 확인됐다는 뜻이므로 값 자체는 받지 않는다 — 안 쓸 값을 받으면 다음 사람이 이 유스케이스가
      * 검증도 한다고 믿는다.
+     *
+     * <p>리스 갱신은 하지 않는다 — 재적재가 TTL(30초)보다 오래 걸리면 리스를 잃는다.
+     * 갱신은 Task 7 에서 붙인다.
      */
     public Mono<SyncRun> execute(ScimRebuildMode mode) {
-        if (!gate.acquire()) {
-            return Mono.error(new MutationsSuspendedException(
-                    "재적재가 이미 진행 중입니다"));
-        }
         log.warn("SCIM 재적재 요청: mode={}", mode);
 
-        return runs.start(SyncSource.SCIM, triggerFor(mode))
-                .flatMap(run -> rebuild(mode)
-                        .onErrorResume(error -> {
-                            log.error("SCIM 재적재 실패: mode={}", mode, error);
-                            return Mono.just(SyncOutcome.failed(error.getMessage()));
-                        })
-                        .flatMap(outcome -> runs.finish(run, outcome)))
-                .doFinally(signal -> gate.release());
+        return lock.acquire(MutationLock.LockPurpose.REBUILD)
+                .flatMap(lease -> runs.start(SyncSource.SCIM, triggerFor(mode))
+                        .flatMap(run -> rebuild(mode)
+                                .onErrorResume(error -> {
+                                    log.error("SCIM 재적재 실패: mode={}", mode, error);
+                                    return Mono.just(SyncOutcome.failed(error.getMessage()));
+                                })
+                                .flatMap(outcome -> runs.finish(run, outcome)))
+                        .doFinally(signal -> lock.release(lease).subscribe()));
     }
 
     private static SyncTrigger triggerFor(ScimRebuildMode mode) {

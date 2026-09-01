@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.MutationsSuspendedException;
 import dev.starryeye.organization.core.usecase.ScimRebuildMode;
 import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
@@ -61,6 +62,10 @@ public class AdminSyncController {
         return rebuild.execute(rebuildMode)
                 .map(SyncRunResponse::from)
                 .onErrorMap(MutationsSuspendedException.class, e ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e))
+                // 다른 인스턴스가 SCIM 쓰기나 재적재로 락을 쥐고 있어 이번 재적재가 시작하지
+                // 못한 경우도 같은 409 다 — 관리자가 잠시 뒤 다시 시도하면 된다.
+                .onErrorMap(LockUnavailableException.class, e ->
                         new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e));
     }
 

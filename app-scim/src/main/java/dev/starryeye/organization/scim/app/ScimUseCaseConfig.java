@@ -7,7 +7,6 @@ import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
-import dev.starryeye.organization.core.usecase.MutationGate;
 import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import dev.starryeye.organization.storage.DynamoDbProperties;
@@ -18,15 +17,6 @@ import java.time.Clock;
 
 @Configuration
 public class ScimUseCaseConfig {
-
-    /**
-     * 재적재가 도는 동안 SCIM 변경을 막는 문. 인스턴스 하나 안에서만 유효하므로
-     * 여러 대로 늘리면 저장소 수준 장치로 바꿔야 한다.
-     */
-    @Bean
-    public MutationGate mutationGate() {
-        return new MutationGate();
-    }
 
     @Bean
     public IncrementalSyncUseCase incrementalSyncUseCase(DirectoryStateRepository state,
@@ -43,9 +33,9 @@ public class ScimUseCaseConfig {
                                                  RelationTupleWriter writer,
                                                  TupleSnapshotRepository snapshots,
                                                  SyncRunRepository runs,
-                                                 MutationGate gate,
+                                                 MutationLock lock,
                                                  Clock clock) {
-        return new ScimRebuildUseCase(state, writer, snapshots, runs, gate, clock);
+        return new ScimRebuildUseCase(state, writer, snapshots, runs, lock, clock);
     }
 
     @Bean

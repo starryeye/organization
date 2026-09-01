@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
@@ -21,7 +22,6 @@ import java.time.ZoneOffset;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimRebuildUseCaseTest {
 
@@ -31,7 +31,7 @@ class ScimRebuildUseCaseTest {
     private FakeTupleWriter writer;
     private FakeSnapshotRepository snapshots;
     private FakeSyncRunRepository runs;
-    private MutationGate gate;
+    private FakeMutationLock lock;
     private ScimRebuildUseCase useCase;
 
     @BeforeEach
@@ -40,8 +40,8 @@ class ScimRebuildUseCaseTest {
         writer = new FakeTupleWriter();
         snapshots = new FakeSnapshotRepository();
         runs = new FakeSyncRunRepository(NOW);
-        gate = new MutationGate();
-        useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, gate,
+        lock = new FakeMutationLock();
+        useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
@@ -208,25 +208,13 @@ class ScimRebuildUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
     }
 
-    // ---------- 게이트 ----------
+    // ---------- 락 ----------
+    // 락 획득·반납·거절의 상세 동작은 ScimRebuildLockTest 가 본다. 여기서는 정상 경로에서
+    // 실패해도 반납되는 것만 회귀로 남긴다.
 
     @Test
-    @DisplayName("재적재가 도는 동안 게이트가 닫혀 있다")
-    void 도는_동안_게이트가_닫힌다() {
-        // given
-        조직도를_심는다();
-        writer.onApply(() -> assertThat(gate.isSuspended()).isTrue());
-
-        // when
-        useCase.execute(ScimRebuildMode.TUPLES).block();
-
-        // then — 끝나면 열린다
-        assertThat(gate.isSuspended()).isFalse();
-    }
-
-    @Test
-    @DisplayName("재적재가 실패해도 게이트는 반납된다")
-    void 실패해도_게이트를_반납한다() {
+    @DisplayName("재적재가 실패해도 락은 반납된다")
+    void 실패해도_락을_반납한다() {
         // given
         조직도를_심는다();
         writer.failResetStore(new IllegalStateException("터짐"));
@@ -235,21 +223,6 @@ class ScimRebuildUseCaseTest {
         useCase.execute(ScimRebuildMode.TUPLES).block();
 
         // then — 안 반납하면 이후 모든 SCIM 변경이 영구히 503 이 된다
-        assertThat(gate.isSuspended()).isFalse();
-    }
-
-    @Test
-    @DisplayName("이미 재적재가 돌고 있으면 두 번째 요청은 거절된다")
-    void 겹친_재적재는_거절한다() {
-        // given
-        gate.acquire();
-
-        // when, then
-        assertThatThrownBy(() -> useCase.execute(ScimRebuildMode.TUPLES).block())
-                .isInstanceOf(MutationsSuspendedException.class);
-
-        // 남의 게이트를 반납해버리면 안 된다
-        assertThat(gate.isSuspended()).isTrue();
-        assertThat(writer.resetStoreCount).hasValue(0);
+        assertThat(lock.released).hasValue(1);
     }
 }
