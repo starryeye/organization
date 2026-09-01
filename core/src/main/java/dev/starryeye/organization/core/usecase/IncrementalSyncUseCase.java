@@ -554,10 +554,18 @@ public class IncrementalSyncUseCase {
     /**
      * 조직의 최종 멤버 목록을, 실제로 반영된 만큼만 계산한다.
      *
-     * <p>새로 추가된 멤버는 그 튜플이 실제로 기록됐을 때만(또는 처음부터 튜플이 필요 없을
-     * 때, 예: 비활성 유저나 존재하지 않는 하위 조직) 저장된다. 빠진 멤버는 그 튜플이 실제로
-     * 지워졌을 때만(또는 원래 튜플이 없었을 때) 제외된다 — 삭제가 실패하면 여전히 멤버로
-     * 남아, 다음 동기화가 다시 지우려 시도한다.
+     * <p>새로 추가된 멤버는 <b>그 튜플이 지금 OpenFGA 에 있을 때</b> 저장된다 — 이번에 우리가
+     * 썼거나({@code result.written()}), 이미 있어서 쓸 필요가 없었거나({@code beforeTuples},
+     * 즉 Check 기준선), 애초에 튜플이 필요 없는 멤버거나(비활성 유저, 존재하지 않는 하위 조직).
+     * 빠진 멤버는 그 튜플이 실제로 지워졌을 때만(또는 원래 튜플이 없었을 때) 제외된다 —
+     * 삭제가 실패하면 여전히 멤버로 남아, 다음 동기화가 다시 지우려 시도한다.
+     *
+     * <p><b>"이미 있음" 을 빠뜨리면 안 된다.</b> 기준선이 상태였을 때는 새 멤버의 튜플이 언제나
+     * 델타에 들어가 {@code written} 에 나타났다. 기준선이 OpenFGA 로 바뀐 지금은 <b>이미 있는
+     * 튜플이 델타에서 빠지므로</b> {@code written} 에도 없다. {@code written} 만 보면 그 멤버가
+     * 조용히 누락되고, 멤버십이 없으니 다음 연산의 후보에도 들어오지 않아 영원히 고쳐지지
+     * 않는다 — OpenFGA 쓰기 성공 뒤 DynamoDB 커밋이 실패해 IdP 가 같은 요청을 재시도하는,
+     * 이 기능이 없애려는 바로 그 경로다.
      *
      * <p>{@code requested} 의 멤버를 빈 집합으로 주면 "이 조직을 통째로 비우려는 시도"를
      * 표현할 수 있다 — {@link #removeGroup} 이 자기 자신의 멤버 튜플 삭제를 이 방식으로
@@ -579,7 +587,8 @@ public class IncrementalSyncUseCase {
             }
             RelationTuple tuple = tupleFor(member, requested.id());
             boolean expected = afterTuples.contains(tuple);
-            if (!expected || result.written().contains(tuple)) {
+            boolean inOpenFga = result.written().contains(tuple) || beforeTuples.contains(tuple);
+            if (!expected || inOpenFga) {
                 persisted.add(member);
             }
             // else: 튜플 반영 실패 -> 제외한 채로 둬서 다음 동기화가 재시도하게 한다

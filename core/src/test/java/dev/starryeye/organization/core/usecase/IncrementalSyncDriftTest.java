@@ -90,6 +90,33 @@ class IncrementalSyncDriftTest {
     }
 
     @Test
+    @DisplayName("튜플이 이미 OpenFGA 에 있는 멤버도 멤버십으로 저장된다")
+    void 이미_있는_튜플의_멤버도_저장된다() {
+        // given — OpenFGA 쓰기는 성공했는데 DynamoDB 커밋이 실패해 500 이 나갔고,
+        // IdP 가 똑같은 요청을 재시도해 들어온 상황.
+        // DynamoDB: DEV001 의 멤버는 park 뿐이다(kim 은 커밋되지 못했다).
+        state.users.put("kim", 직원("kim", true));
+        state.users.put("park", 직원("park", true));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("park"))));
+        // OpenFGA: 두 튜플 모두 이미 있다 — kim 의 것은 실패 직전에 쓰였다
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV001"));
+        checker.allowed.add(RelationTuple.directMember("park", "DEV001"));
+
+        // when — 재시도. 델타는 비어 있어 written 이 아무것도 담지 않는다
+        useCase.upsertGroup(new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("park"), MemberRef.user("kim")))).block();
+
+        // then — kim 을 떨어뜨리면 OpenFGA 에는 튜플이 있는데 DynamoDB 에는 멤버십이 없는
+        // 상태가 굳는다. 멤버십이 없으면 후보에도 안 들어와 어떤 연산도 다시 보지 못한다 —
+        // 이 기능이 없애려는 바로 그 영구 어긋남이다.
+        assertThat(state.groups.get("DEV001").members())
+                .as("이미 OpenFGA 에 있는 튜플의 멤버를 조용히 떨어뜨리면 영원히 고쳐지지 않는다")
+                .contains(MemberRef.user("kim"), MemberRef.user("park"));
+        assertThat(writer.written).as("이미 있으므로 다시 쓸 것은 없다").isEmpty();
+    }
+
+    @Test
     @DisplayName("변경 하나에 락을 정확히 한 번 잡고 반드시 반납한다")
     void 락을_잡고_반납한다() {
         // given
