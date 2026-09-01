@@ -70,4 +70,14 @@ public class FakeTupleChecker implements RelationTupleChecker {
             return result;
         });
     }
+
+    @Override
+    public Mono<Set<RelationTuple>> existing(Set<RelationTuple> candidates) {
+        return reactor.core.publisher.Flux.fromIterable(candidates)
+                .concatMap(tuple -> check(tuple).map(found -> java.util.Map.entry(tuple, found)))
+                .filter(java.util.Map.Entry::getValue)
+                .map(java.util.Map.Entry::getKey)
+                .collect(LinkedHashSet<RelationTuple>::new, Set::add)
+                .map(found -> (Set<RelationTuple>) found);
+    }
 }
