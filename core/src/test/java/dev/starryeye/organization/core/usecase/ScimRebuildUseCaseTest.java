@@ -20,6 +20,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -211,6 +212,31 @@ class ScimRebuildUseCaseTest {
     // ---------- 락 ----------
     // 락 획득·반납·거절의 상세 동작은 ScimRebuildLockTest 가 본다. 여기서는 정상 경로에서
     // 실패해도 반납되는 것만 회귀로 남긴다.
+
+    @Test
+    @DisplayName("재적재가 도는 동안, 즉 쓰기가 실제로 일어나는 순간에도 락이 잡혀 있다")
+    void 도는_동안_락이_잡혀있다() {
+        // given — 쓰기가 실제로 실행되는 순간의 락 상태를 스냅샷으로 남긴다.
+        // 훅 안에서 바로 assertThat 을 부르면 안 된다 — 여기는 rebuild(mode) 내부이고
+        // execute() 가 그 바깥을 onErrorResume 으로 감싸고 있어, 훅에서 던진
+        // AssertionError 가 "재적재 실패" 로 삼켜져 테스트가 거짓으로 통과한다.
+        조직도를_심는다();
+        AtomicInteger acquiredDuringWrite = new AtomicInteger(-1);
+        AtomicInteger releasedDuringWrite = new AtomicInteger(-1);
+        writer.onApply(() -> {
+            acquiredDuringWrite.set(lock.acquired.get());
+            releasedDuringWrite.set(lock.released.get());
+        });
+
+        // when
+        var run = useCase.execute(ScimRebuildMode.TUPLES).block();
+
+        // then — 쓰기 시점에는 락이 잡혀 있었고(반납 전), 끝나면 반납된다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(acquiredDuringWrite).hasValue(1);
+        assertThat(releasedDuringWrite).hasValue(0);
+        assertThat(lock.released).hasValue(1);
+    }
 
     @Test
     @DisplayName("재적재가 실패해도 락은 반납된다")

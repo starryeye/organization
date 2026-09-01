@@ -27,14 +27,16 @@ class ScimRebuildLockTest {
     private static final Instant NOW = Instant.parse("2026-09-01T03:00:00Z");
 
     private FakeMutationLock lock;
+    private FakeTupleWriter writer;
     private ScimRebuildUseCase useCase;
 
     @BeforeEach
     void 준비한다() {
         lock = new FakeMutationLock();
+        writer = new FakeTupleWriter();
         useCase = new ScimRebuildUseCase(
                 new FakeStateRepository(),
-                new FakeTupleWriter(),
+                writer,
                 new FakeSnapshotRepository(),
                 new FakeSyncRunRepository(NOW),
                 lock,
@@ -61,5 +63,9 @@ class ScimRebuildLockTest {
         // when, then
         assertThatThrownBy(() -> useCase.execute(ScimRebuildMode.TUPLES).block())
                 .isInstanceOf(LockUnavailableException.class);
+
+        // 던지고도 store 를 지웠다면 최악이다 — 거절은 파괴적 작업이 전혀 일어나지
+        // 않았다는 뜻이어야 한다
+        assertThat(writer.resetStoreCount).hasValue(0);
     }
 }
