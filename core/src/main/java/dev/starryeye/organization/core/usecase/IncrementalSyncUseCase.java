@@ -366,8 +366,13 @@ public class IncrementalSyncUseCase {
                     // DynamoDB 장애 등 락 이외의 예외도 503 으로 옮긴다 (설계 §6).
                     .onErrorMap(error -> !(error instanceof LockUnavailableException),
                             error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
+                    // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도
+                    // LockUnavailableException 으로 옮기므로 예외 타입으로는 구별할 수 없고,
+                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다 — 여기에 true 를 박으면
+                    // 저장소 장애가 scim.lock.contended 를 올려, 장애 대응 중인 운영자를
+                    // "전역 락을 다시 볼 때다"(설계 §4.1) 라는 엉뚱한 방향으로 민다.
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
-                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
+                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
                     // 획득이 성공한 뒤 리스가 전달되기 전에 취소되면 그 리스는 손에 들어오지
                     // 않은 채로 TTL 만큼 샌다(위 2번). 취소 자체는 막을 수 없으니 세기라도 한다.
                     .doFinally(signal -> {

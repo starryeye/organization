@@ -132,7 +132,7 @@ class IncrementalSyncLockObservabilityTest {
     }
 
     @Test
-    @DisplayName("락 획득이 저장소 장애로 실패해도 503(LockUnavailableException)으로 나가고 경합으로 센다")
+    @DisplayName("락 획득이 저장소 장애로 실패하면 503 으로 나가되 경합으로 세지는 않는다")
     void 저장소_장애도_503이다() {
         // given — DynamoDB 부분 장애. 그대로 흘리면 ScimRouter 기본 분기가 500 을 내고,
         // IdP 는 500 을 영구 실패로 읽어 프로비저닝을 버린다 — 재시도해야 할 바로 그 순간에.
@@ -159,7 +159,15 @@ class IncrementalSyncLockObservabilityTest {
                 .isInstanceOf(LockUnavailableException.class)
                 .as("원인을 끊으면 DynamoDB 가 무엇을 던졌는지가 로그에서 사라진다")
                 .hasCause(저장소장애);
-        assertThat(관찰자.경합).containsExactly(true);
+
+        // 503 으로 나가는 것과 "경합했다" 는 별개다. 이 실패에는 밀린 순간이 한 번도 없었다 —
+        // 여기서 경합을 세면 저장소 장애가 scim.lock.contended 를 밀어 올리고, README 가
+        // 그 카운터를 "전역 락 결정을 다시 볼 신호"(설계 §4.1)라고 적어 두었으므로 장애
+        // 대응 중인 운영자를 정확히 틀린 방향으로 보낸다.
+        assertThat(관찰자.경합)
+                .as("경합이 아닌 실패를 경합으로 세면 지표가 장애 중에 거짓말을 한다")
+                .containsExactly(false);
+        assertThat(관찰자.대기).as("기다린 시간 자체는 남는다").hasSize(1);
     }
 
     @Test
