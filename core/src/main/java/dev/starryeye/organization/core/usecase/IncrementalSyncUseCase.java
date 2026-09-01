@@ -296,8 +296,21 @@ public class IncrementalSyncUseCase {
      * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 네 경로가 빠짐없이 덮이고
      * 경로가 늘어도 자동으로 포함된다({@code MutationGate} 가 같은 이유로 여기 있었다).
      *
-     * <p><b>반드시 반납한다.</b> 새면 리스가 만료될 때까지 모든 변경이 막힌다.
-     * 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가 반납한다.
+     * <p><b>{@code work} 가 끝나면 반납한다 — 단, 두 틈은 이것으로 못 막는다.</b>
+     * {@code work} 자체가 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가
+     * {@code lock.release(lease)} 를 부르는 것은 맞다. 하지만
+     * <ol>
+     *   <li>반납 호출 자체가 실패하면(스로틀, 네트워크 등) {@code .subscribe()} 가 구독자 없이
+     *       구독하는 것이라 그 에러는 아무도 받지 않고 {@code Hooks.onErrorDropped} 로만 샌다 —
+     *       재시도하지 않으므로 리스가 자연 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다.</li>
+     *   <li>{@code lock.acquire} 내부에서 조건부 쓰기(DynamoDB PutItem)가 이미 성공한 뒤,
+     *       그 결과가 구독자에게 리스로 전달되기 전에 구독이 취소되면 이 메서드는 그 리스를
+     *       아예 손에 쥐지 못해 반납을 시도할 대상조차 없다 — {@code Mono.fromFuture} 는
+     *       다운스트림 취소를 내부 {@code CompletableFuture} 취소로 전파하지 않으므로, 쓰기는
+     *       이미 저장소에 반영된 채로 남는다.
+     * </ol>
+     * 두 경우 모두 락이 TTL 이 지날 때까지 묶인다 — 완벽한 상호 배제가 아니라는 설계 §4 의
+     * 전제와 같은 종류의 틈이다.
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return lock.acquire(MutationLock.LockPurpose.WRITE)
@@ -323,6 +336,13 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
      * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
+     *
+     * <p><b>리스 재확인은 델타가 있을 때만 일어난다(설계 §4.7).</b> {@code lock.renew(lease)} 는
+     * 델타가 비지 않은 분기 — 즉 실제로 {@code writer.apply} 가 OpenFGA 에 쓰기를 낼 분기 —
+     * 에서만 부른다. 델타가 비면 OpenFGA 에 아무것도 쓰지 않고 곧바로 {@code commit} 으로
+     * 넘어가며, 이 경로는 리스를 재확인하지 않는다. §4.7 이 요구하는 것은 "OpenFGA 쓰기 직전"
+     * 재확인이고 이 경로엔 그 쓰기가 없으므로 스펙과 어긋나지 않는다 — 다만 재확인이 <b>모든
+     * 커밋</b>에 걸린다고 읽으면 안 된다.
      *
      * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
      * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이

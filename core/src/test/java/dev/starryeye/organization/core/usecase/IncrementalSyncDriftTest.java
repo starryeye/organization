@@ -123,17 +123,50 @@ class IncrementalSyncDriftTest {
     }
 
     @Test
-    @DisplayName("락을 못 잡으면 아무것도 쓰지 않고 실패한다")
+    @DisplayName("락을 못 잡으면 네 변경 경로 모두 아무것도 쓰지 않고 실패한다")
     void 락을_못_잡으면_쓰지_않는다() {
-        // given
+        // given — 핸들러가 아니라 유스케이스에서 막으므로 네 경로가 빠짐없이 덮여야 한다
+        // (IncrementalSyncUseCaseTest.재적재_중에는_변경이_거절된다 가 게이트 시절 못박던 것과
+        // 같은 성질이다. withLock 을 네 곳 중 하나에서라도 빼면 이 테스트가 잡는다 — 예를 들어
+        // removeGroup 에서 withLock 을 지우고 removeGroupInternal 을 직접 부르게 하면
+        // removeGroup 쪽 단언만 예외 없이 끝나 실패한다. 직접 확인함(아래 리포트 참고).
         lock.failAcquire = true;
         state.users.put("kim", 직원("kim", true));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("kim"))));
 
         // when, then
         assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
                 .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.upsertGroup(new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("kim")))).block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.removeUser("kim").block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.removeGroup("DEV001").block())
+                .isInstanceOf(LockUnavailableException.class);
+
+        // 거절된 요청은 아무것도 건드리지 않는다
         assertThat(writer.written).isEmpty();
         assertThat(writer.deleted).isEmpty();
+    }
+
+    @Test
+    @DisplayName("락 획득은 조립 시점이 아니라 구독 시점에 일어난다")
+    void 락_획득은_구독_시점이다() {
+        // given — Mono 를 만들기만 하고 아직 구독(block)하지 않는다.
+        // withLock 이 lock.acquire(...) 를 평범한 자바 표현식으로 호출하면서도 이 성질이
+        // 성립하는 것은 오로지 두 어댑터(FakeMutationLock/DynamoDbMutationLock) 가 acquire 를
+        // Mono.defer/Mono.fromFuture(supplier) 로 지연시키기 때문이다 — writer.apply 가
+        // .then() 인자로 즉시 평가되던 것과 같은 종류의 함정이다.
+        state.users.put("kim", 직원("kim", true));
+        var 조립됨 = useCase.upsertUser(직원("kim", false));
+
+        // when, then — 아직 구독 전이므로 락을 쥐었을 리 없다
+        assertThat(lock.acquired).hasValue(0);
+
+        조립됨.block();
+        assertThat(lock.acquired).hasValue(1);
     }
 
     @Test
@@ -164,9 +197,10 @@ class IncrementalSyncDriftTest {
                 Set.of(MemberRef.user("kim"))));
         checker.failFor(tuple -> true);
 
-        // when, then
+        // when, then — Exception.class 는 NPE 도 통과시켜 "폴백하지 않는다" 를 제대로 못
+        // 앵커링한다. FakeTupleChecker.check 이 실제로 던지는 타입으로 좁힌다.
         assertThatThrownBy(() -> useCase.upsertUser(직원("kim", false)).block())
-                .isInstanceOf(Exception.class);
+                .isInstanceOf(IllegalStateException.class);
         assertThat(writer.written).isEmpty();
         assertThat(writer.deleted).isEmpty();
         assertThat(lock.released).as("실패해도 락은 반납된다").hasValue(1);
