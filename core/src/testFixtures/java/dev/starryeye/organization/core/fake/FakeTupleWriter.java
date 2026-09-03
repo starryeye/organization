@@ -7,8 +7,10 @@ import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,6 +20,13 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     public final List<TupleDelta> appliedDeltas = new ArrayList<>();
     public final AtomicInteger resetStoreCount = new AtomicInteger();
+
+    /** 지금까지 실제로 쓰인/지워진 튜플. appliedDeltas 로도 볼 수 있지만 단언이 읽기 어려워진다. */
+    public final Set<RelationTuple> written = new LinkedHashSet<>();
+    public final Set<RelationTuple> deleted = new LinkedHashSet<>();
+
+    /** 쓰기 응답을 늦춘다. 긴 작업을 흉내내는 데 쓴다. */
+    public Duration delay = Duration.ZERO;
 
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
@@ -54,6 +63,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
                 failures.add(new TupleFailure(tuple, "테스트용 실패"));
             } else {
                 written.add(tuple);
+                this.written.add(tuple);
             }
         }
         for (RelationTuple tuple : delta.toDelete()) {
@@ -61,9 +71,11 @@ public class FakeTupleWriter implements RelationTupleWriter {
                 failures.add(new TupleFailure(tuple, "테스트용 실패"));
             } else {
                 deleted.add(tuple);
+                this.deleted.add(tuple);
             }
         }
-        return Mono.just(new TupleWriteResult(written, deleted, failures));
+        Mono<TupleWriteResult> result = Mono.just(new TupleWriteResult(written, deleted, failures));
+        return delay.isZero() ? result : result.delayElement(delay);
     }
 
     @Override

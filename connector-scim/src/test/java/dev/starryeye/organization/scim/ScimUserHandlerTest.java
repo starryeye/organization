@@ -1,18 +1,22 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
-import dev.starryeye.organization.core.usecase.MutationGate;
+import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,15 +25,17 @@ class ScimUserHandlerTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
-    private MutationGate gate;
+    private FakeTupleChecker checker;
+    private FakeMutationLock lock;
     private WebTestClient client;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        gate = new MutationGate();
-        var useCase = new IncrementalSyncUseCase(state, writer, gate);
+        checker = new FakeTupleChecker();
+        lock = new FakeMutationLock();
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
@@ -152,10 +158,11 @@ class ScimUserHandlerTest {
     @Test
     @DisplayName("PATCH 로 비활성화하면 소속 조직의 튜플이 사라진다")
     void 비활성화가_튜플을_지운다() {
-        // given
+        // given — kim 의 튜플이 이미 OpenFGA 에 있어야 이번 비활성화가 실제 삭제 델타를 만든다
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
         state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀",
                 Set.of(MemberRef.user("kim")))).block();
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV002"));
         String patch = """
                 {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
                  "Operations":[{"op":"replace","path":"active","value":false}]}
@@ -208,10 +215,10 @@ class ScimUserHandlerTest {
     }
 
     @Test
-    @DisplayName("재적재가 도는 동안의 변경은 503 이고 SCIM 에러 형식을 지킨다")
-    void 재적재_중_변경은_503이다() {
-        // given
-        gate.acquire();
+    @DisplayName("변경 락을 못 잡으면 503 이고 SCIM 에러 형식을 지킨다")
+    void 락을_못_잡으면_503이다() {
+        // given — 다른 인스턴스가 락을 쥐고 있는 상황(재적재 등)을 재현한다
+        lock.failAcquire = true;
 
         // when, then — IdP 는 503 을 재시도 신호로 보므로 프로비저닝이 유실되지 않는다
         client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
@@ -226,11 +233,11 @@ class ScimUserHandlerTest {
     }
 
     @Test
-    @DisplayName("재적재 중에도 조회는 통과한다")
-    void 재적재_중_조회는_통과한다() {
-        // given — 무슨 일이 벌어지는지 들여다보는 것이 그 순간 가장 필요한 일이다
+    @DisplayName("락을 못 잡은 동안에도 조회는 통과한다")
+    void 락을_못_잡은_동안에도_조회는_통과한다() {
+        // given — 조회는 락을 타지 않으므로 무슨 일이 벌어지는지 들여다보는 것이 그 순간 가장 필요한 일이다
         state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
-        gate.acquire();
+        lock.failAcquire = true;
 
         // when, then
         client.get().uri("/scim/v2/Users/kim")

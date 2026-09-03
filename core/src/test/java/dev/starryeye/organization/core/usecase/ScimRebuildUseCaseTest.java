@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
@@ -16,12 +17,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimRebuildUseCaseTest {
 
@@ -31,7 +33,7 @@ class ScimRebuildUseCaseTest {
     private FakeTupleWriter writer;
     private FakeSnapshotRepository snapshots;
     private FakeSyncRunRepository runs;
-    private MutationGate gate;
+    private FakeMutationLock lock;
     private ScimRebuildUseCase useCase;
 
     @BeforeEach
@@ -40,9 +42,9 @@ class ScimRebuildUseCaseTest {
         writer = new FakeTupleWriter();
         snapshots = new FakeSnapshotRepository();
         runs = new FakeSyncRunRepository(NOW);
-        gate = new MutationGate();
-        useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, gate,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+        lock = new FakeMutationLock();
+        useCase = new ScimRebuildUseCase(state, writer, snapshots, runs, lock,
+                Duration.ofSeconds(10), LockObserver.NOOP, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private static DirectoryUser 직원(String id, boolean active) {
@@ -208,25 +210,38 @@ class ScimRebuildUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
     }
 
-    // ---------- 게이트 ----------
+    // ---------- 락 ----------
+    // 락 획득·반납·거절의 상세 동작은 ScimRebuildLockTest 가 본다. 여기서는 정상 경로에서
+    // 실패해도 반납되는 것만 회귀로 남긴다.
 
     @Test
-    @DisplayName("재적재가 도는 동안 게이트가 닫혀 있다")
-    void 도는_동안_게이트가_닫힌다() {
-        // given
+    @DisplayName("재적재가 도는 동안, 즉 쓰기가 실제로 일어나는 순간에도 락이 잡혀 있다")
+    void 도는_동안_락이_잡혀있다() {
+        // given — 쓰기가 실제로 실행되는 순간의 락 상태를 스냅샷으로 남긴다.
+        // 훅 안에서 바로 assertThat 을 부르면 안 된다 — 여기는 rebuild(mode) 내부이고
+        // execute() 가 그 바깥을 onErrorResume 으로 감싸고 있어, 훅에서 던진
+        // AssertionError 가 "재적재 실패" 로 삼켜져 테스트가 거짓으로 통과한다.
         조직도를_심는다();
-        writer.onApply(() -> assertThat(gate.isSuspended()).isTrue());
+        AtomicInteger acquiredDuringWrite = new AtomicInteger(-1);
+        AtomicInteger releasedDuringWrite = new AtomicInteger(-1);
+        writer.onApply(() -> {
+            acquiredDuringWrite.set(lock.acquired.get());
+            releasedDuringWrite.set(lock.released.get());
+        });
 
         // when
-        useCase.execute(ScimRebuildMode.TUPLES).block();
+        var run = useCase.execute(ScimRebuildMode.TUPLES).block();
 
-        // then — 끝나면 열린다
-        assertThat(gate.isSuspended()).isFalse();
+        // then — 쓰기 시점에는 락이 잡혀 있었고(반납 전), 끝나면 반납된다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(acquiredDuringWrite).hasValue(1);
+        assertThat(releasedDuringWrite).hasValue(0);
+        assertThat(lock.released).hasValue(1);
     }
 
     @Test
-    @DisplayName("재적재가 실패해도 게이트는 반납된다")
-    void 실패해도_게이트를_반납한다() {
+    @DisplayName("재적재가 실패해도 락은 반납된다")
+    void 실패해도_락을_반납한다() {
         // given
         조직도를_심는다();
         writer.failResetStore(new IllegalStateException("터짐"));
@@ -235,21 +250,6 @@ class ScimRebuildUseCaseTest {
         useCase.execute(ScimRebuildMode.TUPLES).block();
 
         // then — 안 반납하면 이후 모든 SCIM 변경이 영구히 503 이 된다
-        assertThat(gate.isSuspended()).isFalse();
-    }
-
-    @Test
-    @DisplayName("이미 재적재가 돌고 있으면 두 번째 요청은 거절된다")
-    void 겹친_재적재는_거절한다() {
-        // given
-        gate.acquire();
-
-        // when, then
-        assertThatThrownBy(() -> useCase.execute(ScimRebuildMode.TUPLES).block())
-                .isInstanceOf(MutationsSuspendedException.class);
-
-        // 남의 게이트를 반납해버리면 안 된다
-        assertThat(gate.isSuspended()).isTrue();
-        assertThat(writer.resetStoreCount).hasValue(0);
+        assertThat(lock.released).hasValue(1);
     }
 }

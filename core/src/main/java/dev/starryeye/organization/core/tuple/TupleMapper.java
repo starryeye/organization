@@ -42,6 +42,34 @@ public final class TupleMapper {
         return new TupleMappingResult(tuples, warnings);
     }
 
+    /**
+     * 이 스냅샷의 멤버십에서 나올 수 있는 <b>모든</b> 튜플. `active` 필터도 순환 필터도
+     * 적용하지 않는다 (설계 §5.1).
+     *
+     * <p><b>{@link #toTuples} 와 다른 질문에 답한다.</b> {@code toTuples} 는 "있어야 하는
+     * 튜플" 이고 이쪽은 "혹시 있을지 모르는 튜플" 이다. 잘못 남은 튜플은 대개 비활성 직원의
+     * 것이라(경합이 활성일 때 쓰고 지나갔으므로) 필터를 적용하면 정확히 그것을 놓친다.
+     *
+     * <p>이 집합은 <b>OpenFGA 에 물어볼 대상</b>일 뿐 쓰거나 지울 대상이 아니다.
+     * 무엇을 쓰고 지울지는 이것과 {@code toTuples} 결과를 비교해 정한다.
+     *
+     * <p>id 는 {@code toTuples} 와 마찬가지로 정규화하지 않고 그대로 쓴다 — {@code toTuples}
+     * 가 {@link IdNormalizer} 를 적용하지 않으므로, 여기서 적용하면 같은 논리적 튜플이
+     * 서로 다른 문자열이 되어 diff 가 영원히 쓰고 지우기를 반복하게 된다.
+     */
+    public static Set<RelationTuple> candidateTuples(DirectorySnapshot snapshot) {
+        Set<RelationTuple> candidates = new LinkedHashSet<>();
+        for (DirectoryGroup group : snapshot.groups().values()) {
+            for (MemberRef member : group.members()) {
+                candidates.add(switch (member.type()) {
+                    case USER -> RelationTuple.directMember(member.id(), group.id());
+                    case GROUP -> RelationTuple.child(member.id(), group.id());
+                });
+            }
+        }
+        return candidates;
+    }
+
     /** 조직코드 사전순으로 부모 → 자식 인접 리스트를 만든다. 순서를 고정해야 결과가 결정적이다. */
     private static Map<String, Set<String>> collectChildEdges(DirectorySnapshot snapshot, List<String> warnings) {
         Map<String, Set<String>> edges = new TreeMap<>();

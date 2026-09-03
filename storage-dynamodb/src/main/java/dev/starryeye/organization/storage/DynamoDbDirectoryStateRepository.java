@@ -30,6 +30,31 @@ import java.util.stream.Collectors;
 /**
  * 조직·직원·멤버십의 현재 상태를 단일 테이블에 저장하는 {@link DirectoryStateRepository} 구현체.
  * 튜플이 아니라 도메인 상태만 다룬다 — 실제로 OpenFGA 에 반영된 튜플은 별도 저장소(Task 9)가 담당한다.
+ *
+ * <h2>강한 일관성</h2>
+ *
+ * <p>메인 테이블 읽기({@link #findUser}, {@link #findGroup} 및 그 아래 {@code queryPartition})는
+ * {@code consistentRead} 를 켠다.
+ *
+ * <p><b>왜 필요해졌나 (설계 §5).</b> 전에는 diff 의 양쪽 재료가 모두 이 저장소였다. 낡은 값을
+ * 읽어도 before 와 after 가 똑같이 낡아 델타가 비었을 뿐, 틀린 튜플을 쓰지는 않았다. 지금은
+ * {@code after} 만 여기서 오고 기준선은 OpenFGA 에서 온다 — <b>낡은 읽기가 곧 삭제</b>가 된다:
+ *
+ * <pre>
+ * 인스턴스 A: PUT /Users/bob {active:true}  → dm(bob,DEV001) 쓰고 락 반납
+ * 인스턴스 B: PUT /Groups/DEV001            → bob 을 낡은 비활성으로 읽음
+ *                                          → after 에 dm(bob,DEV001) 이 없음
+ *                                          → 방금 쓴 튜플을 지운다
+ * </pre>
+ *
+ * <p><b>이것으로 창이 완전히 닫히지는 않는다.</b> DynamoDB GSI 는 강한 일관성을 지원하지 않으므로
+ * 역참조({@link #findGroupIdsContaining})는 여전히 최종 일관성이다. 방금 추가된 멤버십이 GSI 에
+ * 아직 안 보이면 그 조직이 영향 범위에서 빠질 수 있다 — 다만 그 경우는 "이 연산이 그 조직을
+ * 건드리지 않는다" 로 끝나고, 위처럼 <b>있는 튜플을 지우는</b> 방향은 아니다. 남은 잔여 위험이며
+ * 재적재가 유일한 해결책이다(설계 §5.4).
+ *
+ * <p>비용은 읽기당 RCU 2배다. 쓰기 경로의 읽기는 요청당 한 자릿수라 감당할 만하고, 조회 API 는
+ * 별도 저장소({@code DynamoDbDirectorySearchRepository})를 탄다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
@@ -54,6 +79,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 한 건만 집어온다.
      * 전에는 파티션 전체를 Query 로 읽고 클라이언트에서 META 만 골라냈다 — 결과는 같지만
      * 읽는 양과 소비 RCU 가 파티션 크기를 따라간다. 조회 API 가 직원 단건을 자주 부른다.
+     *
+     * <p><b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고.
      */
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
@@ -61,6 +88,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.userPk(userId)),
                                 Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
                         .build()))
                 .filter(GetItemResponse::hasItem)
                 .map(response -> toUser(userId, response.item()));
@@ -126,6 +154,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 조직 ----------
 
+    /** <b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고. */
     @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
         return queryPartition(Keys.groupPk(groupId))
@@ -280,16 +309,17 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 공통 ----------
 
+    /** 메인 테이블의 파티션 하나를 <b>강한 일관성</b>으로 읽는다. 클래스 자바독 참고. */
     private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .keyConditionExpression("#pk = :pk")
                 .expressionAttributeNames(Map.of("#pk", Keys.PK))
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .consistentRead(true)
                 .build();
         return Paginator.queryAll(client, request);
     }
-
     private Mono<Void> putItem(Map<String, AttributeValue> item) {
         return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
                 .tableName(properties.getTableName())

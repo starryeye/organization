@@ -1,18 +1,22 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
-import dev.starryeye.organization.core.usecase.MutationGate;
+import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,15 +25,17 @@ class ScimGroupHandlerTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
-    private MutationGate gate;
+    private FakeTupleChecker checker;
+    private FakeMutationLock lock;
     private WebTestClient client;
 
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        gate = new MutationGate();
-        var useCase = new IncrementalSyncUseCase(state, writer, gate);
+        checker = new FakeTupleChecker();
+        lock = new FakeMutationLock();
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
@@ -192,10 +198,11 @@ class ScimGroupHandlerTest {
     @Test
     @DisplayName("조직을 삭제하면 204 를 돌려주고 튜플과 상태가 사라진다")
     void 조직을_삭제한다() {
-        // given
+        // given — kim 의 튜플이 이미 OpenFGA 에 있어야 이번 삭제가 실제 삭제 델타를 만든다
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
         state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀",
                 Set.of(MemberRef.user("kim")))).block();
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV002"));
 
         // when, then
         client.delete().uri("/scim/v2/Groups/DEV002")
