@@ -150,6 +150,17 @@ public class IncrementalSyncUseCase {
      * 남기고) 기여가 0 이라 두 상태가 튜플 관점에서 구별되지 않기 때문이다. 조직은 그렇지
      * 않다: 멤버 0개인 조직은 <b>상위 조직의 child 엣지</b>를 성립시키지만 없는 조직은 그렇지
      * 않아, 같은 대역을 쓰면 델타가 사라진다.
+     *
+     * <p><b>아직 없던 직원은 하나라도 실패하면 레코드를 만들지 않는다.</b> 만들어 두면 IdP 의
+     * 재시도가 {@code POST} 로 오는데 이미 존재해서 {@code 409 uniqueness} 로 막힌다. IdP 는
+     * 409 를 영구 충돌로 읽어 재시도를 멈추므로, 실패한 튜플을 다시 잡을 기회가 사라진다 —
+     * 그 사람은 {@code active=false} 로 남는다. 권한이 없는 안전한 방향이지만
+     * <b>프로비저닝이 조용히 실패한 상태</b>이고, 다음 {@code PUT} 이 올 때까지 그대로다.
+     *
+     * <p>레코드를 만들지 않아도 안전한 이유: 재시도가 {@link #affectedGroupsOf} 로 소속을 다시
+     * 찾고, Check 기준선이 이미 쓰인 튜플을 보므로 남은 것만 정확히 다시 쓴다.
+     * {@link #upsertGroup} 이 같은 가드를 갖는다 — 다만 그쪽은 레코드를 만들면 부모의 child
+     * 엣지를 <b>영원히</b> 못 쓰게 되므로 더 심각하다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
         return withLock(lease -> upsertUserInternal(user, lease));
@@ -161,13 +172,19 @@ public class IncrementalSyncUseCase {
 
         return affectedGroupsOf(user.id())
                 .flatMap(groups -> state.findUser(user.id())
-                        .defaultIfEmpty(neverStored)
-                        .flatMap(existingUser -> {
+                        .map(Optional::of)
+                        .defaultIfEmpty(Optional.empty())
+                        .flatMap(existing -> {
+                            DirectoryUser existingUser = existing.orElse(neverStored);
                             Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(existingUser));
                             Mono<DirectorySnapshot> after = snapshotOf(groups, Mono.just(user));
 
-                            Commit commit = (result, beforeTuples, afterTuples) ->
-                                    Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
+                            Commit commit = (result, beforeTuples, afterTuples) -> {
+                                if (existing.isEmpty() && result.hasFailure()) {
+                                    return Mono.empty();
+                                }
+                                return Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
+                            };
 
                             return diffAndApply(before, after, RelationTuple.userRef(user.id()), lease, commit);
                         }));

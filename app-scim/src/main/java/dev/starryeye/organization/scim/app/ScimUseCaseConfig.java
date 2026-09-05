@@ -50,9 +50,10 @@ public class ScimUseCaseConfig {
 
     @Bean
     public SnapshotArchiveUseCase snapshotArchiveUseCase(DirectoryStateRepository state,
+                                                          RelationTupleChecker checker,
                                                           TupleSnapshotRepository snapshots,
                                                           SyncRunRepository runs,
                                                           Clock clock) {
-        return new SnapshotArchiveUseCase(state, snapshots, runs, clock);
+        return new SnapshotArchiveUseCase(state, checker, snapshots, runs, clock);
     }
 }

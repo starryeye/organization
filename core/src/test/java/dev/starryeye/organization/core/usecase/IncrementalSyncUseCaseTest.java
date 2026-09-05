@@ -239,6 +239,55 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("새 직원의 튜플 반영이 실패하면 직원 레코드를 만들지 않아 재시도가 다시 시도한다")
+    void 새_직원_반영이_실패하면_레코드를_만들지_않는다() {
+        // given — DEV001 이 아직 없는 kim 을 이미 멤버로 적어 두었다(조직이 먼저 도착한 경우).
+        // 그 상태에서 kim 이 POST 로 도착하면 dm(kim,DEV001) 을 써야 하는데 그것이 실패한다.
+        state.saveGroup(조직("DEV001", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
+        writer.failFor(tuple -> true);
+
+        // when
+        var result = useCase.upsertUser(직원("kim", true)).block();
+
+        // then — 레코드를 만들어 두면 IdP 재시도가 POST 로 오는데 이미 존재해서
+        // 409(uniqueness)로 막힌다. 그러면 실패한 튜플을 다시 잡을 기회가 사라진다.
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.users).doesNotContainKey("kim");
+
+        // when — 재시도 (실패 조건 해제)
+        writer.appliedDeltas.clear();
+        writer.failFor(tuple -> false);
+        var retry = useCase.upsertUser(직원("kim", true)).block();
+
+        // then
+        assertThat(retry.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.get(0).toWrite())
+                .containsExactly(RelationTuple.directMember("kim", "DEV001"));
+        assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("이미 있던 직원은 튜플 반영이 실패해도 레코드를 지우지 않는다")
+    void 기존_직원은_실패해도_레코드가_남는다() {
+        // given — kim 은 이미 있고 활성이다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("DEV001", MemberRef.user("kim"))).block();
+        openFga를_상태와_맞춘다();
+        writer.failFor(tuple -> true);
+
+        // when — 비활성화를 시도하지만 튜플 삭제가 실패한다
+        var result = useCase.upsertUser(직원("kim", false)).block();
+
+        // then — 레코드는 남는다. 지워버리면 다음 재시도가 diff 할 "이전"이 사라져
+        // OpenFGA 에 남은 튜플을 영원히 다시 잡지 못한다.
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(state.users).containsKey("kim");
+        // 실패했으므로 active 는 이전 값(활성)으로 되돌아간다
+        assertThat(state.users.get("kim").active()).isTrue();
+    }
+
+    @Test
     @DisplayName("새 조직의 튜플 반영이 실패하면 조직 레코드를 만들지 않아 재시도가 다시 시도한다")
     void 새_조직_반영이_실패하면_레코드를_만들지_않는다() {
         // given — DEV001 이 아직 없는 DEV002 를 참조 중이고, 튜플 반영이 전부 실패한다

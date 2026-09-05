@@ -2,6 +2,7 @@ package dev.starryeye.organization.core.usecase;
 
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -26,6 +27,7 @@ class SnapshotArchiveUseCaseTest {
     private static final Instant 고정시각 = Instant.parse("2026-08-15T03:00:00Z");
 
     private FakeStateRepository state;
+    private FakeTupleChecker checker;
     private FakeSnapshotRepository snapshots;
     private FakeSyncRunRepository runs;
     private SnapshotArchiveUseCase useCase;
@@ -33,19 +35,21 @@ class SnapshotArchiveUseCaseTest {
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
+        checker = new FakeTupleChecker();
         snapshots = new FakeSnapshotRepository();
         runs = new FakeSyncRunRepository(고정시각);
-        useCase = new SnapshotArchiveUseCase(state, snapshots, runs,
+        useCase = new SnapshotArchiveUseCase(state, checker, snapshots, runs,
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
     @Test
-    @DisplayName("현재상태를 튜플로 바꿔 SCIM 소스 스냅샷으로 적재한다")
-    void 현재상태를_스냅샷으로_적재한다() {
-        // given
+    @DisplayName("OpenFGA 에 실제로 있는 튜플을 SCIM 소스 스냅샷으로 적재한다")
+    void 실제_튜플을_스냅샷으로_적재한다() {
+        // given — 상태와 OpenFGA 가 일치하는 평상시
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
         state.saveGroup(new DirectoryGroup("DEV002", null, "백엔드팀",
                 Set.of(MemberRef.user("kim")))).block();
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV002"));
 
         // when
         var run = useCase.execute().block();
@@ -57,6 +61,41 @@ class SnapshotArchiveUseCaseTest {
         assertThat(snapshots.saved.get(0).id()).isEqualTo("20260815T030000000-SCIM");
         assertThat(snapshots.saved.get(0).tuples())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+    }
+
+    @Test
+    @DisplayName("상태가 요구하는 것이 아니라 실제 있는 것을 적재한다 — 둘이 어긋나 있어도")
+    void 어긋나면_실제를_적재한다() {
+        // given — 상태는 kim 의 소속을 말하지만 OpenFGA 에는 그 튜플이 없다.
+        // 전에는 상태로부터 유도해 저장했으므로 이 스냅샷이 "있었다" 고 거짓말했다.
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", null, "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        // checker.allowed 가 비어 있다 = OpenFGA 에 아무것도 없다
+
+        // when
+        var run = useCase.execute().block();
+
+        // then — 감사 기록은 관찰이어야 한다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(snapshots.saved.get(0).tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("BatchCheck 가 실패하면 의도한 튜플로 폴백하지 않고 아카이빙을 실패로 끝낸다")
+    void Check_실패는_폴백하지_않는다() {
+        // given — 폴백하면 그 스냅샷이 관찰인지 유도인지 구분되지 않는다
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", null, "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        checker.failFor(tuple -> true);
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.saved).isEmpty();
     }
 
     @Test
