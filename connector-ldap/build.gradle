@@ -7,8 +7,10 @@ dependencies {
     api libs.spring.ldap.core
     implementation 'org.springframework.boot:spring-boot-starter'
 
-    // 조직도(OrgChart)를 LDIF 로 옮기는 렌더러가 여기 산다.
+    // 조직도(OrgChart)를 LDIF 로 옮기는 렌더러와, 살아 있는 서버를 시나리오가 바꾸는
+    // 손잡이(LdapDirectory)가 여기 산다. 후자가 UnboundID 타입을 공개 표면에 쓴다.
     testFixturesApi testFixtures(project(':core'))
+    testFixturesApi libs.unboundid.ldapsdk
 
     testImplementation libs.unboundid.ldapsdk
 }
