@@ -5,7 +5,9 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -82,6 +84,40 @@ public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
             all.addAll(조상들(org));
         }
         return all;
+    }
+
+    /**
+     * {@code orgCode} 아래 모든 하위 조직. 롤업 <b>음성</b> 검증이 이것을 쓴다.
+     *
+     * <p>멤버십은 위로만 흐르므로, 어떤 조직의 직속 직원은 그 조직의 <b>자손</b>에 대해
+     * {@code member = false} 여야 한다. 아래로 새는 결함은 양성 검증만으로는 절대 안 잡힌다 —
+     * 있어야 할 것은 그대로 다 있기 때문이다.
+     */
+    public Set<String> 자손들(String orgCode) {
+        Set<String> found = new LinkedHashSet<>();
+        Deque<String> 남은것 = new ArrayDeque<>(자식조직들(orgCode));
+        while (!남은것.isEmpty()) {
+            String current = 남은것.pop();
+            if (found.add(current)) {
+                남은것.addAll(자식조직들(current));
+            }
+        }
+        return found;
+    }
+
+    /** {@code orgCode} 의 직속 하위 조직들. */
+    public Set<String> 자식조직들(String orgCode) {
+        DirectoryGroup group = snapshot.groups().get(orgCode);
+        if (group == null) {
+            return Set.of();
+        }
+        Set<String> children = new LinkedHashSet<>();
+        for (MemberRef member : group.members()) {
+            if (member.type() == MemberType.GROUP) {
+                children.add(member.id());
+            }
+        }
+        return children;
     }
 
     public long 멤버십수() {

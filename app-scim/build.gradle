@@ -13,6 +13,9 @@ dependencies {
     implementation 'io.micrometer:micrometer-registry-prometheus'
     implementation libs.aws.dynamodb
 
+    // 규모 E2E 는 조직도 픽스처와 검증 하네스를 커넥터별 렌더러와 함께 쓴다
+    testImplementation testFixtures(project(':core'))
+    testImplementation testFixtures(project(':connector-scim'))
     testImplementation libs.testcontainers.junit
     testImplementation libs.openfga.sdk
 }
