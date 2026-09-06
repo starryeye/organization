@@ -1,9 +1,14 @@
+apply plugin: 'java-test-fixtures'
+
 dependencies {
     api project(':core')
     // LdapConfig 가 LdapContextSource/LdapTemplate 을 @Bean 으로 공개하므로
     // 이 타입들은 이 모듈의 공개 표면이다. app-ldap 의 헬스 인디케이터가 그것을 쓴다.
     api libs.spring.ldap.core
     implementation 'org.springframework.boot:spring-boot-starter'
+
+    // 조직도(OrgChart)를 LDIF 로 옮기는 렌더러가 여기 산다.
+    testFixturesApi testFixtures(project(':core'))
 
     testImplementation libs.unboundid.ldapsdk
 }

@@ -1,6 +1,11 @@
+apply plugin: 'java-test-fixtures'
+
 dependencies {
     api project(':core')
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+    // 조직도(OrgChart)를 SCIM 요청 시퀀스로 옮기는 렌더러가 여기 산다.
+    testFixturesApi testFixtures(project(':core'))
 
     testImplementation testFixtures(project(':core'))
 }
