@@ -80,6 +80,27 @@ public final class OrgChartEditor {
         return this;
     }
 
+    /**
+     * 겸직을 전부 풀어 <b>모든 직원의 소속을 하나로</b> 만든다.
+     *
+     * <p>DIT 은 dn 위치가 곧 소속이라 한 직원이 두 조직에 있을 수 없다. 겸직을 그대로 둔 채
+     * DIT 로 렌더링하면 한쪽 소속이 조용히 사라지고, 검증은 그것을 <b>구현의 결함</b>으로
+     * 보고한다 — 실제로는 형식의 한계인데도. 그래서 기대값 쪽에서 먼저 푼다.
+     */
+    public OrgChartEditor 겸직을_모두_푼다() {
+        OrgChart 현재 = 완성();
+        for (String userId : 현재.snapshot().users().keySet()) {
+            Set<String> 소속들 = 현재.직속조직들(userId);
+            if (소속들.size() <= 1) {
+                continue;
+            }
+            String 남길것 = 현재.주소속(userId);
+            소속들.stream().filter(org -> !org.equals(남길것))
+                    .forEach(org -> 멤버를_뺀다(org, MemberRef.user(userId)));
+        }
+        return this;
+    }
+
     // ---------- 조직 ----------
 
     public OrgChartEditor 조직을_넣는다(String code, String 이름, String 부모) {
