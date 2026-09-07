@@ -8,3 +8,7 @@ build/
 # SDD 작업 공간 (원장, 브리프, 리뷰 패키지) — 커밋 대상 아님
 .superpowers/
 .claude/worktrees/
+
+# 규모 시드는 생성물이다 — 1MB 넘는 파일을 저장소에 두지 않는다.
+# ./gradlew :connector-ldap:generateScaleSeed 로 만든다.
+docker/ldap/scale-*/

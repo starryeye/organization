@@ -80,7 +80,10 @@ class AdminQueryScaleTest {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
         config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("adminquery", 0));
-        config.setSchema(null);
+        // 스키마 검사를 <b>켜 둔다.</b> 껐더니 실제 OpenLDAP 이 거부하는 엔트리(member 없는
+        // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
+        // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
+        // 없는 형태를 검증하게 된다.
 
         LDAP = new InMemoryDirectoryServer(config);
         LDAP.importFromLDIF(true, new LDIFReader(new ByteArrayInputStream(
@@ -293,6 +296,59 @@ class AdminQueryScaleTest {
         assertThat(페이지수).isGreaterThan(1);
         assertThat(읽은것).hasSize(중복없이);
         assertThat(읽은것).isEqualTo(기대.snapshot().users().keySet());
+    }
+
+    @Test
+    @DisplayName("겸직 직원도 검색 결과에는 한 번만 나온다 — 소속이 둘이라고 줄이 둘이면 안 된다")
+    void 겸직직원이_검색에_한번만_나온다() {
+        // given
+        한번만_동기화한다();
+        String 겸직 = 기대.landmarks().겸직직원();
+        assertThat(기대.직속조직들(겸직)).as("전제: 소속이 둘이다").hasSize(2);
+
+        // when — 전원이 걸리는 접두사로 끝까지 읽는다
+        List<String> 전부 = new ArrayList<>();
+        String cursor = null;
+        int 페이지수 = 0;
+        do {
+            JsonNode page = cursor == null
+                    ? 조회한다("/admin/employees?displayName={p}&limit=" + 최대limit, "직원")
+                    : 조회한다("/admin/employees?displayName={p}&limit=" + 최대limit + "&cursor={c}",
+                            "직원", cursor);
+            page.get("items").forEach(item -> 전부.add(item.get("employeeId").asText()));
+            cursor = page.hasNonNull("nextCursor") ? page.get("nextCursor").asText() : null;
+            페이지수++;
+        } while (cursor != null && 페이지수 < 200);
+
+        // then — 검색은 직원 아이템을 보는 것이지 멤버십을 보는 게 아니다.
+        // 소속 수만큼 줄이 늘어나면 운영자는 같은 사람을 여러 명으로 읽는다.
+        assertThat(전부.stream().filter(겸직::equals).count())
+                .as("겸직 직원이 검색 결과에 여러 번 나온다").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("겸직 직원은 두 조직의 멤버 목록에 모두 나온다 — 검색과는 다른 질문이다")
+    void 겸직직원이_두_조직_멤버목록에_모두_있다() {
+        // given
+        한번만_동기화한다();
+        String 겸직 = 기대.landmarks().겸직직원();
+
+        // when, then
+        기대.직속조직들(겸직).forEach(org -> {
+            Set<String> 멤버 = new LinkedHashSet<>();
+            String cursor = null;
+            int 페이지수 = 0;
+            do {
+                JsonNode page = cursor == null
+                        ? 조회한다("/admin/organizations/" + org + "/members?limit=" + 최대limit)
+                        : 조회한다("/admin/organizations/" + org + "/members?limit=" + 최대limit
+                                + "&cursor={c}", cursor);
+                page.get("items").forEach(item -> 멤버.add(item.get("employeeId").asText()));
+                cursor = page.hasNonNull("nextCursor") ? page.get("nextCursor").asText() : null;
+                페이지수++;
+            } while (cursor != null && 페이지수 < 50);
+            assertThat(멤버).as("조직 %s 의 멤버 목록에 겸직 직원이 없다", org).contains(겸직);
+        });
     }
 
     @Test

@@ -23,6 +23,8 @@ public final class LdifRenderer {
 
     public static final String USER_OU = "ou=people";
     public static final String GROUP_OU = "ou=groups";
+    /** 빈 조직의 자리 채우기. 실제로 존재하지 않는 DN 이다 — 아래 조직을_쓴다 의 설명을 보라. */
+    public static final String PLACEHOLDER_MEMBER = "cn=placeholder";
 
     private final String baseDn;
 
@@ -91,8 +93,19 @@ public final class LdifRenderer {
                     ? groupDn(member.id())
                     : userDn(member.id()));
         }
-        // groupOfNames 는 member 를 최소 하나 요구한다. 빈 조직은 스키마 검사를 끈
-        // 서버에서만 이 형태로 살아남는다 — 시나리오의 빈 델타 경로가 그것을 노린다.
+        if (group.members().isEmpty()) {
+            // groupOfNames 는 member 를 <b>필수</b>로 요구한다. 실제 OpenLDAP 은 member 없는
+            // 엔트리를 objectClass violation 으로 거부하므로, 빈 조직을 그대로 쓰면 규모 시드가
+            // 실제 서버에 안 올라간다(임베디드 서버에서 스키마를 끄면 통과해 버려 더 위험하다).
+            //
+            // 그래서 실제 디렉터리가 쓰는 관례를 그대로 따른다 — 존재하지 않는 DN 을 자리
+            // 채우기로 넣는다. 전략은 사람도 그룹도 아닌 member 를 경고와 함께 건너뛰므로
+            // 조직은 여전히 멤버 0명으로 읽히고, 시나리오가 노리는 빈 델타 경로는 그대로다.
+            //
+            // 자기 DN 을 넣으면 안 된다 — 전략이 그것을 하위 조직으로 읽어 자기 자신을
+            // 자식으로 갖는 순환이 된다.
+            attr(sb, "member", PLACEHOLDER_MEMBER + "," + baseDn);
+        }
         sb.append('\n');
     }
 

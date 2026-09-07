@@ -84,8 +84,10 @@ class LdapScaleScenarioTest {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
         config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("scenario", 0));
-        // 빈 조직은 groupOfNames 의 member 필수 제약에 걸린다. 그 형태를 일부러 살린다.
-        config.setSchema(null);
+        // 스키마 검사를 <b>켜 둔다.</b> 껐더니 실제 OpenLDAP 이 거부하는 엔트리(member 없는
+        // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
+        // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
+        // 없는 형태를 검증하게 된다.
 
         LDAP = new InMemoryDirectoryServer(config);
         LDAP.importFromLDIF(true, new LDIFReader(new ByteArrayInputStream(
@@ -168,11 +170,19 @@ class LdapScaleScenarioTest {
     void L4_직원_삭제() {
         // given
         String 파트 = 기대.landmarks().대상파트();
+        // 아이디 정렬로 고른다. members 는 Set.copyOf 라 순회 순서가 JVM 실행마다 달라서,
+        // 그대로 두 명을 집으면 실행마다 다른 사람이 지워진다.
+        //
+        // 랜드마크 직원은 제외한다 — 뒤 시나리오들이 그 직원을 이름으로 잡고 쓰는데, 여기서
+        // 지워 버리면 "없는 엔트리를 수정" 으로 엉뚱한 곳에서 터진다. 실제로 한 번 터졌다.
         List<String> 지울사람 = 기대.snapshot().groups().get(파트).members().stream()
                 .filter(member -> member.type() == dev.starryeye.organization.core.model.MemberType.USER)
                 .map(MemberRef::id)
+                .filter(id -> !랜드마크직원들().contains(id))
+                .sorted()
                 .limit(2)
                 .toList();
+        assertThat(지울사람).hasSize(2);
 
         // when
         var editor = OrgChartEditor.편집한다(기대);
@@ -307,6 +317,7 @@ class LdapScaleScenarioTest {
         var 소속직원 = 기대.snapshot().groups().get(팀).members().stream()
                 .filter(member -> member.type() == dev.starryeye.organization.core.model.MemberType.USER)
                 .map(MemberRef::id)
+                .sorted()
                 .toList();
         var 옛조상들 = 기대.조상들(팀);
 
@@ -341,6 +352,7 @@ class LdapScaleScenarioTest {
                 .flatMap(team -> 기대.snapshot().groups().get(team).members().stream())
                 .filter(member -> member.type() == dev.starryeye.organization.core.model.MemberType.USER)
                 .map(MemberRef::id)
+                .sorted()
                 .findFirst().orElseThrow();
         String 고아팀 = 기대.직속조직(고아팀_직원);
 
@@ -402,6 +414,13 @@ class LdapScaleScenarioTest {
     }
 
     // ---------- 거들기 ----------
+
+    /** 뒤 시나리오들이 이름으로 잡아 쓰는 직원들. 여기 있는 사람은 함부로 지우면 안 된다. */
+    private static java.util.Set<String> 랜드마크직원들() {
+        var l = 기대.landmarks();
+        return java.util.Set.of(l.L2직속직원(), l.L3직속직원(), l.L4직속직원(),
+                l.L5직속직원(), l.L6직속직원(), l.겸직직원());
+    }
 
     private WebTestClient.BodyContentSpec 동기화한다() {
         return client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
