@@ -101,6 +101,20 @@ public final class OrgChartEditor {
         return this;
     }
 
+    /**
+     * 조직의 멤버를 <b>통째로</b> 비운다 — 직원뿐 아니라 하위 조직 참조까지.
+     *
+     * <p>SCIM 의 필터 없는 {@code remove members} 가 정확히 이것이다. 직원만 빼는 것으로
+     * 착각하면 기대값이 실제와 갈리는데, 그때 검증은 <b>구현이 하위 조직을 잃어버렸다</b>고
+     * 보고한다 — 실제로는 기대값이 틀린 것이다.
+     */
+    public OrgChartEditor 멤버를_모두_비운다(String orgCode) {
+        DirectoryGroup 원본 = require(groups.get(orgCode), "조직", orgCode);
+        groups.put(orgCode, new DirectoryGroup(
+                원본.id(), 원본.externalId(), 원본.displayName(), Set.of()));
+        return this;
+    }
+
     // ---------- 조직 ----------
 
     public OrgChartEditor 조직을_넣는다(String code, String 이름, String 부모) {

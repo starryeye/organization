@@ -45,10 +45,16 @@ public record RollupSampling(int 추가표본수) {
         Set<String> 표본 = new LinkedHashSet<>(List.of(
                 l.L2직속직원(), l.L3직속직원(), l.L4직속직원(),
                 l.L5직속직원(), l.L6직속직원(), l.겸직직원()));
+        // 시나리오가 진행되며 랜드마크 직원이 삭제될 수 있다. 없는 사람의 롤업을 묻는 것은
+        // 의미가 없고, 그 자리에서 터지면 정작 검증하려던 것이 가려진다.
+        표본.retainAll(chart.snapshot().users().keySet());
 
         List<String> 전체 = chart.snapshot().users().keySet().stream().sorted().toList();
         if (추가표본수 >= 전체.size()) {
             표본.addAll(전체);
+            return List.copyOf(표본);
+        }
+        if (전체.isEmpty()) {
             return List.copyOf(표본);
         }
         if (추가표본수 > 0) {

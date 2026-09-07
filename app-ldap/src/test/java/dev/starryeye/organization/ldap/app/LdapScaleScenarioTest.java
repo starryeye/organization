@@ -7,6 +7,9 @@ import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
+import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -105,6 +108,7 @@ class LdapScaleScenarioTest {
     @Autowired WebTestClient client;
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
+    @Autowired StoreBootstrapper bootstrapper;
 
     // ---------- L1~L2: 최초와 무변경 ----------
 
@@ -429,10 +433,22 @@ class LdapScaleScenarioTest {
                 .expectBody();
     }
 
+    /**
+     * <b>두 경로로</b> 확인한다.
+     *
+     * <p>하나는 {@code RelationTupleChecker} 포트를 타는 하네스, 하나는 OpenFGA SDK 를 그대로
+     * 쓰는 직접 질의다. 어댑터에 결함이 있으면 하네스는 그 결함에 <b>같이 속는다</b> — 어댑터가
+     * "있다" 고 말한 것을 어댑터로 확인하는 셈이기 때문이다. 같은 사실을 서로 다른 경로로 두 번
+     * 물어 답이 갈리면, 갈렸다는 것 자체가 결함이다.
+     */
     private void 검증한다() {
-        var 결과 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(결과).isNotNull();
-        assertThat(결과.어긋났는가()).as(결과 == null ? "" : 결과.요약()).isFalse();
+        var 하네스 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
+        assertThat(하네스).isNotNull();
+        assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
+
+        var 직접 = new OpenFgaProbe(bootstrapper)
+                .직접_대조한다(기대, RollupSampling.기본값().표본을_고른다(기대));
+        assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
     }
 
     private boolean 성립하는가(RelationTuple tuple) {

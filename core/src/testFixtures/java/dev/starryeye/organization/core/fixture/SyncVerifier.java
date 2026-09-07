@@ -177,7 +177,12 @@ public final class SyncVerifier {
 
         for (String userId : 표본) {
             Set<String> 기대소속 = 기대.기대소속(userId);
-            기대소속.forEach(org -> 참이어야.add(RelationTuple.member(userId, org)));
+            // 비활성 직원은 <b>소속이 그대로여도 권한이 없다.</b> 멤버십은 남기고 튜플만
+            // 지우는 것이 비활성의 정의이므로(설계 §5.1), 소속만 보고 member 를 기대하면
+            // 올바른 구현을 결함으로 신고한다 — 실제로 그렇게 신고했다.
+            boolean 활성 = 활성인가(기대, userId);
+            기대소속.forEach(org -> (활성 ? 참이어야 : 거짓이어야)
+                    .add(RelationTuple.member(userId, org)));
             새면_안되는_조직들(기대, userId, 기대소속)
                     .forEach(org -> 거짓이어야.add(RelationTuple.member(userId, org)));
         }
@@ -199,6 +204,11 @@ public final class SyncVerifier {
             }
             return new VerificationResult(어긋남);
         });
+    }
+
+    private static boolean 활성인가(OrgChart 기대, String userId) {
+        DirectoryUser user = 기대.snapshot().users().get(userId);
+        return user != null && user.active();
     }
 
     /**

@@ -234,6 +234,49 @@ class SyncVerifierTest {
     }
 
     @Test
+    @DisplayName("④ 비활성 직원은 소속이 그대로여도 member 가 아니어야 한다")
+    void 비활성직원의_롤업은_끊겨야_한다() {
+        // given — 비활성이 됐지만 멤버십은 그대로인 직원. 비활성의 정의가 그것이다.
+        // 하네스가 active 를 안 보면 "소속이 있으니 member 여야 한다" 고 기대해
+        // 올바른 구현을 결함으로 신고한다 — 실제로 그렇게 신고했다.
+        String 퇴사자 = chart.landmarks().L4직속직원();
+        OrgChart 비활성된조직도 = 비활성으로_바꾼다(퇴사자);
+
+        state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
+        // 구현이 올바르게 동작한 상태를 만든다 — dm 도 member 도 지워졌다
+        chart.기대소속(퇴사자).forEach(org ->
+                checker.allowed.remove(RelationTuple.member(퇴사자, org)));
+        chart.직속조직들(퇴사자).forEach(org ->
+                checker.allowed.remove(RelationTuple.directMember(퇴사자, org)));
+
+        // when
+        var result = verifier.검증한다(비활성된조직도).block();
+
+        // then — 올바른 상태이므로 통과해야 한다
+        assertThat(result).isNotNull();
+        assertThat(result.어긋났는가()).as(result == null ? "" : result.요약()).isFalse();
+    }
+
+    @Test
+    @DisplayName("④ 비활성 직원의 롤업이 살아 있으면 잡는다")
+    void 비활성인데_롤업이_남으면_잡는다() {
+        // given — dm 은 지웠는데 member 해석이 남아 있는 모양
+        String 퇴사자 = chart.landmarks().L4직속직원();
+        OrgChart 비활성된조직도 = 비활성으로_바꾼다(퇴사자);
+        state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
+        chart.직속조직들(퇴사자).forEach(org ->
+                checker.allowed.remove(RelationTuple.directMember(퇴사자, org)));
+        // member 는 일부러 남겨 둔다
+
+        // when
+        var result = verifier.검증한다(비활성된조직도).block();
+
+        // then
+        assertThat(result.어긋남()).anyMatch(message ->
+                message.startsWith("④ 권한이 아래로 샌다") || message.contains(퇴사자));
+    }
+
+    @Test
     @DisplayName("어긋남을 첫 건에서 멈추지 않고 전부 모은다")
     void 어긋남을_전부_모은다() {
         // given
