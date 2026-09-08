@@ -403,9 +403,13 @@ L4 실을 그 손자 L6 파트의 하위로 만든다 (A→B→C→A).
 
 ## 4. SCIM 시나리오
 
-**구현 상태:** S2, S4~S9, S11~S16 구현 완료 (`ScimScaleScenarioTest`). 최초 싱크를 한 번만
-만들고 그 위에 순차로 쌓는다. 남은 것: S1(조직 먼저 순서), S3(락 경합), S10(PUT 전체 교체),
-S17(고아 튜플 한계), S18(재적재), S19(아카이빙).
+**구현 상태:** S1~S19 <b>전부 구현 완료.</b>
+
+| 시나리오 | 테스트 클래스 |
+|---|---|
+| S2~S16 | `ScimScaleScenarioTest` — 최초 싱크 한 번 위에 순차로 쌓는다 |
+| S1 | `ScimProvisioningOrderScaleTest` — 조직 먼저 순서, 늦게 온 직원 |
+| S17, S18, S19 | `ScimLimitsAndRecoveryScaleTest` — 한계·아카이빙·재적재 |
 
 **모든 단계가 두 경로로 확인된다.** 하네스는 `RelationTupleChecker` 포트를 타고, `OpenFgaProbe`
 는 OpenFGA SDK 를 그대로 쓴다. 어댑터에 결함이 있으면 하네스는 그 결함에 <b>같이 속으므로</b>,
@@ -627,6 +631,60 @@ OpenFGA 에 `dm(ghost, DEV001)` 을 직접 심는다. DynamoDB 에 `ghost` 는 �
 | **측정** | `loadAll` + BatchCheck 111청크 소요 |
 
 어긋남을 심어두고(예: 튜플 하나 직접 삭제) **어긋남 로그가 남는지**도 본다.
+
+---
+
+## 4.5 SCIM 실측 (2026-09-07, 로컬 macOS)
+
+자동화 테스트와 별개로, 실제 앱을 독립 프로세스로 띄우고 <b>IdP 역할로 밖에서</b> 요청을
+쐈다. LDAP 은 원천 디렉터리를 띄우면 앱이 알아서 읽어 가지만 SCIM 은 받는 쪽이라, 실측하려면
+쏘는 쪽이 따로 있어야 한다 — `generateScimSeed` 가 요청 시퀀스를 NDJSON 으로 떨구고
+`docker/scim/replay.py` 가 순차로 보낸다.
+
+```bash
+./gradlew :connector-scim:generateScimSeed
+docker compose up -d openfga dynamodb-local
+./gradlew :app-scim:bootRun
+python3 docker/scim/replay.py
+```
+
+### 결과
+
+| | |
+|---|---|
+| 최초 싱크 5,376건 | **48.0초** (건당 8.9ms), 실패 0건 |
+| 직원 상세 조회 (겸직, 두 갈래 경로) | 23ms |
+| 500명 조직 멤버 100건 | 61ms |
+| JVM 힙 | 138MB |
+
+순차 적재 중 락 대기는 건당 평균 1.1ms, 최대 25.9ms 였다 (`scim_lock_wait_seconds`).
+
+### 동시 쓰기 실측 — 설계의 503 이 실제로 성립한다
+
+동시 32스레드로 500건을 쐈다.
+
+```
+200: 216건
+503: 284건
+500:   0건        ← 여기가 핵심이다
+scim_lock_contended_total      334
+scim_lock_wait_seconds_max     3.15초   ← 설계한 3초 획득 타임아웃
+```
+
+**500 이 하나도 없다.** IdP 는 503 을 재시도 신호로 보므로 프로비저닝이 유실되지 않는다.
+500 이나 400 으로 뭉갰다면 IdP 가 영구 실패로 판단해 포기하거나 무한히 재시도했을 것이다
+(설계 §4.4). 최대 대기가 3.15초로 설계값과 맞는 것도 여기서 확인됐다.
+
+`ScimScaleScenarioTest` 의 S3 가 이 동작을 자동화로 고정한다 — 이미 활성인 직원에게
+`active:true` 를 보내 <b>어느 요청이 성공하든 최종 상태가 안 바뀌게</b> 해 두고, 응답이
+200/503 뿐인지만 본다.
+
+### 이 과정에서 확인한 것 하나
+
+`/actuator/prometheus` 가 테스트 컨텍스트에서 404 였다. 제품 결함이 아니라 <b>Spring Boot 가
+테스트에서 메트릭 익스포트를 기본으로 끄기</b> 때문이고, 실제 앱은 200 을 준다.
+`@AutoConfigureObservability` 를 붙여 테스트에서도 메트릭을 보게 했다 — 안 그러면 메트릭
+회귀를 테스트로 못 잡는다.
 
 ---
 

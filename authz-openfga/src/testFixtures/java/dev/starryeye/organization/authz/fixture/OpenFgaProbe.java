@@ -3,6 +3,9 @@ package dev.starryeye.organization.authz.fixture;
 import dev.openfga.sdk.api.client.model.ClientBatchCheckItem;
 import dev.openfga.sdk.api.client.model.ClientBatchCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.openfga.sdk.api.client.model.ClientTupleKey;
+import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
+import dev.openfga.sdk.api.client.model.ClientWriteRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.VerificationResult;
@@ -40,6 +43,38 @@ public final class OpenFgaProbe {
 
     public OpenFgaProbe(StoreBootstrapper bootstrapper) {
         this.bootstrapper = bootstrapper;
+    }
+
+    /**
+     * 우리 쓰기 경로를 <b>거치지 않고</b> OpenFGA 에 튜플을 직접 심는다.
+     *
+     * <p>동기화가 만들 수 없는 상태 — 멤버십이 아예 없는 고아 튜플 — 를 일부러 만들기 위한
+     * 것이다. 설계 §5.4 가 "이건 우리 검증으로 못 잡는다" 고 적어 둔 한계를 실제로 만들어
+     * 놓고, 정말 안 잡히는지 그리고 무엇으로는 지워지는지를 고정한다.
+     */
+    public void 직접_심는다(RelationTuple tuple) {
+        try {
+            bootstrapper.client().write(new ClientWriteRequest().writes(List.of(
+                    new ClientTupleKey()
+                            .user(tuple.user())
+                            .relation(tuple.relation())
+                            ._object(tuple.object())))).get();
+        } catch (Exception e) {
+            throw new IllegalStateException("OpenFGA 직접 쓰기 실패: " + tuple, e);
+        }
+    }
+
+    /** 우리 쓰기 경로를 거치지 않고 직접 지운다. 어긋남을 일부러 만들 때 쓴다. */
+    public void 직접_지운다(RelationTuple tuple) {
+        try {
+            bootstrapper.client().write(new ClientWriteRequest().deletes(List.of(
+                    new ClientTupleKeyWithoutCondition()
+                            .user(tuple.user())
+                            .relation(tuple.relation())
+                            ._object(tuple.object())))).get();
+        } catch (Exception e) {
+            throw new IllegalStateException("OpenFGA 직접 삭제 실패: " + tuple, e);
+        }
     }
 
     /** 단건 Check. */

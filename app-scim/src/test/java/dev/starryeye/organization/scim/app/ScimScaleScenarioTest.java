@@ -130,6 +130,51 @@ class ScimScaleScenarioTest {
         assertThat(멤버를_끝까지_읽는다(대형조직)).isEqualTo(직속직원들(대형조직));
     }
 
+    @Test
+    @Order(3)
+    @DisplayName("S10. 조직 멤버 전체 교체 PUT — 요청에 없는 '빠진 사람'을 이전 목록에서 찾아낸다")
+    void S10_PUT_전체_교체() {
+        // given — 12명 중 4명을 빼고 3명을 새로 넣는다.
+        // 요청 본문에는 <b>빠진 4명이 안 적혀 있다</b> — 이전 멤버 목록을 읽어 계산하는
+        // 경로가 여기다(설계 §5.5). 요청 데이터만으로는 무엇을 지울지 알 수 없다.
+        String 팀 = 기대.landmarks().이동할팀();
+        List<String> 현재멤버 = 직속직원들(팀).stream().sorted().toList();
+        assertThat(현재멤버).as("빼고 넣을 여유가 있어야 한다").hasSizeGreaterThan(4);
+
+        List<String> 뺄사람 = 현재멤버.subList(0, 4);
+        List<String> 남길사람 = 현재멤버.subList(4, 현재멤버.size());
+        List<String> 새사람 = List.of("put.a", "put.b", "put.c");
+        새사람.forEach(id -> 성공을_기대하며_보낸다(ScimRequestRenderer.직원생성(
+                new dev.starryeye.organization.core.model.DirectoryUser(
+                        id, null, id, "신입 " + id, id + "@example.com", true))));
+
+        // 하위 조직 참조는 PUT 본문에도 그대로 실어야 한다 — 빠뜨리면 계층이 끊긴다
+        List<MemberRef> 새목록 = new ArrayList<>();
+        기대.자식조직들(팀).forEach(자식 -> 새목록.add(MemberRef.group(자식)));
+        남길사람.forEach(id -> 새목록.add(MemberRef.user(id)));
+        새사람.forEach(id -> 새목록.add(MemberRef.user(id)));
+
+        var 새조직 = new dev.starryeye.organization.core.model.DirectoryGroup(
+                팀, 팀, 기대.snapshot().groups().get(팀).displayName(),
+                new LinkedHashSet<>(새목록));
+
+        // when
+        보낸다(ScimRequestRenderer.조직교체(새조직), 200);
+        var editor = OrgChartEditor.편집한다(기대);
+        뺄사람.forEach(id -> editor.겸직을_푼다(id, 팀));
+        새사람.forEach(id -> editor.직원을_넣는다(팀, id, "신입 " + id, id + "@example.com"));
+        기대 = editor.완성();
+
+        // then — 나머지 8명은 손대지 않는다
+        검증한다();
+        뺄사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 팀)))
+                .as("빠졌어야 할 %s 가 남아 있다", id).isFalse());
+        남길사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 팀)))
+                .as("유지됐어야 할 %s 가 사라졌다", id).isTrue());
+        새사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 팀)))
+                .as("새로 들어온 %s 가 없다", id).isTrue());
+    }
+
     // ---------- S4~S9: 직원 변경 ----------
 
     @Test
@@ -394,6 +439,45 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(15)
+    @DisplayName("S3. 동시 쓰기 경합 — 못 잡으면 503 이고, 500 은 하나도 없어야 한다")
+    void S3_락_경합() throws Exception {
+        // given — 이미 활성인 직원에게 active:true 를 보낸다.
+        // 어느 요청이 성공하든 <b>최종 상태가 안 바뀌는</b> 연산이라, 경합 결과가
+        // 기대 조직도를 흔들지 않는다. 재려는 것은 상태 변화가 아니라 거절 방식이다.
+        List<String> 대상 = 직속직원들(기대.landmarks().대형조직()).stream()
+                .sorted().limit(200).toList();
+        assertThat(대상).isNotEmpty();
+
+        // when — 동시에 쏜다
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(16);
+        try {
+            List<java.util.concurrent.Future<Integer>> futures = new ArrayList<>();
+            대상.forEach(id -> futures.add(pool.submit(() -> 상태코드를_받는다(
+                    ScimRequestRenderer.직원활성(id)))));
+
+            var 집계 = new java.util.TreeMap<Integer, Integer>();
+            for (var future : futures) {
+                집계.merge(future.get(2, java.util.concurrent.TimeUnit.MINUTES), 1, Integer::sum);
+            }
+            System.out.println("=== S3. 동시 16스레드 × " + 대상.size() + "건 응답: " + 집계);
+
+            // then — 락을 못 잡은 요청은 503 이다. IdP 는 503 을 재시도 신호로 보므로
+            // 프로비저닝이 유실되지 않는다. 500 이나 400 으로 뭉개면 IdP 가 영구 실패로
+            // 판단해 포기하거나 무한히 재시도한다.
+            assertThat(집계.keySet())
+                    .as("200 과 503 이외의 응답이 나왔다")
+                    .isSubsetOf(200, 503);
+            assertThat(집계.getOrDefault(200, 0)).as("전부 거절되면 안 된다").isPositive();
+        } finally {
+            pool.shutdown();
+        }
+
+        // 경합이 있었어도 최종 상태는 정합이다
+        검증한다();
+    }
+
+    @Test
+    @Order(16)
     @DisplayName("S16. 순환 조직 참조 — 요청은 성공하고 순환을 닫는 간선만 빠진다")
     void S16_순환_참조() {
         // given — 조상을 자기 자손의 멤버로 넣는다
@@ -414,6 +498,17 @@ class ScimScaleScenarioTest {
 
     private void 성공을_기대하며_보낸다(ScimRequest request) {
         보낸다(request, 201);
+    }
+
+    /** 상태코드만 받는다 — 경합에서는 실패도 정상 응답이라 단정하지 않는다. */
+    private int 상태코드를_받는다(ScimRequest request) {
+        return client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
+                .patch().uri(request.path())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(request.body())
+                .exchange()
+                .returnResult(Void.class)
+                .getStatus().value();
     }
 
     private void 보낸다(ScimRequest request, int 기대상태) {

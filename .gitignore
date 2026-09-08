@@ -12,3 +12,7 @@ build/
 # 규모 시드는 생성물이다 — 1MB 넘는 파일을 저장소에 두지 않는다.
 # ./gradlew :connector-ldap:generateScaleSeed 로 만든다.
 docker/ldap/scale-*/
+
+# SCIM 실측 시드도 생성물이다.
+# ./gradlew :connector-scim:generateScimSeed 로 만든다.
+docker/scim/*.ndjson
