@@ -6,6 +6,9 @@ import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapOperations;
 
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
 import javax.naming.directory.BasicAttribute;
 import javax.naming.directory.BasicAttributes;
@@ -14,6 +17,7 @@ import java.util.List;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -161,18 +165,85 @@ class RangedAttributeReaderTest {
     }
 
     @Test
-    @DisplayName("서버가 값을 더 주지 않는데 완료 표시도 없으면 무한 루프 대신 멈춘다")
-    void 이상한_응답에서_멈춘다() {
+    @DisplayName("서버가 값을 더 주지 않는데 완료 표시도 없으면 던진다 — 읽은 만큼으로 끝내면 나머지가 삭제된다")
+    void 이상한_응답에서_던진다() {
         // given — 늘 "미완료 + 0개" 를 돌려주는 고장난 서버
         LdapOperations 고장난서버 = mock(LdapOperations.class);
         when(고장난서버.lookup(eq("cn=x"), any(String[].class), any(ContextMapper.class)))
                 .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of(), false));
 
-        // when — 여기서 안 멈추면 테스트가 영영 끝나지 않는다
-        List<String> 전부 = RangedAttributeReader.전부_읽는다(고장난서버, "cn=x", MEMBER);
+        // when & then — 여기서 안 멈추면 테스트가 영영 끝나지 않는다
+        assertThatThrownBy(() -> RangedAttributeReader.전부_읽는다(고장난서버, "cn=x", MEMBER))
+                .isInstanceOf(IncompleteAttributeReadException.class)
+                .hasMessageContaining("cn=x")
+                .hasMessageContaining(MEMBER);
+    }
 
-        // then
-        assertThat(전부).isEmpty();
+    @Test
+    @DisplayName("조각이 한도를 넘으면 던진다 — 끝없이 조금씩 주는 서버")
+    void 조각_한도를_넘으면_던진다() {
+        // given — 늘 "미완료 + 1개" 를 돌려주어 영영 안 끝나는 서버
+        LdapOperations 찔끔주는서버 = mock(LdapOperations.class);
+        when(찔끔주는서버.lookup(eq("cn=x"), any(String[].class), any(ContextMapper.class)))
+                .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of("cn=u"), false));
+
+        // when & then
+        assertThatThrownBy(() -> RangedAttributeReader.전부_읽는다(찔끔주는서버, "cn=x", MEMBER))
+                .isInstanceOf(IncompleteAttributeReadException.class);
+    }
+
+    @Test
+    @DisplayName("응답을 읽다 실패하면 던진다 — 빈 목록으로 삼키면 그 조직이 통째로 비어 보인다")
+    void 읽다_실패하면_던진다() throws Exception {
+        // given — 속성을 훑다가 끊긴다. getAll() 자체는 검사 예외를 던지지 않으므로
+        // 실제로 끊기는 자리인 NamingEnumeration.hasMore() 에서 던지게 한다
+        NamingEnumeration<Attribute> 열거 = mock(NamingEnumeration.class);
+        when(열거.hasMore()).thenThrow(new NamingException("연결이 끊겼다"));
+        Attributes 고장난응답 = mock(Attributes.class);
+        when(고장난응답.getAll()).thenAnswer(invocation -> 열거);
+
+        // when & then
+        assertThatThrownBy(() -> RangedAttributeReader.읽는다(고장난응답, MEMBER))
+                .isInstanceOf(IncompleteAttributeReadException.class)
+                .hasRootCauseInstanceOf(NamingException.class);
+    }
+
+    @Test
+    @DisplayName("값을 꺼내다 실패하면 던진다 — 읽다 만 목록을 돌려주면 나머지가 삭제된다")
+    void 값을_꺼내다_실패하면_던진다() throws Exception {
+        // given — 첫 값은 주고 그 다음에 끊기는 속성
+        Attribute 끊기는속성 = mock(Attribute.class);
+        when(끊기는속성.getID()).thenReturn(MEMBER);
+        NamingEnumeration<?> 열거 = mock(NamingEnumeration.class);
+        when(열거.hasMore()).thenReturn(true).thenThrow(new NamingException("연결이 끊겼다"));
+        when(열거.next()).thenReturn("cn=a");
+        when(끊기는속성.getAll()).thenAnswer(invocation -> 열거);
+
+        Attributes attributes = new BasicAttributes();
+        attributes.put(끊기는속성);
+
+        // when & then
+        assertThatThrownBy(() -> RangedAttributeReader.읽는다(attributes, MEMBER))
+                .isInstanceOf(IncompleteAttributeReadException.class);
+    }
+
+    @Test
+    @DisplayName("진짜로 멤버가 0명인 것과 못 읽은 것을 구분한다 — 이 설계의 전제")
+    void 진짜_삭제와_못_읽음을_구분한다() {
+        // given — 진짜 삭제: range 옵션 없이 값이 0개. "이게 전부다"
+        Attributes 진짜비었음 = new BasicAttributes();
+        진짜비었음.put(new BasicAttribute(MEMBER));
+
+        // given — 못 읽음: 상한이 숫자다. "더 있다, 또 물어라"
+        Attributes 잘렸음 = new BasicAttributes();
+        잘렸음.put(new BasicAttribute(MEMBER));
+        잘렸음.put(값이_있는(MEMBER + ";range=0-1499", "cn=a"));
+
+        // when & then — 진짜 삭제는 예외가 아니어야 한다. 아니면 삭제가 영원히 전파되지 않는다
+        assertThat(RangedAttributeReader.읽는다(진짜비었음, MEMBER).완료())
+                .as("range 옵션이 없으면 서버가 '이게 전부다' 라고 말한 것이다").isTrue();
+        assertThat(RangedAttributeReader.읽는다(잘렸음, MEMBER).완료())
+                .as("상한이 숫자면 서버가 '더 있다' 라고 말한 것이다").isFalse();
     }
 
     // ---------- 거들기 ----------

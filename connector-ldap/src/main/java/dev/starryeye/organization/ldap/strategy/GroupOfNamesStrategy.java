@@ -170,6 +170,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             return 결과;
         });
 
+        // 마지막 인자가 무조건 true 인 것은 낙관이 아니다 — 끝까지 못 읽으면
+        // 전부_읽는다 가 IncompleteAttributeReadException 을 던지므로 여기 도달하지 못한다.
         return entries.stream()
                 .map(entry -> 이어받은것.containsKey(entry.id())
                         ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(),

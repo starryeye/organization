@@ -1,6 +1,5 @@
 package dev.starryeye.organization.ldap.strategy;
 
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapOperations;
 
@@ -45,8 +44,14 @@ import java.util.regex.Pattern;
  *
  * <p>범위 옵션을 붙여 보내지 않는 서버(OpenLDAP, 임베디드 UnboundID)에서는 평범한 속성 하나가
  * 그대로 오므로 이 클래스는 값을 그대로 돌려주고 끝난다 — 동작이 바뀌지 않는다.
+ *
+ * <p><b>끝까지 못 읽으면 {@link IncompleteAttributeReadException} 을 던진다. 읽은 만큼을
+ * 돌려주지 않는다.</b> 부분 목록은 상위에서 "이 조직의 멤버가 줄었다" 와 구별되지 않고,
+ * 그것이 곧 권한 튜플 삭제이기 때문이다 — 이 클래스가 존재하는 이유인 결함과 같은 모양이다.
+ * <b>진짜로 멤버가 없어진 경우는 여기 걸리지 않는다</b> — 그때 서버는 범위 옵션 없이 값
+ * 0개를 주고, 그것은 "이게 전부다" 라서 완료로 읽힌다. 둘의 구분은 짐작이 아니라 서버가
+ * 프로토콜로 알려주는 값이다.
  */
-@Slf4j
 final class RangedAttributeReader {
 
     /** {@code member;range=0-1499} 또는 {@code member;range=1500-*}. */
@@ -54,8 +59,9 @@ final class RangedAttributeReader {
             "^(?<name>[^;]+);range=(?<low>\\d+)-(?<high>\\d+|\\*)$", Pattern.CASE_INSENSITIVE);
 
     /**
-     * 값이 안 늘어나는데 완료 표시도 없는 응답이 오면 여기서 멈춘다. 서버가 예상 밖으로
-     * 동작할 때 무한 루프로 도는 것보다, 읽은 만큼으로 끝내고 경고를 남기는 편이 낫다.
+     * 조각이 이 수를 넘으면 포기한다. 1,000조각이면 한계선이 1,000이어도 100만 개다 —
+     * 정상적인 조직이 여기 닿을 일은 없고, 닿았다면 서버가 예상 밖으로 동작하는 것이다.
+     * 무한 루프로 도는 것보다 낫다.
      */
     private static final int 최대조각수 = 1_000;
 
@@ -104,8 +110,8 @@ final class RangedAttributeReader {
                 }
             }
         } catch (Exception e) {
-            log.warn("속성 '{}' 을 읽지 못했습니다", 속성명, e);
-            return Chunk.완결(List.of());
+            throw new IncompleteAttributeReadException(
+                    "속성 '%s' 을 읽지 못했습니다".formatted(속성명), e);
         }
         return Chunk.완결(평범한것 == null ? List.of() : 값들(평범한것));
     }
@@ -126,15 +132,16 @@ final class RangedAttributeReader {
                 return 모은것;
             }
             if (chunk.values().isEmpty()) {
-                log.warn("범위 검색이 값을 더 주지 않는데 완료 표시도 없습니다. 읽은 만큼으로 끝냅니다: "
-                        + "dn={}, 속성={}, 지금까지 {}개", dn, 속성명, 모은것.size());
-                return 모은것;
+                throw new IncompleteAttributeReadException(
+                        ("범위 검색이 값을 더 주지 않는데 완료 표시도 없습니다: "
+                                + "dn=%s, 속성=%s, 지금까지 %d개")
+                                .formatted(dn, 속성명, 모은것.size()));
             }
             다음 += chunk.values().size();
         }
-        log.warn("범위 검색 조각이 {}개를 넘었습니다. 읽은 만큼으로 끝냅니다: dn={}, 속성={}, {}개",
-                최대조각수, dn, 속성명, 모은것.size());
-        return 모은것;
+        throw new IncompleteAttributeReadException(
+                "범위 검색 조각이 %d개를 넘었습니다: dn=%s, 속성=%s, %d개"
+                        .formatted(최대조각수, dn, 속성명, 모은것.size()));
     }
 
     private static Chunk 한조각(LdapOperations 한커넥션, String dn, String 속성명, int 시작) {
@@ -152,7 +159,9 @@ final class RangedAttributeReader {
                 result.add((String) 전부.next());
             }
         } catch (Exception e) {
-            log.warn("속성 '{}' 의 값을 읽지 못했습니다", attribute.getID(), e);
+            throw new IncompleteAttributeReadException(
+                    "속성 '%s' 의 값을 %d개까지 읽고 끊겼습니다"
+                            .formatted(attribute.getID(), result.size()), e);
         }
         return result;
     }
