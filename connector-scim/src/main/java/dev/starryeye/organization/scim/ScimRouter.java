@@ -81,7 +81,7 @@ public final class ScimRouter {
     }
 
     /**
-     * 지원하지 않는 기능을 정직하게 광고한다. 여기서 filter 를 지원한다고 하면
+     * 지원하지 않는 기능을 정직하게 선언한다. 여기서 filter 를 지원한다고 하면
      * IdP 가 필터 질의를 보내기 시작하고, 우리는 그것을 처리할 수 없다.
      */
     private static Mono<ServerResponse> serviceProviderConfig() {
