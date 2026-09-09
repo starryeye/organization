@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * SCIM 이 보낸 단건 변경을 튜플에 반영한다.
@@ -263,9 +264,19 @@ public class IncrementalSyncUseCase {
     private Mono<IncrementalSyncResult> removeUserInternal(String userId, LockLease lease) {
         return state.findUser(userId)
                 .flatMap(user -> affectedGroupsOf(userId).flatMap(groups -> {
-                    Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(user));
+                    // 스냅샷은 좁힌다 — 델타에는 이 직원의 튜플만 남으므로 동료가 필요 없다.
+                    Set<GroupHeader> headers = groups.stream()
+                            .map(group -> new GroupHeader(
+                                    group.id(), group.externalId(), group.displayName()))
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
+                    Mono<DirectorySnapshot> before = 직원한명_그림(headers, userId, Mono.just(user));
+                    // 삭제 후에는 어느 조직에도 속하지 않으므로 조직이 하나도 없는 그림이 맞다.
+                    Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
+
+                    // 커밋에는 좁히지 않은 groups/without 을 쓴다 — saveGroup 은 members() 를
+                    // 최종 목록으로 받아 거기 없는 멤버 줄을 지운다. 좁힌 것을 넘기면
+                    // 이 조직의 멤버가 통째로 삭제된다.
                     Set<DirectoryGroup> without = removeMemberFrom(groups, MemberRef.user(userId));
-                    Mono<DirectorySnapshot> after = snapshotOf(without, Mono.empty());
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         Set<DirectoryGroup> reconciled = reconcileRemovedMember(
