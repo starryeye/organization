@@ -1,7 +1,7 @@
 # 직원 한 명 변경의 스냅샷을 그 한 명으로 좁힌다
 
 **작성일:** 2026-09-10
-**상태:** 설계. 구현 전
+**상태:** 구현 완료. **S3 503 감소가 락 시간 단축만으로 설명되는지는 증명하지 않았다** (§5.6)
 **발단:** 픽스처 최대 조직을 500명 → 1,600명으로 키우자 S1(조직 먼저 순서)이 46.5초 → 835.4초
 **바꿀 것:** `IncrementalSyncUseCase`, `DirectoryStateRepository`(+구현체), `GroupHeader`(신규)
 
@@ -297,7 +297,12 @@ then   OpenFGA 에서 kim 튜플만 사라지고
 **2026-09-10 재측정 (`containsMember` 추가, 커밋 `b87263c`, 후).** `:app-scim:test`
 단독 `BUILD SUCCESSFUL in 6m 48s`, 58 tests, 실패 0. (앞서 적어 둔 전체 빌드
 `4m 40s`/569 tests 는 `containsMember` 이전 회차라 이번 재측정 대상이 아니다 —
-`:app-scim:test` 는 이번 수정이 닿는 유일한 모듈이다.)
+`:app-scim:test` 는 이번 수정이 닿는 유일한 모듈이 **아니다.** `containsMember` 는
+`core`(main, test, testFixtures) 와 `storage-dynamodb`(main, test) 도 바꿨고, 그
+필터를 지키는 테스트(`IncrementalSyncReadScopeTest`, `DynamoDbDirectoryStateRepositoryTest`
+등)는 `:app-scim:test` 가 아니라 그 두 모듈에 있다. 재측정할 때는 `:core:test` 와
+`:storage-dynamodb:test` 도 함께 돌려야 한다 — `:app-scim:test` 만 돌리면 이 수정이
+지키는 안전장치는 아예 실행되지 않는다.)
 
 | | 원래 (수정 전 코드) | 스냅샷 축소 후 (구 측정, 이제 무효) | `containsMember` 수정 후 (현재 코드) |
 |---|---|---|---|

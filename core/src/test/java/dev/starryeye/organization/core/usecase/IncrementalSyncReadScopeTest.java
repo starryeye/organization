@@ -88,6 +88,11 @@ class IncrementalSyncReadScopeTest {
                 .as("멤버 목록이 필요 없으므로 파티션을 통째로 읽지 않는다")
                 .isEmpty();
         assertThat(state.findGroupHeaderCalls).containsExactly(대형조직);
+
+        // then — 멤버십은 GSI 가 아니라 강한 일관성으로 다시 확인한다
+        assertThat(state.containsMemberCalls)
+                .as("이 확인이 사라지면 방금 지워진 멤버십을 낡은 GSI 히트가 되살려 다시 쓴다")
+                .containsExactly(new FakeStateRepository.ContainsMemberCall(대형조직, MemberRef.user("u0")));
     }
 
     @Test
