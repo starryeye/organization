@@ -32,9 +32,13 @@ public class FakeStateRepository implements DirectoryStateRepository {
      */
     public final List<String> findGroupHeaderCalls = new ArrayList<>();
 
+    /** {@link #findUser} 가 불린 순서대로의 직원 아이디. {@link #findGroupCalls} 와 같은 목적. */
+    public final List<String> findUserCalls = new ArrayList<>();
+
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
-        return Mono.justOrEmpty(users.get(userId));
+        return Mono.fromRunnable(() -> findUserCalls.add(userId))
+                .then(Mono.justOrEmpty(users.get(userId)));
     }
 
     @Override

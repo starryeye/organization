@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -170,14 +171,16 @@ public class IncrementalSyncUseCase {
         DirectoryUser neverStored = new DirectoryUser(
                 user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
 
-        return affectedGroupsOf(user.id())
-                .flatMap(groups -> state.findUser(user.id())
+        return affectedGroupHeadersOf(user.id())
+                .flatMap(headers -> state.findUser(user.id())
                         .map(Optional::of)
                         .defaultIfEmpty(Optional.empty())
                         .flatMap(existing -> {
                             DirectoryUser existingUser = existing.orElse(neverStored);
-                            Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(existingUser));
-                            Mono<DirectorySnapshot> after = snapshotOf(groups, Mono.just(user));
+                            Mono<DirectorySnapshot> before =
+                                    직원한명_그림(headers, user.id(), Mono.just(existingUser));
+                            Mono<DirectorySnapshot> after =
+                                    직원한명_그림(headers, user.id(), Mono.just(user));
 
                             Commit commit = (result, beforeTuples, afterTuples) -> {
                                 if (existing.isEmpty() && result.hasFailure()) {
@@ -775,6 +778,39 @@ public class IncrementalSyncUseCase {
                 .flatMap(allGroups -> changed.map(Set::of).defaultIfEmpty(Set.of())
                         .flatMap(overrides -> loadMemberUsers(allGroups, overrides)
                                 .map(users -> new DirectorySnapshot(users, byId(allGroups)))));
+    }
+
+    /**
+     * <b>직원 한 명에 대한 연산을 위한 스냅샷.</b> 조직의 멤버 목록을 그 직원 하나로 바꾸고,
+     * 유저도 그 한 명만 싣는다. {@link #loadMemberUsers} 를 부르지 않는다.
+     *
+     * <p><b>왜 동료를 안 실어도 결과가 같은가.</b> {@link #diffAndApply} 가 후보·목표·상태
+     * 기준선 셋 모두를 {@code mentioning(user:그사람)} 으로 좁힌다. 동료의 튜플은
+     * {@code direct_member(user:X, group:G)} 라 어느 자리도 그 직원이 아니므로 <b>세 집합
+     * 전부에서 사라진다.</b> 좁힌 스냅샷은 그 튜플들을 애초에 만들지 않을 뿐, 걸러진 결과가
+     * 같다. child 간선은 {@code group:} 둘로만 이루어져 역시 언급되지 않고, 사용자는 조직
+     * 그래프에 순환을 만들 수 없다.
+     *
+     * <p><b>여기서 만든 조직을 {@code saveGroup} 에 넘기면 안 된다.</b> 멤버 목록이 한 명뿐이라
+     * 그 조직의 나머지 멤버 줄이 전부 삭제된다 — 저장에는 반드시 전체 목록을 쓴다.
+     */
+    private Mono<DirectorySnapshot> 직원한명_그림(Set<GroupHeader> headers,
+                                             String userId,
+                                             Mono<DirectoryUser> user) {
+        Set<MemberRef> 그사람만 = Set.of(MemberRef.user(userId));
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        headers.forEach(header -> groups.put(header.id(), new DirectoryGroup(
+                header.id(), header.externalId(), header.displayName(), 그사람만)));
+
+        return user.map(Set::of).defaultIfEmpty(Set.<DirectoryUser>of())
+                .map(users -> new DirectorySnapshot(byUserId(users), groups));
+    }
+
+    /** 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 경로에서 쓴다. */
+    private Mono<Set<GroupHeader>> affectedGroupHeadersOf(String userId) {
+        return state.findGroupIdsContaining(MemberRef.user(userId))
+                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+                .collect(LinkedHashSet<GroupHeader>::new, Set::add);
     }
 
     /**
