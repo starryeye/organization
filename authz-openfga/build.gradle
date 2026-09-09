@@ -1,7 +1,14 @@
+apply plugin: 'java-test-fixtures'
+
 dependencies {
     api project(':core')
     implementation libs.openfga.sdk
     implementation 'org.springframework.boot:spring-boot-starter'
+
+    // OpenFGA 를 우리 어댑터를 거치지 않고 직접 두드리는 검증 도구가 여기 산다.
+    // SDK 타입을 공개 표면에 쓰므로 api 로 노출한다.
+    testFixturesApi libs.openfga.sdk
+    testFixturesApi testFixtures(project(':core'))
 
     testImplementation libs.testcontainers.junit
 }

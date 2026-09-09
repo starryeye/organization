@@ -37,6 +37,12 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
      *
      * <p><b>매 시도가 읽기를 처음부터 다시 한다.</b> {@code Mono.fromCallable} 이 {@code read} 를
      * 새로 부르므로, 페이징 도중 끊겨도 앞 시도의 부분 결과가 섞이지 않는다.
+     *
+     * <p><b>재시도를 다 쓰면 마지막 실패를 그대로 던진다.</b> 기본값은 {@code
+     * RetryExhaustedException} 인데, 그 메시지가 {@code "Retries exhausted: 3/3"} 이라
+     * 동기화 이력에 그 문장만 남는다. 실제로 벌어진 일이 <b>디렉터리가 잘린 목록을 줬다</b>
+     * ({@code SizeLimitExceededException}) 여도 이력만 보는 운영자는 알 수 없다 — 이력은
+     * 무엇이 잘못됐는지 말해야 하는 자리다.
      */
     @Override
     public Mono<DirectorySnapshot> fetchAll() {
@@ -44,7 +50,8 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
                 .subscribeOn(Schedulers.boundedElastic())
                 .retryWhen(Retry.backoff(properties.getMaxRetries(), RETRY_BACKOFF)
                         .doBeforeRetry(signal -> log.warn("LDAP 읽기 실패, 재시도 {}회차",
-                                signal.totalRetries() + 1, signal.failure())))
+                                signal.totalRetries() + 1, signal.failure()))
+                        .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
                 .doOnNext(snapshot -> log.info("LDAP 에서 직원 {}명, 조직 {}개를 읽었다",
                         snapshot.users().size(), snapshot.groups().size()));
     }

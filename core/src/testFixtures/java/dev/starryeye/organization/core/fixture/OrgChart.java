@@ -5,7 +5,9 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -63,6 +65,18 @@ public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
         return orgs.iterator().next();
     }
 
+    /**
+     * 겸직이 있어도 <b>하나로 정해지는</b> 주 소속. 아이디 정렬 순 첫 번째다.
+     *
+     * <p>DIT 처럼 소속을 하나만 표현할 수 있는 형식이 이것을 쓴다. 정렬로 정하는 이유는
+     * {@link DirectorySnapshot} 의 순회 순서가 JVM 실행마다 달라지기 때문이다 — "첫 번째"
+     * 를 순회로 정하면 렌더러가 실행마다 다른 조직에 직원을 심는다.
+     */
+    public String 주소속(String userId) {
+        return 직속조직들(userId).stream().sorted().findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("소속이 없는 직원입니다: " + userId));
+    }
+
     /** {@code userId} 가 직속으로 속한 조직들. */
     public Set<String> 직속조직들(String userId) {
         Set<String> orgs = new LinkedHashSet<>();
@@ -82,6 +96,40 @@ public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
             all.addAll(조상들(org));
         }
         return all;
+    }
+
+    /**
+     * {@code orgCode} 아래 모든 하위 조직. 롤업 <b>음성</b> 검증이 이것을 쓴다.
+     *
+     * <p>멤버십은 위로만 흐르므로, 어떤 조직의 직속 직원은 그 조직의 <b>자손</b>에 대해
+     * {@code member = false} 여야 한다. 아래로 새는 결함은 양성 검증만으로는 절대 안 잡힌다 —
+     * 있어야 할 것은 그대로 다 있기 때문이다.
+     */
+    public Set<String> 자손들(String orgCode) {
+        Set<String> found = new LinkedHashSet<>();
+        Deque<String> 남은것 = new ArrayDeque<>(자식조직들(orgCode));
+        while (!남은것.isEmpty()) {
+            String current = 남은것.pop();
+            if (found.add(current)) {
+                남은것.addAll(자식조직들(current));
+            }
+        }
+        return found;
+    }
+
+    /** {@code orgCode} 의 직속 하위 조직들. */
+    public Set<String> 자식조직들(String orgCode) {
+        DirectoryGroup group = snapshot.groups().get(orgCode);
+        if (group == null) {
+            return Set.of();
+        }
+        Set<String> children = new LinkedHashSet<>();
+        for (MemberRef member : group.members()) {
+            if (member.type() == MemberType.GROUP) {
+                children.add(member.id());
+            }
+        }
+        return children;
     }
 
     public long 멤버십수() {

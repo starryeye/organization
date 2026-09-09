@@ -136,6 +136,28 @@ class OrgChartFixtureTest {
     }
 
     @Test
+    @DisplayName("랜드마크가 각자의 용도에 실제로 쓸 수 있는 모양이다")
+    void 랜드마크가_용도에_맞는다() {
+        // given
+        var l = chart.landmarks();
+
+        // then — 이동할팀이 이미 목적지 아래에 있으면 그 시나리오는 아무것도 안 하고 통과한다.
+        // 이런 랜드마크 결함은 시나리오 쪽 실패로 나타나서 원인을 찾는 데 시간이 든다.
+        assertThat(chart.부모(l.이동할팀()))
+                .as("이동할팀이 이미 목적지 아래면 이동 시나리오가 무의미해진다")
+                .isNotEqualTo(l.이동목적지실());
+        assertThat(l.이동목적지실()).isNotEqualTo(l.삭제할실());
+
+        // 삭제할실은 계층이 끊기는 것을 보려는 것이므로 하위 조직이 있어야 한다
+        assertThat(chart.자식조직들(l.삭제할실()))
+                .as("하위 조직이 없으면 '고아가 된다' 를 볼 수 없다").isNotEmpty();
+
+        // 멤버를 넣고 뺄 대상들은 실제로 멤버가 있어야 한다
+        assertThat(chart.snapshot().groups().get(l.대상팀()).members()).isNotEmpty();
+        assertThat(chart.snapshot().groups().get(l.대상파트()).members()).isNotEmpty();
+    }
+
+    @Test
     @DisplayName("두 번 만들어도 같은 조직도가 나온다 — 결정론적")
     void 결정론적이다() {
         // when

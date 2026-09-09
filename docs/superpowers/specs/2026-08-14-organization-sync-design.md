@@ -675,7 +675,7 @@ boolean shouldAbort(TupleDelta delta, Set<RelationTuple> baseline) {
 | PATCH | `/scim/v2/Groups/{id}` | O |
 | DELETE | `/scim/v2/Groups/{id}` | O |
 | GET | `/scim/v2/Users`, `/Groups` (목록) | X — 필터/페이징 비목표 |
-| GET | `/scim/v2/ServiceProviderConfig` | O (지원 기능 광고) |
+| GET | `/scim/v2/ServiceProviderConfig` | O (지원 기능 선언) |
 
 ### 10.1 PATCH 지원 범위
 
@@ -707,7 +707,7 @@ IdP가 그룹 멤버 변경에 실제로 쓰는 경로만 구현한다.
 | `Group.displayName` | `DirectoryGroup.displayName` | **조직명**. 튜플에 사용하지 않음 |
 | `Group.members[].value` + `type` | `Set<MemberRef>` | |
 
-Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)은 파싱하지 않는다. 요청에 포함되면 무시하고 `ServiceProviderConfig`에도 광고하지 않는다.
+Enterprise User 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`)은 파싱하지 않는다. 요청에 포함되면 무시하고 `ServiceProviderConfig`에도 지원한다고 선언하지 않는다.
 
 `active: false`인 유저는 튜플을 생성하지 않는다(비활성 직원에게 권한이 남지 않도록). LDAP도 동일 규칙을 적용한다.
 

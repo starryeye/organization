@@ -236,8 +236,8 @@ class ScimGroupHandlerTest {
     }
 
     @Test
-    @DisplayName("ServiceProviderConfig 는 지원하지 않는 기능을 정직하게 광고한다")
-    void 지원기능을_광고한다() {
+    @DisplayName("ServiceProviderConfig 는 지원하지 않는 기능을 정직하게 선언한다")
+    void 지원기능을_선언한다() {
         // given, when, then
         client.get().uri("/scim/v2/ServiceProviderConfig")
                 .exchange()
