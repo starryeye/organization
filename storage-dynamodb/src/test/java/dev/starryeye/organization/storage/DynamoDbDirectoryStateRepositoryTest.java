@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -267,5 +268,32 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then — 이때는 갱신되는 것이 맞다. 보존 로직이 "한 번 쓰면 영원히" 가
         // 되어버리면 이 경우를 틀리게 만든다.
         assertThat(addedAt("DEV001", kim)).isNotEqualTo(최초합류);
+    }
+
+    @Test
+    @DisplayName("findGroupHeader 는 멤버를 읽지 않고 조직의 이름과 externalId 만 돌려준다")
+    void 헤더만_읽는다() {
+        // given — 멤버가 있는 조직
+        repository.saveGroup(new DirectoryGroup("PLANT", "ou=plant", "제1공장",
+                Set.of(MemberRef.user("kim"), MemberRef.user("park")))).block();
+
+        // when
+        GroupHeader header = repository.findGroupHeader("PLANT").block();
+
+        // then
+        assertThat(header).isNotNull();
+        assertThat(header.id()).isEqualTo("PLANT");
+        assertThat(header.externalId()).isEqualTo("ou=plant");
+        assertThat(header.displayName()).isEqualTo("제1공장");
+    }
+
+    @Test
+    @DisplayName("없는 조직이면 빈 결과다 — findGroup 이 빈 것을 돌려주던 것과 같은 뜻")
+    void 없는_조직은_빈_결과다() {
+        // when
+        GroupHeader header = repository.findGroupHeader("없는조직").block();
+
+        // then
+        assertThat(header).isNull();
     }
 }

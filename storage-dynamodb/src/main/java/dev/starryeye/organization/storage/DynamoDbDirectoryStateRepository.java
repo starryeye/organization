@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
@@ -160,6 +161,26 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return queryPartition(Keys.groupPk(groupId))
                 .collectList()
                 .flatMap(items -> Mono.justOrEmpty(toGroup(groupId, items)));
+    }
+
+    /**
+     * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 META 한 건만 집어온다 —
+     * {@link #findUser} 와 같은 이유다. 읽는 양이 조직 크기를 따라가지 않는다.
+     *
+     * <p><b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고.
+     */
+    @Override
+    public Mono<GroupHeader> findGroupHeader(String groupId) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                                Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(response -> new GroupHeader(groupId,
+                        Attrs.str(response.item(), EXTERNAL_ID),
+                        Attrs.str(response.item(), DISPLAY_NAME)));
     }
 
     @Override

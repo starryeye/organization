@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.fake;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import reactor.core.publisher.Flux;
@@ -25,6 +26,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
      */
     public final List<String> findGroupCalls = new ArrayList<>();
 
+    /**
+     * {@link #findGroupHeader} 가 불린 순서대로의 조직 id. {@link #findGroupCalls} 와
+     * 같은 목적의 계측이다.
+     */
+    public final List<String> findGroupHeaderCalls = new ArrayList<>();
+
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
         return Mono.justOrEmpty(users.get(userId));
@@ -44,6 +51,14 @@ public class FakeStateRepository implements DirectoryStateRepository {
     public Mono<DirectoryGroup> findGroup(String groupId) {
         return Mono.fromRunnable(() -> findGroupCalls.add(groupId))
                 .then(Mono.justOrEmpty(groups.get(groupId)));
+    }
+
+    @Override
+    public Mono<GroupHeader> findGroupHeader(String groupId) {
+        return Mono.fromRunnable(() -> findGroupHeaderCalls.add(groupId))
+                .then(Mono.justOrEmpty(groups.get(groupId)))
+                .map(group -> new GroupHeader(
+                        group.id(), group.externalId(), group.displayName()));
     }
 
     @Override

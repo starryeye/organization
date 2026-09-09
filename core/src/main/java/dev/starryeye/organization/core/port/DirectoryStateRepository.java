@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.port;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -25,6 +26,18 @@ public interface DirectoryStateRepository {
     Flux<String> findUserIdsByUserName(String userName);
 
     Mono<DirectoryGroup> findGroup(String groupId);
+
+    /**
+     * 멤버를 빼고 조직의 META 만 읽는다. <b>읽는 양이 조직 크기를 따라가지 않는다.</b>
+     *
+     * <p>직원 한 명에 대한 연산은 조직의 id 만 있으면 튜플을 만들 수 있는데,
+     * {@link #findGroup} 은 파티션을 통째로 읽어 1,600명 조직이면 1,601 아이템을 가져온다.
+     * {@link #findUser} 가 이미 같은 이유로 Query 대신 GetItem 을 쓴다.
+     *
+     * <p>조직이 없으면 빈 {@code Mono} 다 — {@link #findGroup} 이 그때 빈 것을 돌려주는
+     * 것과 같은 뜻이므로, 부르는 쪽의 "없는 조직은 건너뛴다" 동작이 바뀌지 않는다.
+     */
+    Mono<GroupHeader> findGroupHeader(String groupId);
 
     Mono<Void> saveUser(DirectoryUser user);
 
