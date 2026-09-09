@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * SCIM 최초 싱크 <b>한 번</b>의 실비를 잰다.
  *
  * <p>답을 얻으려는 질문: 시나리오 19건을 이 위에 쌓을 수 있는가. LDAP 은 동기화 호출 한 번이라
- * 부담이 없는데, SCIM 최초 싱크는 HTTP 요청 5,376건이고 건건이 DynamoDB + OpenFGA 쓰기를
+ * 부담이 없는데, SCIM 최초 싱크는 HTTP 요청이 수천 건이고 건건이 DynamoDB + OpenFGA 쓰기를
  * 탄다. 이게 몇 분이면 시나리오마다 처음부터 다시 채울 수 없고, 최초 싱크를 한 번만 만들고
  * 재사용하는 구조로 가야 한다.
  *
@@ -70,7 +70,7 @@ class ScimScaleSyncCostTest {
     @Autowired RelationTupleChecker checker;
 
     @Test
-    @DisplayName("5,024명 최초 싱크가 실제로 끝나고, 하네스 검증까지 통과한다")
+    @DisplayName("조직도 전체 최초 싱크가 실제로 끝나고, 하네스 검증까지 통과한다")
     void 최초싱크_실비를_잰다() {
         // given
         OrgChart chart = OrgChartFixture.오천명();

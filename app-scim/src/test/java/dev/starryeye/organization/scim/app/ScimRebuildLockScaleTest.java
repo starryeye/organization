@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 지우는 것까지 봤다. 여기서 보는 것은 그 <b>도중</b>이다 — 리스가 유지되는가, 그리고 그동안
  * 들어오는 SCIM 쓰기가 어떻게 거절되는가.
  *
- * <p><b>리스 TTL 을 2초로 줄인다.</b> 기본값 30초로는 5,541 튜플 재적재가 그보다 빨리 끝나
+ * <p><b>리스 TTL 을 2초로 줄인다.</b> 기본값 30초로는 재적재가 그보다 빨리 끝나
  * 하트비트가 한 번도 필요하지 않다 — 갱신이 통째로 망가져 있어도 테스트가 통과한다.
  * TTL 을 재적재 소요보다 짧게 만들어야 <b>갱신이 실제로 일을 한다.</b>
  */
@@ -90,7 +90,7 @@ class ScimRebuildLockScaleTest {
 
     @Test
     @Order(1)
-    @DisplayName("5,376건을 적재해 기준 상태를 만든다")
+    @DisplayName("조직도 전체를 적재해 기준 상태를 만든다")
     void 기준_상태를_만든다() {
         ScimRequestRenderer.최초싱크(기대).forEach(request -> 보낸다(request, 201));
         검증한다();

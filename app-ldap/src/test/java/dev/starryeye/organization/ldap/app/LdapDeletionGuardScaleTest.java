@@ -57,6 +57,9 @@ class LdapDeletionGuardScaleTest {
     private static final String BASE_DN = "dc=example,dc=com";
     private static final OrgChart 최초 = OrgChartFixture.오천명();
     private static final double 임계비율 = 0.3;
+    /** 픽스처에서 유도한다 — 조직도를 키울 때 경계값 계산을 손으로 고치지 않도록. */
+    private static final int 최초튜플수 = dev.starryeye.organization.core.tuple.TupleMapper
+            .toTuples(최초.snapshot()).tuples().size();
 
     private static OrgChart 기대 = 최초;
     /** 소속이 하나뿐인 직원들. 한 명 지우면 튜플이 정확히 하나 줄어 계산이 어긋나지 않는다. */
@@ -113,10 +116,10 @@ class LdapDeletionGuardScaleTest {
 
     @Test
     @Order(1)
-    @DisplayName("기준선을 만든다 — 5,541 튜플")
+    @DisplayName("기준선을 만든다 — 조직도 전체를 적재한다")
     void 기준선을_만든다() {
         // when, then
-        동기화한다(false).jsonPath("$.writtenCount").isEqualTo(5_541);
+        동기화한다(false).jsonPath("$.writtenCount").isEqualTo(최초튜플수);
         검증한다();
     }
 
@@ -124,8 +127,8 @@ class LdapDeletionGuardScaleTest {
     @Order(2)
     @DisplayName("L12-a. 임계치와 같은 비율은 통과한다 — 한 건 차이의 아래쪽")
     void L12a_경계_아래는_통과한다() {
-        // given — 기준선 5,541 의 30% 는 1,662.3 이므로 1,662 건이 통과 쪽 경계다
-        int 기준선 = 5_541;
+        // given — 임계치와 같은 비율이 되는 가장 큰 정수가 통과 쪽 경계다
+        int 기준선 = 최초튜플수;
         int 지울건수 = (int) Math.floor(기준선 * 임계비율);
         assertThat((double) 지울건수 / 기준선).isLessThanOrEqualTo(임계비율);
 
@@ -144,13 +147,13 @@ class LdapDeletionGuardScaleTest {
     @DisplayName("L12-b. 임계치를 한 건 넘기면 중단하고 아무것도 안 지운다")
     void L12b_경계_위는_중단한다() {
         // given — 새 기준선(3,879)의 30% 를 한 건 넘긴다
-        int 기준선 = 5_541 - (int) Math.floor(5_541 * 임계비율);
+        int 기준선 = 최초튜플수 - (int) Math.floor(최초튜플수 * 임계비율);
         int 지울건수 = (int) Math.floor(기준선 * 임계비율) + 1;
         assertThat((double) 지울건수 / 기준선).isGreaterThan(임계비율);
 
         // LDAP 에서만 지운다. 중단되면 기대값은 그대로여야 하므로 편집하지 않는다 —
         // 여기서 기대값을 같이 옮기면 "아무것도 안 지웠다" 를 검증할 기준이 사라진다.
-        int 이미지운수 = (int) Math.floor(5_541 * 임계비율);
+        int 이미지운수 = (int) Math.floor(최초튜플수 * 임계비율);
         LDAP에서만_지운다(이미지운수, 이미지운수 + 지울건수);
 
         // when
@@ -170,8 +173,8 @@ class LdapDeletionGuardScaleTest {
     @DisplayName("L13. force=true 는 가드를 지나 실제로 지운다")
     void L13_강제로_우회한다() {
         // given — LDAP 은 이미 L12-b 의 상태다. 기대값만 그쪽으로 맞춘다
-        int 이미지운수 = (int) Math.floor(5_541 * 임계비율);
-        int 추가로지운수 = (int) Math.floor((5_541 - 이미지운수) * 임계비율) + 1;
+        int 이미지운수 = (int) Math.floor(최초튜플수 * 임계비율);
+        int 추가로지운수 = (int) Math.floor((최초튜플수 - 이미지운수) * 임계비율) + 1;
         var editor = OrgChartEditor.편집한다(기대);
         단일소속직원.subList(이미지운수, 이미지운수 + 추가로지운수).forEach(editor::직원을_지운다);
         기대 = editor.완성();

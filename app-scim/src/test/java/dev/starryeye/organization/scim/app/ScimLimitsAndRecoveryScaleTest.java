@@ -44,7 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>셋이 한 클래스인 것은 <b>서로 이어지기 때문</b>이다. 고아 튜플을 심고(S17) → 아카이빙이
  * 그것을 담지 않는 것을 보고(S19) → 재적재가 그것을 지우는 것을 본다(S18). 따로 떼면 각각
- * 5,376건 적재를 다시 해야 하고, 무엇보다 <b>"무엇으로는 안 지워지고 무엇으로는 지워지는가"</b>
+ * 전체 적재를 다시 해야 하고, 무엇보다 <b>"무엇으로는 안 지워지고 무엇으로는 지워지는가"</b>
  * 라는 하나의 이야기가 세 조각으로 흩어진다.
  */
 @Testcontainers
@@ -93,7 +93,7 @@ class ScimLimitsAndRecoveryScaleTest {
 
     @Test
     @Order(1)
-    @DisplayName("5,376건을 적재해 기준 상태를 만든다")
+    @DisplayName("조직도 전체를 적재해 기준 상태를 만든다")
     void 기준_상태를_만든다() {
         // when
         ScimRequestRenderer.최초싱크(기대).forEach(this::보낸다);
@@ -145,7 +145,7 @@ class ScimLimitsAndRecoveryScaleTest {
         // when
         long t0 = System.currentTimeMillis();
         var outcome = archive.execute().block(Duration.ofMinutes(10));
-        System.out.printf("%n=== S19. 아카이빙 5,000 규모: %.1f초%n",
+        System.out.printf("%n=== S19. 아카이빙: %.1f초%n",
                 (System.currentTimeMillis() - t0) / 1000.0);
 
         // then
@@ -189,7 +189,7 @@ class ScimLimitsAndRecoveryScaleTest {
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
-        System.out.printf("=== S18. mode=tuples 재적재 5,541 튜플: %.1f초%n",
+        System.out.printf("=== S18. mode=tuples 재적재: %.1f초%n",
                 (System.currentTimeMillis() - t0) / 1000.0);
 
         // then — 어긋남이 메워지고
@@ -206,7 +206,7 @@ class ScimLimitsAndRecoveryScaleTest {
 
     @Test
     @Order(5)
-    @DisplayName("이력과 메트릭이 5,000 규모에서 제대로 남는다")
+    @DisplayName("이력과 메트릭이 대규모에서 제대로 남는다")
     void 이력과_메트릭이_남는다() {
         // when
         JsonNode runs = client.get().uri("/admin/sync/runs?limit=10").exchange()

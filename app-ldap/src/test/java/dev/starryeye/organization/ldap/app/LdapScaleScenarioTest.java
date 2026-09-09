@@ -114,14 +114,14 @@ class LdapScaleScenarioTest {
 
     @Test
     @Order(1)
-    @DisplayName("L1. 최초 전체 동기화 — 빈 상태에서 5,541 튜플을 만든다")
+    @DisplayName("L1. 최초 전체 동기화 — 빈 상태에서 조직도 전체를 튜플로 만든다")
     void L1_최초_전체_동기화() {
         // when
         var 결과 = 동기화한다();
 
         // then
         결과.jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.writtenCount").isEqualTo(5_541)
+                .jsonPath("$.writtenCount").isEqualTo(전체튜플수())
                 .jsonPath("$.deletedCount").isEqualTo(0);
         검증한다();
     }
@@ -418,6 +418,12 @@ class LdapScaleScenarioTest {
     }
 
     // ---------- 거들기 ----------
+
+    /** 픽스처에서 유도한다 — 조직도를 키울 때 테스트를 손으로 고치지 않도록. */
+    private static int 전체튜플수() {
+        return dev.starryeye.organization.core.tuple.TupleMapper
+                .toTuples(최초.snapshot()).tuples().size();
+    }
 
     /** 뒤 시나리오들이 이름으로 잡아 쓰는 직원들. 여기 있는 사람은 함부로 지우면 안 된다. */
     private static java.util.Set<String> 랜드마크직원들() {

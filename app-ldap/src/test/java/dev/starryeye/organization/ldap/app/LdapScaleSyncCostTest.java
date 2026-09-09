@@ -88,7 +88,7 @@ class LdapScaleSyncCostTest {
     @Autowired RelationTupleChecker checker;
 
     @Test
-    @DisplayName("5,024명 전체 동기화가 한 회차로 끝나고, 하네스 검증까지 통과한다")
+    @DisplayName("조직도 전체 동기화가 한 회차로 끝나고, 하네스 검증까지 통과한다")
     void 전체동기화_실비를_잰다() {
         // when
         long t0 = System.currentTimeMillis();

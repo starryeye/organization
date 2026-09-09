@@ -44,8 +44,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * SCIM 규모 시나리오 (시나리오 문서 §4).
  *
- * <p><b>최초 싱크를 한 번만 만들고 그 위에 순차로 쌓는다.</b> 시나리오마다 5,376건을 다시
- * 쏘면 SCIM 쪽만 13분이다. 실제 운영도 최초 싱크는 한 번뿐이므로 이어 붙이는 쪽이 더
+ * <p><b>최초 싱크를 한 번만 만들고 그 위에 순차로 쌓는다.</b> 시나리오마다 전체를 다시
+ * 쏘면 SCIM 쪽만 십수 분이다. 실제 운영도 최초 싱크는 한 번뿐이므로 이어 붙이는 쪽이 더
  * 실제에 가깝기도 하다.
  *
  * <p>모든 단계 끝에서 <b>세 가지로</b> 확인한다 — 하네스(포트 경유), OpenFGA 직접 질의,
@@ -90,7 +90,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(1)
-    @DisplayName("S2. 대량 프로비저닝 — 직원 5,024명 → 조직 352개 순으로 5,376건")
+    @DisplayName("S2. 대량 프로비저닝 — 직원 먼저, 그다음 조직")
     void S2_대량_프로비저닝() {
         // given
         List<ScimRequest> requests = ScimRequestRenderer.최초싱크(기대);
@@ -108,7 +108,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(2)
-    @DisplayName("admin 조회가 SCIM 으로 적재된 5,024명을 그대로 보여준다")
+    @DisplayName("admin 조회가 SCIM 으로 적재된 조직도를 그대로 보여준다")
     void admin조회가_적재를_보여준다() {
         // given — 겸직 직원. 소속이 둘인 사람이 화면에 어떻게 보이는지가 가장 헷갈리는 자리다
         String 겸직 = 기대.landmarks().겸직직원();
@@ -125,7 +125,7 @@ class ScimScaleScenarioTest {
         });
         assertThat(경로조직).isEqualTo(기대.기대소속(겸직));
 
-        // 500명 조직 멤버를 커서로 끝까지 — 한 명도 빠지거나 겹치면 안 된다
+        // 대형 조직 멤버를 커서로 끝까지 — 한 명도 빠지거나 겹치면 안 된다
         String 대형조직 = 기대.landmarks().대형조직();
         assertThat(멤버를_끝까지_읽는다(대형조직)).isEqualTo(직속직원들(대형조직));
     }
@@ -412,7 +412,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(14)
-    @DisplayName("S15. 500명 조직 멤버 교체 — 락을 쥔 채 BatchCheck 를 도는 구간")
+    @DisplayName("S15. 대형 조직 멤버 교체 — 락을 쥔 채 BatchCheck 를 도는 구간")
     void S15_대형조직_교체() {
         // given
         String 대형조직 = 기대.landmarks().대형조직();
@@ -425,7 +425,8 @@ class ScimScaleScenarioTest {
         long t0 = System.currentTimeMillis();
         보낸다(ScimRequestRenderer.멤버전체교체(대형조직, 남길사람), 200);
         long 소요 = System.currentTimeMillis() - t0;
-        System.out.printf("=== S15. 500명 조직 멤버 교체: %.1f초%n", 소요 / 1000.0);
+        System.out.printf("=== S15. 대형 조직(%d명) 멤버 교체: %.1f초%n",
+                현재멤버.size(), 소요 / 1000.0);
 
         var editor = OrgChartEditor.편집한다(기대);
         현재멤버.subList(현재멤버.size() - 20, 현재멤버.size())
