@@ -197,6 +197,7 @@ class LdapInterruptedSyncScaleTest {
         }
         @Override public Mono<DirectoryGroup> findGroup(String groupId) { return 실제.findGroup(groupId); }
         @Override public Mono<GroupHeader> findGroupHeader(String groupId) { return 실제.findGroupHeader(groupId); }
+        @Override public Mono<Boolean> containsMember(String groupId, MemberRef ref) { return 실제.containsMember(groupId, ref); }
         @Override public Mono<Void> saveUser(DirectoryUser user) { return 실제.saveUser(user); }
         @Override public Mono<Void> saveGroup(DirectoryGroup group) { return 실제.saveGroup(group); }
         @Override public Mono<Void> deleteUser(String userId) { return 실제.deleteUser(userId); }

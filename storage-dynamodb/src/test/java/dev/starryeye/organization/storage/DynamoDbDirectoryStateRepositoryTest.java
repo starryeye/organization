@@ -296,4 +296,23 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(header).isNull();
     }
+
+    @Test
+    @DisplayName("containsMember 는 실제로 그 멤버 줄이 있을 때만 true 다")
+    void 멤버줄이_있어야_true다() {
+        // given — PLANT 는 kim 만 멤버로 갖는다
+        repository.saveGroup(new DirectoryGroup("PLANT", "ou=plant", "제1공장",
+                Set.of(MemberRef.user("kim")))).block();
+
+        // when / then — kim 은 있고, 같은 조직의 park 은 없다
+        assertThat(repository.containsMember("PLANT", MemberRef.user("kim")).block()).isTrue();
+        assertThat(repository.containsMember("PLANT", MemberRef.user("park")).block()).isFalse();
+    }
+
+    @Test
+    @DisplayName("조직 자체가 없어도 예외 없이 false 다")
+    void 없는_조직의_멤버는_false다() {
+        // when / then
+        assertThat(repository.containsMember("없는조직", MemberRef.user("kim")).block()).isFalse();
+    }
 }

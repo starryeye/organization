@@ -51,9 +51,16 @@ import java.util.stream.Collectors;
  *       멤버로 참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child
  *       엣지를 만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
  *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고)</li>
- *   <li>유저 변경 — 그 유저 + 그 유저가 속한 모든 조직({@code findGroupIdsContaining} 으로
- *       찾음). {@code active} 가 뒤집히면 그 유저의 모든 {@code direct_member} 튜플이
- *       생기거나 사라진다</li>
+ *   <li>유저 변경 — 그 유저가 속한 모든 조직을 찾는 것은 {@code findGroupIdsContaining}
+ *       (GSI1, 최종 일관성) 하나지만 그 뒤가 갈린다. {@link #upsertUser} 는 조직마다
+ *       {@link #affectedGroupHeadersOf} 로 <b>헤더만</b> 읽고(멤버 목록은 필요 없다 — 커밋이
+ *       {@code saveUser} 뿐이라서다), GSI 가 낡아 이미 빠진 멤버십을 계속 보고할 가능성을
+ *       {@link DirectoryStateRepository#containsMember} 로 멤버 줄 자체를 강한 일관성으로
+ *       다시 확인해 걸러낸다({@link #직원한명_그림} 참고). {@link #removeUser} 는 반대로
+ *       {@link #affectedGroupsOf} 로 조직을 <b>멤버 목록째로</b> 그대로 읽는다 — 커밋이
+ *       {@code saveGroup} 이라 최종 멤버 목록 전체를 요구해서다(설계 §4.4). 어느 경로든
+ *       {@code active} 가 뒤집히거나(또는 유저가 삭제되면) 그 유저의 모든
+ *       {@code direct_member} 튜플이 생기거나 사라진다</li>
  * </ul>
  *
  * <p><b>최소 스냅샷이 볼 수 있는 규칙과 볼 수 없는 규칙(설계의 경계).</b>
@@ -159,8 +166,9 @@ public class IncrementalSyncUseCase {
      * 그 사람은 {@code active=false} 로 남는다. 권한이 없는 안전한 방향이지만
      * <b>프로비저닝이 조용히 실패한 상태</b>이고, 다음 {@code PUT} 이 올 때까지 그대로다.
      *
-     * <p>레코드를 만들지 않아도 안전한 이유: 재시도가 {@link #affectedGroupsOf} 로 소속을 다시
-     * 찾고, Check 기준선이 이미 쓰인 튜플을 보므로 남은 것만 정확히 다시 쓴다.
+     * <p>레코드를 만들지 않아도 안전한 이유: 재시도가 {@link #affectedGroupHeadersOf} 로 소속을
+     * 다시 찾고(멤버십은 {@link DirectoryStateRepository#containsMember} 로 강한 일관성 재확인을
+     * 거친다), Check 기준선이 이미 쓰인 튜플을 보므로 남은 것만 정확히 다시 쓴다.
      * {@link #upsertGroup} 이 같은 가드를 갖는다 — 다만 그쪽은 레코드를 만들면 부모의 child
      * 엣지를 <b>영원히</b> 못 쓰게 되므로 더 심각하다.
      */
@@ -817,10 +825,25 @@ public class IncrementalSyncUseCase {
                 .map(users -> new DirectorySnapshot(byUserId(users), groups));
     }
 
-    /** 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 경로에서 쓴다. */
+    /**
+     * 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 {@link #upsertUser} 에서만 쓴다.
+     *
+     * <p><b>멤버십을 {@link DirectoryStateRepository#containsMember} 로 다시 확인한다.</b>
+     * {@code findGroupIdsContaining} 은 GSI1 이라 최종 일관성이다 — 이 직원이 막 빠진 조직을
+     * 그 삭제가 인덱스에 반영되기 전까지 계속 보고할 수 있다. {@link #findGroupHeader} 는
+     * 조직의 <b>존재</b>만 확인하고 멤버십은 확인하지 않으므로, 그 결과만 믿으면 이미 지워진
+     * 멤버십이 {@link #직원한명_그림} 에서 <b>단언</b>되어 "실제로 없는 튜플"이 after 에
+     * 나타나고 재시도가 그것을 되살려 쓴다 — 있어야 할 튜플이 빠지는 것보다 위험한 방향이다
+     * ({@link DirectoryStateRepository#containsMember} 자바독 참고). 그래서 헤더를 읽기 전에
+     * 멤버 줄 자체를 강한 일관성으로 한 번 더 확인하고, 확인되지 않은 조직은 통째로 뺀다 —
+     * 조직 크기와 무관하게 조직 하나당 {@code GetItem} 이 하나 늘 뿐이다.
+     */
     private Mono<Set<GroupHeader>> affectedGroupHeadersOf(String userId) {
-        return state.findGroupIdsContaining(MemberRef.user(userId))
-                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+        MemberRef ref = MemberRef.user(userId);
+        return state.findGroupIdsContaining(ref)
+                .flatMap(groupId -> state.containsMember(groupId, ref)
+                        .filter(Boolean::booleanValue)
+                        .flatMap(confirmed -> state.findGroupHeader(groupId)), LOAD_CONCURRENCY)
                 .collect(LinkedHashSet<GroupHeader>::new, Set::add);
     }
 

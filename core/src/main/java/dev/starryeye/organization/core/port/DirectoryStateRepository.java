@@ -39,6 +39,24 @@ public interface DirectoryStateRepository {
      */
     Mono<GroupHeader> findGroupHeader(String groupId);
 
+    /**
+     * 조직 {@code groupId} 의 멤버 목록에 {@code ref} 가 실제로 있는지, 멤버 줄 한 개만
+     * 강한 일관성으로 확인한다.
+     *
+     * <p><b>왜 필요한가.</b> {@link #findGroupIdsContaining} 은 GSI1(최종 일관성)이라 멤버가
+     * 방금 빠진 조직을 잠시 계속 보고할 수 있다. 예전에는 그 뒤 {@link #findGroup} 이 파티션을
+     * 통째로 읽어 실제 멤버 목록으로 다시 걸렀으므로 그 낡은 히트가 조용히 걸러졌다. 지금은
+     * {@link #findGroupHeader} 가 그 자리를 대신하는데, 헤더는 조직의 <b>존재</b>만 확인하고
+     * <b>멤버십</b>은 확인하지 않는다 — 멤버가 빠져도 META 아이템은 그대로 남기 때문이다.
+     * 그래서 존재 확인과 멤버십 확인을 각자의 강한 일관성 읽기로 나눈다. 이걸 건너뛰면
+     * "조직에서 막 빠진 직원의 PUT 재시도"가 이미 지워진 멤버십을 되살려 쓴다 — 권한
+     * 있는 시스템에서 가장 위험한 방향의 오류다.
+     *
+     * <p>비용은 조직 크기와 무관하다 — {@link #findGroup} 처럼 파티션 전체를 읽지 않고
+     * 멤버 줄 한 개만 {@code GetItem} 한다.
+     */
+    Mono<Boolean> containsMember(String groupId, MemberRef ref);
+
     Mono<Void> saveUser(DirectoryUser user);
 
     /** 멤버십까지 포함해 교체한다. 기존 멤버십 중 사라진 것은 삭제된다. */
