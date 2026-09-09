@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
 import dev.starryeye.organization.core.fixture.OrgChart;
+import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
@@ -240,6 +241,53 @@ class ScimLimitsAndRecoveryScaleTest {
                 .as("Check 호출과 어긋남 카운터는 운영이 드리프트를 보는 유일한 창이다")
                 .contains("authz_checks_total")
                 .contains("authz_drift_detected_total");
+    }
+
+    // ---------- S20: 순서 뒤집힘 ----------
+
+    @Test
+    @Order(6)
+    @DisplayName("S20. push 순서가 뒤집히면 IdP 의 의도와 반대 상태가 되고, 우리는 그것을 못 잡는다")
+    void S20_순서가_뒤집히면_못_잡는다() {
+        // given — IdP 의 의도는 "넣었다가 뺀다" 이므로 최종적으로 이 직원은 팀에 없어야 한다.
+        //
+        //   IdP 의도:  add(kim→TEAM)  →  remove(kim→TEAM)   최종: 팀에 없음
+        //
+        // 그런데 add 가 503 으로 밀렸다가 remove 뒤에 재시도되면 도착 순서가 뒤집힌다.
+        // SCIM 명세에는 요청 간 순서 보장이 없고, 우리에게는 IdP 의 의도 순서를 알 방법이 없다.
+        String 팀 = 기대.landmarks().대상팀();
+        String 직원 = 기대.landmarks().L2직속직원();
+        assertThat(기대.직속조직들(직원)).as("전제: 이 직원은 그 팀 소속이 아니다").doesNotContain(팀);
+
+        // when — 뒤집힌 순서로 도착한다: remove 가 먼저, add 가 나중
+        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 200);
+        보낸다(ScimRequestRenderer.멤버추가(팀,
+                dev.starryeye.organization.core.model.MemberRef.user(직원)), 200);
+
+        // then — IdP 가 마지막으로 원한 것은 "빠짐" 인데 실제로는 "들어감" 이다
+        assertThat(성립하는가(RelationTuple.member(직원, 팀)))
+                .as("순서가 뒤집혀도 IdP 의 최신 의도가 지켜졌다면 좋은 소식이다 — "
+                        + "순서 보장이 생긴 것이니 설계 문서를 고쳐라")
+                .isTrue();
+
+        // 그리고 <b>하네스는 이것을 못 잡는다.</b> DynamoDB 와 OpenFGA 가 서로 완벽히
+        // 일치하기 때문이다 — 고아 튜플도 없고 드리프트도 없다. 어긋난 것은
+        // "우리 상태 ↔ IdP 의 의도" 이고, 우리는 IdP 를 읽을 수단이 없다(SCIM 은 push 전용).
+        //
+        // 이것이 S17 의 고아 튜플보다 더 안 보이는 이유다. 고아 튜플은 최소한 재적재로
+        // 지워지기라도 하는데, 이것은 재적재해도 우리 DynamoDB 기준으로 다시 쓰므로
+        // 틀린 채로 굳는다.
+        var 뒤집힌결과 = OrgChartEditor.편집한다(기대).겸직을_더한다(직원, 팀).완성();
+        var 하네스 = new SyncVerifier(state, checker).검증한다(뒤집힌결과).block(Duration.ofMinutes(10));
+        assertThat(하네스).isNotNull();
+        assertThat(하네스.어긋났는가())
+                .as("하네스가 순서 뒤집힘을 잡게 됐다면 무엇이 바뀐 것인지 확인하라: "
+                        + (하네스 == null ? "" : 하네스.요약()))
+                .isFalse();
+
+        // 원래대로 돌려놓는다 — 뒤 시나리오가 이 상태를 물려받지 않도록
+        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 200);
+        검증한다();
     }
 
     // ---------- 거들기 ----------
