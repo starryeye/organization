@@ -158,6 +158,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
         log.info("멤버가 범위 검색으로 잘린 조직 {}개를 이어받는다", 잘린것.size());
 
+        // realDn 으로 색인한다 — entry.id() 는 안 된다. IdNormalizer 가 금지 문자를 뭉개
+        // 서로 다른 조직코드를 같은 값으로 만들 수 있고(DuplicateIdGuard 가 막는 바로 그
+        // 충돌), 그 상태에서 아이디로 색인하면 잘리지 않은 형제 조직까지 이 맵에 걸려
+        // 남의 이어받은 멤버 목록을 받는다 — 3명짜리 조직이 조용히 1,600명을 떠안는 권한
+        // 확대다. realDn 은 서버가 돌려준 진짜 DN이라 엔트리마다 유일하다.
         Map<String, List<String>> 이어받은것 = LdapTemplates.한_커넥션에서(template, 한커넥션 -> {
             Map<String, List<String>> 결과 = new LinkedHashMap<>();
             for (RawEntry entry : 잘린것) {
@@ -165,7 +170,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                         한커넥션, entry.realDn(), config.getMemberAttribute());
                 log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개)",
                         entry.id(), 전부.size(), entry.members().size());
-                결과.put(entry.id(), 전부);
+                결과.put(entry.realDn(), 전부);
             }
             return 결과;
         });
@@ -173,9 +178,9 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         // 마지막 인자가 무조건 true 인 것은 낙관이 아니다 — 끝까지 못 읽으면
         // 전부_읽는다 가 IncompleteAttributeReadException 을 던지므로 여기 도달하지 못한다.
         return entries.stream()
-                .map(entry -> 이어받은것.containsKey(entry.id())
+                .map(entry -> 이어받은것.containsKey(entry.realDn())
                         ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(),
-                                이어받은것.get(entry.id()), entry.realDn(), true)
+                                이어받은것.get(entry.realDn()), entry.realDn(), true)
                         : entry)
                 .toList();
     }
