@@ -417,9 +417,11 @@ class ScimScaleScenarioTest {
         // given
         String 대형조직 = 기대.landmarks().대형조직();
         List<String> 현재멤버 = 직속직원들(대형조직).stream().sorted().toList();
+        List<String> 뺄사람 = 현재멤버.subList(현재멤버.size() - 20, 현재멤버.size());
         List<MemberRef> 남길사람 = 현재멤버.subList(0, 현재멤버.size() - 20).stream()
                 .map(MemberRef::user)
                 .toList();
+        assertThat(뺄사람).as("빠지는 20명이 있어야 그들의 권한 소멸을 확인할 수 있다").isNotEmpty();
 
         // when
         long t0 = System.currentTimeMillis();
@@ -429,13 +431,19 @@ class ScimScaleScenarioTest {
                 현재멤버.size(), 소요 / 1000.0);
 
         var editor = OrgChartEditor.편집한다(기대);
-        현재멤버.subList(현재멤버.size() - 20, 현재멤버.size())
-                .forEach(id -> editor.겸직을_푼다(id, 대형조직));
+        뺄사람.forEach(id -> editor.겸직을_푼다(id, 대형조직));
         기대 = editor.완성();
 
         // then
         검증한다();
         assertThat(멤버를_끝까지_읽는다(대형조직)).hasSize(현재멤버.size() - 20);
+
+        // 뺀 20명은 대형조직 말고 다른 소속이 없어 기대 조직도에서 통째로 빠지고,
+        // SyncVerifier 의 후보 집합(TupleMapper.candidateTuples)에서도 같이 사라진다 — 하네스는
+        // 이들을 아예 묻지 않는다. 위 admin 조회는 DynamoDB 목록만 보는 것이라, OpenFGA 쪽 삭제가
+        // 실제로 일어났는지는 이렇게 직접 물어야 안다. 20명뿐이라 전수 확인이 싸다.
+        뺄사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 대형조직)))
+                .as("빠졌어야 할 %s 의 member 가 OpenFGA 에 남아 있다", id).isFalse());
     }
 
     @Test
@@ -479,7 +487,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(16)
-    @DisplayName("S16. 순환 조직 참조 — 요청은 성공하고 순환을 닫는 간선만 빠진다")
+    @DisplayName("S16. 순환 조직 참조 — 순환을 닫는 간선만 빠지고 나머지 롤업은 그대로 산다")
     void S16_순환_참조() {
         // given — 조상을 자기 자손의 멤버로 넣는다
         String 조상 = 기대.landmarks().개발부문();
@@ -487,11 +495,27 @@ class ScimScaleScenarioTest {
                 .filter(org -> 기대.조상들(org).size() >= 3)
                 .findFirst().orElseThrow();
         String 순환밖직원 = 기대.landmarks().L3직속직원();
+        // 순환이 걸린 가지 안에서 원래 롤업이 살아남는지 볼 사람 — 자손의 직속 직원
+        List<String> 자손직원 = 직속직원들(자손).stream().sorted().toList();
+        assertThat(자손직원).as("순환이 걸린 가지에도 롤업 생존을 확인할 사람이 있어야 한다").isNotEmpty();
 
         // when
         보낸다(ScimRequestRenderer.멤버추가(자손, MemberRef.group(조상)), 200);
 
-        // then — 순환은 그 가지 안에서만 문제여야 한다
+        // then — TupleMapper.removeCycles 는 조상→...→자손 으로 내려가는 기존 트리를 DFS 로
+        // 훑다가(그동안 조상은 GRAY), 자손에서 새로 생긴 자손→조상 간선을 만나 back edge 로
+        // 판정해 버린다. 즉 버려지는 것은 (group:조상, child, group:자손) 그 한 간선뿐이다.
+        // removeCycles 가 통째로 없어도, 순환을 걸렀어도 엉뚱한 간선을 지웠어도 이 값은
+        // 잘못된 답을 낸다 — 예전에는 이걸 아무도 묻지 않아 그런 결함이 다 통과했다.
+        assertThat(성립하는가(RelationTuple.child(조상, 자손)))
+                .as("순환을 닫는 간선(조상이 자손의 child)이 그대로 남아 있다").isFalse();
+
+        // 순환과 무관한, 자손 → 조상으로 원래 있던 롤업은 살아남아야 한다 —
+        // removeCycles 가 back edge 말고 다른 간선까지 지우면 여기서 걸린다
+        자손직원.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 조상)))
+                .as("순환과 무관한 %s → %s 롤업까지 끊기면 안 된다", id, 조상).isTrue());
+
+        // 순환은 그 가지 안에서만 문제여야 한다 — 다른 부문 직원의 권한은 그대로다
         assertThat(성립하는가(RelationTuple.member(순환밖직원, 기대.landmarks().회사()))).isTrue();
     }
 
