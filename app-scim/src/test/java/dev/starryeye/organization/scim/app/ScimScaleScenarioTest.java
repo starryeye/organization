@@ -502,11 +502,17 @@ class ScimScaleScenarioTest {
         // when
         보낸다(ScimRequestRenderer.멤버추가(자손, MemberRef.group(조상)), 200);
 
-        // then — TupleMapper.removeCycles 는 조상→...→자손 으로 내려가는 기존 트리를 DFS 로
-        // 훑다가(그동안 조상은 GRAY), 자손에서 새로 생긴 자손→조상 간선을 만나 back edge 로
-        // 판정해 버린다. 즉 버려지는 것은 (group:조상, child, group:자손) 그 한 간선뿐이다.
-        // removeCycles 가 통째로 없어도, 순환을 걸렀어도 엉뚱한 간선을 지웠어도 이 값은
-        // 잘못된 답을 낸다 — 예전에는 이걸 아무도 묻지 않아 그런 결함이 다 통과했다.
+        // then — 이 경로(SCIM)의 순환 방지는 TupleMapper.removeCycles 가 아니라
+        // IncrementalSyncUseCase.withoutCycleCreatingEdges 다. removeCycles 는 LDAP 전체
+        // 동기화가 스냅샷 전체를 한 번에 DFS 로 훑을 때 쓰는 것이고, SCIM 은 요청 한 건마다
+        // 영향 범위만 담은 최소 스냅샷을 만들어 조상 전체 사슬을 싣지 않으므로 그 DFS 로는
+        // 여러 홉 떨어진 이 순환이 보이지 않는다. 대신 withoutCycleCreatingEdges 가 새로
+        // 생기는 (group:조상, child, group:자손) 간선마다 reaches(조상, 자손) 로 저장소에
+        // 쌓인 현재 상태를 직접 타고 내려가 조상이 이미 자손에 닿는지 확인한다 — 자손이
+        // 조상의 기존 하위 조직이라 닿는다고 나오고, 그래서 이번에 새로 요청한 그 간선
+        // 하나만 순환을 닫는다고 판정돼 버려진다.
+        // withoutCycleCreatingEdges 가 통째로 없어도, 순환을 걸렀어도 엉뚱한 간선을 지웠어도
+        // 이 값은 잘못된 답을 낸다 — 예전에는 이걸 아무도 묻지 않아 그런 결함이 다 통과했다.
         assertThat(성립하는가(RelationTuple.child(조상, 자손)))
                 .as("순환을 닫는 간선(조상이 자손의 child)이 그대로 남아 있다").isFalse();
 
