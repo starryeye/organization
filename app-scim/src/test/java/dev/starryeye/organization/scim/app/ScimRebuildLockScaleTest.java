@@ -170,12 +170,34 @@ class ScimRebuildLockScaleTest {
     }
 
     private void 보낸다(ScimRequest request, int 기대상태) {
-        client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
-                .post().uri(request.path())
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(request.body())
-                .exchange()
-                .expectStatus().isEqualTo(기대상태);
+        // 기준선 적재 전용 503 재시도. 이 구간(기준_상태를_만든다)은 아직 락 경합이 시작되기
+        // 전이라 503 이 나온다면 그건 경합이 아니라 DynamoDB Local 의 순간 지연이 500ms 락
+        // 타임아웃을 넘긴 것뿐이다 — 실제 SCIM IdP 도 503 을 "나중에 다시" 신호로 보고 재시도
+        // 하도록 설계돼 있다(§1.1). S18-b 의 쓰기(쓰기를_시도한다)는 이 재시도를 타지 않는다 —
+        // 거기서는 재적재 중 503 이 나오는 것 자체가 검증 대상이라 재시도하면 그 단언이 무너진다.
+        int 최대시도 = 5;
+        int 상태 = -1;
+        for (int 시도 = 1; 시도 <= 최대시도; 시도++) {
+            상태 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
+                    .post().uri(request.path())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(request.body())
+                    .exchange()
+                    .returnResult(Void.class)
+                    .getStatus().value();
+            if (상태 != 503) {
+                break;
+            }
+            if (시도 < 최대시도) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        assertThat(상태).as("기준선 적재 중 503 이 반복돼 재시도로도 회복되지 않았다").isEqualTo(기대상태);
     }
 
     private void 검증한다() {
