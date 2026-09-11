@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -23,11 +24,13 @@ import java.util.Set;
  */
 public final class OrgChartEditor {
 
+    private final OrgChart 원본;
     private final Map<String, DirectoryUser> users;
     private final Map<String, DirectoryGroup> groups;
     private final Landmarks landmarks;
 
     private OrgChartEditor(OrgChart chart) {
+        this.원본 = chart;
         this.users = new LinkedHashMap<>(chart.snapshot().users());
         this.groups = new LinkedHashMap<>(chart.snapshot().groups());
         this.landmarks = chart.landmarks();
@@ -37,8 +40,23 @@ public final class OrgChartEditor {
         return new OrgChartEditor(chart);
     }
 
+    /**
+     * 편집 결과. 편집 전후 멤버십을 비교해 <b>사라진 것을 이전 기억에 더한다.</b>
+     *
+     * <p>편집 메서드마다 기록하지 않는 이유: {@link #조직을_지운다} 처럼 조직 레코드가 통째로
+     * 사라지면 그 안의 멤버십이 {@code groups.remove} 한 줄로 사라진다. 전후 비교만이 그것까지
+     * 빠짐없이 잡고, 새 편집 메서드가 생겨도 기록을 빠뜨릴 수 없다.
+     *
+     * <p>다시 추가된 멤버십을 기억에서 빼지 않는다 — 판정은 {@link ChartExpectation} 이
+     * "있어야 함" 을 우선한다.
+     */
     public OrgChart 완성() {
-        return new OrgChart(new DirectorySnapshot(users, groups), landmarks);
+        OrgChart 편집후 = new OrgChart(new DirectorySnapshot(users, groups), landmarks);
+        Set<Membership> 사라진것 = new HashSet<>(원본.멤버십들());
+        사라진것.removeAll(편집후.멤버십들());
+        Set<Membership> 기억 = new HashSet<>(원본.지워진멤버십());
+        기억.addAll(사라진것);
+        return new OrgChart(편집후.snapshot(), landmarks, 기억);
     }
 
     // ---------- 직원 ----------
@@ -61,6 +79,40 @@ public final class OrgChartEditor {
         DirectoryUser 원본 = require(users.get(userId), "직원", userId);
         users.put(userId, new DirectoryUser(원본.id(), 원본.externalId(), 원본.userName(),
                 표시명, 메일, 원본.active()));
+        return this;
+    }
+
+    /** 비활성의 정의대로 <b>멤버십은 그대로 두고</b> {@code active} 만 끈다. */
+    public OrgChartEditor 비활성으로_바꾼다(String userId) {
+        return 활성을_바꾼다(userId, false);
+    }
+
+    public OrgChartEditor 활성으로_바꾼다(String userId) {
+        return 활성을_바꾼다(userId, true);
+    }
+
+    /** 비활성 직원을 만들어 조직에 넣는다 — "멤버지만 권한 없음" 상태. */
+    public OrgChartEditor 비활성_직원을_넣는다(String orgCode, String userId) {
+        users.put(userId, new DirectoryUser(userId, null, userId, "비활성 직원", null, false));
+        멤버를_더한다(orgCode, MemberRef.user(userId));
+        return this;
+    }
+
+    /**
+     * 직원 레코드만 없앤다. <b>멤버 목록의 참조는 남는다.</b>
+     *
+     * <p>SCIM 에서 조직이 직원보다 먼저 도착한 중간 상태가 이 모양이다. 끊긴 참조가 생기므로
+     * 이 조직도는 {@link ChartExpectation#끊긴참조를_허용하며} 로만 검증할 수 있다.
+     */
+    public OrgChartEditor 직원_레코드만_지운다(String userId) {
+        require(users.remove(userId), "직원", userId);
+        return this;
+    }
+
+    private OrgChartEditor 활성을_바꾼다(String userId, boolean active) {
+        DirectoryUser 원본직원 = require(users.get(userId), "직원", userId);
+        users.put(userId, new DirectoryUser(원본직원.id(), 원본직원.externalId(), 원본직원.userName(),
+                원본직원.displayName(), 원본직원.email(), active));
         return this;
     }
 
