@@ -38,17 +38,18 @@ class SyncVerifierTest {
 
         checker = new FakeTupleChecker();
         checker.allowed.addAll(TupleMapper.toTuples(chart.snapshot()).tuples());
-        checker.allowed.addAll(롤업까지_펼친다());
+        checker.allowed.addAll(롤업까지_펼친다(chart));
 
         verifier = new SyncVerifier(state, checker);
     }
 
-    /** OpenFGA 가 member 를 해석해 주는 것을 흉내 낸다 — 직속 + 모든 조상. */
-    private Set<RelationTuple> 롤업까지_펼친다() {
+    /** OpenFGA 가 member 를 해석해 주는 것을 흉내 낸다 — 활성 직원의 직속 + 모든 조상. */
+    private Set<RelationTuple> 롤업까지_펼친다(OrgChart 조직도) {
         Set<RelationTuple> tuples = new LinkedHashSet<>();
-        chart.snapshot().users().keySet().forEach(userId ->
-                chart.기대소속(userId).forEach(org ->
-                        tuples.add(RelationTuple.member(userId, org))));
+        조직도.snapshot().users().values().stream()
+                .filter(DirectoryUser::active)
+                .forEach(user -> 조직도.기대소속(user.id()).forEach(org ->
+                        tuples.add(RelationTuple.member(user.id(), org))));
         return tuples;
     }
 
@@ -150,7 +151,7 @@ class SyncVerifierTest {
         // 퇴사자 권한 생존이 정확히 이 형태다. 기대 튜플에서는 active 필터로 빠지지만
         // 음성 후보는 필터 전 멤버십이라 이 튜플을 여전히 물어본다.
         String 퇴사자 = chart.landmarks().L5직속직원();
-        OrgChart 비활성된조직도 = 비활성으로_바꾼다(퇴사자);
+        OrgChart 비활성된조직도 = OrgChartEditor.편집한다(chart).비활성으로_바꾼다(퇴사자).완성();
         state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
 
         RelationTuple 잔여 = RelationTuple.directMember(퇴사자, chart.직속조직(퇴사자));
@@ -165,10 +166,56 @@ class SyncVerifierTest {
     }
 
     @Test
-    @DisplayName("③ 은 멤버십이 아예 사라진 튜플까지는 못 잡는다 — 알려진 한계를 못박는다")
+    @DisplayName("③ 옮긴 직원의 옛 조직 튜플이 남아 있으면 잡는다 — 지운 멤버십을 기억하므로")
+    void 옮긴_직원의_잔여튜플을_잡는다() {
+        // given — 앱이 새 조직 튜플은 썼는데 옛 조직 튜플 삭제를 잊은 모양
+        String 직원 = chart.landmarks().L5직속직원();
+        String 옛조직 = chart.직속조직(직원);
+        String 새조직 = chart.landmarks().대상팀();
+        assertThat(새조직).as("전제: 다른 조직으로 옮겨야 한다").isNotEqualTo(옛조직);
+        OrgChart 이동후 = OrgChartEditor.편집한다(chart).직원을_옮긴다(직원, 옛조직, 새조직).완성();
+
+        state.groups.put(옛조직, 이동후.snapshot().groups().get(옛조직));
+        state.groups.put(새조직, 이동후.snapshot().groups().get(새조직));
+        checker.allowed.add(RelationTuple.directMember(직원, 새조직));
+        assertThat(checker.allowed).as("전제: 옛 튜플이 남아 있다")
+                .contains(RelationTuple.directMember(직원, 옛조직));
+
+        // when
+        var result = verifier.검증한다(이동후).block();
+
+        // then — 옛 멤버십은 조직도에서 사라졌지만 기억에 남아 여전히 묻는다
+        assertThat(result.어긋남()).anyMatch(message ->
+                message.startsWith("③ 남아 있으면 안 되는 튜플")
+                        && message.contains(직원) && message.contains(옛조직));
+    }
+
+    @Test
+    @DisplayName("비활성 직원이 섞인 조직도도 올바른 앱이면 통과한다 — 운영 매핑에 속지 않는지 보는 자리")
+    void 비활성이_섞여도_올바른_앱이면_통과한다() {
+        // given — 앱은 운영의 TupleMapper 로 쓴다. 하네스는 그것과 따로 계산한다.
+        // TupleMapper 가 비활성을 거르지 못하면 이 테스트가 깨져야 한다 — 하네스가 운영에게
+        // 정답을 묻던 시절에는 같이 틀려서 통과했다 (스펙 §7 변이 #1).
+        String 퇴사자 = chart.landmarks().L4직속직원();
+        OrgChart 비활성된조직도 = OrgChartEditor.편집한다(chart).비활성으로_바꾼다(퇴사자).완성();
+        state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
+        checker.allowed.clear();
+        checker.allowed.addAll(TupleMapper.toTuples(비활성된조직도.snapshot()).tuples());
+        checker.allowed.addAll(롤업까지_펼친다(비활성된조직도));
+
+        // when
+        var result = verifier.검증한다(비활성된조직도).block();
+
+        // then
+        assertThat(result).isNotNull();
+        assertThat(result.어긋났는가()).as(result == null ? "" : result.요약()).isFalse();
+    }
+
+    @Test
+    @DisplayName("③ 은 조직도에 한 번도 없었던 튜플까지는 못 잡는다 — 알려진 한계를 못박는다")
     void 멤버십이_사라진_튜플은_못_잡는다() {
-        // given — 조직 멤버 목록에도 없고 조직도에도 없는, 완전히 떠 있는 튜플.
-        // 음성 후보가 멤버십에서 나오므로 하네스는 이것을 아예 물어보지 않는다(설계 §5.4).
+        // given — 조직도에 한 번도 없었던, 완전히 떠 있는 튜플. 지운 멤버십은 기억하지만
+        // 한 번도 없던 것은 후보에 들어갈 길이 없어 하네스가 아예 물어보지 않는다(스펙 §11).
         String 직원 = chart.landmarks().L3직속직원();
         String 엉뚱한조직 = chart.landmarks().대상파트();
         assertThat(chart.기대소속(직원)).doesNotContain(엉뚱한조직);
@@ -182,18 +229,6 @@ class SyncVerifierTest {
         assertThat(result.어긋났는가())
                 .as("한계가 사라졌다면 그것대로 좋은 소식이다 — 이 테스트를 지우고 하네스 문서를 고쳐라")
                 .isFalse();
-    }
-
-    /** {@code userId} 만 비활성으로 바꾼 조직도. 멤버 목록은 그대로 둔다. */
-    private OrgChart 비활성으로_바꾼다(String userId) {
-        var users = new java.util.LinkedHashMap<>(chart.snapshot().users());
-        DirectoryUser 원본 = users.get(userId);
-        users.put(userId, new DirectoryUser(원본.id(), 원본.externalId(), 원본.userName(),
-                원본.displayName(), 원본.email(), false));
-        return new OrgChart(
-                new dev.starryeye.organization.core.model.DirectorySnapshot(
-                        users, chart.snapshot().groups()),
-                chart.landmarks());
     }
 
     @Test
@@ -240,7 +275,7 @@ class SyncVerifierTest {
         // 하네스가 active 를 안 보면 "소속이 있으니 member 여야 한다" 고 기대해
         // 올바른 구현을 결함으로 신고한다 — 실제로 그렇게 신고했다.
         String 퇴사자 = chart.landmarks().L4직속직원();
-        OrgChart 비활성된조직도 = 비활성으로_바꾼다(퇴사자);
+        OrgChart 비활성된조직도 = OrgChartEditor.편집한다(chart).비활성으로_바꾼다(퇴사자).완성();
 
         state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
         // 구현이 올바르게 동작한 상태를 만든다 — dm 도 member 도 지워졌다
@@ -262,7 +297,7 @@ class SyncVerifierTest {
     void 비활성인데_롤업이_남으면_잡는다() {
         // given — dm 은 지웠는데 member 해석이 남아 있는 모양
         String 퇴사자 = chart.landmarks().L4직속직원();
-        OrgChart 비활성된조직도 = 비활성으로_바꾼다(퇴사자);
+        OrgChart 비활성된조직도 = OrgChartEditor.편집한다(chart).비활성으로_바꾼다(퇴사자).완성();
         state.users.put(퇴사자, 비활성된조직도.snapshot().users().get(퇴사자));
         chart.직속조직들(퇴사자).forEach(org ->
                 checker.allowed.remove(RelationTuple.directMember(퇴사자, org)));
