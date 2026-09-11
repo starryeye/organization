@@ -44,8 +44,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * SCIM 규모 시나리오 (시나리오 문서 §4).
  *
- * <p><b>최초 싱크를 한 번만 만들고 그 위에 순차로 쌓는다.</b> 시나리오마다 5,376건을 다시
- * 쏘면 SCIM 쪽만 13분이다. 실제 운영도 최초 싱크는 한 번뿐이므로 이어 붙이는 쪽이 더
+ * <p><b>최초 싱크를 한 번만 만들고 그 위에 순차로 쌓는다.</b> 시나리오마다 전체를 다시
+ * 쏘면 SCIM 쪽만 십수 분이다. 실제 운영도 최초 싱크는 한 번뿐이므로 이어 붙이는 쪽이 더
  * 실제에 가깝기도 하다.
  *
  * <p>모든 단계 끝에서 <b>세 가지로</b> 확인한다 — 하네스(포트 경유), OpenFGA 직접 질의,
@@ -90,7 +90,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(1)
-    @DisplayName("S2. 대량 프로비저닝 — 직원 5,024명 → 조직 352개 순으로 5,376건")
+    @DisplayName("S2. 대량 프로비저닝 — 직원 먼저, 그다음 조직")
     void S2_대량_프로비저닝() {
         // given
         List<ScimRequest> requests = ScimRequestRenderer.최초싱크(기대);
@@ -108,7 +108,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(2)
-    @DisplayName("admin 조회가 SCIM 으로 적재된 5,024명을 그대로 보여준다")
+    @DisplayName("admin 조회가 SCIM 으로 적재된 조직도를 그대로 보여준다")
     void admin조회가_적재를_보여준다() {
         // given — 겸직 직원. 소속이 둘인 사람이 화면에 어떻게 보이는지가 가장 헷갈리는 자리다
         String 겸직 = 기대.landmarks().겸직직원();
@@ -125,7 +125,7 @@ class ScimScaleScenarioTest {
         });
         assertThat(경로조직).isEqualTo(기대.기대소속(겸직));
 
-        // 500명 조직 멤버를 커서로 끝까지 — 한 명도 빠지거나 겹치면 안 된다
+        // 대형 조직 멤버를 커서로 끝까지 — 한 명도 빠지거나 겹치면 안 된다
         String 대형조직 = 기대.landmarks().대형조직();
         assertThat(멤버를_끝까지_읽는다(대형조직)).isEqualTo(직속직원들(대형조직));
     }
@@ -412,29 +412,38 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(14)
-    @DisplayName("S15. 500명 조직 멤버 교체 — 락을 쥔 채 BatchCheck 를 도는 구간")
+    @DisplayName("S15. 대형 조직 멤버 교체 — 락을 쥔 채 BatchCheck 를 도는 구간")
     void S15_대형조직_교체() {
         // given
         String 대형조직 = 기대.landmarks().대형조직();
         List<String> 현재멤버 = 직속직원들(대형조직).stream().sorted().toList();
+        List<String> 뺄사람 = 현재멤버.subList(현재멤버.size() - 20, 현재멤버.size());
         List<MemberRef> 남길사람 = 현재멤버.subList(0, 현재멤버.size() - 20).stream()
                 .map(MemberRef::user)
                 .toList();
+        assertThat(뺄사람).as("빠지는 20명이 있어야 그들의 권한 소멸을 확인할 수 있다").isNotEmpty();
 
         // when
         long t0 = System.currentTimeMillis();
         보낸다(ScimRequestRenderer.멤버전체교체(대형조직, 남길사람), 200);
         long 소요 = System.currentTimeMillis() - t0;
-        System.out.printf("=== S15. 500명 조직 멤버 교체: %.1f초%n", 소요 / 1000.0);
+        System.out.printf("=== S15. 대형 조직(%d명) 멤버 교체: %.1f초%n",
+                현재멤버.size(), 소요 / 1000.0);
 
         var editor = OrgChartEditor.편집한다(기대);
-        현재멤버.subList(현재멤버.size() - 20, 현재멤버.size())
-                .forEach(id -> editor.겸직을_푼다(id, 대형조직));
+        뺄사람.forEach(id -> editor.겸직을_푼다(id, 대형조직));
         기대 = editor.완성();
 
         // then
         검증한다();
         assertThat(멤버를_끝까지_읽는다(대형조직)).hasSize(현재멤버.size() - 20);
+
+        // 뺀 20명은 대형조직 말고 다른 소속이 없어 기대 조직도에서 통째로 빠지고,
+        // SyncVerifier 의 후보 집합(TupleMapper.candidateTuples)에서도 같이 사라진다 — 하네스는
+        // 이들을 아예 묻지 않는다. 위 admin 조회는 DynamoDB 목록만 보는 것이라, OpenFGA 쪽 삭제가
+        // 실제로 일어났는지는 이렇게 직접 물어야 안다. 20명뿐이라 전수 확인이 싸다.
+        뺄사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 대형조직)))
+                .as("빠졌어야 할 %s 의 member 가 OpenFGA 에 남아 있다", id).isFalse());
     }
 
     @Test
@@ -478,7 +487,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(16)
-    @DisplayName("S16. 순환 조직 참조 — 요청은 성공하고 순환을 닫는 간선만 빠진다")
+    @DisplayName("S16. 순환 조직 참조 — 순환을 닫는 간선만 빠지고 나머지 롤업은 그대로 산다")
     void S16_순환_참조() {
         // given — 조상을 자기 자손의 멤버로 넣는다
         String 조상 = 기대.landmarks().개발부문();
@@ -486,11 +495,33 @@ class ScimScaleScenarioTest {
                 .filter(org -> 기대.조상들(org).size() >= 3)
                 .findFirst().orElseThrow();
         String 순환밖직원 = 기대.landmarks().L3직속직원();
+        // 순환이 걸린 가지 안에서 원래 롤업이 살아남는지 볼 사람 — 자손의 직속 직원
+        List<String> 자손직원 = 직속직원들(자손).stream().sorted().toList();
+        assertThat(자손직원).as("순환이 걸린 가지에도 롤업 생존을 확인할 사람이 있어야 한다").isNotEmpty();
 
         // when
         보낸다(ScimRequestRenderer.멤버추가(자손, MemberRef.group(조상)), 200);
 
-        // then — 순환은 그 가지 안에서만 문제여야 한다
+        // then — 이 경로(SCIM)의 순환 방지는 TupleMapper.removeCycles 가 아니라
+        // IncrementalSyncUseCase.withoutCycleCreatingEdges 다. removeCycles 는 LDAP 전체
+        // 동기화가 스냅샷 전체를 한 번에 DFS 로 훑을 때 쓰는 것이고, SCIM 은 요청 한 건마다
+        // 영향 범위만 담은 최소 스냅샷을 만들어 조상 전체 사슬을 싣지 않으므로 그 DFS 로는
+        // 여러 홉 떨어진 이 순환이 보이지 않는다. 대신 withoutCycleCreatingEdges 가 새로
+        // 생기는 (group:조상, child, group:자손) 간선마다 reaches(조상, 자손) 로 저장소에
+        // 쌓인 현재 상태를 직접 타고 내려가 조상이 이미 자손에 닿는지 확인한다 — 자손이
+        // 조상의 기존 하위 조직이라 닿는다고 나오고, 그래서 이번에 새로 요청한 그 간선
+        // 하나만 순환을 닫는다고 판정돼 버려진다.
+        // withoutCycleCreatingEdges 가 통째로 없어도, 순환을 걸렀어도 엉뚱한 간선을 지웠어도
+        // 이 값은 잘못된 답을 낸다 — 예전에는 이걸 아무도 묻지 않아 그런 결함이 다 통과했다.
+        assertThat(성립하는가(RelationTuple.child(조상, 자손)))
+                .as("순환을 닫는 간선(조상이 자손의 child)이 그대로 남아 있다").isFalse();
+
+        // 순환과 무관한, 자손 → 조상으로 원래 있던 롤업은 살아남아야 한다 —
+        // removeCycles 가 back edge 말고 다른 간선까지 지우면 여기서 걸린다
+        자손직원.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 조상)))
+                .as("순환과 무관한 %s → %s 롤업까지 끊기면 안 된다", id, 조상).isTrue());
+
+        // 순환은 그 가지 안에서만 문제여야 한다 — 다른 부문 직원의 권한은 그대로다
         assertThat(성립하는가(RelationTuple.member(순환밖직원, 기대.landmarks().회사()))).isTrue();
     }
 

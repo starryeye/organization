@@ -2,6 +2,8 @@ package dev.starryeye.organization.authz.fixture;
 
 import dev.openfga.sdk.api.client.model.ClientBatchCheckItem;
 import dev.openfga.sdk.api.client.model.ClientBatchCheckRequest;
+import dev.openfga.sdk.api.client.model.ClientBatchCheckResponse;
+import dev.openfga.sdk.api.client.model.ClientBatchCheckSingleResponse;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
@@ -120,21 +122,72 @@ public final class OpenFgaProbe {
                     ._object(tuple.object())
                     .correlationId(correlationId));
         }
+        ClientBatchCheckResponse response;
         try {
-            var response = bootstrapper.client()
+            response = bootstrapper.client()
                     .batchCheck(new ClientBatchCheckRequest().checks(items)).get();
-            Map<RelationTuple, Boolean> 결과 = new LinkedHashMap<>();
-            response.getResult().forEach(single -> {
-                RelationTuple tuple = byCorrelation.get(single.getCorrelationId());
-                if (tuple != null) {
-                    결과.put(tuple, Boolean.TRUE.equals(single.isAllowed()));
-                }
-            });
-            조각.forEach(tuple -> 결과.putIfAbsent(tuple, false));
-            return 결과;
         } catch (Exception e) {
             throw new IllegalStateException("OpenFGA batchCheck 실패", e);
         }
+        // 응답 해석(개별 오류/개수/correlationId 대응)은 SDK 호출 실패를 감싸는 위 try 밖에서
+        // 한다 — 여기서 던지는 예외가 "OpenFGA batchCheck 실패" 로 다시 뭉뚱그려지면 원인을
+        // 구분할 수 없다.
+        return toAnswers(response, byCorrelation);
+    }
+
+    /**
+     * BatchCheck 응답을 요청과 맞춰 {@code true}/{@code false} 로 바꾼다. 답을 못 받은 항목은
+     * 이 자리에서 절대 {@code false} 로 채우지 않는다 — 던진다.
+     *
+     * <p>이 프로브의 롤업 교차검증은 한 직원에 대해 ~250건을 물어 <b>전부 false 여야</b>
+     * 통과한다({@code 직접_대조한다} 참고) — 즉 {@code false} 는 이 프로브가 절대다수 항목에서
+     * 기대하는 "정상" 값이다. 그래서 오류로 답을 못 받은 항목·응답에 아예 없는 항목·중복 응답으로
+     * 밀려난 항목을 예전처럼 {@code putIfAbsent(tuple, false)} 로 채우면, 그 항목은 "확인했고
+     * 없다" 와 구별되지 않는 채로 기대값(false)과 우연히 일치해버린다. 청크 하나가 통째로
+     * 에러났을 때(스로틀링, 일시적 store 장애, model-id 불일치) 그 청크의 모든 항목이 이렇게
+     * false 로 채워지고 기대값과 맞아떨어져, 아래로 새는 권한이 있어도 교차검증이 "이상 없음"
+     * 이라고 보고한다 — 아무것도 확인하지 않고도 통과하는 것이다. 그래서 어댑터의
+     * {@code OpenFgaRelationTupleChecker#toFound} 와 같은 결로, 답을 못 받은 항목을 상태
+     * 기준선(false)으로 폴백시키지 않고 예외로 멈춘다.
+     *
+     * <p>어댑터 코드를 그대로 불러 쓰지 않고 여기서 따로 짠다 — 이 프로브의 존재 이유가
+     * "어댑터와 다른 경로로 같은 사실을 물어, 둘이 갈리면 그 자체가 결함" 이기 때문이다.
+     * 어댑터 것을 재사용하면 어댑터에 있는 결함이 이 검사도 함께 속인다.
+     */
+    static Map<RelationTuple, Boolean> toAnswers(
+            ClientBatchCheckResponse response,
+            Map<String, RelationTuple> byCorrelation) {
+        List<ClientBatchCheckSingleResponse> results = response.getResult();
+
+        List<ClientBatchCheckSingleResponse> 오류난것 = results.stream()
+                .filter(single -> single.getError() != null)
+                .toList();
+        if (!오류난것.isEmpty()) {
+            throw new IllegalStateException(
+                    "OpenFGA batchCheck 중 %d건이 개별 오류로 끝났다(예: %s) — 상태 기준선(false)으로 폴백하지 않는다"
+                            .formatted(오류난것.size(), 오류난것.get(0).getError().getMessage()));
+        }
+
+        if (results.size() != byCorrelation.size()) {
+            throw new IllegalStateException(
+                    "OpenFGA batchCheck 가 %d건을 물었는데 %d건만 답했다 — 빠진 항목을 '없음(false)'으로 격하하지 않는다"
+                            .formatted(byCorrelation.size(), results.size()));
+        }
+
+        // 빼면서 읽는다 — 요청 하나가 정확히 한 번씩 소진돼야 한다. 개수가 같은데 어떤 id 가
+        // 두 번 오면, 그만큼 다른 튜플 하나가 답 없이 남아 조용히 "없음(false)" 으로 격하된다.
+        Map<String, RelationTuple> 답을_기다리는것 = new LinkedHashMap<>(byCorrelation);
+        Map<RelationTuple, Boolean> 결과 = new LinkedHashMap<>();
+        for (ClientBatchCheckSingleResponse single : results) {
+            RelationTuple tuple = 답을_기다리는것.remove(single.getCorrelationId());
+            if (tuple == null) {
+                throw new IllegalStateException(
+                        ("OpenFGA batchCheck 응답의 correlationId '%s' 가 요청에 없거나 두 번 왔다 "
+                                + "— 어느 튜플의 답인지 알 수 없다").formatted(single.getCorrelationId()));
+            }
+            결과.put(tuple, Boolean.TRUE.equals(single.isAllowed()));
+        }
+        return 결과;
     }
 
     /**

@@ -74,7 +74,7 @@ class LdapPagingScaleTest {
         // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
         // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
         // 없는 형태를 검증하게 된다.
-        // 서버가 한 번에 이만큼만 준다. 5,024명 중 1,000명이다.
+        // 서버가 한 번에 이만큼만 준다 — 전체 직원 수보다 한참 적다.
         config.setMaxSizeLimit(서버상한);
 
         LDAP = new InMemoryDirectoryServer(config);

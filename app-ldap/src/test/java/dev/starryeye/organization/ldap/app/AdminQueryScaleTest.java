@@ -125,7 +125,7 @@ class AdminQueryScaleTest {
     }
 
     @Test
-    @DisplayName("500명 조직의 멤버를 커서로 끝까지 읽으면 한 명도 빠지거나 겹치지 않는다")
+    @DisplayName("대형 조직의 멤버를 커서로 끝까지 읽으면 한 명도 빠지거나 겹치지 않는다")
     void 대형조직_멤버를_커서로_전부_읽는다() {
         // given
         한번만_동기화한다();
@@ -292,7 +292,7 @@ class AdminQueryScaleTest {
             페이지수++;
         } while (cursor != null && 페이지수 < 200);
 
-        // then — 5,024명 전부, 중복 없이
+        // then — 전 직원, 중복 없이
         assertThat(페이지수).isGreaterThan(1);
         assertThat(읽은것).hasSize(중복없이);
         assertThat(읽은것).isEqualTo(기대.snapshot().users().keySet());

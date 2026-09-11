@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -49,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>쓰기 순서는 OpenFGA → 스냅샷 → 상태다. 그래서 상태 저장 직전에 죽으면 <b>OpenFGA 는
  * 반영됐고 상태만 낡은</b> 어긋난 지점이 남는다. 설계 §1.1 은 이것을 별도 보정 장치 없이
- * <b>다음 회차의 재시도가 수렴시킨다</b>고 전제하는데, 그 전제를 5,000 규모에서 실증한다.
+ * <b>다음 회차의 재시도가 수렴시킨다</b>고 전제하는데, 그 전제를 전체 조직도 규모에서 실증한다.
  *
  * <p>수렴이 성립하는 이유는 <b>빈 델타 경로도 {@code state.replaceWith} 를 부르기</b>
  * 때문이다. 다음 회차는 스냅샷이 이미 갱신돼 있어 델타가 비는데, 그때 아무것도 안 하고
@@ -195,6 +196,8 @@ class LdapInterruptedSyncScaleTest {
             return 실제.findUserIdsByUserName(userName);
         }
         @Override public Mono<DirectoryGroup> findGroup(String groupId) { return 실제.findGroup(groupId); }
+        @Override public Mono<GroupHeader> findGroupHeader(String groupId) { return 실제.findGroupHeader(groupId); }
+        @Override public Mono<Boolean> containsMember(String groupId, MemberRef ref) { return 실제.containsMember(groupId, ref); }
         @Override public Mono<Void> saveUser(DirectoryUser user) { return 실제.saveUser(user); }
         @Override public Mono<Void> saveGroup(DirectoryGroup group) { return 실제.saveGroup(group); }
         @Override public Mono<Void> deleteUser(String userId) { return 실제.deleteUser(userId); }

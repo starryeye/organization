@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -32,6 +33,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * SCIM 이 보낸 단건 변경을 튜플에 반영한다.
@@ -49,9 +51,16 @@ import java.util.function.Function;
  *       멤버로 참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child
  *       엣지를 만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
  *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고)</li>
- *   <li>유저 변경 — 그 유저 + 그 유저가 속한 모든 조직({@code findGroupIdsContaining} 으로
- *       찾음). {@code active} 가 뒤집히면 그 유저의 모든 {@code direct_member} 튜플이
- *       생기거나 사라진다</li>
+ *   <li>유저 변경 — 그 유저가 속한 모든 조직을 찾는 것은 {@code findGroupIdsContaining}
+ *       (GSI1, 최종 일관성) 하나지만 그 뒤가 갈린다. {@link #upsertUser} 는 조직마다
+ *       {@link #affectedGroupHeadersOf} 로 <b>헤더만</b> 읽고(멤버 목록은 필요 없다 — 커밋이
+ *       {@code saveUser} 뿐이라서다), GSI 가 낡아 이미 빠진 멤버십을 계속 보고할 가능성을
+ *       {@link DirectoryStateRepository#containsMember} 로 멤버 줄 자체를 강한 일관성으로
+ *       다시 확인해 걸러낸다({@link #직원한명_그림} 참고). {@link #removeUser} 는 반대로
+ *       {@link #affectedGroupsOf} 로 조직을 <b>멤버 목록째로</b> 그대로 읽는다 — 커밋이
+ *       {@code saveGroup} 이라 최종 멤버 목록 전체를 요구해서다(설계 §4.4). 어느 경로든
+ *       {@code active} 가 뒤집히거나(또는 유저가 삭제되면) 그 유저의 모든
+ *       {@code direct_member} 튜플이 생기거나 사라진다</li>
  * </ul>
  *
  * <p><b>최소 스냅샷이 볼 수 있는 규칙과 볼 수 없는 규칙(설계의 경계).</b>
@@ -157,8 +166,9 @@ public class IncrementalSyncUseCase {
      * 그 사람은 {@code active=false} 로 남는다. 권한이 없는 안전한 방향이지만
      * <b>프로비저닝이 조용히 실패한 상태</b>이고, 다음 {@code PUT} 이 올 때까지 그대로다.
      *
-     * <p>레코드를 만들지 않아도 안전한 이유: 재시도가 {@link #affectedGroupsOf} 로 소속을 다시
-     * 찾고, Check 기준선이 이미 쓰인 튜플을 보므로 남은 것만 정확히 다시 쓴다.
+     * <p>레코드를 만들지 않아도 안전한 이유: 재시도가 {@link #affectedGroupHeadersOf} 로 소속을
+     * 다시 찾고(멤버십은 {@link DirectoryStateRepository#containsMember} 로 강한 일관성 재확인을
+     * 거친다), Check 기준선이 이미 쓰인 튜플을 보므로 남은 것만 정확히 다시 쓴다.
      * {@link #upsertGroup} 이 같은 가드를 갖는다 — 다만 그쪽은 레코드를 만들면 부모의 child
      * 엣지를 <b>영원히</b> 못 쓰게 되므로 더 심각하다.
      */
@@ -170,14 +180,16 @@ public class IncrementalSyncUseCase {
         DirectoryUser neverStored = new DirectoryUser(
                 user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
 
-        return affectedGroupsOf(user.id())
-                .flatMap(groups -> state.findUser(user.id())
+        return affectedGroupHeadersOf(user.id())
+                .flatMap(headers -> state.findUser(user.id())
                         .map(Optional::of)
                         .defaultIfEmpty(Optional.empty())
                         .flatMap(existing -> {
                             DirectoryUser existingUser = existing.orElse(neverStored);
-                            Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(existingUser));
-                            Mono<DirectorySnapshot> after = snapshotOf(groups, Mono.just(user));
+                            Mono<DirectorySnapshot> before =
+                                    직원한명_그림(headers, user.id(), Mono.just(existingUser));
+                            Mono<DirectorySnapshot> after =
+                                    직원한명_그림(headers, user.id(), Mono.just(user));
 
                             Commit commit = (result, beforeTuples, afterTuples) -> {
                                 if (existing.isEmpty() && result.hasFailure()) {
@@ -260,9 +272,19 @@ public class IncrementalSyncUseCase {
     private Mono<IncrementalSyncResult> removeUserInternal(String userId, LockLease lease) {
         return state.findUser(userId)
                 .flatMap(user -> affectedGroupsOf(userId).flatMap(groups -> {
-                    Mono<DirectorySnapshot> before = snapshotOf(groups, Mono.just(user));
+                    // 스냅샷은 좁힌다 — 델타에는 이 직원의 튜플만 남으므로 동료가 필요 없다.
+                    Set<GroupHeader> headers = groups.stream()
+                            .map(group -> new GroupHeader(
+                                    group.id(), group.externalId(), group.displayName()))
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
+                    Mono<DirectorySnapshot> before = 직원한명_그림(headers, userId, Mono.just(user));
+                    // 삭제 후에는 어느 조직에도 속하지 않으므로 조직이 하나도 없는 그림이 맞다.
+                    Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
+
+                    // 커밋에는 좁히지 않은 groups/without 을 쓴다 — saveGroup 은 members() 를
+                    // 최종 목록으로 받아 거기 없는 멤버 줄을 지운다. 좁힌 것을 넘기면
+                    // 이 조직의 멤버가 통째로 삭제된다.
                     Set<DirectoryGroup> without = removeMemberFrom(groups, MemberRef.user(userId));
-                    Mono<DirectorySnapshot> after = snapshotOf(without, Mono.empty());
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         Set<DirectoryGroup> reconciled = reconcileRemovedMember(
@@ -775,6 +797,54 @@ public class IncrementalSyncUseCase {
                 .flatMap(allGroups -> changed.map(Set::of).defaultIfEmpty(Set.of())
                         .flatMap(overrides -> loadMemberUsers(allGroups, overrides)
                                 .map(users -> new DirectorySnapshot(users, byId(allGroups)))));
+    }
+
+    /**
+     * <b>직원 한 명에 대한 연산을 위한 스냅샷.</b> 조직의 멤버 목록을 그 직원 하나로 바꾸고,
+     * 유저도 그 한 명만 싣는다. {@link #loadMemberUsers} 를 부르지 않는다.
+     *
+     * <p><b>왜 동료를 안 실어도 결과가 같은가.</b> {@link #diffAndApply} 가 후보·목표·상태
+     * 기준선 셋 모두를 {@code mentioning(user:그사람)} 으로 좁힌다. 동료의 튜플은
+     * {@code direct_member(user:X, group:G)} 라 어느 자리도 그 직원이 아니므로 <b>세 집합
+     * 전부에서 사라진다.</b> 좁힌 스냅샷은 그 튜플들을 애초에 만들지 않을 뿐, 걸러진 결과가
+     * 같다. child 간선은 {@code group:} 둘로만 이루어져 역시 언급되지 않고, 사용자는 조직
+     * 그래프에 순환을 만들 수 없다.
+     *
+     * <p><b>여기서 만든 조직을 {@code saveGroup} 에 넘기면 안 된다.</b> 멤버 목록이 한 명뿐이라
+     * 그 조직의 나머지 멤버 줄이 전부 삭제된다 — 저장에는 반드시 전체 목록을 쓴다.
+     */
+    private Mono<DirectorySnapshot> 직원한명_그림(Set<GroupHeader> headers,
+                                             String userId,
+                                             Mono<DirectoryUser> user) {
+        Set<MemberRef> 그사람만 = Set.of(MemberRef.user(userId));
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        headers.forEach(header -> groups.put(header.id(), new DirectoryGroup(
+                header.id(), header.externalId(), header.displayName(), 그사람만)));
+
+        return user.map(Set::of).defaultIfEmpty(Set.<DirectoryUser>of())
+                .map(users -> new DirectorySnapshot(byUserId(users), groups));
+    }
+
+    /**
+     * 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 {@link #upsertUser} 에서만 쓴다.
+     *
+     * <p><b>멤버십을 {@link DirectoryStateRepository#containsMember} 로 다시 확인한다.</b>
+     * {@code findGroupIdsContaining} 은 GSI1 이라 최종 일관성이다 — 이 직원이 막 빠진 조직을
+     * 그 삭제가 인덱스에 반영되기 전까지 계속 보고할 수 있다. {@link #findGroupHeader} 는
+     * 조직의 <b>존재</b>만 확인하고 멤버십은 확인하지 않으므로, 그 결과만 믿으면 이미 지워진
+     * 멤버십이 {@link #직원한명_그림} 에서 <b>단언</b>되어 "실제로 없는 튜플"이 after 에
+     * 나타나고 재시도가 그것을 되살려 쓴다 — 있어야 할 튜플이 빠지는 것보다 위험한 방향이다
+     * ({@link DirectoryStateRepository#containsMember} 자바독 참고). 그래서 헤더를 읽기 전에
+     * 멤버 줄 자체를 강한 일관성으로 한 번 더 확인하고, 확인되지 않은 조직은 통째로 뺀다 —
+     * 조직 크기와 무관하게 조직 하나당 {@code GetItem} 이 하나 늘 뿐이다.
+     */
+    private Mono<Set<GroupHeader>> affectedGroupHeadersOf(String userId) {
+        MemberRef ref = MemberRef.user(userId);
+        return state.findGroupIdsContaining(ref)
+                .flatMap(groupId -> state.containsMember(groupId, ref)
+                        .filter(Boolean::booleanValue)
+                        .flatMap(confirmed -> state.findGroupHeader(groupId)), LOAD_CONCURRENCY)
+                .collect(LinkedHashSet<GroupHeader>::new, Set::add);
     }
 
     /**

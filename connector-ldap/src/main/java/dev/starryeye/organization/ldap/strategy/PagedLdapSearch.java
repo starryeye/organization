@@ -5,7 +5,6 @@ import org.springframework.ldap.core.AttributesMapper;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.LdapTemplate;
 import dev.starryeye.organization.ldap.LdapTemplates;
-import org.springframework.ldap.core.support.SingleContextSource;
 import org.springframework.ldap.query.LdapQuery;
 
 import javax.naming.directory.SearchControls;
@@ -23,7 +22,7 @@ import java.util.function.Function;
  * 한 페이지만 반환하고 침묵하는(예: Active Directory의 {@code MaxPageSize}=1000) 상황을 막는다.
  * 이 처리가 없으면 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 삭제해 버릴 수 있다.
  *
- * <p><b>페이징 전체가 커넥션 하나 안에서 돈다({@link SingleContextSource}).</b> paged results
+ * <p><b>페이징 전체가 커넥션 하나 안에서 돈다({@link LdapTemplates#한_커넥션에서}).</b> paged results
  * 쿠키는 <b>커넥션에 묶인 상태</b>다. {@code LdapTemplate} 은 검색 한 번마다 {@code DirContext}
  * 를 새로 얻었다 반납하므로, 그대로 두면 두 번째 페이지가 <b>다른 커넥션</b>에서 나가고 서버는
  * {@code "paged results cookie is invalid"} 로 거절한다. 임베디드 UnboundID 서버는 이것을
@@ -75,13 +74,8 @@ final class PagedLdapSearch {
         String filter = query.filter().encode();
         SearchControls controls = controlsOf(query);
 
-        // doWithSingleContext 대신 직접 만든다. 그쪽이 넘겨주는 LdapOperations 는 기본 설정으로
-        // 만들어져 ignoreSizeLimitExceededException 이 true 로 돌아가고, 그러면 서버가 자른
-        // 결과를 조용히 삼킨다 — 이 클래스가 막으려는 바로 그 상황이다.
-        SingleContextSource single = new SingleContextSource(
-                template.getContextSource().getReadOnlyContext());
-        try {
-            페이지읽기<T> 읽는다 = 읽기를_만든다.apply(LdapTemplates.configured(single));
+        return LdapTemplates.한_커넥션에서(template, paged -> {
+            페이지읽기<T> 읽는다 = 읽기를_만든다.apply(paged);
 
             List<T> results = new ArrayList<>();
             PagedResultsDirContextProcessor processor = new PagedResultsDirContextProcessor(pageSize);
@@ -94,9 +88,7 @@ final class PagedLdapSearch {
                 }
             } while (hasMore);
             return results;
-        } finally {
-            single.destroy();
-        }
+        });
     }
 
     private static SearchControls controlsOf(LdapQuery query) {

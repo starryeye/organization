@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
@@ -49,9 +50,17 @@ import java.util.stream.Collectors;
  *
  * <p><b>이것으로 창이 완전히 닫히지는 않는다.</b> DynamoDB GSI 는 강한 일관성을 지원하지 않으므로
  * 역참조({@link #findGroupIdsContaining})는 여전히 최종 일관성이다. 방금 추가된 멤버십이 GSI 에
- * 아직 안 보이면 그 조직이 영향 범위에서 빠질 수 있다 — 다만 그 경우는 "이 연산이 그 조직을
- * 건드리지 않는다" 로 끝나고, 위처럼 <b>있는 튜플을 지우는</b> 방향은 아니다. 남은 잔여 위험이며
- * 재적재가 유일한 해결책이다(설계 §5.4).
+ * 아직 안 보이면 그 조직이 영향 범위에서 빠질 수 있다 — 그 경우는 "이 연산이 그 조직을
+ * 건드리지 않는다" 로 끝난다.
+ *
+ * <p><b>반대 방향(막 빠진 멤버십을 낡은 GSI 가 계속 보고하는 경우)은 방향이 다르다 —
+ * 그래서 별도로 막는다.</b> {@code upsertUser} 는 {@code findGroupIdsContaining} 이 보고한
+ * 조직마다 {@link #findGroupHeader}(존재 확인)만 읽고 멤버 목록은 읽지 않는데, 헤더는 조직이
+ * 있다는 것만 말하고 이 직원이 아직 멤버인지는 말하지 않는다 — 확인 없이 그대로 믿으면 방금
+ * 지워진 멤버십을 재시도가 되살려 쓴다(있어야 할 튜플을 지우는 것보다 위험한, <b>없어야 할
+ * 튜플을 쓰는</b> 방향이다). {@link #containsMember} 가 멤버 줄 자체를 한 번 더 강한
+ * 일관성으로 읽어 이 창을 닫는다. 재적재가 유일한 해결책인 잔여 위험은 여전히 "빠짐" 방향
+ * 뿐이다(설계 §5.4).
  *
  * <p>비용은 읽기당 RCU 2배다. 쓰기 경로의 읽기는 요청당 한 자릿수라 감당할 만하고, 조회 API 는
  * 별도 저장소({@code DynamoDbDirectorySearchRepository})를 탄다.
@@ -160,6 +169,45 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return queryPartition(Keys.groupPk(groupId))
                 .collectList()
                 .flatMap(items -> Mono.justOrEmpty(toGroup(groupId, items)));
+    }
+
+    /**
+     * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 META 한 건만 집어온다 —
+     * {@link #findUser} 와 같은 이유다. 읽는 양이 조직 크기를 따라가지 않는다.
+     *
+     * <p><b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고.
+     */
+    @Override
+    public Mono<GroupHeader> findGroupHeader(String groupId) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                                Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(response -> new GroupHeader(groupId,
+                        Attrs.str(response.item(), EXTERNAL_ID),
+                        Attrs.str(response.item(), DISPLAY_NAME)));
+    }
+
+    /**
+     * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 멤버 줄 한 개만 집어온다 —
+     * {@link #findGroupHeader} 와 같은 이유다. 읽는 양이 조직 크기를 따라가지 않는다.
+     *
+     * <p><b>강한 일관성으로 읽는다.</b> {@link DirectoryStateRepository#containsMember} 의
+     * 자바독 참고 — {@link #findGroupIdsContaining}(GSI1, 최종 일관성)이 보고한 조직이 실제로도
+     * 이 멤버를 갖고 있는지를 이 메서드가 확정한다.
+     */
+    @Override
+    public Mono<Boolean> containsMember(String groupId, MemberRef ref) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                                Keys.SK, Attrs.s(Keys.memberSk(ref))))
+                        .consistentRead(true)
+                        .build()))
+                .map(GetItemResponse::hasItem);
     }
 
     @Override

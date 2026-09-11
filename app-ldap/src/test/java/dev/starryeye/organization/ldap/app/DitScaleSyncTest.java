@@ -109,7 +109,7 @@ class DitScaleSyncTest {
 
     @Test
     @Order(1)
-    @DisplayName("DIT 로 심은 5,024명이 groupOfNames 와 같은 스냅샷·같은 튜플에 도달한다")
+    @DisplayName("DIT 로 심은 조직도가 groupOfNames 와 같은 스냅샷·같은 튜플에 도달한다")
     void DIT가_같은_결과에_도달한다() {
         // given — 겸직 166건이 빠진 만큼만 튜플이 적다
         int 기대튜플 = TupleMapper.toTuples(기대.snapshot()).tuples().size();

@@ -12,6 +12,7 @@ import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
 import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -114,14 +115,14 @@ class LdapScaleScenarioTest {
 
     @Test
     @Order(1)
-    @DisplayName("L1. 최초 전체 동기화 — 빈 상태에서 5,541 튜플을 만든다")
+    @DisplayName("L1. 최초 전체 동기화 — 빈 상태에서 조직도 전체를 튜플로 만든다")
     void L1_최초_전체_동기화() {
         // when
         var 결과 = 동기화한다();
 
         // then
         결과.jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.writtenCount").isEqualTo(5_541)
+                .jsonPath("$.writtenCount").isEqualTo(전체튜플수())
                 .jsonPath("$.deletedCount").isEqualTo(0);
         검증한다();
     }
@@ -397,14 +398,24 @@ class LdapScaleScenarioTest {
 
     @Test
     @Order(16)
-    @DisplayName("L16. 순환 참조 유입 — 완주하고, 순환을 닫는 간선만 빠진다")
+    @DisplayName("L16. 순환 참조 유입 — 완주하고, 순환을 닫는 간선만 빠지고 나머지 롤업은 그대로 산다")
     void L16_순환_참조() {
-        // given — 조상을 자기 자손의 하위로 붙인다 (A→B→C→A)
+        // given — 조상을 자기 자손의 하위로 붙인다 (A→B→C→A).
+        // .sorted() 가 없으면 자손들() 이 훑는 DirectoryGroup.members() 가 Set.copyOf 라
+        // 순회 순서가 JVM 실행마다 달라, 실행마다 다른 조직에 순환이 걸린다 — S16 의 동일한
+        // 식은 정렬돼 있는데 여기만 빠져 있었다.
         String 조상 = 기대.landmarks().개발부문();
-        String 자손 = 기대.자손들(조상).stream()
+        String 자손 = 기대.자손들(조상).stream().sorted()
                 .filter(org -> 기대.조상들(org).size() >= 3)
                 .findFirst().orElseThrow();
         String 순환밖직원 = 기대.landmarks().L3직속직원();
+        // 순환이 걸린 가지 안에서 원래 롤업이 살아남는지 볼 사람 — 자손의 직속 직원
+        List<String> 자손직원 = 기대.snapshot().groups().get(자손).members().stream()
+                .filter(member -> member.type() == MemberType.USER)
+                .map(MemberRef::id)
+                .sorted()
+                .toList();
+        assertThat(자손직원).as("순환이 걸린 가지에도 롤업 생존을 확인할 사람이 있어야 한다").isNotEmpty();
 
         // when
         디렉터리.하위조직으로_붙인다(자손, 조상);
@@ -412,12 +423,31 @@ class LdapScaleScenarioTest {
         // then — 동기화는 완주한다. 순환 때문에 멈추면 그날 전체가 반영되지 않는다
         동기화한다().jsonPath("$.status").isEqualTo("SUCCEEDED");
 
+        // TupleMapper.removeCycles 는 조상→...→자손 으로 내려가는 기존 트리를 DFS 로 훑다가
+        // (그동안 조상은 GRAY), 자손에서 새로 생긴 자손→조상 간선을 만나 back edge 로 판정해
+        // 버린다. 즉 버려지는 것은 (group:조상, child, group:자손) 그 한 간선뿐이다.
+        // removeCycles 를 통째로 지워도 OpenFGA 는 순환 child 튜플을 그냥 받아 주므로,
+        // 이 값을 직접 묻지 않으면 그 삭제조차 잡히지 않는다.
+        assertThat(성립하는가(RelationTuple.child(조상, 자손)))
+                .as("순환을 닫는 간선(조상이 자손의 child)이 그대로 남아 있다").isFalse();
+
+        // 순환과 무관한, 자손 → 조상으로 원래 있던 롤업은 살아남아야 한다 —
+        // removeCycles 가 back edge 말고 다른 간선까지 지우면 여기서 걸린다
+        자손직원.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 조상)))
+                .as("순환과 무관한 %s → %s 롤업까지 끊기면 안 된다", id, 조상).isTrue());
+
         // 순환 밖 직원의 권한은 그대로다
         assertThat(성립하는가(RelationTuple.member(순환밖직원, 기대.landmarks().회사())))
                 .as("순환은 그 가지 안에서만 문제여야 한다").isTrue();
     }
 
     // ---------- 거들기 ----------
+
+    /** 픽스처에서 유도한다 — 조직도를 키울 때 테스트를 손으로 고치지 않도록. */
+    private static int 전체튜플수() {
+        return dev.starryeye.organization.core.tuple.TupleMapper
+                .toTuples(최초.snapshot()).tuples().size();
+    }
 
     /** 뒤 시나리오들이 이름으로 잡아 쓰는 직원들. 여기 있는 사람은 함부로 지우면 안 된다. */
     private static java.util.Set<String> 랜드마크직원들() {

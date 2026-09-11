@@ -182,6 +182,31 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("역참조가 낡아 이미 빠진 조직을 계속 보고해도, 멤버 줄을 강한 일관성으로 다시 확인해 튜플을 새로 쓰지 않는다")
+    void 낡은_역참조가_보고한_조직은_멤버줄_확인으로_걸러진다() {
+        // given — kim 은 활성 직원이고, PLANT 는 kim 을 멤버로 갖고 있지 않다(PATCH 로 이미
+        // 빠졌고 그 튜플도 지워졌다). 그런데 findGroupIdsContaining(GSI1, 최종 일관성)은 그
+        // 삭제를 아직 못 봐서 PLANT 를 계속 보고한다 — DynamoDbDirectoryStateRepository
+        // 클래스 자바독의 "강한 일관성" 절이 말하는 그 창을 staleGroupIdsContaining 으로
+        // 흉내낸다.
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("PLANT")).block();
+        state.staleGroupIdsContaining.add("PLANT");
+        openFga를_상태와_맞춘다();
+
+        // when — kim 의 아무 속성이나 바뀌어 PUT 이 다시 온다
+        var result = useCase.upsertUser(직원("kim", true)).block();
+
+        // then — 낡은 역참조만으로 소속을 단언하면(직원한명_그림이 members = {kim} 으로
+        // 가정) 이미 지워진 direct_member(kim,PLANT) 가 되살아나 쓰인다. 멤버 줄 자체를
+        // containsMember 로 다시 확인해야 PLANT 가 걸러지고, 그 튜플은 어느 delta 에도
+        // 나타나지 않는다.
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas.stream().flatMap(delta -> delta.toWrite().stream()))
+                .doesNotContain(RelationTuple.directMember("kim", "PLANT"));
+    }
+
+    @Test
     @DisplayName("조직이 이미 참조 중인 멤버의 유저 레코드가 나중에 도착해도 소속 튜플이 생성된다")
     void 조직이_먼저_참조한_유저가_나중에_도착해도_튜플이_생성된다() {
         // given — DEV002 가 이미 kim 을 멤버로 갖고 있지만, kim 의 유저 레코드는 아직 도착하지 않았다

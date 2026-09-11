@@ -8,7 +8,10 @@ import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import dev.starryeye.organization.ldap.LdapTemplates;
 import org.springframework.ldap.core.AttributesMapper;
+import org.springframework.ldap.core.ContextMapper;
+import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQueryBuilder;
 
@@ -17,6 +20,7 @@ import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -46,11 +50,12 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                         .where("objectClass").is(config.getUserObjectClass()),
                 pageSize, userMapper(config));
 
-        List<RawEntry> groupEntries = PagedLdapSearch.search(template,
-                LdapQueryBuilder.query()
-                        .base(config.getGroupSearchBase())
-                        .where("objectClass").is(config.getGroupObjectClass()),
-                pageSize, groupMapper(config));
+        List<RawEntry> groupEntries = 범위가_잘린_멤버를_이어받는다(template, config,
+                PagedLdapSearch.search(template,
+                        LdapQueryBuilder.query()
+                                .base(config.getGroupSearchBase())
+                                .where("objectClass").is(config.getGroupObjectClass()),
+                        pageSize, groupMapper(config)));
 
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
@@ -109,19 +114,75 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 List.of());
     }
 
-    private AttributesMapper<RawEntry> groupMapper(LdapProperties.GroupOfNames config) {
-        return attributes -> {
+    /**
+     * <b>{@code ContextMapper} 다.</b> {@code AttributesMapper} 에는 DN 이 넘어오지 않는데,
+     * 범위 검색으로 잘린 멤버를 이어받으려면 그 엔트리를 <b>다시 지목해 물어야</b> 하고
+     * 그러려면 서버가 알려준 진짜 DN 이 필요하다. {@link #dnOf} 의 재구성은 조직이 검색
+     * 베이스 바로 아래 있다고 가정하므로 트리가 깊으면 틀린 DN 이 된다.
+     */
+    private ContextMapper<RawEntry> groupMapper(LdapProperties.GroupOfNames config) {
+        return context -> {
+            DirContextAdapter adapter = (DirContextAdapter) context;
+            Attributes attributes = adapter.getAttributes();
             String code = IdNormalizer.normalize(required(attributes, config.getGroupIdAttribute()));
+            RangedAttributeReader.Chunk 멤버 =
+                    RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
                     code,
+                    // externalId 는 지금 형태를 유지한다. 진짜 DN 이 더 정확하지만 저장된 값이
+                    // 전부 바뀌는 데이터 변경이라 이번 범위 밖이다 — 진짜 DN 은 재요청에만 쓴다.
                     dnOf(attributes, config.getGroupIdAttribute(), config.getGroupSearchBase()),
                     // 폴백은 정규화된 code 가 아니라 원본이다 — 금지 문자가 있으면 code 에는
                     // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getGroupNameAttribute()),
                             required(attributes, config.getGroupIdAttribute())),
                     null,
-                    values(attributes, config.getMemberAttribute()));
+                    멤버.values(),
+                    adapter.getDn().toString(),
+                    멤버.완료());
         };
+    }
+
+    /**
+     * 멤버가 범위 검색으로 잘린 조직만 골라 <b>커넥션 하나 안에서</b> 끝까지 이어받는다.
+     *
+     * <p>잘린 조직이 없으면 — 범위 검색을 하지 않는 서버(OpenLDAP, 임베디드 UnboundID)이거나
+     * 모든 조직이 한계선 아래이면 — 커넥션을 열지도 않는다.
+     */
+    private List<RawEntry> 범위가_잘린_멤버를_이어받는다(LdapTemplate template,
+                                              LdapProperties.GroupOfNames config,
+                                              List<RawEntry> entries) {
+        List<RawEntry> 잘린것 = entries.stream().filter(entry -> !entry.membersComplete()).toList();
+        if (잘린것.isEmpty()) {
+            return entries;
+        }
+        log.info("멤버가 범위 검색으로 잘린 조직 {}개를 이어받는다", 잘린것.size());
+
+        // realDn 으로 색인한다 — entry.id() 는 안 된다. IdNormalizer 가 금지 문자를 뭉개
+        // 서로 다른 조직코드를 같은 값으로 만들 수 있고(DuplicateIdGuard 가 막는 바로 그
+        // 충돌), 그 상태에서 아이디로 색인하면 잘리지 않은 형제 조직까지 이 맵에 걸려
+        // 남의 이어받은 멤버 목록을 받는다 — 3명짜리 조직이 조용히 1,600명을 떠안는 권한
+        // 확대다. realDn 은 서버가 돌려준 진짜 DN이라 엔트리마다 유일하다.
+        Map<String, List<String>> 이어받은것 = LdapTemplates.한_커넥션에서(template, 한커넥션 -> {
+            Map<String, List<String>> 결과 = new LinkedHashMap<>();
+            for (RawEntry entry : 잘린것) {
+                List<String> 전부 = RangedAttributeReader.전부_읽는다(
+                        한커넥션, entry.realDn(), config.getMemberAttribute());
+                log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개)",
+                        entry.id(), 전부.size(), entry.members().size());
+                결과.put(entry.realDn(), 전부);
+            }
+            return 결과;
+        });
+
+        // 마지막 인자가 무조건 true 인 것은 낙관이 아니다 — 끝까지 못 읽으면
+        // 전부_읽는다 가 IncompleteAttributeReadException 을 던지므로 여기 도달하지 못한다.
+        return entries.stream()
+                .map(entry -> 이어받은것.containsKey(entry.realDn())
+                        ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(),
+                                이어받은것.get(entry.realDn()), entry.realDn(), true)
+                        : entry)
+                .toList();
     }
 
     /**
@@ -181,6 +242,16 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return null;
     }
 
-    private record RawEntry(String id, String dn, String displayName, String email, List<String> members) {
+    /**
+     * @param realDn          서버가 알려준 DN. 범위 검색 재요청에만 쓴다. 직원 쪽은 쓰지 않는다
+     * @param membersComplete 멤버 목록이 잘리지 않고 다 왔는가
+     */
+    private record RawEntry(String id, String dn, String displayName, String email,
+                            List<String> members, String realDn, boolean membersComplete) {
+
+        /** 직원 엔트리용. 다중값 속성을 읽지 않으므로 언제나 완결이다. */
+        RawEntry(String id, String dn, String displayName, String email, List<String> members) {
+            this(id, dn, displayName, email, members, dn, true);
+        }
     }
 }
