@@ -434,16 +434,10 @@ class ScimScaleScenarioTest {
         뺄사람.forEach(id -> editor.겸직을_푼다(id, 대형조직));
         기대 = editor.완성();
 
-        // then
+        // then — 뺀 20명의 권한이 OpenFGA 에서 사라졌는지는 하네스 ③이 묻는다 — 조직도가
+        // 지운 멤버십을 기억한다. 아래 admin 조회는 DynamoDB 목록 쪽이다
         검증한다();
         assertThat(멤버를_끝까지_읽는다(대형조직)).hasSize(현재멤버.size() - 20);
-
-        // 뺀 20명은 대형조직 말고 다른 소속이 없어 기대 조직도에서 통째로 빠지고,
-        // SyncVerifier 의 후보 집합(TupleMapper.candidateTuples)에서도 같이 사라진다 — 하네스는
-        // 이들을 아예 묻지 않는다. 위 admin 조회는 DynamoDB 목록만 보는 것이라, OpenFGA 쪽 삭제가
-        // 실제로 일어났는지는 이렇게 직접 물어야 안다. 20명뿐이라 전수 확인이 싸다.
-        뺄사람.forEach(id -> assertThat(성립하는가(RelationTuple.member(id, 대형조직)))
-                .as("빠졌어야 할 %s 의 member 가 OpenFGA 에 남아 있다", id).isFalse());
     }
 
     @Test
