@@ -9,10 +9,10 @@ import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
 import dev.openfga.sdk.api.client.model.ClientWriteRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.VerificationResult;
 import dev.starryeye.organization.core.model.RelationTuple;
-import dev.starryeye.organization.core.tuple.TupleMapper;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -193,18 +193,19 @@ public final class OpenFgaProbe {
     /**
      * 조직도가 요구하는 상태를 OpenFGA 에 직접 물어 대조한다 — 양성·음성·롤업을 한 번에.
      *
-     * <p>{@code SyncVerifier} 와 같은 것을 보지만 경로가 다르다. 둘이 같은 답을 내야 하고,
-     * 갈리면 어느 한쪽 — 대개 그 사이에 있는 어댑터 — 이 틀린 것이다.
+     * <p>{@code SyncVerifier} 와 <b>같은 기대값({@link ChartExpectation})을 다른 경로로</b> 묻는다.
+     * 둘이 같은 답을 내야 하고, 갈리면 어느 한쪽 — 대개 그 사이에 있는 어댑터 — 이 틀린 것이다.
      */
     public VerificationResult 직접_대조한다(OrgChart chart, List<String> 롤업표본) {
+        return 직접_대조한다(ChartExpectation.of(chart), 롤업표본);
+    }
+
+    /** 끊긴 참조를 일부러 허용한 기대값처럼, 기대값을 직접 넘길 때. */
+    public VerificationResult 직접_대조한다(ChartExpectation 기대, List<String> 롤업표본) {
         List<String> 어긋남 = new ArrayList<>();
 
-        Set<RelationTuple> 기대튜플 = TupleMapper.toTuples(chart.snapshot()).tuples();
-        Set<RelationTuple> 후보 = TupleMapper.candidateTuples(chart.snapshot());
-        Set<RelationTuple> 물어볼것 = new LinkedHashSet<>(후보);
-        물어볼것.addAll(기대튜플);
-
-        Map<RelationTuple, Boolean> 답 = batchCheck(물어볼것);
+        Set<RelationTuple> 기대튜플 = 기대.있어야할튜플();
+        Map<RelationTuple, Boolean> 답 = batchCheck(기대.물어볼후보());
         답.forEach((tuple, allowed) -> {
             boolean 기대값 = 기대튜플.contains(tuple);
             if (기대값 != allowed) {
@@ -213,33 +214,14 @@ public final class OpenFgaProbe {
             }
         });
 
-        Set<RelationTuple> 롤업 = new LinkedHashSet<>();
+        // 음성은 자손과 형제 가지 — SyncVerifier 와 같은 규칙이다. 비활성 직원은 소속이 그대로여도
+        // 권한이 없으므로 기대소속까지 음성이다(설계 §5.1).
         Map<RelationTuple, Boolean> 롤업기대 = new LinkedHashMap<>();
         for (String userId : 롤업표본) {
-            // 비활성 직원은 소속이 그대로여도 권한이 없다 — 멤버십은 남기고 튜플만 지우는
-            // 것이 비활성의 정의다(설계 §5.1).
-            var user = chart.snapshot().users().get(userId);
-            boolean 활성 = user != null && user.active();
-            for (String org : chart.기대소속(userId)) {
-                RelationTuple tuple = RelationTuple.member(userId, org);
-                롤업.add(tuple);
-                롤업기대.put(tuple, 활성);
-            }
-            // 소속이 없는 직원 — 아직 어느 조직에도 안 들어갔거나 방금 조직이 지워진 —
-            // 은 "아래로 새는지" 를 물을 기준 조직 자체가 없다. 여기서 터뜨리면 정작
-            // 검증하려던 것이 가려진다.
-            for (String 직속 : chart.직속조직들(userId)) {
-                for (String org : chart.자손들(직속)) {
-                    if (chart.기대소속(userId).contains(org)) {
-                        continue;
-                    }
-                    RelationTuple tuple = RelationTuple.member(userId, org);
-                    롤업.add(tuple);
-                    롤업기대.put(tuple, false);
-                }
-            }
+            기대.롤업양성(userId).forEach(tuple -> 롤업기대.put(tuple, true));
+            기대.롤업음성(userId).forEach(tuple -> 롤업기대.put(tuple, false));
         }
-        batchCheck(롤업).forEach((tuple, allowed) -> {
+        batchCheck(new LinkedHashSet<>(롤업기대.keySet())).forEach((tuple, allowed) -> {
             if (!롤업기대.get(tuple).equals(allowed)) {
                 어긋남.add("OpenFGA 직접질의 롤업: %s 가 기대=%s 실제=%s"
                         .formatted(읽기쉽게(tuple), 롤업기대.get(tuple), allowed));

@@ -2,13 +2,13 @@ package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
+import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.model.DirectoryGroup;
-import dev.starryeye.organization.core.model.MemberRef;
-import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -95,16 +95,11 @@ class ScimProvisioningOrderScaleTest {
         // when
         조직요청.forEach(request -> 보낸다(request, 201));
 
-        // then — 조직은 다 만들어졌지만 직원이 없으므로 그 멤버십의 튜플은 아직 없다.
-        // TupleMapper 가 "스냅샷에 없어 건너뜁니다" 로 미뤄 둔 상태다.
-        String 대표직원 = 기대.landmarks().L6직속직원();
-        assertThat(성립하는가(RelationTuple.member(대표직원, 기대.직속조직(대표직원))))
-                .as("직원이 아직 없는데 튜플이 생겼다").isFalse();
-
-        // child 간선은 조직끼리라 이미 성립한다 — 조직은 둘 다 도착했기 때문이다
-        String 팀 = 기대.landmarks().이동할팀();
-        assertThat(성립하는가(RelationTuple.child(팀, 기대.부모(팀))))
-                .as("조직끼리의 계층은 직원과 무관하게 성립해야 한다").isTrue();
+        // then — 조직은 다 만들어졌지만 직원이 아직 없는 중간 상태 전체를 하네스로 잰다.
+        // 멤버 목록은 아직 없는 직원을 가리키고(끊긴 참조), 그 멤버십의 튜플은 없어야 한다 —
+        // 운영이 "스냅샷에 없어 건너뜁니다" 로 미뤄 둔 상태다. 조직끼리의 child 는 이미 성립한다.
+        // 직원이 없으니 롤업 표본은 비고, ④ 는 이 단계에서 할 일이 없다.
+        검증한다(ChartExpectation.끊긴참조를_허용하며(직원이_아직_없는_조직도()));
     }
 
     @Test
@@ -179,13 +174,24 @@ class ScimProvisioningOrderScaleTest {
     }
 
     private void 검증한다() {
-        var 하네스 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
+        검증한다(ChartExpectation.of(기대));
+    }
+
+    private void 검증한다(ChartExpectation 기대값) {
+        var 하네스 = new SyncVerifier(state, checker).검증한다(기대값).block(Duration.ofMinutes(10));
         assertThat(하네스).isNotNull();
         assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
 
         var 직접 = new OpenFgaProbe(bootstrapper)
-                .직접_대조한다(기대, RollupSampling.기본값().표본을_고른다(기대));
+                .직접_대조한다(기대값, RollupSampling.기본값().표본을_고른다(기대값.chart()));
         assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
+    }
+
+    /** 조직만 도착한 상태 — 멤버 목록의 직원 참조는 남고 직원 레코드만 없다. */
+    private static OrgChart 직원이_아직_없는_조직도() {
+        var editor = OrgChartEditor.편집한다(기대);
+        기대.snapshot().users().keySet().stream().sorted().forEach(editor::직원_레코드만_지운다);
+        return editor.완성();
     }
 
     private boolean 성립하는가(RelationTuple tuple) {

@@ -179,4 +179,17 @@ class OrgChartFixtureTest {
                         l.L5직속직원(), l.L6직속직원()))
                 .allSatisfy(userId -> assertThat(chart.직속조직들(userId)).hasSize(1));
     }
+
+    @Test
+    @DisplayName("모든 조직의 부모는 하나 이하다 — 다중 부모는 단위 테스트만 다룬다")
+    void 부모는_하나_이하다() {
+        // when — 조직마다 자신을 하위 조직으로 가진 조직 수를 센다
+        var 부모수 = new java.util.HashMap<String, Integer>();
+        chart.snapshot().groups().values().forEach(group -> group.members().stream()
+                .filter(member -> member.type() == MemberType.GROUP)
+                .forEach(member -> 부모수.merge(member.id(), 1, Integer::sum)));
+
+        // then — 이 성질이 깨지면 스펙 §11 의 "다중 부모는 단위 테스트로만 확인" 을 고쳐야 한다
+        assertThat(부모수.values()).allSatisfy(count -> assertThat(count).isEqualTo(1));
+    }
 }

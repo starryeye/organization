@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -33,7 +34,6 @@ import org.testcontainers.utility.DockerImageName;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,8 +59,7 @@ class LdapDeletionGuardScaleTest {
     private static final OrgChart 최초 = OrgChartFixture.오천명();
     private static final double 임계비율 = 0.3;
     /** 픽스처에서 유도한다 — 조직도를 키울 때 경계값 계산을 손으로 고치지 않도록. */
-    private static final int 최초튜플수 = dev.starryeye.organization.core.tuple.TupleMapper
-            .toTuples(최초.snapshot()).tuples().size();
+    private static final int 최초튜플수 = ChartExpectation.of(최초).있어야할튜플().size();
 
     private static OrgChart 기대 = 최초;
     /** 소속이 하나뿐인 직원들. 한 명 지우면 튜플이 정확히 하나 줄어 계산이 어긋나지 않는다. */
@@ -132,7 +131,6 @@ class LdapDeletionGuardScaleTest {
         int 기준선 = 최초튜플수;
         int 지울건수 = (int) Math.floor(기준선 * 임계비율);
         assertThat((double) 지울건수 / 기준선).isLessThanOrEqualTo(임계비율);
-        List<String> 지워진사람들 = 단일소속직원.subList(0, 지울건수);
 
         // when
         양쪽에서_지운다(0, 지울건수);
@@ -141,31 +139,16 @@ class LdapDeletionGuardScaleTest {
         동기화한다(false)
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.deletedCount").isEqualTo(지울건수);
+        // deletedCount 숫자만 맞고 OpenFGA 삭제가 조용히 no-op 이어도, 지운 사람 전원의 권한이
+        // 사라졌는지를 하네스 ③이 묻는다 — 조직도가 지운 멤버십을 기억한다
         검증한다();
-
-        // 지워진 사람들은 기대 조직도에서도 통째로 빠지므로 SyncVerifier 의 후보 집합
-        // (TupleMapper.candidateTuples) 에서도 같이 사라진다 — 하네스는 이들을 아예 묻지
-        // 않는다. deletedCount 숫자만 맞고 실제 OpenFGA 삭제가 조용히 no-op 이어도 여기까지는
-        // 전부 통과하므로, "나간 사람이 권한을 계속 쥐고 있다" 를 잡으려면 직접 물어야 한다.
-        // 전원을 물으면 비싸 50명을 스트라이드로 고른다 — 삭제 구간 전체에 고르게 걸쳐야
-        // 특정 배치(batch)에서만 나는 결함도 놓치지 않는다.
-        int 표본크기 = 50;
-        int 간격 = Math.max(1, 지워진사람들.size() / 표본크기);
-        List<String> 표본 = new ArrayList<>();
-        for (int i = 0; i < 지워진사람들.size(); i += 간격) {
-            표본.add(지워진사람들.get(i));
-        }
-        assertThat(표본).isNotEmpty();
-        표본.forEach(id -> assertThat(성립하는가(
-                        RelationTuple.directMember(id, 최초.직속조직(id))))
-                .as("삭제됐어야 할 %s 의 direct_member 가 아직 OpenFGA 에 남아 있다", id).isFalse());
     }
 
     @Test
     @Order(3)
     @DisplayName("L12-b. 임계치를 한 건 넘기면 중단하고 아무것도 안 지운다")
     void L12b_경계_위는_중단한다() {
-        // given — 새 기준선(3,879)의 30% 를 한 건 넘긴다
+        // given — L12-a 뒤의 새 기준선의 30% 를 한 건 넘긴다
         int 기준선 = 최초튜플수 - (int) Math.floor(최초튜플수 * 임계비율);
         int 지울건수 = (int) Math.floor(기준선 * 임계비율) + 1;
         assertThat((double) 지울건수 / 기준선).isGreaterThan(임계비율);

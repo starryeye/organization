@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -21,8 +22,33 @@ import java.util.Set;
  * <p><b>{@code externalId} 는 비워 둔다.</b> LDAP 은 DN 을, SCIM 은 그쪽 식별자를 채우므로
  * 조직도 자체는 그것을 모른다. 검증에서도 비교하지 않는다 — 이 값을 읽는 코드가 없기
  * 때문이다(follow-ups §4).
+ *
+ * <p><b>{@link #지워진멤버십} 은 이 조직도에 이르기까지 사라진 멤버십이다.</b> 하네스는 조직도에
+ * 있는 멤버십만 묻기 때문에, 이것이 없으면 "지웠어야 할 권한이 남았는가" 를 못 묻는다.
+ * {@link OrgChartEditor#완성()} 이 편집 전후를 비교해 쌓는다. 2인자 생성자는 기억이 없는
+ * 최초 조직도용이다.
  */
-public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
+public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Membership> 지워진멤버십) {
+
+    public OrgChart {
+        지워진멤버십 = 지워진멤버십 == null ? Set.of() : Set.copyOf(지워진멤버십);
+    }
+
+    /** 기억이 없는 최초 조직도. */
+    public OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
+        this(snapshot, landmarks, Set.of());
+    }
+
+    /** 지금 조직도의 멤버십 전부. 에디터가 편집 전후를 비교하는 데 쓴다. */
+    public Set<Membership> 멤버십들() {
+        Set<Membership> all = new HashSet<>();
+        for (DirectoryGroup group : snapshot.groups().values()) {
+            for (MemberRef member : group.members()) {
+                all.add(new Membership(group.id(), member));
+            }
+        }
+        return all;
+    }
 
     /** 조직 {@code orgCode} 의 조상들을 가까운 순으로. 롤업 검증이 이 체인을 탄다. */
     public List<String> 조상들(String orgCode) {

@@ -6,7 +6,6 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
-import dev.starryeye.organization.core.tuple.TupleMapper;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
@@ -27,11 +26,12 @@ import java.util.TreeSet;
  *
  * <p><b>③ 이 가장 중요하다.</b> "있어야 할 것이 있다" 만 보면 잘못 남은 튜플을 영원히 못
  * 잡는다 — 이 프로젝트가 처음부터 위험하다고 본 것(퇴사자 권한 생존)이 정확히 그 모양이다.
- * 음성 후보는 {@link TupleMapper#candidateTuples} 로 뽑는다. {@code active}·순환 필터를
- * 적용하기 <b>전</b>의 멤버십 전체라, 비활성 직원의 잔여 튜플이 여기 걸린다.
+ * 기대값과 후보는 {@link ChartExpectation} 이 조직도만 보고 계산한다. <b>운영의 {@code TupleMapper}
+ * 에게 묻지 않는다</b> — 운영이 틀리면 정답도 같이 틀려 통과하기 때문이다. 후보에는 비활성 직원의
+ * 멤버십과 조직도가 기억하는 <b>지워진 멤버십</b>이 들어간다.
  *
- * <p><b>한계를 알고 쓴다.</b> 후보가 멤버십에서 나오므로 <b>멤버십이 아예 사라진 튜플</b>은
- * 이 검증으로도 안 잡힌다(설계 §5.4). 그것을 잡으려면 열거가 필요한데 금지돼 있다.
+ * <p><b>한계를 알고 쓴다.</b> 에디터로 지운 멤버십은 잡지만, <b>조직도에 한 번도 없었던 튜플</b>은
+ * 후보에 들어갈 길이 없어 못 잡는다(스펙 §11). 그것을 잡으려면 열거가 필요한데 금지돼 있다.
  *
  * <p>포트({@link DirectoryStateRepository}, {@link RelationTupleChecker})에만 의존하므로
  * LDAP·SCIM 양쪽 E2E 가 같은 것을 쓴다 — 두 커넥터를 서로 다른 잣대로 재면 "같은 조직도로
@@ -54,9 +54,14 @@ public final class SyncVerifier {
         this.롤업표본 = 롤업표본;
     }
 
-    /** ①~④ 를 전부 돈다. */
+    /** ①~④ 를 전부 돈다. 조직도에 끊긴 참조나 순환이 있으면 거부한다. */
     public Mono<VerificationResult> 검증한다(OrgChart 기대) {
-        return 상태를_대조한다(기대)
+        return 검증한다(ChartExpectation.of(기대));
+    }
+
+    /** 끊긴 참조를 일부러 허용한 기대값처럼, 기대값을 직접 넘길 때. */
+    public Mono<VerificationResult> 검증한다(ChartExpectation 기대) {
+        return 상태를_대조한다(기대.chart())
                 .flatMap(상태결과 -> 튜플을_대조한다(기대)
                         .flatMap(튜플결과 -> 롤업을_대조한다(기대)
                                 .map(롤업결과 -> 상태결과.합친다(튜플결과).합친다(롤업결과))));
@@ -128,12 +133,9 @@ public final class SyncVerifier {
      * 물으면 "실제로 있는 것" 한 집합이 나오고, 거기서 양쪽 방향의 차집합이 바로 나온다.
      * 두 번 물으면 그 사이에 상태가 변할 여지가 생기고 비용도 두 배다.
      */
-    private Mono<VerificationResult> 튜플을_대조한다(OrgChart 기대) {
-        Set<RelationTuple> 기대튜플 = TupleMapper.toTuples(기대.snapshot()).tuples();
-        Set<RelationTuple> 후보 = TupleMapper.candidateTuples(기대.snapshot());
-
-        Set<RelationTuple> 물어볼것 = new LinkedHashSet<>(후보);
-        물어볼것.addAll(기대튜플);
+    private Mono<VerificationResult> 튜플을_대조한다(ChartExpectation 기대) {
+        Set<RelationTuple> 기대튜플 = 기대.있어야할튜플();
+        Set<RelationTuple> 물어볼것 = 기대.물어볼후보();
 
         return checker.existing(물어볼것).map(실제 -> {
             List<String> 어긋남 = new ArrayList<>();
@@ -164,27 +166,20 @@ public final class SyncVerifier {
      *
      * <p>전 직원을 다 도는 대신 표본을 쓴다. 6,000여 명 × 조상 체인이면 Check 가 수만 번이라
      * 매 단계 도는 검증으로 감당이 안 된다. 표본은 {@link RollupSampling} 이 정하고,
-     * 깊이별 대표와 겸직은 <b>항상</b> 들어간다.
+     * 깊이별 대표와 겸직은 <b>항상</b> 들어간다. 규칙은 {@link ChartExpectation#롤업양성}·
+     * {@link ChartExpectation#롤업음성} 에 있다.
      */
-    private Mono<VerificationResult> 롤업을_대조한다(OrgChart 기대) {
-        List<String> 표본 = 롤업표본.표본을_고른다(기대);
+    private Mono<VerificationResult> 롤업을_대조한다(ChartExpectation 기대) {
+        List<String> 표본 = 롤업표본.표본을_고른다(기대.chart());
         if (표본.isEmpty()) {
             return Mono.just(VerificationResult.통과());
         }
 
         Set<RelationTuple> 참이어야 = new LinkedHashSet<>();
         Set<RelationTuple> 거짓이어야 = new LinkedHashSet<>();
-
         for (String userId : 표본) {
-            Set<String> 기대소속 = 기대.기대소속(userId);
-            // 비활성 직원은 <b>소속이 그대로여도 권한이 없다.</b> 멤버십은 남기고 튜플만
-            // 지우는 것이 비활성의 정의이므로(설계 §5.1), 소속만 보고 member 를 기대하면
-            // 올바른 구현을 결함으로 신고한다 — 실제로 그렇게 신고했다.
-            boolean 활성 = 활성인가(기대, userId);
-            기대소속.forEach(org -> (활성 ? 참이어야 : 거짓이어야)
-                    .add(RelationTuple.member(userId, org)));
-            새면_안되는_조직들(기대, userId, 기대소속)
-                    .forEach(org -> 거짓이어야.add(RelationTuple.member(userId, org)));
+            참이어야.addAll(기대.롤업양성(userId));
+            거짓이어야.addAll(기대.롤업음성(userId));
         }
 
         Set<RelationTuple> 물어볼것 = new LinkedHashSet<>(참이어야);
@@ -204,30 +199,6 @@ public final class SyncVerifier {
             }
             return new VerificationResult(어긋남);
         });
-    }
-
-    private static boolean 활성인가(OrgChart 기대, String userId) {
-        DirectoryUser user = 기대.snapshot().users().get(userId);
-        return user != null && user.active();
-    }
-
-    /**
-     * 이 직원이 {@code member} 면 안 되는 조직들.
-     *
-     * <p>자기 직속 조직의 <b>자손</b>이 1순위다 — 롤업 방향이 뒤집히면 정확히 여기서 터진다.
-     * 형제 가지도 몇 개 넣는다. 자손만 보면 "엉뚱한 부문으로 새는" 경우를 놓친다.
-     */
-    private Set<String> 새면_안되는_조직들(OrgChart 기대, String userId, Set<String> 기대소속) {
-        Set<String> 후보 = new LinkedHashSet<>();
-        for (String org : 기대.직속조직들(userId)) {
-            후보.addAll(기대.자손들(org));
-            String 부모 = 기대.부모(org);
-            if (부모 != null) {
-                후보.addAll(기대.자식조직들(부모));
-            }
-        }
-        후보.removeAll(기대소속);
-        return 후보;
     }
 
     // ---------- 거들기 ----------
