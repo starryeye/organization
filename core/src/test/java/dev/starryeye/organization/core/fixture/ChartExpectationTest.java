@@ -198,6 +198,23 @@ class ChartExpectationTest {
     }
 
     @Test
+    @DisplayName("기대값은 읽기 전용이다 — 소비자가 줄이면 검증이 약해진 채 통과한다")
+    void 기대값은_읽기_전용이다() {
+        // given
+        var 기대 = ChartExpectation.of(조직도());
+
+        // when, then
+        assertThatThrownBy(() -> 기대.있어야할튜플().add(child("X", "Y")))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> 기대.있어야할튜플().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> 기대.물어볼후보().add(child("X", "Y")))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> 기대.물어볼후보().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     @DisplayName("없는 직원의 롤업은 묻지 않는다")
     void 없는_직원의_롤업() {
         // when

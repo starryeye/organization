@@ -148,7 +148,7 @@ class LdapDeletionGuardScaleTest {
     @Order(3)
     @DisplayName("L12-b. 임계치를 한 건 넘기면 중단하고 아무것도 안 지운다")
     void L12b_경계_위는_중단한다() {
-        // given — 새 기준선(3,879)의 30% 를 한 건 넘긴다
+        // given — L12-a 뒤의 새 기준선의 30% 를 한 건 넘긴다
         int 기준선 = 최초튜플수 - (int) Math.floor(최초튜플수 * 임계비율);
         int 지울건수 = (int) Math.floor(기준선 * 임계비율) + 1;
         assertThat((double) 지울건수 / 기준선).isGreaterThan(임계비율);

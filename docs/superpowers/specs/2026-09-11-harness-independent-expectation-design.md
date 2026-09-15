@@ -249,9 +249,9 @@ public record Membership(String 조직, MemberRef 멤버) { }   // 같은 fixtur
 | # | 변이 | 실행 | 결과 |
 |---|---|---|---|
 | 1 | `TupleMapper` 의 비활성 필터를 끈다 | `SyncVerifierTest` | `비활성이_섞여도_올바른_앱이면_통과한다` 실패 — `③ 남아 있으면 안 되는 튜플: (user:new4_0.u0, direct_member, group:NEW4_0)`. **옛 하네스는 운영과 같이 틀려 통과했을 경우다** |
-| 2 | `TupleMapper` 가 `DEV` 로 시작하는 하위 조직 간선을 버린다 | `SyncVerifierTest` | `맞으면_통과한다` 실패 — `어긋남 137건: ② 있어야 할 튜플이 없다: (group:DEV, child, group:CORP)`. 가짜 앱을 운영 매핑으로 채우는 `@BeforeEach` 를 공유하므로 4개 테스트가 함께 깨졌다 |
+| 2 | `TupleMapper` 가 `DEV` 로 시작하는 하위 조직 간선을 버린다 | `SyncVerifierTest` | `맞으면_통과한다` 실패 — `어긋남 137건: ② 있어야 할 튜플이 없다: (group:DEV, child, group:CORP)`. 가짜 앱을 운영 매핑으로 채우는 `@BeforeEach` 를 공유하므로 `맞으면_통과한다` 포함 5개 테스트가 함께 깨졌다 |
 | 3 | `ChartExpectation` 이 지워진 멤버십을 후보에 넣지 않는다 | `SyncVerifierTest` | `옮긴_직원의_잔여튜플을_잡는다` 실패 — ③ 이 한 건도 나오지 않는다. 기억이 그 결함을 잡는 유일한 길이다 |
-| 4 | `OpenFgaRelationTupleWriter` 가 삭제 배치를 보내지 않고 성공으로만 보고한다 | `LdapDeletionGuardScaleTest`, `ScimScaleScenarioTest` | **손 Check 를 지운 뒤에도** L12-a 가 `어긋남 1992건: ③ 남아 있으면 안 되는 튜플: (user:biz.u0, direct_member, group:BIZ)` 로 실패. SCIM 은 첫 삭제 시나리오 S10 부터 13/16 실패(S15 는 `어긋남 46건: ③ …`). `deletedCount` 는 맞게 나오는데 하네스가 잡는다 |
+| 4 | `OpenFgaRelationTupleWriter` 가 삭제 배치를 보내지 않고 성공으로만 보고한다 | `LdapDeletionGuardScaleTest`, `ScimScaleScenarioTest` | **손 Check 를 지운 뒤에도** L12-a 가 `어긋남 1992건: ③ 남아 있으면 안 되는 튜플: (user:biz.u0, direct_member, group:BIZ)` 로 실패. SCIM 은 첫 삭제 시나리오 S10 부터 13/16 실패(S15 는 `어긋남 46건: ③ …` — 삭제가 전부 막힌 순서 실행이라 S10 부터 누적된 수다). `deletedCount` 는 맞게 나오는데 하네스가 잡는다 |
 
 ## 11. 이 설계가 말할 수 없는 것
 

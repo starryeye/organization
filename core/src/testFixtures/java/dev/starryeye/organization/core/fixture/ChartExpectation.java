@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
@@ -58,8 +59,11 @@ public final class ChartExpectation {
         }
         순환이_없어야_한다(snapshot);
         this.부모들 = 부모들을_모은다(snapshot);
-        this.있어야할튜플 = 있어야할튜플을_모은다(snapshot);
-        this.물어볼후보 = 후보를_모은다(chart);
+        this.있어야할튜플 = Collections.unmodifiableSet(있어야할튜플을_모은다(snapshot));
+        this.물어볼후보 = Collections.unmodifiableSet(후보를_모은다(chart));
+        if (!this.물어볼후보.containsAll(this.있어야할튜플)) {
+            throw new IllegalStateException("물어볼후보 는 있어야할튜플 을 모두 포함해야 한다 — 프로브가 후보만 묻기 때문이다");
+        }
     }
 
     public static ChartExpectation of(OrgChart chart) {

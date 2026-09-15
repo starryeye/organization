@@ -37,6 +37,9 @@ class ChartExpectationAgreementTest {
                 .비활성으로_바꾼다(l.겸직직원())
                 .완성();
 
+        assertThat(섞인것.snapshot().users().get(l.L4직속직원()).active()).as("전제: 비활성으로 바뀌었다").isFalse();
+        assertThat(섞인것.snapshot().users().get(l.겸직직원()).active()).as("전제: 비활성으로 바뀌었다").isFalse();
+
         // when
         var 기대 = ChartExpectation.of(섞인것).있어야할튜플();
 
