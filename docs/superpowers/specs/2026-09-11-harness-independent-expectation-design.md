@@ -217,7 +217,41 @@ public record Membership(String 조직, MemberRef 멤버) { }   // 같은 fixtur
 
 ## 10. 실측
 
-구현 마지막 태스크에서 규모 시나리오별 하네스 검증 시간을 전후로 재서 이 절에 표로 추가한다.
+### 규모 테스트 클래스별 소요 시간
+
+전 = `b08839b` 소스로 돈 결과, 후 = 이 슬라이드를 마친 뒤 `./gradlew test` 한 번(2026-09-15, 실패 0). 한 번씩만 쟀다.
+
+| 테스트 클래스 | 전 (초) | 후 (초) | 차이 |
+|---|---|---|---|
+| `ldap.app.AdminQueryScaleTest` | 11.6 | 13.8 | +2.2 |
+| `ldap.app.DitScaleSyncTest` | 16.6 | 15.6 | -1.0 |
+| `ldap.app.LdapDeletionGuardScaleTest` | 20.5 | 18.3 | -2.2 |
+| `ldap.app.LdapInterruptedSyncScaleTest` | 9.3 | 8.4 | -0.9 |
+| `ldap.app.LdapPagingScaleTest` | 1.2 | 1.3 | +0.1 |
+| `ldap.app.LdapScaleScenarioTest` | 82.2 | 79.5 | -2.7 |
+| `ldap.app.LdapScaleSyncCostTest` | 11.2 | 9.8 | -1.4 |
+| `scim.app.ScimLimitsAndRecoveryScaleTest` | 63.9 | 61.4 | -2.5 |
+| `scim.app.ScimProvisioningOrderScaleTest` | 98.5 | 76.2 | -22.3 |
+| `scim.app.ScimRebuildLockScaleTest` | 57.6 | 59.9 | +2.3 |
+| `scim.app.ScimScaleScenarioTest` | 102.5 | 97.0 | -5.6 |
+| `scim.app.ScimScaleSyncCostTest` | 46.6 | 44.3 | -2.3 |
+| **합계** | **521.6** | **485.3** | **-36.3** |
+
+**검증 비용이 눈에 띄게 늘지 않았다.** 지워진 멤버십이 쌓여 Check 가 늘 것으로 예상했지만(§7), 차이는 대부분 ±3초로
+실행마다 흔들리는 폭 안이다. `ScimProvisioningOrderScaleTest` 의 -22초는 이 변경으로 설명되지 않는다 — S1-a 가 손 Check
+두 개 대신 하네스 전체를 돌게 됐으니 오히려 늘어야 한다. 조직 먼저 순서의 긴 싱크(S1-b)가 흔들린 것으로 보고, 한 번 잰
+값이라 원인을 단정하지 않는다.
+
+### 변이로 확인한 것
+
+각각 적용해 실패를 본 뒤 되돌렸다. `src/main` 은 커밋에 남지 않았다.
+
+| # | 변이 | 실행 | 결과 |
+|---|---|---|---|
+| 1 | `TupleMapper` 의 비활성 필터를 끈다 | `SyncVerifierTest` | `비활성이_섞여도_올바른_앱이면_통과한다` 실패 — `③ 남아 있으면 안 되는 튜플: (user:new4_0.u0, direct_member, group:NEW4_0)`. **옛 하네스는 운영과 같이 틀려 통과했을 경우다** |
+| 2 | `TupleMapper` 가 `DEV` 로 시작하는 하위 조직 간선을 버린다 | `SyncVerifierTest` | `맞으면_통과한다` 실패 — `어긋남 137건: ② 있어야 할 튜플이 없다: (group:DEV, child, group:CORP)`. 가짜 앱을 운영 매핑으로 채우는 `@BeforeEach` 를 공유하므로 4개 테스트가 함께 깨졌다 |
+| 3 | `ChartExpectation` 이 지워진 멤버십을 후보에 넣지 않는다 | `SyncVerifierTest` | `옮긴_직원의_잔여튜플을_잡는다` 실패 — ③ 이 한 건도 나오지 않는다. 기억이 그 결함을 잡는 유일한 길이다 |
+| 4 | `OpenFgaRelationTupleWriter` 가 삭제 배치를 보내지 않고 성공으로만 보고한다 | `LdapDeletionGuardScaleTest`, `ScimScaleScenarioTest` | **손 Check 를 지운 뒤에도** L12-a 가 `어긋남 1992건: ③ 남아 있으면 안 되는 튜플: (user:biz.u0, direct_member, group:BIZ)` 로 실패. SCIM 은 첫 삭제 시나리오 S10 부터 13/16 실패(S15 는 `어긋남 46건: ③ …`). `deletedCount` 는 맞게 나오는데 하네스가 잡는다 |
 
 ## 11. 이 설계가 말할 수 없는 것
 
@@ -229,5 +263,5 @@ public record Membership(String 조직, MemberRef 멤버) { }   // 같은 fixtur
   같은 설계 문서를 보고 썼다. 설계 문서 자체가 틀렸다면 둘 다 같이 틀린다. 일치 테스트는 둘이 같다는 것만
   말한다.
 - **순환의 기대 동작은 여전히 L16/S16 의 손 Check 가 전부다.** `ChartExpectation` 은 순환을 거부할 뿐이다.
-- **부모가 둘인 조직이 규모 픽스처에 있는지는 확인하지 않았다.** 없다면 조상 계산의 다중 부모 처리는
-  단위 테스트로만 확인된다.
+- **규모 픽스처에는 부모가 둘인 조직이 없다** (`OrgChartFixtureTest.부모는_하나_이하다` 가 못박는다).
+  조상 계산의 다중 부모 처리는 `ChartExpectationTest.다중_부모` 로만 확인된다.

@@ -66,6 +66,8 @@ A·B 는 각 수정의 테스트가 **수정 전 코드에서 실패하는 것**
 **미룬 이유:** 하네스의 기대값 원천을 바꾸는 것이라 이미 통과하던 규모 시나리오 전부가 새 기준으로 다시
 검증돼야 한다. 설계 판단이 필요한 크기라 스펙부터 쓴다.
 
+**해소:** 슬라이드 E — [`2026-09-11-harness-independent-expectation-design.md`](2026-09-11-harness-independent-expectation-design.md).
+
 ---
 
 ## 4. 실제 AD 연동 전에 — H 외
