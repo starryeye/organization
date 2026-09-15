@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -445,8 +446,7 @@ class LdapScaleScenarioTest {
 
     /** 픽스처에서 유도한다 — 조직도를 키울 때 테스트를 손으로 고치지 않도록. */
     private static int 전체튜플수() {
-        return dev.starryeye.organization.core.tuple.TupleMapper
-                .toTuples(최초.snapshot()).tuples().size();
+        return ChartExpectation.of(최초).있어야할튜플().size();
     }
 
     /** 뒤 시나리오들이 이름으로 잡아 쓰는 직원들. 여기 있는 사람은 함부로 지우면 안 된다. */

@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -59,8 +60,7 @@ class LdapDeletionGuardScaleTest {
     private static final OrgChart 최초 = OrgChartFixture.오천명();
     private static final double 임계비율 = 0.3;
     /** 픽스처에서 유도한다 — 조직도를 키울 때 경계값 계산을 손으로 고치지 않도록. */
-    private static final int 최초튜플수 = dev.starryeye.organization.core.tuple.TupleMapper
-            .toTuples(최초.snapshot()).tuples().size();
+    private static final int 최초튜플수 = ChartExpectation.of(최초).있어야할튜플().size();
 
     private static OrgChart 기대 = 최초;
     /** 소속이 하나뿐인 직원들. 한 명 지우면 튜플이 정확히 하나 줄어 계산이 어긋나지 않는다. */

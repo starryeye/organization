@@ -217,7 +217,7 @@ class ScimScaleScenarioTest {
 
         // when
         보낸다(ScimRequestRenderer.직원비활성(겸직), 200);
-        기대 = 활성을_바꾼다(기대, 겸직, false);
+        기대 = OrgChartEditor.편집한다(기대).비활성으로_바꾼다(겸직).완성();
 
         // then — 멤버십은 상태에 그대로 남아 있고(하네스 ①이 본다), 튜플만 사라진다
         검증한다();
@@ -237,7 +237,7 @@ class ScimScaleScenarioTest {
 
         // when
         보낸다(ScimRequestRenderer.직원활성(겸직), 200);
-        기대 = 활성을_바꾼다(기대, 겸직, true);
+        기대 = OrgChartEditor.편집한다(기대).활성으로_바꾼다(겸직).완성();
 
         // then — 소속 조직 전부에 dm 이 복원된다
         검증한다();
@@ -320,7 +320,7 @@ class ScimScaleScenarioTest {
 
         // when
         보낸다(ScimRequestRenderer.멤버추가(팀, MemberRef.user(비활성)), 200);
-        기대 = 비활성_멤버를_더한다(기대, 팀, 비활성);
+        기대 = OrgChartEditor.편집한다(기대).비활성_직원을_넣는다(팀, 비활성).완성();
 
         // then — "멤버지만 권한 없음". 이 상태가 음성 후보 집합의 존재 이유다
         검증한다();
@@ -604,28 +604,5 @@ class ScimScaleScenarioTest {
                 .expectStatus().isOk()
                 .expectBody(JsonNode.class)
                 .returnResult().getResponseBody();
-    }
-
-    private static OrgChart 활성을_바꾼다(OrgChart chart, String userId, boolean active) {
-        var users = new java.util.LinkedHashMap<>(chart.snapshot().users());
-        var 원본 = users.get(userId);
-        users.put(userId, new dev.starryeye.organization.core.model.DirectoryUser(
-                원본.id(), 원본.externalId(), 원본.userName(), 원본.displayName(), 원본.email(), active));
-        return new OrgChart(new dev.starryeye.organization.core.model.DirectorySnapshot(
-                users, chart.snapshot().groups()), chart.landmarks());
-    }
-
-    private static OrgChart 비활성_멤버를_더한다(OrgChart chart, String orgCode, String userId) {
-        var users = new java.util.LinkedHashMap<>(chart.snapshot().users());
-        users.put(userId, new dev.starryeye.organization.core.model.DirectoryUser(
-                userId, null, userId, "비활성 직원", null, false));
-        var groups = new java.util.LinkedHashMap<>(chart.snapshot().groups());
-        var 원본 = groups.get(orgCode);
-        var members = new ArrayList<>(원본.members());
-        members.add(MemberRef.user(userId));
-        groups.put(orgCode, new dev.starryeye.organization.core.model.DirectoryGroup(
-                원본.id(), 원본.externalId(), 원본.displayName(), new LinkedHashSet<>(members)));
-        return new OrgChart(new dev.starryeye.organization.core.model.DirectorySnapshot(
-                users, groups), chart.landmarks());
     }
 }

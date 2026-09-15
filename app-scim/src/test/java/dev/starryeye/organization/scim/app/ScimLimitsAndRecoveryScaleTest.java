@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim.app;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -12,7 +13,6 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
-import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
@@ -166,7 +166,7 @@ class ScimLimitsAndRecoveryScaleTest {
 
         // 지운 것 하나만 빠진 나머지는 그대로 담겼다
         assertThat(snapshot.tuples().size())
-                .isEqualTo(TupleMapper.toTuples(기대.snapshot()).tuples().size() - 1);
+                .isEqualTo(ChartExpectation.of(기대).있어야할튜플().size() - 1);
     }
 
     // ---------- S18: 재적재 ----------

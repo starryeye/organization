@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -11,7 +12,6 @@ import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
-import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.ldap.fixture.DitLdifRenderer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -112,7 +112,7 @@ class DitScaleSyncTest {
     @DisplayName("DIT 로 심은 조직도가 groupOfNames 와 같은 스냅샷·같은 튜플에 도달한다")
     void DIT가_같은_결과에_도달한다() {
         // given — 겸직 166건이 빠진 만큼만 튜플이 적다
-        int 기대튜플 = TupleMapper.toTuples(기대.snapshot()).tuples().size();
+        int 기대튜플 = ChartExpectation.of(기대).있어야할튜플().size();
 
         // when
         동기화한다().jsonPath("$.status").isEqualTo("SUCCEEDED")
