@@ -15,6 +15,7 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -314,5 +315,124 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     void 없는_조직의_멤버는_false다() {
         // when / then
         assertThat(repository.containsMember("없는조직", MemberRef.user("kim")).block()).isFalse();
+    }
+
+    @Test
+    @DisplayName("조직을 저장하면 멤버 쪽 파티션에도 소속 줄이 생긴다")
+    void 소속_줄이_함께_생긴다() {
+        // given, when
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).contains("BELONGS_TO#GROUP#DEV002");
+        assertThat(정렬키들("GROUP#DEV003")).contains("BELONGS_TO#GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("멤버가 빠지면 그 멤버의 소속 줄도 사라진다")
+    void 빠진_멤버의_소속_줄이_사라진다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.user("lee"))).block();
+
+        // when
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("lee"))).block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).doesNotContain("BELONGS_TO#GROUP#DEV002");
+        assertThat(정렬키들("USER#lee")).contains("BELONGS_TO#GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("하위 조직의 소속 줄은 그 조직의 멤버로 읽히지 않는다")
+    void 소속_줄은_멤버가_아니다() {
+        // given — DEV003 은 DEV002 의 하위이고, 자기 멤버로 park 한 명을 갖는다
+        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("park"))).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.group("DEV003"))).block();
+
+        // when
+        var found = repository.findGroup("DEV003").block();
+
+        // then — BELONGS_TO#GROUP#DEV002 가 멤버로 섞이면 안 된다
+        assertThat(found.members()).containsExactly(MemberRef.user("park"));
+    }
+
+    @Test
+    @DisplayName("조직을 지우면 그 멤버들의 소속 줄까지 사라진다")
+    void 조직_삭제가_소속_줄을_치운다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
+
+        // when
+        repository.deleteGroup("DEV002").block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).isEmpty();
+        assertThat(정렬키들("GROUP#DEV003")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("아직 없는 직원을 가리키는 소속 줄이 있어도 그 직원은 여전히 '없음' 이다")
+    void 소속_줄만_있는_직원은_없는_직원이다() {
+        // given — SCIM 에서 조직이 직원보다 먼저 도착한 모양
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("아직없음"))).block();
+
+        // when, then
+        assertThat(정렬키들("USER#아직없음")).containsExactly("BELONGS_TO#GROUP#DEV002");
+        assertThat(repository.findUser("아직없음").block()).isNull();
+        assertThat(repository.loadAll().block().users()).doesNotContainKey("아직없음");
+    }
+
+    @Test
+    @DisplayName("멤버 줄과 소속 줄은 GSI 에 실리지 않는다 — 직원·조직 열거에 섞이면 안 된다")
+    void 멤버십_줄은_색인에_없다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when — 전체 열거는 GSI1 의 USER_INDEX/GROUP_INDEX 파티션을 훑는다
+        var snapshot = repository.loadAll().block();
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("kim");
+        assertThat(snapshot.groups()).containsOnlyKeys("DEV002");
+    }
+
+    @Test
+    @DisplayName("직원을 지우면 직원 파티션이 통째로 빈다 — 남은 소속 줄도 함께")
+    void 직원_삭제가_파티션을_비운다() {
+        // given — 소속 줄만 남은 상태(중간 실패로 생길 수 있는 모양)를 직접 만든다
+        repository.saveUser(직원("kim")).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀")).block();
+        repository.saveGroup(조직("DEV004", "고아팀", MemberRef.user("kim"))).block();
+        지운다("GROUP#DEV004", "MEMBER#USER#kim");
+
+        // when
+        repository.deleteUser("kim").block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).isEmpty();
+    }
+
+    /** 파티션 하나의 정렬키 전부. 테이블에 실제로 무엇이 들어갔는지 직접 본다. */
+    private List<String> 정렬키들(String pk) {
+        var response = client.query(software.amazon.awssdk.services.dynamodb.model.QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .consistentRead(true)
+                .build()).join();
+        return response.items().stream().map(item -> Attrs.str(item, Keys.SK)).toList();
+    }
+
+    private void 지운다(String pk, String sk) {
+        client.deleteItem(software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                .build()).join();
     }
 }

@@ -125,9 +125,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return putItem(item);
     }
 
+    /** 직원 파티션을 통째로 비운다 — {@code META} 와 남아 있을 수 있는 소속 줄까지. */
     @Override
     public Mono<Void> deleteUser(String userId) {
-        return deleteItem(Keys.userPk(userId), Keys.META);
+        return queryPartition(Keys.userPk(userId))
+                .map(item -> Attrs.str(item, Keys.SK))
+                .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
+                .then();
     }
 
     /**
@@ -237,22 +241,45 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
 
+                    // 소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5).
+                    // 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
+                    // "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면
+                    // 삭제가 그 조직을 못 찾아 권한이 남는다.
                     return Flux.fromIterable(떠난멤버)
-                            .flatMap(sk -> deleteItem(Keys.groupPk(group.id()), sk), QUERY_CONCURRENCY)
+                            .map(Keys::parseMemberSk)
+                            .flatMap(ref -> deleteItem(Keys.groupPk(group.id()), Keys.memberSk(ref))
+                                    .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(group.id()))),
+                                    QUERY_CONCURRENCY)
                             .then(putItem(meta))
                             .then(Flux.fromIterable(새로온멤버)
-                                    .flatMap(member -> putItem(memberItem(group.id(), member)),
+                                    .flatMap(member -> putItem(belongsToItem(member, group.id()))
+                                            .then(putItem(memberItem(group.id(), member))),
                                             QUERY_CONCURRENCY)
                                     .then());
                 });
     }
 
+    /**
+     * 조직 파티션을 비우고, <b>그 멤버들의 소속 줄까지</b> 지운다. 소속 줄을 남기면 역참조가
+     * 그 조직을 후보로 계속 들고 오고(확인 단계가 걸러 내지만) 파티션에 영원히 쌓인다.
+     */
     @Override
     public Mono<Void> deleteGroup(String groupId) {
         return queryPartition(Keys.groupPk(groupId))
                 .map(item -> Attrs.str(item, Keys.SK))
-                .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
-                .then();
+                .collectList()
+                .flatMap(sks -> {
+                    List<MemberRef> members = sks.stream()
+                            .filter(Keys::isMemberSk)
+                            .map(Keys::parseMemberSk)
+                            .toList();
+                    return Flux.fromIterable(sks)
+                            .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
+                            .thenMany(Flux.fromIterable(members))
+                            .flatMap(ref -> deleteItem(Keys.memberPk(ref), Keys.belongsToSk(groupId)),
+                                    QUERY_CONCURRENCY)
+                            .then();
+                });
     }
 
     private Map<String, AttributeValue> memberItem(String groupId, MemberRef member) {
@@ -261,6 +288,18 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
         item.put(Keys.GSI1PK, Attrs.s(Keys.memberSk(member)));
         item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
+        item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
+        return item;
+    }
+
+    /**
+     * 멤버 쪽 파티션에 적는 소속 줄. <b>GSI 키를 넣지 않는다</b> — 넣으면 직원·조직 열거
+     * ({@code USER_INDEX}/{@code GROUP_INDEX})와 조회 API 결과에 섞인다.
+     */
+    private Map<String, AttributeValue> belongsToItem(MemberRef member, String groupId) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.memberPk(member)));
+        item.put(Keys.SK, Attrs.s(Keys.belongsToSk(groupId)));
         item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
         return item;
     }
