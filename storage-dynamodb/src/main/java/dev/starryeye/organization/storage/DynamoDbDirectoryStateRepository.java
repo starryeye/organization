@@ -259,7 +259,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.groupPk(groupId)));
         item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
-        item.put(Keys.GSI1PK, Attrs.s(Keys.memberGsi1Pk(member)));
+        item.put(Keys.GSI1PK, Attrs.s(Keys.memberSk(member)));
         item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
         item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
         return item;
@@ -297,7 +297,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .indexName(Keys.GSI1)
                 .keyConditionExpression("#pk = :pk")
                 .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberGsi1Pk(ref))))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberSk(ref))))
                 .build();
 
         return Paginator.queryAll(client, request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));

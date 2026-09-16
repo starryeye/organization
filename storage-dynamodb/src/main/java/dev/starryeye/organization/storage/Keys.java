@@ -64,6 +64,7 @@ public final class Keys {
     public static final String USER_PREFIX = "USER#";
     public static final String GROUP_PREFIX = "GROUP#";
     public static final String MEMBER_PREFIX = "MEMBER#";
+    public static final String BELONGS_TO_PREFIX = "BELONGS_TO#";
     public static final String SNAPSHOT_PREFIX = "SNAPSHOT#";
     public static final String TUPLE_PREFIX = "TUPLE#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
@@ -136,14 +137,34 @@ public final class Keys {
         return MEMBER_PREFIX + ref.type().name() + "#" + ref.id();
     }
 
-    /** 멤버십 아이템의 GSI 파티션키. 정렬키와 같은 문자열이라 역참조가 성립한다. */
-    public static String memberGsi1Pk(MemberRef ref) {
-        return memberSk(ref);
-    }
-
     /** 정렬키가 {@link #memberSk} 로 만들어진 멤버십 아이템인지 판별한다. */
     public static boolean isMemberSk(String sk) {
         return sk.startsWith(MEMBER_PREFIX);
+    }
+
+    /**
+     * 멤버 쪽 파티션에 적는 소속 줄의 정렬키. <b>{@code MEMBER#} 로 시작하지 않는 것이 핵심이다</b> —
+     * 조직 파티션을 읽는 {@code toGroup}·{@code existingMemberSks} 가 {@code MEMBER#} 로 멤버를
+     * 고르므로, 하위 조직의 소속 줄이 그 조직의 멤버로 오인되면 계층이 통째로 어긋난다.
+     */
+    public static String belongsToSk(String groupId) {
+        return BELONGS_TO_PREFIX + GROUP_PREFIX + groupId;
+    }
+
+    public static boolean isBelongsToSk(String sk) {
+        return sk.startsWith(BELONGS_TO_PREFIX);
+    }
+
+    public static String parseBelongsToSk(String sk) {
+        if (sk == null || !isBelongsToSk(sk)) {
+            throw new IllegalArgumentException("소속 정렬키가 아니다: " + sk);
+        }
+        return sk.substring(BELONGS_TO_PREFIX.length() + GROUP_PREFIX.length());
+    }
+
+    /** 멤버 자신의 파티션키. 직원은 {@code USER#}, 하위 조직은 {@code GROUP#} 이다. */
+    public static String memberPk(MemberRef ref) {
+        return ref.type() == MemberType.USER ? userPk(ref.id()) : groupPk(ref.id());
     }
 
     public static MemberRef parseMemberSk(String sk) {
