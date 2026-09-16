@@ -102,6 +102,12 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 도구가 관리해야 하고, 애플리케이션이 부팅할 때마다 스키마를 만들려 드는 것은 인덱스 구성이
 바뀔 때 특히 위험하다(follow-ups §7).
 
+**이 브랜치는 키 레이아웃을 바꾼다** — 멤버십 아이템이 GSI1 키를 잃고, 대신 멤버 쪽 파티션에
+`BELONGS_TO#` 줄이 새로 생긴다(`2026-09-16-strong-membership-lookup-design.md`). 그래서 기존에
+쓰던 테이블은 반드시 다시 만들어야 한다 — 비우지 않은 테이블을 그대로 쓰면, 이미 있던 멤버십은
+전부 `BELONGS_TO#` 줄이 없는 채로 남고, 그 멤버에 대한 역참조(`findGroupIdsContaining`)는 빈
+결과만 돌려주며, 그 상태에서 일어나는 삭제는 조용히 권한을 남긴다.
+
 | 서비스 | 주소 |
 |---|---|
 | OpenFGA | http://localhost:8080 (플레이그라운드 http://localhost:3000) |

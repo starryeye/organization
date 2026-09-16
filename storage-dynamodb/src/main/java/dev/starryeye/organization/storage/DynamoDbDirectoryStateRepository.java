@@ -55,8 +55,10 @@ import java.util.stream.Collectors;
  * 방향도 여기서 막힌다.
  *
  * <p>비용은 읽기당 RCU 2배다 — 멤버 확인이 추가로 붙는 경로는 쓰기 경로 정도로 요청당 한
- * 자릿수라 감당할 만하고, 조회 API 는 별도 저장소({@code DynamoDbDirectorySearchRepository})를
- * 탄다.
+ * 자릿수라 감당할 만하다. 목록·검색 조회 API 는 별도 저장소({@code DynamoDbDirectorySearchRepository})를
+ * 타지만, {@code AdminQueryUseCase.employeeDetail} 은 이 저장소의 {@link #findUser} 와
+ * {@link #findGroupIdsContaining} 을 그대로 써서 이제 후보 조직마다 강한 일관성 Query 한 번에
+ * 확인 {@code GetItem} 한 번씩을 추가로 낸다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
@@ -118,13 +120,42 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return putItem(item);
     }
 
-    /** 직원 파티션을 통째로 비운다 — {@code META} 와 남아 있을 수 있는 소속 줄까지. */
+    /**
+     * 직원 파티션을 통째로 비우기 전에, 그 소속 줄이 가리키는 조직들의 멤버 줄부터 지운다.
+     * {@link #deleteGroup} 과 대칭이다 — 그쪽은 조직 파티션(멤버 줄)을 먼저 비우고 멤버의
+     * 소속 줄을 나중에 지우는데, 이쪽은 반대 방향이라 조직 쪽 멤버 줄을 먼저 지우고 직원
+     * 파티션(소속 줄 포함)을 나중에 비운다.
+     *
+     * <p><b>순서가 이래야 하는 이유.</b> 지켜야 할 불변식은 "{@code MEMBER#} 줄은 반드시
+     * {@code BELONGS_TO#} 줄을 동반한다" 다 — 거꾸로(소속 줄만 있고 멤버 줄이 없음)는
+     * {@link #findGroupIdsContaining} 의 확인 단계가 걸러내 무해하다. 순서를 반대로 해서
+     * 직원 파티션(소속 줄)을 먼저 비우면, 중간에 실패했을 때 그 조직 쪽엔 소속 줄 없는
+     * {@code MEMBER#} 줄이 남는다 — 역참조가 이 직원을 놓쳐 나중에 그 조직을 지워도 권한이
+     * 남는, 금지된 방향이다. 조직 쪽 멤버 줄을 먼저 지우면 중간 실패의 최악의 잔여물이
+     * "멤버 줄 없는 소속 줄"(안전한 방향)뿐이다.
+     *
+     * <p>이 대칭이 깨지면 고칠 방법도 없다 — {@link #saveGroup} 은 "새로 온 멤버"를 조직 쪽
+     * 파티션({@code existingMemberSks})만 보고 계산하므로, 소속 줄이 없어진 멤버 줄은
+     * 재동기화로도 다시 쓰이지 않는다(설계 §5).
+     */
     @Override
     public Mono<Void> deleteUser(String userId) {
         return queryPartition(Keys.userPk(userId))
                 .map(item -> Attrs.str(item, Keys.SK))
-                .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
-                .then();
+                .collectList()
+                .flatMap(sks -> {
+                    List<String> groupIds = sks.stream()
+                            .filter(Keys::isBelongsToSk)
+                            .map(Keys::parseBelongsToSk)
+                            .toList();
+                    MemberRef self = MemberRef.user(userId);
+                    return Flux.fromIterable(groupIds)
+                            .flatMap(groupId -> deleteItem(Keys.groupPk(groupId), Keys.memberSk(self)),
+                                    QUERY_CONCURRENCY)
+                            .thenMany(Flux.fromIterable(sks))
+                            .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
+                            .then();
+                });
     }
 
     /**

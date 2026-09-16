@@ -198,20 +198,24 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("역참조는 정렬키 오름차순을 지킨다 — 확인이 병렬로 끝나도 순서가 흔들리면 안 된다")
     void 역참조는_정렬키_순서를_지킨다() {
-        // given — 삽입 순서를 정렬키 순서와 일부러 다르게 섞는다. 같은 멤버를 4개 이상의
-        // 조직에 넣어야 QUERY_CONCURRENCY(8) 안에서 여러 건의 확인이 동시에 뜬다.
-        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("kim"))).block();
-        repository.saveGroup(조직("DEV001", "개발본부", MemberRef.user("kim"))).block();
-        repository.saveGroup(조직("DEV004", "고아팀", MemberRef.user("kim"))).block();
-        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        // given — QUERY_CONCURRENCY(8)를 훌쩍 넘는 24개 조직에 같은 멤버를 넣어야 확인
+        // GetItem 이 항상 동시에 여러 건 떠서, 완료 순서가 삽입/정렬 순서와 우연히 같을
+        // 가능성이 사실상 없다. 삽입은 정렬키 순서(오름차순)와 반대로 한다.
+        List<String> 정렬키_오름차순 = java.util.stream.IntStream.rangeClosed(1, 24)
+                .mapToObj(i -> String.format("DEV%03d", i))
+                .toList();
+        for (int i = 정렬키_오름차순.size() - 1; i >= 0; i--) {
+            String groupId = 정렬키_오름차순.get(i);
+            repository.saveGroup(조직(groupId, groupId + "팀", MemberRef.user("kim"))).block();
+        }
 
         // when
         var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
 
         // then — 본문 테이블 Query 가 정렬키(BELONGS_TO#GROUP#<id>) 오름차순으로 결정적으로
         // 돌려주는 순서 그대로다. flatMap 으로 되돌리면 GetItem 완료 순서로 흔들려 이 단언이
-        // 깨진다 — AdminQueryUseCase 가 바로 이 순서에 기대어 take() 로 자르고 순서를 넘긴다.
-        assertThat(groupIds).containsExactly("DEV001", "DEV002", "DEV003", "DEV004");
+        // 사실상 매번 깨진다 — AdminQueryUseCase 가 바로 이 순서에 기대어 take() 로 자르고 순서를 넘긴다.
+        assertThat(groupIds).containsExactly(정렬키_오름차순.toArray(new String[0]));
     }
 
     @Test
@@ -476,6 +480,21 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(정렬키들("USER#kim")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("직원을 지우면 그 직원이 속한 조직의 멤버 줄도 함께 사라진다 — 대칭이 깨지면 삭제가 권한을 남긴다")
+    void 직원_삭제가_조직의_멤버줄도_지운다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when
+        repository.deleteUser("kim").block();
+
+        // then — 조직 쪽 멤버 줄이 남아 있으면 findGroup 이 여전히 kim 을 멤버로 보여준다
+        var found = repository.findGroup("DEV002").block();
+        assertThat(found.members()).doesNotContain(MemberRef.user("kim"));
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block()).isEmpty();
     }
 
     /** 파티션 하나의 정렬키 전부. 테이블에 실제로 무엇이 들어갔는지 직접 본다. */

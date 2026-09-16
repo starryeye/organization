@@ -156,7 +156,7 @@ public final class Keys {
     }
 
     public static String parseBelongsToSk(String sk) {
-        if (sk == null || !isBelongsToSk(sk)) {
+        if (sk == null || !sk.startsWith(BELONGS_TO_PREFIX + GROUP_PREFIX)) {
             throw new IllegalArgumentException("소속 정렬키가 아니다: " + sk);
         }
         return sk.substring(BELONGS_TO_PREFIX.length() + GROUP_PREFIX.length());
