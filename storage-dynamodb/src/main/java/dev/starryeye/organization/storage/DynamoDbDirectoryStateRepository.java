@@ -48,22 +48,15 @@ import java.util.stream.Collectors;
  *                                          → 방금 쓴 튜플을 지운다
  * </pre>
  *
- * <p><b>이것으로 창이 완전히 닫히지는 않는다.</b> DynamoDB GSI 는 강한 일관성을 지원하지 않으므로
- * 역참조({@link #findGroupIdsContaining})는 여전히 최종 일관성이다. 방금 추가된 멤버십이 GSI 에
- * 아직 안 보이면 그 조직이 영향 범위에서 빠질 수 있다 — 그 경우는 "이 연산이 그 조직을
- * 건드리지 않는다" 로 끝난다.
+ * <p><b>역참조({@link #findGroupIdsContaining})도 강한 일관성이고 정확하다.</b> 멤버 쪽 파티션의
+ * 소속 줄을 강한 일관성으로 읽고, 조직 쪽 멤버 줄이 실제로 있는지까지 이 메서드 안에서 확인한
+ * 것만 돌려준다(설계 `2026-09-16-strong-membership-lookup-design.md` §1, §6) — 막 추가된 멤버십을
+ * 놓쳐 삭제가 권한을 남기는 방향도, 중간 실패로 소속 줄만 남아 "속하지 않은 조직" 이 보이는
+ * 방향도 여기서 막힌다.
  *
- * <p><b>반대 방향(막 빠진 멤버십을 낡은 GSI 가 계속 보고하는 경우)은 방향이 다르다 —
- * 그래서 별도로 막는다.</b> {@code upsertUser} 는 {@code findGroupIdsContaining} 이 보고한
- * 조직마다 {@link #findGroupHeader}(존재 확인)만 읽고 멤버 목록은 읽지 않는데, 헤더는 조직이
- * 있다는 것만 말하고 이 직원이 아직 멤버인지는 말하지 않는다 — 확인 없이 그대로 믿으면 방금
- * 지워진 멤버십을 재시도가 되살려 쓴다(있어야 할 튜플을 지우는 것보다 위험한, <b>없어야 할
- * 튜플을 쓰는</b> 방향이다). {@link #containsMember} 가 멤버 줄 자체를 한 번 더 강한
- * 일관성으로 읽어 이 창을 닫는다. 재적재가 유일한 해결책인 잔여 위험은 여전히 "빠짐" 방향
- * 뿐이다(설계 §5.4).
- *
- * <p>비용은 읽기당 RCU 2배다. 쓰기 경로의 읽기는 요청당 한 자릿수라 감당할 만하고, 조회 API 는
- * 별도 저장소({@code DynamoDbDirectorySearchRepository})를 탄다.
+ * <p>비용은 읽기당 RCU 2배다 — 멤버 확인이 추가로 붙는 경로는 쓰기 경로 정도로 요청당 한
+ * 자릿수라 감당할 만하고, 조회 API 는 별도 저장소({@code DynamoDbDirectorySearchRepository})를
+ * 탄다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
@@ -199,12 +192,15 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 멤버 줄 한 개만 집어온다 —
      * {@link #findGroupHeader} 와 같은 이유다. 읽는 양이 조직 크기를 따라가지 않는다.
      *
-     * <p><b>강한 일관성으로 읽는다.</b> {@link DirectoryStateRepository#containsMember} 의
-     * 자바독 참고 — {@link #findGroupIdsContaining}(GSI1, 최종 일관성)이 보고한 조직이 실제로도
-     * 이 멤버를 갖고 있는지를 이 메서드가 확정한다.
+     * <p><b>강한 일관성으로 읽는다.</b> {@link #findGroupIdsContaining} 이 소속 줄에서 뽑은
+     * 후보 조직마다 이 메서드로 멤버 줄 자체를 다시 확인한다 — 쓰기가 중간에 실패해 소속
+     * 줄만 남은 경우를 걸러낸다.
+     *
+     * <p>포트에는 없다 — {@link #findGroupIdsContaining} 내부에서만 쓰는 확인 단계라 패키지
+     * 전용이다. 다만 그 확인 자체를 지키는 기존 테스트 세 줄이 이 메서드를 직접 부르므로
+     * {@code private} 로 좁히지 않는다.
      */
-    @Override
-    public Mono<Boolean> containsMember(String groupId, MemberRef ref) {
+    Mono<Boolean> containsMember(String groupId, MemberRef ref) {
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
@@ -286,8 +282,6 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.groupPk(groupId)));
         item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
-        item.put(Keys.GSI1PK, Attrs.s(Keys.memberSk(member)));
-        item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
         item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
         return item;
     }
@@ -329,17 +323,33 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 역참조 ----------
 
+    /**
+     * 멤버 쪽 파티션의 소속 줄을 <b>강한 일관성</b>으로 읽고, 조직 쪽 멤버 줄이 실제로 있는지
+     * 확인한 것만 돌려준다.
+     *
+     * <p><b>GSI 를 쓰지 않는다.</b> GSI1 은 최종 일관성이라 막 추가된 멤버십을 아직 모를 수 있고,
+     * 그 창에 삭제가 들어오면 그 조직의 튜플과 멤버 줄이 남는다(설계 §1).
+     *
+     * <p><b>확인까지 여기서 한다.</b> 쓰기가 중간에 실패하면 소속 줄만 남을 수 있다. 부르는 쪽에
+     * 확인을 맡기면 관리자 조회처럼 그대로 믿는 곳에서 "속하지 않은 조직" 이 보인다(설계 §6).
+     */
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
-                .indexName(Keys.GSI1)
-                .keyConditionExpression("#pk = :pk")
-                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberSk(ref))))
+                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
+                .expressionAttributeValues(Map.of(
+                        ":pk", Attrs.s(Keys.memberPk(ref)),
+                        ":prefix", Attrs.s(Keys.BELONGS_TO_PREFIX)))
+                .consistentRead(true)
                 .build();
 
-        return Paginator.queryAll(client, request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));
+        return Paginator.queryAll(client, request)
+                .map(item -> Keys.parseBelongsToSk(Attrs.str(item, Keys.SK)))
+                .flatMap(groupId -> containsMember(groupId, ref)
+                        .filter(Boolean::booleanValue)
+                        .map(confirmed -> groupId), QUERY_CONCURRENCY);
     }
 
     // ---------- 전체 ----------

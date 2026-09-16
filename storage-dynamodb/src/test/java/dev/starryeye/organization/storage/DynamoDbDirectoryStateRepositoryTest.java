@@ -154,6 +154,48 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("역참조는 소속 줄로 찾는다 — 막 추가된 멤버십도 즉시 보인다")
+    void 역참조가_소속_줄로_찾는다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("kim"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactlyInAnyOrder("DEV002", "DEV003");
+    }
+
+    @Test
+    @DisplayName("소속 줄만 남고 멤버 줄이 없으면 역참조에서 빠진다 — 중간 실패로 남은 찌꺼기")
+    void 찌꺼기_소속_줄은_걸러진다() {
+        // given — 멤버 줄만 지워 "소속 줄만 남은" 모양을 만든다
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        지운다("GROUP#DEV002", "MEMBER#USER#kim");
+        assertThat(정렬키들("USER#kim")).contains("BELONGS_TO#GROUP#DEV002");
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then — 화면에 "속하지 않은 조직" 이 보이면 안 된다
+        assertThat(groupIds).isEmpty();
+    }
+
+    @Test
+    @DisplayName("하위 조직도 자기 상위 조직을 역참조로 찾는다")
+    void 하위_조직의_역참조() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.group("DEV003"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.group("DEV003")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactly("DEV002");
+    }
+
+    @Test
     @DisplayName("조직을 삭제하면 조직 자체와 멤버십 아이템이 모두 사라진다")
     void 조직_삭제시_멤버십도_사라진다() {
         // given
