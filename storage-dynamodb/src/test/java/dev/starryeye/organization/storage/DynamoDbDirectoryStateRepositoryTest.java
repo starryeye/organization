@@ -196,6 +196,25 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("역참조는 정렬키 오름차순을 지킨다 — 확인이 병렬로 끝나도 순서가 흔들리면 안 된다")
+    void 역참조는_정렬키_순서를_지킨다() {
+        // given — 삽입 순서를 정렬키 순서와 일부러 다르게 섞는다. 같은 멤버를 4개 이상의
+        // 조직에 넣어야 QUERY_CONCURRENCY(8) 안에서 여러 건의 확인이 동시에 뜬다.
+        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV001", "개발본부", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV004", "고아팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then — 본문 테이블 Query 가 정렬키(BELONGS_TO#GROUP#<id>) 오름차순으로 결정적으로
+        // 돌려주는 순서 그대로다. flatMap 으로 되돌리면 GetItem 완료 순서로 흔들려 이 단언이
+        // 깨진다 — AdminQueryUseCase 가 바로 이 순서에 기대어 take() 로 자르고 순서를 넘긴다.
+        assertThat(groupIds).containsExactly("DEV001", "DEV002", "DEV003", "DEV004");
+    }
+
+    @Test
     @DisplayName("조직을 삭제하면 조직 자체와 멤버십 아이템이 모두 사라진다")
     void 조직_삭제시_멤버십도_사라진다() {
         // given

@@ -332,6 +332,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      *
      * <p><b>확인까지 여기서 한다.</b> 쓰기가 중간에 실패하면 소속 줄만 남을 수 있다. 부르는 쪽에
      * 확인을 맡기면 관리자 조회처럼 그대로 믿는 곳에서 "속하지 않은 조직" 이 보인다(설계 §6).
+     *
+     * <p><b>소스 순서(정렬키 오름차순)를 지킨다 — {@code flatMap} 이 아니라
+     * {@code flatMapSequential} 이다.</b> 본문 테이블 Query 는 정렬키 오름차순으로 결정적으로
+     * 돌아오는데, 확인을 병렬로 걸면서 {@code flatMap} 을 쓰면 방출 순서가 GetItem 완료 순서로
+     * 바뀐다. {@code AdminQueryUseCase.directGroupsOf} 는 이 메서드가 낸 순서 그대로
+     * {@code take(MAX_PATHS+1)} 로 자르고, {@code expandParents}/{@code ancestorsOf} 는 이
+     * 순서를 상위 조직 목록 순서로 그대로 넘긴다 — 둘 다 소스 순서가 안정적이라고 전제한다.
      */
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
@@ -347,7 +354,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
         return Paginator.queryAll(client, request)
                 .map(item -> Keys.parseBelongsToSk(Attrs.str(item, Keys.SK)))
-                .flatMap(groupId -> containsMember(groupId, ref)
+                .flatMapSequential(groupId -> containsMember(groupId, ref)
                         .filter(Boolean::booleanValue)
                         .map(confirmed -> groupId), QUERY_CONCURRENCY);
     }
