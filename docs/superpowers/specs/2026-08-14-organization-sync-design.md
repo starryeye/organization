@@ -386,14 +386,18 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 |---|---|---|---|---|---|
 | 직원 | `USER#<empId>` | `META` | `USER_INDEX` | `<userName>` | externalId, userName, displayName, email, active, updatedAt |
 | 조직 | `GROUP#<orgCode>` | `META` | `GROUP_INDEX` | `<displayName>` | externalId, displayName, updatedAt |
-| 멤버십(유저) | `GROUP#<gid>` | `MEMBER#USER#<uid>` | `MEMBER#USER#<uid>` | `GROUP#<gid>` | addedAt |
-| 멤버십(하위조직) | `GROUP#<gid>` | `MEMBER#GROUP#<cid>` | `MEMBER#GROUP#<cid>` | `GROUP#<gid>` | addedAt |
+| 멤버십(유저) | `GROUP#<gid>` | `MEMBER#USER#<uid>` | ~~`MEMBER#USER#<uid>`~~ ⚠️ | ~~`GROUP#<gid>`~~ ⚠️ | addedAt |
+| 멤버십(하위조직) | `GROUP#<gid>` | `MEMBER#GROUP#<cid>` | ~~`MEMBER#GROUP#<cid>`~~ ⚠️ | ~~`GROUP#<gid>`~~ ⚠️ | addedAt |
 | 스냅샷 메타 | `SNAPSHOT#<sid>` | `META` | `SNAPSHOT_INDEX` | `<createdAt ISO>` | source, tupleCount, expiresAt |
 | 스냅샷 튜플 | `SNAPSHOT#<sid>` | `TUPLE#<user>\|<rel>\|<obj>` | – | – | expiresAt |
 | 최신 포인터 | `SNAPSHOT_POINTER` | `LATEST` | – | – | snapshotId |
 | 실행 이력 | `SYNCRUN#<yyyy-MM>` | `<startedAt ISO>#<runId>` | – | – | source, trigger, status, counts, message, expiresAt |
 
 `snapshotId` 형식: `<yyyyMMdd'T'HHmmss>-<SOURCE>` (예: `20260814T030000-LDAP`)
+
+> ⚠️ **최신 아님.** 멤버십 아이템의 GSI1PK/GSI1SK 열은 이제 존재하지 않는다 — 역참조가 최종 일관성 GSI를
+> 쓰다 생긴 버그 때문에 강한 일관성 조회로 옮겨갔고, 그 자리를 멤버 쪽 파티션의 `BELONGS_TO#GROUP#<gid>`
+> 줄이 대신한다. 현재 레이아웃은 `2026-09-16-strong-membership-lookup-design.md` §3~§4 를 본다.
 
 ### 6.1 접근 패턴
 
@@ -402,7 +406,7 @@ LDAP이나 SCIM이 순환(A가 B의 자식이면서 B가 A의 자식)을 만들 
 | 직원 아이디로 조회 | `GetItem PK = USER#<empId>, SK = META` | admin API |
 | 조직코드로 조회 | `GetItem PK = GROUP#<orgCode>, SK = META` | admin API |
 | 조직 + 소속 멤버 전체 | `PK = GROUP#<orgCode>` (SK 전체 — META와 MEMBER가 한 번에) | admin API, SCIM |
-| 어떤 멤버가 속한 조직들 | GSI1 `GSI1PK = MEMBER#USER#<empId>` | SCIM 삭제, admin API |
+| ~~어떤 멤버가 속한 조직들~~ ⚠️ | ~~GSI1 `GSI1PK = MEMBER#USER#<empId>`~~ — 최신 아님, `2026-09-16-strong-membership-lookup-design.md` §4·§6 참고 | SCIM 삭제, admin API |
 | 조직명 prefix 검색 | GSI1 `GSI1PK = GROUP_INDEX AND begins_with(GSI1SK, "개발")` | admin API |
 | 조직명 부분일치 / 조직 전체 목록 | GSI1 `GSI1PK = GROUP_INDEX` Query → 앱에서 `contains` 필터 | admin API |
 | 직전 스냅샷 로드 | 포인터 읽고 → `PK = SNAPSHOT#<sid>, SK begins_with TUPLE#` | LDAP diff |
@@ -507,6 +511,9 @@ SCIM 단건 변경은 튜플이 대개 100개 미만이라 `Write` 한 배치에
 1. backend의 멤버 튜플 전부 + backend가 다른 그룹의 child인 튜플(GSI1 역참조) 전부를 toDelete로
 2. apply → 성공 시 그룹 아이템 + 멤버십 아이템 삭제
 ```
+> ⚠️ **최신 아님.** "GSI1 역참조" 는 더 이상 없다 — `findGroupIdsContaining` 이 강한 일관성 조회로
+> 바뀌었다(`2026-09-16-strong-membership-lookup-design.md` §4·§6). 흐름의 뜻은 그대로이고 1단계가
+> 그 강한 일관성 조회로 바뀌었을 뿐이다.
 
 ### 7.3 스냅샷 아카이빙 — `app-scim`, 매일 03:00
 

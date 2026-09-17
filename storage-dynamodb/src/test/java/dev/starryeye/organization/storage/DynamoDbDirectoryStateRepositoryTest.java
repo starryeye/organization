@@ -15,6 +15,7 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -150,6 +151,71 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(groupIds).containsExactly("DEV001");
+    }
+
+    @Test
+    @DisplayName("역참조는 소속 줄로 찾는다 — 막 추가된 멤버십도 즉시 보인다")
+    void 역참조가_소속_줄로_찾는다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("kim"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactlyInAnyOrder("DEV002", "DEV003");
+    }
+
+    @Test
+    @DisplayName("소속 줄만 남고 멤버 줄이 없으면 역참조에서 빠진다 — 중간 실패로 남은 찌꺼기")
+    void 찌꺼기_소속_줄은_걸러진다() {
+        // given — 멤버 줄만 지워 "소속 줄만 남은" 모양을 만든다
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        지운다("GROUP#DEV002", "MEMBER#USER#kim");
+        assertThat(정렬키들("USER#kim")).contains("BELONGS_TO#GROUP#DEV002");
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then — 화면에 "속하지 않은 조직" 이 보이면 안 된다
+        assertThat(groupIds).isEmpty();
+    }
+
+    @Test
+    @DisplayName("하위 조직도 자기 상위 조직을 역참조로 찾는다")
+    void 하위_조직의_역참조() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.group("DEV003"))).block();
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.group("DEV003")).collectList().block();
+
+        // then
+        assertThat(groupIds).containsExactly("DEV002");
+    }
+
+    @Test
+    @DisplayName("역참조는 정렬키 오름차순을 지킨다 — 확인이 병렬로 끝나도 순서가 흔들리면 안 된다")
+    void 역참조는_정렬키_순서를_지킨다() {
+        // given — QUERY_CONCURRENCY(8)를 훌쩍 넘는 24개 조직에 같은 멤버를 넣어야 확인
+        // GetItem 이 항상 동시에 여러 건 떠서, 완료 순서가 삽입/정렬 순서와 우연히 같을
+        // 가능성이 사실상 없다. 삽입은 정렬키 순서(오름차순)와 반대로 한다.
+        List<String> 정렬키_오름차순 = java.util.stream.IntStream.rangeClosed(1, 24)
+                .mapToObj(i -> String.format("DEV%03d", i))
+                .toList();
+        for (int i = 정렬키_오름차순.size() - 1; i >= 0; i--) {
+            String groupId = 정렬키_오름차순.get(i);
+            repository.saveGroup(조직(groupId, groupId + "팀", MemberRef.user("kim"))).block();
+        }
+
+        // when
+        var groupIds = repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block();
+
+        // then — 본문 테이블 Query 가 정렬키(BELONGS_TO#GROUP#<id>) 오름차순으로 결정적으로
+        // 돌려주는 순서 그대로다. flatMap 으로 되돌리면 GetItem 완료 순서로 흔들려 이 단언이
+        // 사실상 매번 깨진다 — AdminQueryUseCase 가 바로 이 순서에 기대어 take() 로 자르고 순서를 넘긴다.
+        assertThat(groupIds).containsExactly(정렬키_오름차순.toArray(new String[0]));
     }
 
     @Test
@@ -314,5 +380,139 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     void 없는_조직의_멤버는_false다() {
         // when / then
         assertThat(repository.containsMember("없는조직", MemberRef.user("kim")).block()).isFalse();
+    }
+
+    @Test
+    @DisplayName("조직을 저장하면 멤버 쪽 파티션에도 소속 줄이 생긴다")
+    void 소속_줄이_함께_생긴다() {
+        // given, when
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).contains("BELONGS_TO#GROUP#DEV002");
+        assertThat(정렬키들("GROUP#DEV003")).contains("BELONGS_TO#GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("멤버가 빠지면 그 멤버의 소속 줄도 사라진다")
+    void 빠진_멤버의_소속_줄이_사라진다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.user("lee"))).block();
+
+        // when
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("lee"))).block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).doesNotContain("BELONGS_TO#GROUP#DEV002");
+        assertThat(정렬키들("USER#lee")).contains("BELONGS_TO#GROUP#DEV002");
+    }
+
+    @Test
+    @DisplayName("하위 조직의 소속 줄은 그 조직의 멤버로 읽히지 않는다")
+    void 소속_줄은_멤버가_아니다() {
+        // given — DEV003 은 DEV002 의 하위이고, 자기 멤버로 park 한 명을 갖는다
+        repository.saveGroup(조직("DEV003", "플랫폼팀", MemberRef.user("park"))).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.group("DEV003"))).block();
+
+        // when
+        var found = repository.findGroup("DEV003").block();
+
+        // then — BELONGS_TO#GROUP#DEV002 가 멤버로 섞이면 안 된다
+        assertThat(found.members()).containsExactly(MemberRef.user("park"));
+    }
+
+    @Test
+    @DisplayName("조직을 지우면 그 멤버들의 소속 줄까지 사라진다")
+    void 조직_삭제가_소속_줄을_치운다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀",
+                MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
+
+        // when
+        repository.deleteGroup("DEV002").block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).isEmpty();
+        assertThat(정렬키들("GROUP#DEV003")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("아직 없는 직원을 가리키는 소속 줄이 있어도 그 직원은 여전히 '없음' 이다")
+    void 소속_줄만_있는_직원은_없는_직원이다() {
+        // given — SCIM 에서 조직이 직원보다 먼저 도착한 모양
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("아직없음"))).block();
+
+        // when, then
+        assertThat(정렬키들("USER#아직없음")).containsExactly("BELONGS_TO#GROUP#DEV002");
+        assertThat(repository.findUser("아직없음").block()).isNull();
+        assertThat(repository.loadAll().block().users()).doesNotContainKey("아직없음");
+    }
+
+    @Test
+    @DisplayName("멤버 줄과 소속 줄은 GSI 에 실리지 않는다 — 직원·조직 열거에 섞이면 안 된다")
+    void 멤버십_줄은_색인에_없다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when — 전체 열거는 GSI1 의 USER_INDEX/GROUP_INDEX 파티션을 훑는다
+        var snapshot = repository.loadAll().block();
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("kim");
+        assertThat(snapshot.groups()).containsOnlyKeys("DEV002");
+    }
+
+    @Test
+    @DisplayName("직원을 지우면 직원 파티션이 통째로 빈다 — 남은 소속 줄도 함께")
+    void 직원_삭제가_파티션을_비운다() {
+        // given — 소속 줄만 남은 상태(중간 실패로 생길 수 있는 모양)를 직접 만든다
+        repository.saveUser(직원("kim")).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("DEV002", "백엔드팀")).block();
+        repository.saveGroup(조직("DEV004", "고아팀", MemberRef.user("kim"))).block();
+        지운다("GROUP#DEV004", "MEMBER#USER#kim");
+
+        // when
+        repository.deleteUser("kim").block();
+
+        // then
+        assertThat(정렬키들("USER#kim")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("직원을 지우면 그 직원이 속한 조직의 멤버 줄도 함께 사라진다 — 대칭이 깨지면 삭제가 권한을 남긴다")
+    void 직원_삭제가_조직의_멤버줄도_지운다() {
+        // given
+        repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
+
+        // when
+        repository.deleteUser("kim").block();
+
+        // then — 조직 쪽 멤버 줄이 남아 있으면 findGroup 이 여전히 kim 을 멤버로 보여준다
+        var found = repository.findGroup("DEV002").block();
+        assertThat(found.members()).doesNotContain(MemberRef.user("kim"));
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block()).isEmpty();
+    }
+
+    /** 파티션 하나의 정렬키 전부. 테이블에 실제로 무엇이 들어갔는지 직접 본다. */
+    private List<String> 정렬키들(String pk) {
+        var response = client.query(software.amazon.awssdk.services.dynamodb.model.QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .consistentRead(true)
+                .build()).join();
+        return response.items().stream().map(item -> Attrs.str(item, Keys.SK)).toList();
+    }
+
+    private void 지운다(String pk, String sk) {
+        client.deleteItem(software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                .build()).join();
     }
 }

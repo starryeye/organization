@@ -48,22 +48,17 @@ import java.util.stream.Collectors;
  *                                          → 방금 쓴 튜플을 지운다
  * </pre>
  *
- * <p><b>이것으로 창이 완전히 닫히지는 않는다.</b> DynamoDB GSI 는 강한 일관성을 지원하지 않으므로
- * 역참조({@link #findGroupIdsContaining})는 여전히 최종 일관성이다. 방금 추가된 멤버십이 GSI 에
- * 아직 안 보이면 그 조직이 영향 범위에서 빠질 수 있다 — 그 경우는 "이 연산이 그 조직을
- * 건드리지 않는다" 로 끝난다.
+ * <p><b>역참조({@link #findGroupIdsContaining})도 강한 일관성이고 정확하다.</b> 멤버 쪽 파티션의
+ * 소속 줄을 강한 일관성으로 읽고, 조직 쪽 멤버 줄이 실제로 있는지까지 이 메서드 안에서 확인한
+ * 것만 돌려준다(설계 `2026-09-16-strong-membership-lookup-design.md` §1, §6) — 막 추가된 멤버십을
+ * 놓쳐 삭제가 권한을 남기는 방향도, 중간 실패로 소속 줄만 남아 "속하지 않은 조직" 이 보이는
+ * 방향도 여기서 막힌다.
  *
- * <p><b>반대 방향(막 빠진 멤버십을 낡은 GSI 가 계속 보고하는 경우)은 방향이 다르다 —
- * 그래서 별도로 막는다.</b> {@code upsertUser} 는 {@code findGroupIdsContaining} 이 보고한
- * 조직마다 {@link #findGroupHeader}(존재 확인)만 읽고 멤버 목록은 읽지 않는데, 헤더는 조직이
- * 있다는 것만 말하고 이 직원이 아직 멤버인지는 말하지 않는다 — 확인 없이 그대로 믿으면 방금
- * 지워진 멤버십을 재시도가 되살려 쓴다(있어야 할 튜플을 지우는 것보다 위험한, <b>없어야 할
- * 튜플을 쓰는</b> 방향이다). {@link #containsMember} 가 멤버 줄 자체를 한 번 더 강한
- * 일관성으로 읽어 이 창을 닫는다. 재적재가 유일한 해결책인 잔여 위험은 여전히 "빠짐" 방향
- * 뿐이다(설계 §5.4).
- *
- * <p>비용은 읽기당 RCU 2배다. 쓰기 경로의 읽기는 요청당 한 자릿수라 감당할 만하고, 조회 API 는
- * 별도 저장소({@code DynamoDbDirectorySearchRepository})를 탄다.
+ * <p>비용은 읽기당 RCU 2배다 — 멤버 확인이 추가로 붙는 경로는 쓰기 경로 정도로 요청당 한
+ * 자릿수라 감당할 만하다. 목록·검색 조회 API 는 별도 저장소({@code DynamoDbDirectorySearchRepository})를
+ * 타지만, {@code AdminQueryUseCase.employeeDetail} 은 이 저장소의 {@link #findUser} 와
+ * {@link #findGroupIdsContaining} 을 그대로 써서 이제 후보 조직마다 강한 일관성 Query 한 번에
+ * 확인 {@code GetItem} 한 번씩을 추가로 낸다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
@@ -125,9 +120,42 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return putItem(item);
     }
 
+    /**
+     * 직원 파티션을 통째로 비우기 전에, 그 소속 줄이 가리키는 조직들의 멤버 줄부터 지운다.
+     * {@link #deleteGroup} 과 대칭이다 — 그쪽은 조직 파티션(멤버 줄)을 먼저 비우고 멤버의
+     * 소속 줄을 나중에 지우는데, 이쪽은 반대 방향이라 조직 쪽 멤버 줄을 먼저 지우고 직원
+     * 파티션(소속 줄 포함)을 나중에 비운다.
+     *
+     * <p><b>순서가 이래야 하는 이유.</b> 지켜야 할 불변식은 "{@code MEMBER#} 줄은 반드시
+     * {@code BELONGS_TO#} 줄을 동반한다" 다 — 거꾸로(소속 줄만 있고 멤버 줄이 없음)는
+     * {@link #findGroupIdsContaining} 의 확인 단계가 걸러내 무해하다. 순서를 반대로 해서
+     * 직원 파티션(소속 줄)을 먼저 비우면, 중간에 실패했을 때 그 조직 쪽엔 소속 줄 없는
+     * {@code MEMBER#} 줄이 남는다 — 역참조가 이 직원을 놓쳐 나중에 그 조직을 지워도 권한이
+     * 남는, 금지된 방향이다. 조직 쪽 멤버 줄을 먼저 지우면 중간 실패의 최악의 잔여물이
+     * "멤버 줄 없는 소속 줄"(안전한 방향)뿐이다.
+     *
+     * <p>이 대칭이 깨지면 고칠 방법도 없다 — {@link #saveGroup} 은 "새로 온 멤버"를 조직 쪽
+     * 파티션({@code existingMemberSks})만 보고 계산하므로, 소속 줄이 없어진 멤버 줄은
+     * 재동기화로도 다시 쓰이지 않는다(설계 §5).
+     */
     @Override
     public Mono<Void> deleteUser(String userId) {
-        return deleteItem(Keys.userPk(userId), Keys.META);
+        return queryPartition(Keys.userPk(userId))
+                .map(item -> Attrs.str(item, Keys.SK))
+                .collectList()
+                .flatMap(sks -> {
+                    List<String> groupIds = sks.stream()
+                            .filter(Keys::isBelongsToSk)
+                            .map(Keys::parseBelongsToSk)
+                            .toList();
+                    MemberRef self = MemberRef.user(userId);
+                    return Flux.fromIterable(groupIds)
+                            .flatMap(groupId -> deleteItem(Keys.groupPk(groupId), Keys.memberSk(self)),
+                                    QUERY_CONCURRENCY)
+                            .thenMany(Flux.fromIterable(sks))
+                            .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
+                            .then();
+                });
     }
 
     /**
@@ -195,12 +223,15 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * PK 와 SK 를 모두 알고 있으므로 {@code GetItem} 으로 멤버 줄 한 개만 집어온다 —
      * {@link #findGroupHeader} 와 같은 이유다. 읽는 양이 조직 크기를 따라가지 않는다.
      *
-     * <p><b>강한 일관성으로 읽는다.</b> {@link DirectoryStateRepository#containsMember} 의
-     * 자바독 참고 — {@link #findGroupIdsContaining}(GSI1, 최종 일관성)이 보고한 조직이 실제로도
-     * 이 멤버를 갖고 있는지를 이 메서드가 확정한다.
+     * <p><b>강한 일관성으로 읽는다.</b> {@link #findGroupIdsContaining} 이 소속 줄에서 뽑은
+     * 후보 조직마다 이 메서드로 멤버 줄 자체를 다시 확인한다 — 쓰기가 중간에 실패해 소속
+     * 줄만 남은 경우를 걸러낸다.
+     *
+     * <p>포트에는 없다 — {@link #findGroupIdsContaining} 내부에서만 쓰는 확인 단계라 패키지
+     * 전용이다. 다만 그 확인 자체를 지키는 기존 테스트 세 줄이 이 메서드를 직접 부르므로
+     * {@code private} 로 좁히지 않는다.
      */
-    @Override
-    public Mono<Boolean> containsMember(String groupId, MemberRef ref) {
+    Mono<Boolean> containsMember(String groupId, MemberRef ref) {
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
@@ -237,30 +268,63 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
 
+                    // 소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5).
+                    // 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
+                    // "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면
+                    // 삭제가 그 조직을 못 찾아 권한이 남는다.
                     return Flux.fromIterable(떠난멤버)
-                            .flatMap(sk -> deleteItem(Keys.groupPk(group.id()), sk), QUERY_CONCURRENCY)
+                            .map(Keys::parseMemberSk)
+                            .flatMap(ref -> deleteItem(Keys.groupPk(group.id()), Keys.memberSk(ref))
+                                    .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(group.id()))),
+                                    QUERY_CONCURRENCY)
                             .then(putItem(meta))
                             .then(Flux.fromIterable(새로온멤버)
-                                    .flatMap(member -> putItem(memberItem(group.id(), member)),
+                                    .flatMap(member -> putItem(belongsToItem(member, group.id()))
+                                            .then(putItem(memberItem(group.id(), member))),
                                             QUERY_CONCURRENCY)
                                     .then());
                 });
     }
 
+    /**
+     * 조직 파티션을 비우고, <b>그 멤버들의 소속 줄까지</b> 지운다. 소속 줄을 남기면 역참조가
+     * 그 조직을 후보로 계속 들고 오고(확인 단계가 걸러 내지만) 파티션에 영원히 쌓인다.
+     */
     @Override
     public Mono<Void> deleteGroup(String groupId) {
         return queryPartition(Keys.groupPk(groupId))
                 .map(item -> Attrs.str(item, Keys.SK))
-                .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
-                .then();
+                .collectList()
+                .flatMap(sks -> {
+                    List<MemberRef> members = sks.stream()
+                            .filter(Keys::isMemberSk)
+                            .map(Keys::parseMemberSk)
+                            .toList();
+                    return Flux.fromIterable(sks)
+                            .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
+                            .thenMany(Flux.fromIterable(members))
+                            .flatMap(ref -> deleteItem(Keys.memberPk(ref), Keys.belongsToSk(groupId)),
+                                    QUERY_CONCURRENCY)
+                            .then();
+                });
     }
 
     private Map<String, AttributeValue> memberItem(String groupId, MemberRef member) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.groupPk(groupId)));
         item.put(Keys.SK, Attrs.s(Keys.memberSk(member)));
-        item.put(Keys.GSI1PK, Attrs.s(Keys.memberGsi1Pk(member)));
-        item.put(Keys.GSI1SK, Attrs.s(Keys.groupPk(groupId)));
+        item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
+        return item;
+    }
+
+    /**
+     * 멤버 쪽 파티션에 적는 소속 줄. <b>GSI 키를 넣지 않는다</b> — 넣으면 직원·조직 열거
+     * ({@code USER_INDEX}/{@code GROUP_INDEX})와 조회 API 결과에 섞인다.
+     */
+    private Map<String, AttributeValue> belongsToItem(MemberRef member, String groupId) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.memberPk(member)));
+        item.put(Keys.SK, Attrs.s(Keys.belongsToSk(groupId)));
         item.put("addedAt", Attrs.s(Instant.now(clock).toString()));
         return item;
     }
@@ -290,17 +354,40 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 역참조 ----------
 
+    /**
+     * 멤버 쪽 파티션의 소속 줄을 <b>강한 일관성</b>으로 읽고, 조직 쪽 멤버 줄이 실제로 있는지
+     * 확인한 것만 돌려준다.
+     *
+     * <p><b>GSI 를 쓰지 않는다.</b> GSI1 은 최종 일관성이라 막 추가된 멤버십을 아직 모를 수 있고,
+     * 그 창에 삭제가 들어오면 그 조직의 튜플과 멤버 줄이 남는다(설계 §1).
+     *
+     * <p><b>확인까지 여기서 한다.</b> 쓰기가 중간에 실패하면 소속 줄만 남을 수 있다. 부르는 쪽에
+     * 확인을 맡기면 관리자 조회처럼 그대로 믿는 곳에서 "속하지 않은 조직" 이 보인다(설계 §6).
+     *
+     * <p><b>소스 순서(정렬키 오름차순)를 지킨다 — {@code flatMap} 이 아니라
+     * {@code flatMapSequential} 이다.</b> 본문 테이블 Query 는 정렬키 오름차순으로 결정적으로
+     * 돌아오는데, 확인을 병렬로 걸면서 {@code flatMap} 을 쓰면 방출 순서가 GetItem 완료 순서로
+     * 바뀐다. {@code AdminQueryUseCase.directGroupsOf} 는 이 메서드가 낸 순서 그대로
+     * {@code take(MAX_PATHS+1)} 로 자르고, {@code expandParents}/{@code ancestorsOf} 는 이
+     * 순서를 상위 조직 목록 순서로 그대로 넘긴다 — 둘 다 소스 순서가 안정적이라고 전제한다.
+     */
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
-                .indexName(Keys.GSI1)
-                .keyConditionExpression("#pk = :pk")
-                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.memberGsi1Pk(ref))))
+                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
+                .expressionAttributeValues(Map.of(
+                        ":pk", Attrs.s(Keys.memberPk(ref)),
+                        ":prefix", Attrs.s(Keys.BELONGS_TO_PREFIX)))
+                .consistentRead(true)
                 .build();
 
-        return Paginator.queryAll(client, request).map(item -> Keys.parseGroupPk(Attrs.str(item, Keys.PK)));
+        return Paginator.queryAll(client, request)
+                .map(item -> Keys.parseBelongsToSk(Attrs.str(item, Keys.SK)))
+                .flatMapSequential(groupId -> containsMember(groupId, ref)
+                        .filter(Boolean::booleanValue)
+                        .map(confirmed -> groupId), QUERY_CONCURRENCY);
     }
 
     // ---------- 전체 ----------

@@ -37,13 +37,46 @@ class KeysTest {
     }
 
     @Test
-    @DisplayName("멤버십 정렬키를 그대로 GSI 파티션키로 써서 역참조가 가능해진다")
-    void 멤버십_역참조_키는_정렬키와_같다() {
+    @DisplayName("소속 정렬키는 MEMBER# 로 시작하지 않는다 — 조직 파티션에서 멤버로 오인되면 안 된다")
+    void 소속_정렬키는_멤버와_구분된다() {
+        // given, when
+        String belongsTo = Keys.belongsToSk("DEV002");
+
+        // then
+        assertThat(belongsTo).isEqualTo("BELONGS_TO#GROUP#DEV002");
+        assertThat(Keys.isMemberSk(belongsTo)).isFalse();
+        assertThat(Keys.isBelongsToSk(belongsTo)).isTrue();
+        assertThat(Keys.isBelongsToSk(Keys.memberSk(MemberRef.user("kim")))).isFalse();
+    }
+
+    @Test
+    @DisplayName("소속 정렬키는 왕복 변환해도 조직코드가 그대로다")
+    void 소속_정렬키는_왕복_변환된다() {
         // given
-        MemberRef ref = MemberRef.user("kim");
+        String sk = Keys.belongsToSk("DEV002");
 
         // when, then
-        assertThat(Keys.memberGsi1Pk(ref)).isEqualTo(Keys.memberSk(ref));
+        assertThat(Keys.parseBelongsToSk(sk)).isEqualTo("DEV002");
+    }
+
+    @Test
+    @DisplayName("소속 정렬키가 아닌 값을 되돌리려 하면 조용히 자르지 않고 거부한다")
+    void 잘못된_소속_정렬키는_거부한다() {
+        // given, when, then — BELONGS_TO# 로 시작하는 것만 보고 곧장 GROUP# 길이만큼
+        // substring 하면, "BELONGS_TO#USER#kim" 같은 잘못된 모양도 접두사 검사를 통과해
+        // 뒷부분이 조용히 잘린 쓰레기 아이디("im")를 돌려준다.
+        assertThatThrownBy(() -> Keys.parseBelongsToSk("BELONGS_TO#USER#kim"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.parseBelongsToSk(null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("멤버의 파티션키는 직원이면 USER#, 하위 조직이면 GROUP# 이다")
+    void 멤버의_파티션키() {
+        // given, when, then
+        assertThat(Keys.memberPk(MemberRef.user("kim"))).isEqualTo("USER#kim");
+        assertThat(Keys.memberPk(MemberRef.group("DEV002"))).isEqualTo("GROUP#DEV002");
     }
 
     @Test
