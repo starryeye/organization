@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
+import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -54,6 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("test")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ScaleTest
 class ScimProvisioningOrderScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();

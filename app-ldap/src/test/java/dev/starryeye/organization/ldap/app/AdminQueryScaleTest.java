@@ -8,6 +8,7 @@ import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
+import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -51,6 +52,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Testcontainers
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ScaleTest
 class AdminQueryScaleTest {
 
     private static final String BASE_DN = "dc=example,dc=com";

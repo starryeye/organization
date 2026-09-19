@@ -7,6 +7,7 @@ import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
+import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -64,6 +65,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("test")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ScaleTest
 class LdapInterruptedSyncScaleTest {
 
     private static final String BASE_DN = "dc=example,dc=com";

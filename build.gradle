@@ -56,8 +56,8 @@ subprojects {
         }
     }
 
-    tasks.named('test') {
-        useJUnitPlatform()
+    // test 와 scaleTest 가 함께 쓰는 설정.
+    tasks.withType(Test).configureEach {
         testLogging {
             events 'passed', 'skipped', 'failed'
         }
@@ -68,5 +68,29 @@ subprojects {
         // docker-java 가 지원하는 최신 버전이며, DOCKER_API_VERSION 환경변수로
         // 다른 환경에 맞게 덮어쓸 수 있다.
         systemProperty 'api.version', System.getenv('DOCKER_API_VERSION') ?: '1.44'
+    }
+
+    // 규모 테스트(@ScaleTest — core testFixtures)는 기본 test 에서 뺀다. 5,000명 조직도와
+    // Testcontainers 를 띄우는 클래스들이 전체 시간의 대부분(약 9분)을 차지한다.
+    // 태그 문자열 'scale' 은 @ScaleTest 의 @Tag 값과 같아야 한다.
+    tasks.named('test') {
+        useJUnitPlatform {
+            excludeTags 'scale'
+        }
+    }
+
+    // 머지 전에 돌린다. check·build 에는 일부러 걸지 않는다 — 기본 빌드를 빠르게 두기 위해서다.
+    // 모든 모듈에 등록한다: 규모 테스트가 있는 모듈에만 두면, 다른 모듈에 규모 테스트가 새로 생겼을 때
+    // test 에서는 빠지는데 돌려 줄 작업이 없어 아무도 안 돌리게 된다.
+    // Gradle 8 은 태그로 걸러 테스트가 하나도 없어도 실패하지 않는다 — Gradle 9 로 올릴 때 다시 볼 것.
+    tasks.register('scaleTest', Test) {
+        group = 'verification'
+        description = '규모 테스트(@ScaleTest)만 돈다. 머지 전에 돌린다.'
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform {
+            includeTags 'scale'
+        }
+        shouldRunAfter tasks.named('test')
     }
 }
