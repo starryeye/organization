@@ -357,8 +357,14 @@ SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는
 ## 테스트
 
 ```bash
-./gradlew test
+./gradlew test        # 규모 테스트를 뺀 전부 — 평소에 돌린다
+./gradlew scaleTest   # 규모 테스트만 — 머지 전에 돌린다
 ```
+
+**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 12개 클래스(`@ScaleTest`
+가 붙은 것)가 전체 시간의 대부분(약 9분)을 차지해서다. 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
+않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
+테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.
 
 Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 UnboundID 임베디드
 서버로 띄운다. `app-ldap`의 `LdapSyncEndToEndTest`는 이 셋을 모두 띄운 뒤 관리 API를 통해서만

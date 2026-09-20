@@ -6,6 +6,7 @@ import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
+import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.ldap.fixture.LdifRenderer;
 import org.junit.jupiter.api.DisplayName;
@@ -43,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Testcontainers
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ScaleTest
 class LdapPagingScaleTest {
 
     private static final String BASE_DN = "dc=example,dc=com";

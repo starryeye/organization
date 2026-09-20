@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
+import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -54,6 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 // prometheus 를 노출해 뒀어도 /actuator/prometheus 가 404 다. 실제 앱은 200 을 준다.
 @org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ScaleTest
 class ScimLimitsAndRecoveryScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();
