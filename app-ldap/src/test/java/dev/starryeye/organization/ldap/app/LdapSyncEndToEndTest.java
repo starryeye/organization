@@ -298,9 +298,6 @@ class LdapSyncEndToEndTest {
     }
 
     // ---------- 계정 막힘 (⑥) ----------
-    //
-    // 이 조직도의 튜플은 셋뿐이다(kim·park 의 direct_member, DEV001→DEV002 의 child). 한 명을 막으면 1/3 이
-    // 지워져 삭제 가드(30%)에 걸리므로 이 구간의 동기화는 force=true 로 돌린다.
 
     @Test
     @Order(8)
@@ -311,7 +308,7 @@ class LdapSyncEndToEndTest {
                 new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
 
         // when
-        강제로_동기화한다();
+        동기화한다();
 
         // then — 권한은 없다
         assertThat(check("user:kim", "direct_member", "group:DEV002")).isFalse();
@@ -332,7 +329,7 @@ class LdapSyncEndToEndTest {
                 new Modification(ModificationType.REPLACE, "userAccountControl", "512"));
 
         // when
-        강제로_동기화한다();
+        동기화한다();
 
         // then
         assertThat(check("user:kim", "direct_member", "group:DEV002")).isTrue();
@@ -348,7 +345,7 @@ class LdapSyncEndToEndTest {
                 new Modification(ModificationType.REPLACE, "accountExpires", "132223104000000000"));
 
         // when
-        강제로_동기화한다();
+        동기화한다();
 
         // then
         assertThat(check("user:park", "direct_member", "group:DEV001")).isFalse();
@@ -357,9 +354,8 @@ class LdapSyncEndToEndTest {
         assertThat(상태.users().get("park").active()).isFalse();
     }
 
-    /** 이 조직도는 튜플이 셋뿐이라 한 명만 막아도 삭제 가드(30%)를 넘는다. */
-    private void 강제로_동기화한다() {
-        client.post().uri("/admin/sync/full?force=true").exchange()
+    private void 동기화한다() {
+        client.post().uri("/admin/sync/full").exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
