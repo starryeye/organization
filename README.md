@@ -84,6 +84,11 @@ type group
 | `app-ldap` | LDAP 동기화 인스턴스 (8081) |
 | `app-scim` | SCIM 수신 인스턴스 (8082) |
 
+**AD 가 막은 계정은 비활성으로 읽는다.** `userAccountControl` 의 비활성화 비트(`0x2`)가 켜졌거나
+`accountExpires` 가 동기화 시각 이전이면 그 직원은 `active=false` 다 — 소속은 남고 권한 튜플만 사라진다
+(SCIM 의 비활성과 같다). 두 속성이 없는 디렉터리(OpenLDAP 등)에서는 전원 활성이다. 값이 정수가 아니면 그
+회차는 실패한다. 동기화 계정이 두 속성을 읽을 수 있어야 한다 — 못 읽으면 전원이 활성으로 읽힌다.
+
 의존 방향은 항상 `app-*` → 어댑터(`storage-dynamodb`/`authz-openfga`/`connector-*`) → `core`다.
 `core`는 스프링 컨텍스트도, 어떤 구체 어댑터도 모른다.
 

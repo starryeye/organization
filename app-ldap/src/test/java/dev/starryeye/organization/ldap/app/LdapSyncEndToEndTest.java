@@ -3,11 +3,14 @@ package dev.starryeye.organization.ldap.app;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
+import com.unboundid.ldap.sdk.Modification;
+import com.unboundid.ldap.sdk.ModificationType;
 import com.unboundid.ldif.LDIFReader;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientWriteRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
@@ -30,6 +33,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -291,5 +295,73 @@ class LdapSyncEndToEndTest {
                 .jsonPath("$.components.ldap.status").isEqualTo("UP")
                 .jsonPath("$.components.dynamoDb.status").isEqualTo("UP")
                 .jsonPath("$.components.openFga.status").isEqualTo("UP");
+    }
+
+    // ---------- 계정 막힘 (⑥) ----------
+    //
+    // 이 조직도의 튜플은 셋뿐이다(kim·park 의 direct_member, DEV001→DEV002 의 child). 한 명을 막으면 1/3 이
+    // 지워져 삭제 가드(30%)에 걸리므로 이 구간의 동기화는 force=true 로 돌린다.
+
+    @Test
+    @Order(8)
+    @DisplayName("AD 에서 비활성화한 직원은 권한을 잃지만 소속은 남는다")
+    void 비활성화하면_권한이_사라진다() throws Exception {
+        // given — kim 의 계정을 비활성화한다. 그룹에서는 빼지 않는다
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
+
+        // when
+        강제로_동기화한다();
+
+        // then — 권한은 없다
+        assertThat(check("user:kim", "direct_member", "group:DEV002")).isFalse();
+        assertThat(check("user:kim", "member", "group:DEV001")).isFalse();
+        // 소속은 남고 비활성으로 기록된다 — 멤버십은 두고 권한만 사라지는 것이 비활성이다
+        var 상태 = state.loadAll().block(Duration.ofSeconds(30));
+        assertThat(상태).isNotNull();
+        assertThat(상태.users().get("kim").active()).isFalse();
+        assertThat(상태.groups().get("DEV002").members()).contains(MemberRef.user("kim"));
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("다시 활성화하면 다음 동기화에서 권한이 돌아온다")
+    void 다시_활성화하면_권한이_돌아온다() throws Exception {
+        // given
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "512"));
+
+        // when
+        강제로_동기화한다();
+
+        // then
+        assertThat(check("user:kim", "direct_member", "group:DEV002")).isTrue();
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("만료일이 지난 직원은 권한을 잃는다")
+    void 만료되면_권한이_사라진다() throws Exception {
+        // given — 2020-01-01T00:00:00Z. 1601-01-01 부터 100나노초 단위
+        LDAP.modify("uid=park,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "accountExpires", "132223104000000000"));
+
+        // when
+        강제로_동기화한다();
+
+        // then
+        assertThat(check("user:park", "direct_member", "group:DEV001")).isFalse();
+        var 상태 = state.loadAll().block(Duration.ofSeconds(30));
+        assertThat(상태).isNotNull();
+        assertThat(상태.users().get("park").active()).isFalse();
+    }
+
+    /** 이 조직도는 튜플이 셋뿐이라 한 명만 막아도 삭제 가드(30%)를 넘는다. */
+    private void 강제로_동기화한다() {
+        client.post().uri("/admin/sync/full?force=true").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("SUCCEEDED");
     }
 }
