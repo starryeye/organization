@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
+import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ldap.core.LdapTemplate;
@@ -40,6 +41,18 @@ class LdapDirectorySnapshotSourceTest {
             return new DirectorySnapshot(
                     Map.of("kim", new DirectoryUser("kim", "uid=kim", "kim", "김철수", null, true)),
                     Map.of());
+        }
+    }
+
+    /** 항상 {@link MemberMatchingFailedException} 을 던지는 전략. 호출 횟수를 세어 재시도가 실제로 걸렸는지 본다. */
+    private static class 가드가_막는_전략 implements LdapMappingStrategy {
+
+        final AtomicInteger 호출수 = new AtomicInteger();
+
+        @Override
+        public DirectorySnapshot read(LdapTemplate template) {
+            호출수.incrementAndGet();
+            throw new MemberMatchingFailedException("member 가 하나도 대조되지 않았습니다(테스트)");
         }
     }
 
@@ -120,5 +133,21 @@ class LdapDirectorySnapshotSourceTest {
         // then — 성공한 시도의 결과만 온전히 담긴다
         assertThat(snapshot.users()).containsOnlyKeys("kim");
         assertThat(snapshot.groups()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("가드 실패는 재시도하지 않고 그 예외를 그대로 던진다 — DN 형태 어긋남은 일시적 장애가 아니다")
+    void 가드_실패는_재시도하지_않는다() {
+        // given — 항상 MemberMatchingFailedException 을 던진다. 다시 읽어도 같은 결과다
+        var strategy = new 가드가_막는_전략();
+        var source = new LdapDirectorySnapshotSource(안_쓰는_템플릿, strategy, 설정(3));
+
+        // when, then — 재시도 없이 원래 예외가 그대로 올라온다
+        assertThatThrownBy(() -> source.fetchAll().block())
+                .isInstanceOf(MemberMatchingFailedException.class)
+                .hasMessageContaining("member 가 하나도 대조되지 않았습니다");
+
+        // then — 최초 1회뿐, 재시도가 걸리지 않았다
+        assertThat(strategy.호출수).hasValue(1);
     }
 }

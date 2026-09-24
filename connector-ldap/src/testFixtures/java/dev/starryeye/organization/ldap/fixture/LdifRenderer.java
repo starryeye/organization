@@ -9,11 +9,10 @@ import dev.starryeye.organization.core.model.MemberType;
 /**
  * 조직도를 {@code groupOfNames} 형태의 LDIF 로 옮긴다.
  *
- * <p>DN 규칙은 {@code GroupOfNamesStrategy} 가 {@code externalId} 를 재구성하는 방식과
- * <b>같아야 한다</b> — 전략은 검색 베이스와 식별 속성으로 DN 을 조립하므로, 여기서 다른
- * 모양으로 심으면 읽어들인 {@code externalId} 가 심은 것과 어긋난다. 그래서 DN 조립을
- * {@link #userDn}/{@link #groupDn} 한 곳에 모아두고, 시나리오가 LDAP 을 직접 수정할 때도
- * 이 메서드를 쓰게 한다.
+ * <p>이 메서드가 만든 DN 이 그대로 LDAP 서버에 심기는 엔트리의 DN 이 된다. 전략은 서버가
+ * 돌려준 DN 을 그대로 읽어 쓰므로(베이스와 식별 속성으로 재구성하지 않는다) 심은 모양이
+ * 곧 전략이 읽어 오는 DN 이다 — 그래서 DN 조립을 {@link #userDn}/{@link #groupDn} 한 곳에
+ * 모아두고, 시나리오가 LDAP 을 직접 수정할 때도 이 메서드를 쓰게 한다.
  *
  * <p>LDIF 특수 문법은 피한다. 값이 공백이나 {@code :} 로 시작하면 base64 로 감싸야 하는데,
  * 조직도 생성기가 만드는 값에는 그런 것이 없다 — 대신 그런 값이 들어오면

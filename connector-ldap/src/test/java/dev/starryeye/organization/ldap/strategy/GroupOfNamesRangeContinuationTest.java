@@ -40,16 +40,21 @@ import static org.mockito.Mockito.when;
  * {@code cn=제1공장:A} (잘리지 않음, 이미 3명 전부)가 {@link IdNormalizer} 를 거치며 같은
  * {@code 제1공장_A} 로 뭉개진다. 이어받기를 <b>아이디</b>로 색인하면 뭉개진 두 엔트리가
  * 같은 키를 갖게 되어, 잘리지 않은 쪽까지 잘린 쪽의 이어받은 목록을 덮어쓴다 — 3명짜리
- * 조직이 남의 멤버 목록을 받는 조용한 권한 확대다. {@code realDn} 은 서버가 돌려준 진짜
+ * 조직이 남의 멤버 목록을 받는 조용한 권한 확대다. {@code dn} 은 서버가 돌려준 진짜
  * DN 이라 절대 충돌하지 않으므로 색인은 그쪽이어야 한다.
  */
 class GroupOfNamesRangeContinuationTest {
 
-    private static final String 진짜DN_A = "cn=제1공장 A,ou=groups,dc=example,dc=com";
-    private static final String 진짜DN_B = "cn=제1공장:A,ou=groups,dc=example,dc=com";
+    private static final String BASE_DN = "dc=example,dc=com";
+    private static final String 진짜DN_A = "cn=제1공장 A,ou=groups," + BASE_DN;
+    private static final String 진짜DN_B = "cn=제1공장:A,ou=groups," + BASE_DN;
+    // 재요청은 ContextSource 의 베이스에 상대적인 DN 을 받는다(LdapConfig 가 setBase 를
+    // 걸어 두기 때문) — 그래서 모킹한 DirContext 도 베이스를 뗀 형태로 호출된다.
+    private static final String 상대DN_A = LdapDns.상대로(진짜DN_A, BASE_DN);
+    private static final String 상대DN_B = LdapDns.상대로(진짜DN_B, BASE_DN);
 
     @Test
-    @DisplayName("정규화된 조직코드가 충돌해도 이어받은 멤버는 realDn 으로 자기 엔트리에만 돌아간다")
+    @DisplayName("정규화된 조직코드가 충돌해도 이어받은 멤버는 dn 으로 자기 엔트리에만 돌아간다")
     void 코드가_충돌해도_멤버는_각자에게_돌아간다() throws Exception {
         // given — "제1공장 A" 와 "제1공장:A" 는 IdNormalizer 를 거치면 같은 코드로 뭉개진다.
         // 이 전제가 깨지면 이 테스트는 아무것도 증명하지 못하므로 먼저 확인해 둔다.
@@ -61,21 +66,21 @@ class GroupOfNamesRangeContinuationTest {
         Class<?> rawEntryClass = Class.forName(GroupOfNamesStrategy.class.getName() + "$RawEntry");
         Constructor<?> rawEntryCtor = rawEntryClass.getDeclaredConstructor(
                 String.class, String.class, String.class, String.class,
-                List.class, String.class, boolean.class);
+                List.class, boolean.class);
         rawEntryCtor.setAccessible(true);
 
         Object 엔트리A = rawEntryCtor.newInstance(
-                아이디A, 진짜DN_A, "제1공장 A", null, List.of("cn=u0", "cn=u1"), 진짜DN_A, false);
+                아이디A, 진짜DN_A, "제1공장 A", null, List.of("cn=u0", "cn=u1"), false);
         Object 엔트리B = rawEntryCtor.newInstance(
-                아이디B, 진짜DN_B, "제1공장:A", null, List.of("cn=x1", "cn=x2", "cn=x3"), 진짜DN_B, true);
+                아이디B, 진짜DN_B, "제1공장:A", null, List.of("cn=x1", "cn=x2", "cn=x3"), true);
 
-        // given — A 의 realDn 으로 재조회하면 처음(0)부터 다시 받는다({@code 전부_읽는다} 의
-        // 계약: 첫 조각은 검색을 돌린 다른 커넥션에서 왔으니 버리고 새 커넥션에서 처음부터
-        // 다시 받는다). 서버는 2명씩 두 조각(u0,u1 / u2,u3)으로 잘라 준다고 가정한다.
-        // 명세대로 원래 이름(member)은 값 없이 함께 온다.
+        // given — A 의 dn 을 베이스에 상대적인 DN 으로 바꿔 재조회하면 처음(0)부터 다시
+        // 받는다({@code 전부_읽는다} 의 계약: 첫 조각은 검색을 돌린 다른 커넥션에서 왔으니
+        // 버리고 새 커넥션에서 처음부터 다시 받는다). 서버는 2명씩 두 조각(u0,u1 / u2,u3)으로
+        // 잘라 준다고 가정한다. 명세대로 원래 이름(member)은 값 없이 함께 온다.
         DirContext dirContext = mock(DirContext.class);
         List<String> A의전체멤버 = List.of("cn=u0", "cn=u1", "cn=u2", "cn=u3");
-        when(dirContext.getAttributes(eq(진짜DN_A), any(String[].class))).thenAnswer(invocation -> {
+        when(dirContext.getAttributes(eq(상대DN_A), any(String[].class))).thenAnswer(invocation -> {
             String[] 요청속성 = invocation.getArgument(1);
             String 요청이름 = 요청속성[0]; // "member;range=<시작>-*"
             int 시작 = Integer.parseInt(
@@ -99,7 +104,9 @@ class GroupOfNamesRangeContinuationTest {
         LdapProperties.GroupOfNames config = new LdapProperties.GroupOfNames();
         config.setMemberAttribute("member");
 
-        GroupOfNamesStrategy strategy = new GroupOfNamesStrategy(new LdapProperties());
+        LdapProperties properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        GroupOfNamesStrategy strategy = new GroupOfNamesStrategy(properties);
         Method 이어받는다 = GroupOfNamesStrategy.class.getDeclaredMethod(
                 "범위가_잘린_멤버를_이어받는다", LdapTemplate.class,
                 LdapProperties.GroupOfNames.class, List.class);
@@ -123,16 +130,16 @@ class GroupOfNamesRangeContinuationTest {
         assertThat(완료(결과B)).isTrue();
 
         // then — B 는 애초에 잘리지 않았으니 재조회 자체가 없어야 한다.
-        verify(dirContext, never()).getAttributes(eq(진짜DN_B), any(String[].class));
+        verify(dirContext, never()).getAttributes(eq(상대DN_B), any(String[].class));
     }
 
-    private static Object 찾는다(List<Object> 결과, String realDn) throws Exception {
+    private static Object 찾는다(List<Object> 결과, String dn) throws Exception {
         for (Object entry : 결과) {
-            if (realDn.equals(호출(entry, "realDn"))) {
+            if (dn.equals(호출(entry, "dn"))) {
                 return entry;
             }
         }
-        throw new AssertionError("realDn '" + realDn + "' 을 가진 엔트리를 찾지 못했다");
+        throw new AssertionError("dn '" + dn + "' 을 가진 엔트리를 찾지 못했다");
     }
 
     @SuppressWarnings("unchecked")

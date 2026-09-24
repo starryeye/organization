@@ -1,7 +1,6 @@
 package dev.starryeye.organization.ldap.strategy;
 
 import org.springframework.ldap.control.PagedResultsDirContextProcessor;
-import org.springframework.ldap.core.AttributesMapper;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.LdapTemplate;
 import dev.starryeye.organization.ldap.LdapTemplates;
@@ -10,7 +9,6 @@ import org.springframework.ldap.query.LdapQuery;
 import javax.naming.directory.SearchControls;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Function;
 
 /**
  * {@code LdapTemplate}에는 {@code LdapQuery} 기반 검색에 paged results control(RFC 2696)을
@@ -42,46 +40,29 @@ final class PagedLdapSearch {
     private PagedLdapSearch() {
     }
 
-    static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, AttributesMapper<T> mapper) {
-        if (pageSize <= 0) {
-            return template.search(query, mapper);
-        }
-        return 한_커넥션에서_페이징한다(template, query, pageSize,
-                (paged) -> (base, filter, controls, processor) ->
-                        paged.search(base, filter, controls, mapper, processor));
-    }
-
     static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, ContextMapper<T> mapper) {
         if (pageSize <= 0) {
             return template.search(query, mapper);
         }
-        return 한_커넥션에서_페이징한다(template, query, pageSize,
-                (paged) -> (base, filter, controls, processor) ->
-                        paged.search(base, filter, controls, mapper, processor));
+        return 한_커넥션에서_페이징한다(template, query, pageSize, mapper);
     }
 
-    /** 한 페이지를 읽어오는 호출. 매퍼 종류만 다르고 나머지 루프는 같다. */
-    @FunctionalInterface
-    private interface 페이지읽기<T> {
-        List<T> read(String base, String filter, SearchControls controls,
-                     PagedResultsDirContextProcessor processor);
-    }
-
+    // 이 전략(GroupOfNames·DIT)의 매퍼는 전부 ContextMapper 다 — DN 이 필요하기 때문이다
+    // (AttributesMapper 에는 DN 이 오지 않는다). 이전에는 AttributesMapper 오버로드도
+    // 있었지만 마지막 호출자가 사라져 지웠다; 되살릴 때는 DN 없는 매퍼를 다시 불러들이는
+    // 문이 된다는 점을 염두에 둔다.
     private static <T> List<T> 한_커넥션에서_페이징한다(LdapTemplate template, LdapQuery query,
-                                              int pageSize,
-                                              Function<LdapTemplate, 페이지읽기<T>> 읽기를_만든다) {
+                                              int pageSize, ContextMapper<T> mapper) {
         String base = query.base().toString();
         String filter = query.filter().encode();
         SearchControls controls = controlsOf(query);
 
         return LdapTemplates.한_커넥션에서(template, paged -> {
-            페이지읽기<T> 읽는다 = 읽기를_만든다.apply(paged);
-
             List<T> results = new ArrayList<>();
             PagedResultsDirContextProcessor processor = new PagedResultsDirContextProcessor(pageSize);
             boolean hasMore;
             do {
-                results.addAll(읽는다.read(base, filter, controls, processor));
+                results.addAll(paged.search(base, filter, controls, mapper, processor));
                 hasMore = processor.hasMore();
                 if (hasMore) {
                     processor = new PagedResultsDirContextProcessor(pageSize, processor.getCookie());
