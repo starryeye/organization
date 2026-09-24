@@ -853,7 +853,7 @@ Expected: `GroupOfNamesStrategy` 와 `LdifRendererTest` 에는 더 이상 없어
 | # | 변이 | 실패해야 하는 테스트 |
 |---|---|---|
 | 1 | `절대DN(adapter)` 을 `adapter.getDn().toString()` 으로 바꾼다(베이스를 안 붙인다) | `GroupOfNamesDeepTreeTest` |
-| 2 | `LdapDns.대조키(...)` 를 `dn.toLowerCase(Locale.ROOT).replace(", ", ",")` 로 되돌린다 | `LdapDnsTest`(이스케이프·다중값), `GroupOfNamesDeepTreeTest` 는 통과할 수도 있다 — 통과한다면 그 사실을 적는다 |
+| 2 | **`LdapDns.대조키` 의 구현**을 `dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim()` 로 되돌린다 | `LdapDnsTest.이스케이프된_쉼표를_값으로_다룬다`, `LdapDnsTest.다중값_RDN의_순서를_흡수한다` |
 | 3 | `UnmatchedMemberGuard.확인한다(...)` 호출을 지운다 | `GroupOfNamesUnmatchedMemberTest` |
 | 4 | `LdapDns.파싱한다` 의 예외를 `return new LdapName("")` 로 바꿔 조용히 넘긴다 | `LdapDnsTest.해석할_수_없는_DN은_예외다` |
 
@@ -865,7 +865,9 @@ Expected: `GroupOfNamesStrategy` 와 `LdifRendererTest` 에는 더 이상 없어
 
 - [ ] **Step 4: 스펙 §10 에 변이 결과를 적는다**
 
-`docs/superpowers/specs/2026-09-24-real-dn-matching-design.md` 의 `## 10. 구현 후 기록` 아래에 표를 채운다. 변이 2 가 깊은 트리 테스트를 잡지 못했다면 **그대로 적는다** — 어떤 테스트가 무엇을 못 잡는지가 다음 사람에게 필요한 정보다.
+`docs/superpowers/specs/2026-09-24-real-dn-matching-design.md` 의 `## 10. 구현 후 기록` 아래에 표를 채운다.
+
+**같이 적을 것 — 우리 테스트가 못 잡는 것.** 전략의 `LdapDns.대조키(...)` **호출부만** 문자열 다듬기로 되돌리면 어떤 테스트도 실패하지 않는다. 깊은 트리 픽스처의 DN 차이는 대소문자뿐이라 문자열 다듬기로도 대조가 되기 때문이다. 즉 대조키의 추가 능력(이스케이프된 쉼표, 다중값 RDN)은 **단위 테스트로만** 증명돼 있다. 직접 확인한 뒤 그 사실을 적는다 — 무엇을 못 잡는지가 다음 사람에게 필요한 정보다.
 
 - [ ] **Step 5: 커밋한다**
 
