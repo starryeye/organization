@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
@@ -18,10 +19,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
 import java.util.List;
@@ -46,25 +45,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ScimScaleSyncCostTest {
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;

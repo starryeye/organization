@@ -172,7 +172,13 @@ public final class ScimRequestRenderer {
                 null,
                 group.id(),
                 group.displayName(),
-                group.members().stream().map(ScimRequestRenderer::scimMember).toList(),
+                // 아이디 순으로 — Set 의 순회 순서는 JVM 실행마다 달라, 그대로 두면 같은 조직도로
+                // 만든 시드 파일의 바이트가 매번 다르다
+                group.members().stream()
+                        .sorted(Comparator.comparing(MemberRef::id)
+                                .thenComparing(MemberRef::type))
+                        .map(ScimRequestRenderer::scimMember)
+                        .toList(),
                 null);
     }
 

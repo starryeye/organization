@@ -40,7 +40,7 @@ import java.util.regex.Pattern;
  * <p><b>이어받기는 커넥션 하나 안에서 끝내야 한다.</b> 명세가 값의 순서를 이렇게 규정한다 —
  * "임의지만 <b>같은 LDAP 커넥션에서는</b> 일관된다". 조각을 서로 다른 커넥션에서 받으면
  * 순서가 달라져 어떤 값은 두 번 오고 어떤 값은 아예 안 온다. 페이징 쿠키와 같은 제약이고,
- * 같은 이유로 {@link LdapTemplates#한_커넥션에서} 를 쓴다.
+ * 같은 이유로 {@link dev.starryeye.organization.ldap.LdapTemplates#한_커넥션에서} 를 쓴다.
  *
  * <p>범위 옵션을 붙여 보내지 않는 서버(OpenLDAP, 임베디드 UnboundID)에서는 평범한 속성 하나가
  * 그대로 오므로 이 클래스는 값을 그대로 돌려주고 끝난다 — 동작이 바뀌지 않는다.
@@ -69,17 +69,19 @@ final class RangedAttributeReader {
     }
 
     /**
-     * @param values 이번 조각의 값들
-     * @param 완료   더 받을 것이 없는가. 범위 옵션이 아예 없었거나 상한이 {@code *} 면 참
+     * @param values   이번 조각의 값들
+     * @param 완료     더 받을 것이 없는가. 범위 옵션이 아예 없었거나 상한이 {@code *} 면 참
+     * @param 다음시작 완료가 아니면 다음에 물을 위치 — 표준(MS-ADTS)대로 이번 범위의 상한 + 1.
+     *                 완료면 쓰지 않는다({@code -1})
      */
-    record Chunk(List<String> values, boolean 완료) {
+    record Chunk(List<String> values, boolean 완료, int 다음시작) {
 
         Chunk {
             values = List.copyOf(values);
         }
 
         static Chunk 완결(List<String> values) {
-            return new Chunk(values, true);
+            return new Chunk(values, true, -1);
         }
     }
 
@@ -144,7 +146,10 @@ final class RangedAttributeReader {
                 Matcher matcher = RANGE.matcher(id);
                 if (matcher.matches()
                         && matcher.group("name").toLowerCase(Locale.ROOT).equals(찾는이름)) {
-                    return new 훑은것(new Chunk(값들(attribute), "*".equals(matcher.group("high"))), null);
+                    String 상한 = matcher.group("high");
+                    boolean 마지막 = "*".equals(상한);
+                    return new 훑은것(new Chunk(값들(attribute), 마지막,
+                            마지막 ? -1 : Integer.parseInt(상한) + 1), null);
                 }
             }
         } catch (Exception e) {
@@ -175,7 +180,7 @@ final class RangedAttributeReader {
      * 완료될 때까지 이어받는다. <b>범위 0 부터 다시 읽는다</b> — 처음 조각은 검색을 돌린 다른
      * 커넥션에서 왔고, 순서 일관성은 커넥션 단위이기 때문이다. 섞어 쓰면 누락과 중복이 난다.
      *
-     * @param 한커넥션 {@link LdapTemplates#한_커넥션에서} 안에서 받은 템플릿이어야 한다
+     * @param 한커넥션 {@link dev.starryeye.organization.ldap.LdapTemplates#한_커넥션에서} 안에서 받은 템플릿이어야 한다
      */
     static List<String> 전부_읽는다(LdapOperations 한커넥션, String dn, String 속성명) {
         List<String> 모은것 = new ArrayList<>();
@@ -192,7 +197,7 @@ final class RangedAttributeReader {
                                 + "dn=%s, 속성=%s, 지금까지 %d개")
                                 .formatted(dn, 속성명, 모은것.size()));
             }
-            다음 += chunk.values().size();
+            다음 = chunk.다음시작();
         }
         throw new IncompleteAttributeReadException(
                 "범위 검색 조각이 %d개를 넘었습니다: dn=%s, 속성=%s, %d개"

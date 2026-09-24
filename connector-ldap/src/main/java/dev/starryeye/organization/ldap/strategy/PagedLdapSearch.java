@@ -20,7 +20,7 @@ import java.util.List;
  * 한 페이지만 반환하고 침묵하는(예: Active Directory의 {@code MaxPageSize}=1000) 상황을 막는다.
  * 이 처리가 없으면 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 삭제해 버릴 수 있다.
  *
- * <p><b>페이징 전체가 커넥션 하나 안에서 돈다({@link LdapTemplates#한_커넥션에서}).</b> paged results
+ * <p><b>페이징 전체가 커넥션 하나 안에서 돈다({@link dev.starryeye.organization.ldap.LdapTemplates#한_커넥션에서}).</b> paged results
  * 쿠키는 <b>커넥션에 묶인 상태</b>다. {@code LdapTemplate} 은 검색 한 번마다 {@code DirContext}
  * 를 새로 얻었다 반납하므로, 그대로 두면 두 번째 페이지가 <b>다른 커넥션</b>에서 나가고 서버는
  * {@code "paged results cookie is invalid"} 로 거절한다. 임베디드 UnboundID 서버는 이것을

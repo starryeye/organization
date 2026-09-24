@@ -1,13 +1,14 @@
 package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.authz.StoreBootstrapper;
-import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
-import dev.starryeye.organization.core.fixture.RollupSampling;
-import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
@@ -22,19 +23,26 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 
 /**
  * 시나리오 S18 의 나머지 — 재적재가 <b>락을 오래 쥐는 동안</b> 무슨 일이 벌어지는가.
@@ -56,30 +64,28 @@ class ScimRebuildLockScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();
 
-    @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    private static final Duration 리스_TTL = Duration.ofSeconds(2);
+    private static final Duration 갱신_주기 = Duration.ofMillis(500);
+
+    /**
+     * renew 가 이만큼 불렸다면 리스가 제 TTL 을 넘겨 살아있었다는 뜻이다 — TTL 을 갱신 주기로
+     * 나눈 몫만큼 갱신 주기가 지나야 TTL 이 넘어가고, 거기에 한 번을 더해야 "넘겼다" 를 증명한다.
+     */
+    private static final int 최소_갱신_횟수 = (int) (리스_TTL.toMillis() / 갱신_주기.toMillis()) + 1;
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
+
+    @Container
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
 
         // 재적재보다 짧은 리스. 갱신이 안 돌면 재적재가 리스를 잃고 FAILED 로 끝난다.
-        registry.add("dynamodb.lock-ttl", () -> "2s");
-        registry.add("dynamodb.lock-renew-interval", () -> "500ms");
+        registry.add("dynamodb.lock-ttl", () -> 리스_TTL.toMillis() + "ms");
+        registry.add("dynamodb.lock-renew-interval", () -> 갱신_주기.toMillis() + "ms");
         // 짧게 잡는다. 기본 3초로 두면 프로브 쓰기가 3초를 기다렸다가 재적재가 끝난 뒤
         // 성공해 버려서 "재적재 중에는 거절된다" 를 볼 수 없다.
         registry.add("dynamodb.lock-acquire-timeout", () -> "500ms");
@@ -89,6 +95,12 @@ class ScimRebuildLockScaleTest {
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
     @Autowired StoreBootstrapper bootstrapper;
+
+    /**
+     * 실제 락을 감싼 스파이. 동작은 그대로다(callRealMethod) — "재적재가 락을 잡았다" 를
+     * 기다리고 "리스를 갱신했다" 를 직접 확인하려고 쓴다. 운영 코드에 지표를 더하지 않는다.
+     */
+    @MockitoSpyBean MutationLock lock;
 
     @Test
     @Order(1)
@@ -102,17 +114,27 @@ class ScimRebuildLockScaleTest {
     @Order(2)
     @DisplayName("S18-b. 재적재 도중 들어온 SCIM 쓰기는 503 이고, 재적재는 리스를 지켜 완주한다")
     void S18b_재적재_중_쓰기와_리스() throws Exception {
-        // given — 재적재를 비동기로 띄운다
+        // given — 앞선 기준 적재에서 쓰기가 renew 를 불렀을 수 있다. 이 시나리오의 호출만 센다
+        clearInvocations(lock);
+
+        // 재적재가 락을 잡는 순간을 알린다. sleep 으로 "아마 잡았겠지" 를 바라지 않는다 —
+        // 곧바로 쓰기를 두드리면 쓰기가 먼저 락을 쥐고 재적재가 409 로 튕긴다
+        CountDownLatch 재적재가_락을_잡았다 = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Mono<LockLease> 실제 = (Mono<LockLease>) invocation.callRealMethod();
+            return invocation.getArgument(0) == MutationLock.LockPurpose.REBUILD
+                    ? 실제.doOnSuccess(lease -> 재적재가_락을_잡았다.countDown())
+                    : 실제;
+        }).when(lock).acquire(any());
+
         long t0 = System.currentTimeMillis();
         CompletableFuture<Integer> 재적재 = CompletableFuture.supplyAsync(() ->
                 client.mutate().responseTimeout(Duration.ofMinutes(20)).build()
                         .post().uri("/admin/sync/rebuild?mode=tuples").exchange()
                         .returnResult(Void.class).getStatus().value());
-
-        // 재적재가 락을 잡을 때까지 비켜 준다. 곧바로 두드리면 프로브가 먼저 락을 쥐고
-        // 재적재가 409 로 튕긴다 — 실제로 그렇게 실패했다. 재려는 것은 "재적재가 락을 쥔
-        // 동안" 이므로, 재적재를 먼저 자리잡게 해야 한다.
-        Thread.sleep(700);
+        assertThat(재적재가_락을_잡았다.await(1, TimeUnit.MINUTES))
+                .as("재적재가 1분 안에 락을 잡지 못했다").isTrue();
 
         // when — 도는 동안 SCIM 쓰기를 계속 두드린다
         List<Integer> 응답들 = new ArrayList<>();
@@ -128,11 +150,18 @@ class ScimRebuildLockScaleTest {
                 .collect(java.util.stream.Collectors.groupingBy(
                         code -> code, java.util.TreeMap::new, java.util.stream.Collectors.counting())));
 
-        // then — 재적재가 완주했다. 리스 TTL(2초)보다 오래 걸렸다면 갱신이 실제로 일했다는 뜻이다
+        // then — 재적재가 완주했다
         assertThat(재적재응답).as("재적재가 실패했다 — 리스를 잃었을 수 있다").isEqualTo(200);
-        assertThat(소요)
-                .as("재적재가 리스 TTL(2초)보다 빨리 끝나면 하트비트가 한 번도 필요하지 않다")
-                .isGreaterThan(2_000L);
+        // 리스 갱신이 TTL 을 넘길 만큼 여러 번 일했다. 쓰기는 델타가 있을 때만 renew 를
+        // 부르고(설계 §4.7) 여기서 두드린 쓰기는 이미 활성인 직원에게 active:true 를 보내
+        // 델타가 없다 — 그러므로 이 호출들은 재적재의 하트비트다. 한 번만 불렸다는 것으로는
+        // 재적재가 갱신 주기만큼만 돌았다는 것만 보일 뿐 리스가 제 만료를 넘겨 살아남았다는
+        // 주장은 못 한다 — 그래서 최소 횟수를 요구한다
+        verify(lock, atLeast(최소_갱신_횟수)
+                .description("renew 가 " + 최소_갱신_횟수 + "번 미만으로 불렸다 — 재적재가 리스가"
+                        + " 만료됐을 시점보다 먼저 끝나 갱신이 필요 없었다는 뜻이라, 이 테스트의 전제"
+                        + "(재적재가 리스 TTL 보다 오래 걸린다)가 이 환경에서는 성립하지 않는다"))
+                .renew(any());
 
         // 그동안 들어온 쓰기는 503 이다. IdP 는 503 을 재시도 신호로 보므로 유실되지 않는다
         assertThat(응답들).as("재적재 중에 쓰기를 한 번도 못 시도했다").isNotEmpty();
@@ -203,12 +232,6 @@ class ScimRebuildLockScaleTest {
     }
 
     private void 검증한다() {
-        var 하네스 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(하네스).isNotNull();
-        assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
-
-        var 직접 = new OpenFgaProbe(bootstrapper)
-                .직접_대조한다(기대, RollupSampling.기본값().표본을_고른다(기대));
-        assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 }

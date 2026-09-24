@@ -4,11 +4,13 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
-import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -27,10 +29,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -68,18 +68,10 @@ class LdapDeletionGuardScaleTest {
     private static List<String> 단일소속직원;
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     static InMemoryDirectoryServer LDAP;
     static LdapDirectory 디렉터리;
@@ -106,15 +98,13 @@ class LdapDeletionGuardScaleTest {
                 .toList();
 
         registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
+    @Autowired StoreBootstrapper bootstrapper;
 
     @Test
     @Order(1)
@@ -221,12 +211,10 @@ class LdapDeletionGuardScaleTest {
     }
 
     private void 검증한다() {
-        var 결과 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(결과).isNotNull();
-        assertThat(결과.어긋났는가()).as(결과 == null ? "" : 결과.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return Boolean.TRUE.equals(checker.check(tuple).block(Duration.ofSeconds(30)));
+        return ScaleVerification.성립하는가(checker, tuple);
     }
 }

@@ -16,7 +16,6 @@ import org.springframework.ldap.query.LdapQueryBuilder;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -66,7 +65,7 @@ public class DitStrategy implements LdapMappingStrategy {
             if (DuplicateIdGuard.isDuplicate("조직코드", code, entry.dn(), groupDnByCode)) {
                 continue;
             }
-            codeByRdnPath.put(normalize(entry.dn()), code);
+            codeByRdnPath.put(LdapDns.대조키(entry.dn()), code);
             membersByCode.putIfAbsent(code, new LinkedHashSet<>());
             // 폴백은 정규화된 code 가 아니라 원본 속성이다 — 금지 문자가 있으면 code 에는
             // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
@@ -79,11 +78,11 @@ public class DitStrategy implements LdapMappingStrategy {
         // code 가 null 이면 이 엔트리는 위에서 코드 충돌로 스킵된 것이므로 함께 건너뛴다 —
         // 그러지 않으면 부모의 멤버 집합에 id 가 null 인 MemberRef 가 들어간다.
         for (Entry entry : orgEntries) {
-            String code = codeByRdnPath.get(normalize(entry.dn()));
+            String code = codeByRdnPath.get(LdapDns.대조키(entry.dn()));
             if (code == null) {
                 continue;
             }
-            String parentCode = codeByRdnPath.get(normalize(parentDn(entry.dn())));
+            String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode != null && !parentCode.equals(code)) {
                 membersByCode.get(parentCode).add(MemberRef.group(code));
             }
@@ -107,7 +106,7 @@ public class DitStrategy implements LdapMappingStrategy {
                     entry.attribute(config.getUserMailAttribute()),
                     true));
 
-            String parentCode = codeByRdnPath.get(normalize(parentDn(entry.dn())));
+            String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
                 log.warn("직원 '{}' 의 부모 조직을 찾지 못해 소속을 건너뜁니다 (dn={})", userId, entry.dn());
                 continue;
@@ -129,16 +128,6 @@ public class DitStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             return new Entry(adapter.getDn().toString(), adapter);
         };
-    }
-
-    /** 첫 RDN 을 떼어 부모 dn 을 만든다. 최상위면 빈 문자열이 된다. */
-    private static String parentDn(String dn) {
-        int comma = dn.indexOf(',');
-        return comma < 0 ? "" : dn.substring(comma + 1);
-    }
-
-    private static String normalize(String dn) {
-        return dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim();
     }
 
     private static String firstNonBlank(String... candidates) {

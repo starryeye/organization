@@ -3,11 +3,12 @@ package dev.starryeye.organization.scim.app;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
-import dev.starryeye.organization.core.fixture.RollupSampling;
 import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -30,10 +31,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
 import java.util.List;
@@ -62,28 +61,17 @@ class ScimLimitsAndRecoveryScaleTest {
 
     /** 멤버십이 아예 없는 고아 튜플. 동기화로는 만들 수도 지울 수도 없는 상태다. */
     private static final RelationTuple 고아 =
-            RelationTuple.directMember("ghost.user", "DEV5_0");
+            RelationTuple.directMember("ghost.user", 기대.landmarks().대상팀());
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;
@@ -216,11 +204,15 @@ class ScimLimitsAndRecoveryScaleTest {
                 .expectBody(JsonNode.class).returnResult().getResponseBody();
 
         // then — 재적재가 이력에 남아 있고 실제로 쓴 건수가 기록됐다
-        assertThat(runs).isNotEmpty();
-        JsonNode 최근 = runs.get(0);
-        assertThat(최근.get("source").asText()).isEqualTo("SCIM");
-        assertThat(최근.get("trigger").asText()).isEqualTo("REBUILD");
-        assertThat(최근.get("writtenCount").asInt()).isGreaterThan(5_000);
+        // 목록의 순서에 기대지 않고 트리거로 찾는다
+        JsonNode 재적재 = java.util.stream.StreamSupport.stream(runs.spliterator(), false)
+                .filter(run -> "REBUILD".equals(run.get("trigger").asText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("재적재 이력이 없다: " + runs));
+        assertThat(재적재.get("source").asText()).isEqualTo("SCIM");
+        // 재적재는 store 를 비우고 상태가 요구하는 튜플을 전부 다시 쓴다 — 픽스처에서 유도한다
+        assertThat(재적재.get("writtenCount").asInt())
+                .isEqualTo(ChartExpectation.of(기대).있어야할튜플().size());
 
         String metrics = client.get().uri("/actuator/prometheus").exchange()
                 .expectStatus().isOk()
@@ -317,15 +309,10 @@ class ScimLimitsAndRecoveryScaleTest {
     }
 
     private void 검증한다() {
-        var 하네스 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(하네스).isNotNull();
-        assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
-
-        var 직접 = 새_프로브().직접_대조한다(기대, RollupSampling.기본값().표본을_고른다(기대));
-        assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return Boolean.TRUE.equals(checker.check(tuple).block(Duration.ofSeconds(30)));
+        return ScaleVerification.성립하는가(checker, tuple);
     }
 }

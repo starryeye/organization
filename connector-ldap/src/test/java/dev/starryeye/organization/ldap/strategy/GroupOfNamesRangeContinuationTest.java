@@ -50,8 +50,10 @@ class GroupOfNamesRangeContinuationTest {
     private static final String 진짜DN_B = "cn=제1공장:A,ou=groups," + BASE_DN;
     // 재요청은 ContextSource 의 베이스에 상대적인 DN 을 받는다(LdapConfig 가 setBase 를
     // 걸어 두기 때문) — 그래서 모킹한 DirContext 도 베이스를 뗀 형태로 호출된다.
-    private static final String 상대DN_A = LdapDns.상대로(진짜DN_A, BASE_DN);
-    private static final String 상대DN_B = LdapDns.상대로(진짜DN_B, BASE_DN);
+    // 리터럴로 적는다. 피검 함수(LdapDns.상대로)로 계산하면 그 함수가 틀릴 때 기대값도
+    // 같이 틀려 이음매에서의 계약이 보이지 않는다.
+    private static final String 상대DN_A = "cn=제1공장 A,ou=groups";
+    private static final String 상대DN_B = "cn=제1공장:A,ou=groups";
 
     @Test
     @DisplayName("정규화된 조직코드가 충돌해도 이어받은 멤버는 dn 으로 자기 엔트리에만 돌아간다")

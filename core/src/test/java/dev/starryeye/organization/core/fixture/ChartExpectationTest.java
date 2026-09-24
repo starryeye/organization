@@ -144,6 +144,28 @@ class ChartExpectationTest {
     }
 
     @Test
+    @DisplayName("자기 자신을 하위로 갖는 조직도 순환이다")
+    void 자기_루프는_순환이다() {
+        // given
+        조직("TEAM", MemberRef.user("a"), MemberRef.group("TEAM"));
+
+        // when, then
+        assertThatThrownBy(() -> ChartExpectation.of(조직도()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("순환");
+    }
+
+    @Test
+    @DisplayName("순환 메시지는 고리의 경로를 담는다 — 어느 간선이 문제인지 보여야 고친다")
+    void 순환_메시지는_경로를_담는다() {
+        // given — CORP → DEV → TEAM → CORP
+        조직("TEAM", MemberRef.user("a"), MemberRef.group("CORP"));
+
+        // when, then — 조직을 정렬된 순서로 훑으므로 CORP 에서 출발한다
+        assertThatThrownBy(() -> ChartExpectation.of(조직도()))
+                .hasMessageContaining("CORP → DEV → TEAM → CORP");
+    }
+
+    @Test
     @DisplayName("롤업 양성은 직속 조직과 모든 조상이다")
     void 롤업_양성() {
         // when
@@ -180,6 +202,22 @@ class ChartExpectationTest {
     }
 
     @Test
+    @DisplayName("활성 직원의 롤업 음성에는 직속 조직의 자손이 들어간다")
+    void 활성_직원의_자손_음성() {
+        // given — e 는 DEV 직속 활성 직원. 아래에 TEAM·TEAM2 가 있다
+        직원("e", true);
+        조직("DEV", MemberRef.group("TEAM"), MemberRef.group("TEAM2"),
+                MemberRef.user("b"), MemberRef.user("e"));
+
+        // when
+        var 기대 = ChartExpectation.of(조직도());
+
+        // then — 자손 TEAM·TEAM2 와 형제 가지 MGT. 권한이 아래로 새면 여기서 잡힌다
+        assertThat(기대.롤업음성("e")).containsExactlyInAnyOrder(
+                member("e", "TEAM"), member("e", "TEAM2"), member("e", "MGT"));
+    }
+
+    @Test
     @DisplayName("부모가 둘인 조직의 조상은 두 갈래 모두다")
     void 다중_부모() {
         // given — X 가 TEAM 과 MGT 양쪽의 하위 조직
@@ -195,6 +233,24 @@ class ChartExpectationTest {
         assertThat(기대.롤업양성("x")).containsExactlyInAnyOrder(
                 member("x", "X"), member("x", "TEAM"), member("x", "DEV"),
                 member("x", "MGT"), member("x", "CORP"));
+    }
+
+    @Test
+    @DisplayName("부모가 둘인 조직의 형제 가지 음성은 두 부모 쪽 모두다")
+    void 다중_부모의_형제_음성() {
+        // given — X 는 TEAM 과 MGT 양쪽의 하위. TEAM 아래에 형제 T3, MGT 아래에 형제 M2
+        직원("x", true);
+        조직("X", MemberRef.user("x"));
+        조직("T3");
+        조직("M2");
+        조직("TEAM", MemberRef.user("a"), MemberRef.group("X"), MemberRef.group("T3"));
+        조직("MGT", MemberRef.user("c"), MemberRef.group("X"), MemberRef.group("M2"));
+
+        // when
+        var 기대 = ChartExpectation.of(조직도());
+
+        // then — 한쪽 부모만 보는 결함이면 둘 중 하나가 빠진다
+        assertThat(기대.롤업음성("x")).containsExactlyInAnyOrder(member("x", "T3"), member("x", "M2"));
     }
 
     @Test

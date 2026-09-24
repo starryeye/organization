@@ -1,13 +1,12 @@
 package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.authz.StoreBootstrapper;
-import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
-import dev.starryeye.organization.core.fixture.RollupSampling;
-import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -28,10 +27,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -61,25 +58,14 @@ class ScimProvisioningOrderScaleTest {
     private static final OrgChart 기대 = OrgChartFixture.오천명();
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;
@@ -180,13 +166,7 @@ class ScimProvisioningOrderScaleTest {
     }
 
     private void 검증한다(ChartExpectation 기대값) {
-        var 하네스 = new SyncVerifier(state, checker).검증한다(기대값).block(Duration.ofMinutes(10));
-        assertThat(하네스).isNotNull();
-        assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
-
-        var 직접 = new OpenFgaProbe(bootstrapper)
-                .직접_대조한다(기대값, RollupSampling.기본값().표본을_고른다(기대값.chart()));
-        assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대값);
     }
 
     /** 조직만 도착한 상태 — 멤버 목록의 직원 참조는 남고 직원 레코드만 없다. */
@@ -197,6 +177,6 @@ class ScimProvisioningOrderScaleTest {
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return Boolean.TRUE.equals(checker.check(tuple).block(Duration.ofSeconds(30)));
+        return ScaleVerification.성립하는가(checker, tuple);
     }
 }

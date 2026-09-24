@@ -4,11 +4,13 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
-import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -26,10 +28,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -64,18 +64,10 @@ class DitScaleSyncTest {
             .완성();
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     static InMemoryDirectoryServer LDAP;
 
@@ -99,28 +91,26 @@ class DitScaleSyncTest {
         registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
         registry.add("ldap.strategy", () -> "dit");
         registry.add("ldap.dit.root-dn", renderer::rootDn);
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
+    @Autowired StoreBootstrapper bootstrapper;
 
     @Test
     @Order(1)
     @DisplayName("DIT 로 심은 조직도가 groupOfNames 와 같은 스냅샷·같은 튜플에 도달한다")
     void DIT가_같은_결과에_도달한다() {
-        // given — 겸직 166건이 빠진 만큼만 튜플이 적다
+        // given — 겸직이 빠진 만큼 튜플이 적다
         int 기대튜플 = ChartExpectation.of(기대).있어야할튜플().size();
 
         // when
         동기화한다().jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.writtenCount").isEqualTo(기대튜플);
 
-        // then — 같은 하네스로 잰다. 두 전략을 다른 잣대로 재면 비교가 성립하지 않는다
+        // then — 같은 잣대(하네스와 OpenFGA 직접 질의)로 잰다. 두 전략을 다른 잣대로 재면 비교가 성립하지 않는다
         검증한다();
     }
 
@@ -167,12 +157,10 @@ class DitScaleSyncTest {
     }
 
     private void 검증한다() {
-        var 결과 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(결과).isNotNull();
-        assertThat(결과.어긋났는가()).as(결과 == null ? "" : 결과.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return Boolean.TRUE.equals(checker.check(tuple).block(Duration.ofSeconds(30)));
+        return ScaleVerification.성립하는가(checker, tuple);
     }
 }

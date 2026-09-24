@@ -12,6 +12,7 @@ package dev.starryeye.organization.core.model;
  * 만들어야 하고, 그 순간 "누구를 넣을지" 를 명시하게 된다.
  *
  * @param id 조직코드. 튜플에 쓰이는 안정 식별자
+ * @param externalId 원천 디렉터리가 준 식별자(LDAP 은 DN). 튜플에 쓰지 않는다
  * @param displayName 조직명. 튜플에 절대 쓰지 않는다
  */
 public record GroupHeader(

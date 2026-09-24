@@ -61,11 +61,10 @@ public abstract class EmbeddedLdapSupport {
         contextSource.setPassword(BIND_PASSWORD);
         contextSource.afterPropertiesSet();
 
-        ldapTemplate = new LdapTemplate(contextSource);
-        ldapTemplate.setIgnorePartialResultException(true);
-        // 프로덕션 LdapConfig 와 같은 설정. 이것이 false 여야 서버가 결과를 자른 사실이
-        // 예외로 올라온다 — true 로 두면 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 지운다.
-        ldapTemplate.setIgnoreSizeLimitExceededException(false);
+        // 운영(LdapConfig)과 같은 자리에서 만든다. 설정을 여기 따로 적으면 운영과 검증이
+        // 표류한다 — 특히 ignoreSizeLimitExceededException 이 어긋나면 잘린 목록이 대량
+        // 퇴사처럼 보이는 결함을 검증이 못 본다.
+        ldapTemplate = LdapTemplates.configured(contextSource);
     }
 
     @AfterEach

@@ -9,9 +9,8 @@ import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.authz.StoreBootstrapper;
-import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
-import dev.starryeye.organization.core.fixture.RollupSampling;
-import dev.starryeye.organization.core.fixture.SyncVerifier;
+import dev.starryeye.organization.authz.fixture.ScaleContainers;
+import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -32,10 +31,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -70,18 +67,10 @@ class LdapScaleScenarioTest {
     private static OrgChart 기대 = 최초;
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = ScaleContainers.dynamoDb();
 
     static InMemoryDirectoryServer LDAP;
     static LdapDirectory 디렉터리;
@@ -103,10 +92,7 @@ class LdapScaleScenarioTest {
         디렉터리 = new LdapDirectory(LDAP, BASE_DN);
 
         registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
-        registry.add("openfga.api-url",
-                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
-        registry.add("dynamodb.endpoint",
-                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+        ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 
     @Autowired WebTestClient client;
@@ -187,6 +173,9 @@ class LdapScaleScenarioTest {
                 .filter(member -> member.type() == dev.starryeye.organization.core.model.MemberType.USER)
                 .map(MemberRef::id)
                 .filter(id -> !랜드마크직원들().contains(id))
+                // 겸직 직원은 뺀다. 이 파트에서만 지우는 것이라, 다른 조직에도 속한 사람을 고르면
+                // 튜플 계산이 이 시나리오의 가정과 달라진다 — 지금은 우연히 없을 뿐이다
+                .filter(id -> 기대.직속조직들(id).size() == 1)
                 .sorted()
                 .limit(2)
                 .toList();
@@ -474,16 +463,10 @@ class LdapScaleScenarioTest {
      * 물어 답이 갈리면, 갈렸다는 것 자체가 결함이다.
      */
     private void 검증한다() {
-        var 하네스 = new SyncVerifier(state, checker).검증한다(기대).block(Duration.ofMinutes(10));
-        assertThat(하네스).isNotNull();
-        assertThat(하네스.어긋났는가()).as(하네스 == null ? "" : 하네스.요약()).isFalse();
-
-        var 직접 = new OpenFgaProbe(bootstrapper)
-                .직접_대조한다(기대, RollupSampling.기본값().표본을_고른다(기대));
-        assertThat(직접.어긋났는가()).as(직접.요약()).isFalse();
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return Boolean.TRUE.equals(checker.check(tuple).block(Duration.ofSeconds(30)));
+        return ScaleVerification.성립하는가(checker, tuple);
     }
 }

@@ -14,10 +14,8 @@ import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQueryBuilder;
 
-import javax.naming.NamingEnumeration;
 import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -237,23 +235,6 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    private static List<String> values(Attributes attributes, String name) {
-        List<String> result = new ArrayList<>();
-        try {
-            Attribute attribute = attributes.get(name);
-            if (attribute == null) {
-                return result;
-            }
-            NamingEnumeration<?> enumeration = attribute.getAll();
-            while (enumeration.hasMore()) {
-                result.add((String) enumeration.next());
-            }
-        } catch (Exception e) {
-            log.warn("속성 '{}' 을 읽지 못했습니다", name, e);
-        }
-        return result;
     }
 
     private static String firstNonBlank(String... candidates) {
