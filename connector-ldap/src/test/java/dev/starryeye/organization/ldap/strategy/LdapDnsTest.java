@@ -22,34 +22,38 @@ class LdapDnsTest {
     }
 
     @Test
-    @DisplayName("이스케이프된 쉼표는 값의 일부다 — RDN 경계로 잘리지 않는다")
+    @DisplayName("이스케이프된 쉼표는 값의 일부다 — 표기법이 다양해도 같은 엔트리다")
     void 이스케이프된_쉼표를_값으로_다룬다() {
-        // given — 이름에 쉼표가 든 사람. 문자열로 자르면 RDN 이 하나 더 생긴다
-        String 쉼표가든이름 = "CN=Hong\\, Gildong,OU=Seoul," + BASE;
-        String 쉼표가없는동명이인 = "CN=Hong,OU=Gildong,OU=Seoul," + BASE;
+        // given — 이름에 쉼표가 든 사람을 세 가지 LDAP 표기법으로 나타낸다
+        // 모두 같은 엔트리다: CN 속성값이 "Hong, Gildong"
+        String 백슬래시이스케이프 = "CN=Hong\\, Gildong,OU=Seoul," + BASE;
+        String 따옴표 = "CN=\"Hong, Gildong\",OU=Seoul," + BASE;
+        String 헥스이스케이프 = "CN=Hong\\2C Gildong,OU=Seoul," + BASE;
+
+        // 다른 엔트리: 실제로 다른 사람. CN과 OU가 다르다
+        String 다른사람 = "CN=Hong,OU=Gildong,OU=Seoul," + BASE;
 
         // when
-        String 쉼표있는키 = LdapDns.대조키(쉼표가든이름);
-        String 쉼표없는키 = LdapDns.대조키(쉼표가없는동명이인);
+        String 키1 = LdapDns.대조키(백슬래시이스케이프);
+        String 키2 = LdapDns.대조키(따옴표);
+        String 키3 = LdapDns.대조키(헥스이스케이프);
+        String 다른키 = LdapDns.대조키(다른사람);
 
-        // then — 서로 다른 엔트리는 다른 키가 되어야 한다
-        assertThat(쉼표있는키)
-                .isNotEqualTo(쉼표없는키);
+        // then — 표기법이 달라도 같은 엔트리는 같은 키가 된다 (진정한 파싱의 증거)
+        assertThat(키1)
+                .as("백슬래시 이스케이프와 따옴표 표기법은 같은 엔트리")
+                .isEqualTo(키2);
+        assertThat(키1)
+                .as("백슬래시 이스케이프와 헥스 이스케이프 표기법은 같은 엔트리")
+                .isEqualTo(키3);
+        assertThat(키2)
+                .as("따옴표와 헥스 이스케이프 표기법은 같은 엔트리")
+                .isEqualTo(키3);
 
-        // 이스케이프된 쉼표는 RDN 경계가 아니다.
-        // 만약 문자열로 잘못 자르면 ou=gildong 같은 RDN 이 생기는데,
-        // 올바른 파싱에서는 이 RDN 이 생기지 않는다.
-        assertThat(쉼표없는키)
-                .as("쉼표가 없는 쪽은 ou=gildong 을 포함함")
-                .contains("ou=gildong");
-        assertThat(쉼표있는키)
-                .as("쉼표가 있는 쪽은 ou=gildong 을 포함하지 않음 — 이스케이프된 쉼표가 RDN 경계가 아니기 때문")
-                .doesNotContain("ou=gildong");
-
-        // 이스케이프된 쉼표가 한 값 안에 남아있다 — 키에서 찾을 수 있다
-        assertThat(쉼표있는키)
-                .as("이스케이프된 쉼표가 값 내에 보존됨")
-                .contains("hong\\, gildong");
+        // 이스케이프된 쉼표는 RDN 경계가 아니다 — 다른 엔트리와 구분되어야 한다
+        assertThat(키1)
+                .as("이스케이프된 쉼표 엔트리와 다른 사람은 다른 키")
+                .isNotEqualTo(다른키);
     }
 
     @Test
