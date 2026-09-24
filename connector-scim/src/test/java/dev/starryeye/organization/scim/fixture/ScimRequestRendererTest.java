@@ -9,6 +9,7 @@ import dev.starryeye.organization.scim.MemberTypeResolver;
 import dev.starryeye.organization.scim.ScimMapper;
 import dev.starryeye.organization.scim.ScimPatchApplier;
 import dev.starryeye.organization.scim.dto.ScimGroup;
+import dev.starryeye.organization.scim.dto.ScimMember;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
 import dev.starryeye.organization.scim.dto.ScimUser;
 import org.junit.jupiter.api.DisplayName;
@@ -105,6 +106,23 @@ class ScimRequestRendererTest {
             assertThat(읽힌것.displayName()).isEqualTo(심은것.displayName());
             assertThat(읽힌것.members()).isEqualTo(심은것.members());
         });
+    }
+
+    @Test
+    @DisplayName("조직 본문의 멤버는 아이디 순으로 나간다 — 시드 파일 바이트가 실행마다 같아야 한다")
+    void 멤버를_정렬해서_내보낸다() {
+        // given — DirectoryGroup 은 멤버를 Set.copyOf 로 담아 순회 순서가 JVM 실행마다 다르다.
+        // 20명이면 정렬 없이 우연히 정렬된 순서가 나올 일은 없다
+        List<String> 아이디들 = java.util.stream.IntStream.range(0, 20)
+                .mapToObj(i -> "u%02d".formatted(i)).toList();
+        var group = new DirectoryGroup("DEV", null, "개발",
+                아이디들.stream().map(MemberRef::user).collect(java.util.stream.Collectors.toSet()));
+
+        // when
+        var body = (ScimGroup) ScimRequestRenderer.조직생성(group).body();
+
+        // then
+        assertThat(body.members()).extracting(ScimMember::value).containsExactlyElementsOf(아이디들);
     }
 
     @Test
