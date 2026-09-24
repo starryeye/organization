@@ -13,6 +13,8 @@ import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQueryBuilder;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -31,9 +33,18 @@ public class DitStrategy implements LdapMappingStrategy {
 
     private final LdapProperties properties;
 
+    /** 계정 만료를 판정하는 "지금". 동기화마다 한 번 잡는다. */
+    private final Clock clock;
+
+    /** 시스템 UTC 시계를 쓴다. */
+    public DitStrategy(LdapProperties properties) {
+        this(properties, Clock.systemUTC());
+    }
+
     @Override
     public DirectorySnapshot read(LdapTemplate template) {
         LdapProperties.Dit config = properties.getDit();
+        Instant 지금 = clock.instant();
         int pageSize = properties.getPageSize();
 
         List<Entry> orgEntries = PagedLdapSearch.search(template,
@@ -104,7 +115,8 @@ public class DitStrategy implements LdapMappingStrategy {
                     firstNonBlank(entry.attribute(config.getUserNameAttribute()), entry.attribute("cn"),
                             entry.attribute(config.getUserIdAttribute())),
                     entry.attribute(config.getUserMailAttribute()),
-                    true));
+                    // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
+                    !AdAccountStatus.막혔는가(entry.adapter().getAttributes(), 지금)));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {

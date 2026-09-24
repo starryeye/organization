@@ -16,6 +16,8 @@ import org.springframework.ldap.query.LdapQueryBuilder;
 
 import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -34,16 +36,25 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
 
     private final LdapProperties properties;
 
+    /** 계정 만료를 판정하는 "지금". 동기화마다 한 번 잡는다. */
+    private final Clock clock;
+
+    /** 시스템 UTC 시계를 쓴다. */
+    public GroupOfNamesStrategy(LdapProperties properties) {
+        this(properties, Clock.systemUTC());
+    }
+
     @Override
     public DirectorySnapshot read(LdapTemplate template) {
         LdapProperties.GroupOfNames config = properties.getGroupOfNames();
+        Instant 지금 = clock.instant();
         int pageSize = properties.getPageSize();
 
-        List<RawEntry> userEntries = PagedLdapSearch.search(template,
+        List<UserEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
                         .where("objectClass").is(config.getUserObjectClass()),
-                pageSize, userMapper(config));
+                pageSize, userMapper(config, 지금));
 
         List<RawEntry> groupEntries = 범위가_잘린_멤버를_이어받는다(template, config,
                 PagedLdapSearch.search(template,
@@ -55,13 +66,13 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
-        for (RawEntry entry : userEntries) {
+        for (UserEntry entry : userEntries) {
             if (DuplicateIdGuard.isDuplicate("직원 아이디", entry.id(), entry.dn(), userDnById)) {
                 continue;
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
-                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), true));
+                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), entry.active()));
         }
 
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
@@ -111,18 +122,19 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      * OU 아래에 두고 RDN 도 {@code cn} 인 경우가 많아 서버가 준 {@code member} 값과 하나도
      * 맞지 않았다(2026-09-11 코드리뷰 H).
      */
-    private ContextMapper<RawEntry> userMapper(LdapProperties.GroupOfNames config) {
+    private ContextMapper<UserEntry> userMapper(LdapProperties.GroupOfNames config, Instant 지금) {
         return context -> {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
-            return new RawEntry(
+            return new UserEntry(
                     IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
                     절대DN(adapter),
                     firstNonBlank(value(attributes, config.getUserNameAttribute()),
                             value(attributes, "cn"),
                             required(attributes, config.getUserIdAttribute())),
                     value(attributes, config.getUserMailAttribute()),
-                    List.of());
+                    // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
+                    !AdAccountStatus.막혔는가(attributes, 지금));
         };
     }
 
@@ -246,6 +258,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return null;
     }
 
+    /** 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다. */
+    private record UserEntry(String id, String dn, String displayName, String email, boolean active) {
+    }
+
     /**
      * @param dn              <b>서버가 준 절대 DN.</b> member 대조 키이자 externalId 이고,
      *                        범위 검색 재요청 때 엔트리를 다시 지목하는 좌표이기도 하다
@@ -253,10 +269,5 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      */
     private record RawEntry(String id, String dn, String displayName, String email,
                             List<String> members, boolean membersComplete) {
-
-        /** 직원 엔트리용. 다중값 속성을 읽지 않으므로 언제나 완결이다. */
-        RawEntry(String id, String dn, String displayName, String email, List<String> members) {
-            this(id, dn, displayName, email, members, true);
-        }
     }
 }
