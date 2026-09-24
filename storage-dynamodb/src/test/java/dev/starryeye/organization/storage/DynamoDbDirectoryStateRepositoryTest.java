@@ -316,6 +316,32 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(addedAt("DEV001", park)).isNotEqualTo(최초합류);
     }
 
+    /** 소속 줄(멤버 자신의 파티션)의 addedAt 을 직접 읽는다. */
+    private String 소속줄_addedAt(String groupId, MemberRef member) {
+        var response = client.getItem(builder -> builder
+                .tableName(properties.getTableName())
+                .key(java.util.Map.of(
+                        Keys.PK, Attrs.s(Keys.memberPk(member)),
+                        Keys.SK, Attrs.s(Keys.belongsToSk(groupId))))).join();
+        return response.item().get("addedAt").s();
+    }
+
+    @Test
+    @DisplayName("이미 소속된 멤버의 소속 줄 addedAt 도 다시 동기화해도 최초 합류 시각 그대로다")
+    void 기존_멤버의_소속줄_addedAt도_보존된다() {
+        // given — kim 이 1월 1일에 합류했다
+        var kim = MemberRef.user("kim");
+        repository.saveGroup(조직("DEV001", "개발본부", kim)).block();
+        String 최초합류 = 소속줄_addedAt("DEV001", kim);
+
+        // when — 한 달 뒤, 다른 사람이 들어오면서 같은 조직이 다시 저장된다
+        clock.앞으로(Duration.ofDays(31));
+        repository.saveGroup(조직("DEV001", "개발본부", kim, MemberRef.user("park"))).block();
+
+        // then — 멤버 줄과 짝을 이루는 소속 줄도 덮이지 않아야 한다
+        assertThat(소속줄_addedAt("DEV001", kim)).isEqualTo(최초합류);
+    }
+
     @Test
     @DisplayName("떠났다가 다시 합류하면 addedAt 이 새로 찍힌다")
     void 재합류하면_addedAt이_갱신된다() {
