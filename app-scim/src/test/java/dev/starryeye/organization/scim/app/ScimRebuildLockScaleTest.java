@@ -7,6 +7,8 @@ import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
@@ -21,17 +23,26 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 
 /**
  * 시나리오 S18 의 나머지 — 재적재가 <b>락을 오래 쥐는 동안</b> 무슨 일이 벌어지는가.
@@ -76,6 +87,12 @@ class ScimRebuildLockScaleTest {
     @Autowired RelationTupleChecker checker;
     @Autowired StoreBootstrapper bootstrapper;
 
+    /**
+     * 실제 락을 감싼 스파이. 동작은 그대로다(callRealMethod) — "재적재가 락을 잡았다" 를
+     * 기다리고 "리스를 갱신했다" 를 직접 확인하려고 쓴다. 운영 코드에 지표를 더하지 않는다.
+     */
+    @MockitoSpyBean MutationLock lock;
+
     @Test
     @Order(1)
     @DisplayName("조직도 전체를 적재해 기준 상태를 만든다")
@@ -88,17 +105,27 @@ class ScimRebuildLockScaleTest {
     @Order(2)
     @DisplayName("S18-b. 재적재 도중 들어온 SCIM 쓰기는 503 이고, 재적재는 리스를 지켜 완주한다")
     void S18b_재적재_중_쓰기와_리스() throws Exception {
-        // given — 재적재를 비동기로 띄운다
+        // given — 앞선 기준 적재에서 쓰기가 renew 를 불렀을 수 있다. 이 시나리오의 호출만 센다
+        clearInvocations(lock);
+
+        // 재적재가 락을 잡는 순간을 알린다. sleep 으로 "아마 잡았겠지" 를 바라지 않는다 —
+        // 곧바로 쓰기를 두드리면 쓰기가 먼저 락을 쥐고 재적재가 409 로 튕긴다
+        CountDownLatch 재적재가_락을_잡았다 = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Mono<LockLease> 실제 = (Mono<LockLease>) invocation.callRealMethod();
+            return invocation.getArgument(0) == MutationLock.LockPurpose.REBUILD
+                    ? 실제.doOnSuccess(lease -> 재적재가_락을_잡았다.countDown())
+                    : 실제;
+        }).when(lock).acquire(any());
+
         long t0 = System.currentTimeMillis();
         CompletableFuture<Integer> 재적재 = CompletableFuture.supplyAsync(() ->
                 client.mutate().responseTimeout(Duration.ofMinutes(20)).build()
                         .post().uri("/admin/sync/rebuild?mode=tuples").exchange()
                         .returnResult(Void.class).getStatus().value());
-
-        // 재적재가 락을 잡을 때까지 비켜 준다. 곧바로 두드리면 프로브가 먼저 락을 쥐고
-        // 재적재가 409 로 튕긴다 — 실제로 그렇게 실패했다. 재려는 것은 "재적재가 락을 쥔
-        // 동안" 이므로, 재적재를 먼저 자리잡게 해야 한다.
-        Thread.sleep(700);
+        assertThat(재적재가_락을_잡았다.await(1, TimeUnit.MINUTES))
+                .as("재적재가 1분 안에 락을 잡지 못했다").isTrue();
 
         // when — 도는 동안 SCIM 쓰기를 계속 두드린다
         List<Integer> 응답들 = new ArrayList<>();
@@ -116,9 +143,10 @@ class ScimRebuildLockScaleTest {
 
         // then — 재적재가 완주했다. 리스 TTL(2초)보다 오래 걸렸다면 갱신이 실제로 일했다는 뜻이다
         assertThat(재적재응답).as("재적재가 실패했다 — 리스를 잃었을 수 있다").isEqualTo(200);
-        assertThat(소요)
-                .as("재적재가 리스 TTL(2초)보다 빨리 끝나면 하트비트가 한 번도 필요하지 않다")
-                .isGreaterThan(2_000L);
+        // 리스 갱신이 실제로 일했다. 쓰기는 델타가 있을 때만 renew 를 부르고(설계 §4.7) 여기서
+        // 두드린 쓰기는 이미 활성인 직원에게 active:true 를 보내 델타가 없다 — 그러므로 이 호출은
+        // 재적재의 하트비트다
+        verify(lock, atLeastOnce()).renew(any());
 
         // 그동안 들어온 쓰기는 503 이다. IdP 는 503 을 재시도 신호로 보므로 유실되지 않는다
         assertThat(응답들).as("재적재 중에 쓰기를 한 번도 못 시도했다").isNotEmpty();

@@ -173,6 +173,9 @@ class LdapScaleScenarioTest {
                 .filter(member -> member.type() == dev.starryeye.organization.core.model.MemberType.USER)
                 .map(MemberRef::id)
                 .filter(id -> !랜드마크직원들().contains(id))
+                // 겸직 직원은 뺀다. 이 파트에서만 지우는 것이라, 다른 조직에도 속한 사람을 고르면
+                // 튜플 계산이 이 시나리오의 가정과 달라진다 — 지금은 우연히 없을 뿐이다
+                .filter(id -> 기대.직속조직들(id).size() == 1)
                 .sorted()
                 .limit(2)
                 .toList();

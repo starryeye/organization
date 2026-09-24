@@ -61,7 +61,7 @@ class ScimLimitsAndRecoveryScaleTest {
 
     /** 멤버십이 아예 없는 고아 튜플. 동기화로는 만들 수도 지울 수도 없는 상태다. */
     private static final RelationTuple 고아 =
-            RelationTuple.directMember("ghost.user", "DEV5_0");
+            RelationTuple.directMember("ghost.user", 기대.landmarks().대상팀());
 
     @Container
     static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
@@ -204,11 +204,15 @@ class ScimLimitsAndRecoveryScaleTest {
                 .expectBody(JsonNode.class).returnResult().getResponseBody();
 
         // then — 재적재가 이력에 남아 있고 실제로 쓴 건수가 기록됐다
-        assertThat(runs).isNotEmpty();
-        JsonNode 최근 = runs.get(0);
-        assertThat(최근.get("source").asText()).isEqualTo("SCIM");
-        assertThat(최근.get("trigger").asText()).isEqualTo("REBUILD");
-        assertThat(최근.get("writtenCount").asInt()).isGreaterThan(5_000);
+        // 목록의 순서에 기대지 않고 트리거로 찾는다
+        JsonNode 재적재 = java.util.stream.StreamSupport.stream(runs.spliterator(), false)
+                .filter(run -> "REBUILD".equals(run.get("trigger").asText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("재적재 이력이 없다: " + runs));
+        assertThat(재적재.get("source").asText()).isEqualTo("SCIM");
+        // 재적재는 store 를 비우고 상태가 요구하는 튜플을 전부 다시 쓴다 — 픽스처에서 유도한다
+        assertThat(재적재.get("writtenCount").asInt())
+                .isEqualTo(ChartExpectation.of(기대).있어야할튜플().size());
 
         String metrics = client.get().uri("/actuator/prometheus").exchange()
                 .expectStatus().isOk()

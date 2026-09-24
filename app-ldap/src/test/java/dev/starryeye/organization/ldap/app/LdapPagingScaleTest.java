@@ -98,7 +98,7 @@ class LdapPagingScaleTest {
                         assertThat((String) message).containsIgnoringCase("size"));
 
         // then — 아무것도 쓰지 않았어야 한다.
-        // 1,000명만 읽고 나머지 4,024명을 퇴사로 판정해 지우는 것이 이 방어선이 막는 일이다.
+        // 상한만큼만 읽고 나머지 전원을 퇴사로 판정해 지우는 것이 이 방어선이 막는 일이다.
         var 상태 = state.loadAll().block(Duration.ofMinutes(1));
         assertThat(상태).isNotNull();
         assertThat(상태.users())
