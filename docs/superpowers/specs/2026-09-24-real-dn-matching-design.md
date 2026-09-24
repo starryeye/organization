@@ -195,4 +195,15 @@ dc=example,dc=com
 
 ## 10. 구현 후 기록
 
-변이 네 가지의 결과(실패한 테스트와 메시지 첫 줄)를 이 절에 표로 추가한다.
+변이 네 가지를 실제 소스에 넣고 `./gradlew :connector-ldap:test` 를 돌린 뒤 되돌렸다. 결과:
+
+| # | 변이 | 실패한 테스트 | 메시지 첫 줄 |
+|---|---|---|---|
+| 1 | `절대DN(adapter)` 을 `adapter.getDn().toString()` 으로 바꾼다(베이스를 안 붙인다) | `GroupOfNamesDeepTreeTest.깊은_트리의_사용자가_멤버로_대조된다`, `GroupOfNamesDeepTreeTest.externalId가_서버가_준_DN이다` (그 밖에 `PagingUnderServerSizeLimitTest`, `TwoStrategiesSameShapeTest`, `LdifRendererTest` 등 17개도 함께 실패했다 — 대조가 전멸해 Task 3 의 전부 불일치 가드까지 걸렸다) | `dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException: 조직 1개의 member 값 1개가 하나도 대조되지 않았습니다. 사용자 검색 베이스와 그룹 member 값의 DN 형태가 어긋났는지 확인하십시오.` |
+| 2 | `LdapDns.대조키` 의 구현을 `dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim()` 로 되돌린다 | `LdapDnsTest.이스케이프된_쉼표를_값으로_다룬다`, `LdapDnsTest.다중값_RDN의_순서를_흡수한다` (예상 밖으로 `LdapDnsTest.해석할_수_없는_DN은_예외다` 도 함께 실패했다 — 이 테스트가 예외를 일으키는 통로로 `대조키` 를 쓰기 때문이다) | 첫 번째: `org.opentest4j.AssertionFailedError: [백슬래시 이스케이프와 따옴표 표기법은 같은 엔트리] \nexpected: "cn="hong,gildong",ou=seoul,dc=example,dc=com"` / 두 번째: `org.opentest4j.AssertionFailedError: \nexpected: "ou=seoul+cn=hgd,dc=example,dc=com"` / 세 번째(예상 밖): `java.lang.AssertionError: \nExpecting code to raise a throwable.` |
+| 3 | `UnmatchedMemberGuard.확인한다(...)` 호출을 지운다 | `GroupOfNamesUnmatchedMemberTest.전부_대조되지_않으면_실패시킨다`(`@DisplayName`: "DN 형태가 어긋나 멤버가 하나도 대조되지 않으면 그 회차를 실패시킨다") | `java.lang.AssertionError: \nExpecting code to raise a throwable.` |
+| 4 | `LdapDns.파싱한다` 의 예외를 `return new LdapName("")` 로 바꿔 조용히 넘긴다 | `LdapDnsTest.해석할_수_없는_DN은_예외다` | `java.lang.AssertionError: \nExpecting code to raise a throwable.` |
+
+네 변이 모두 되돌린 뒤 `./gradlew :connector-ldap:test` 를 다시 돌려 전부 통과(BUILD SUCCESSFUL)를 확인했다.
+
+**우리 테스트가 못 잡는 것.** 전략의 `GroupOfNamesStrategy` 안에서 `LdapDns.대조키(...)` **호출부 세 곳만**(사용자 색인, 그룹 색인, member 대조) `dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim()` 인라인 문자열 다듬기로 바꾸고 `LdapDns` 자체는 그대로 둔 뒤 돌려 봤다 — `BUILD SUCCESSFUL`, 실패한 테스트가 하나도 없었다. `GroupOfNamesDeepTreeTest` 를 포함한 깊은 트리 픽스처의 DN 차이가 대소문자와 쉼표 뒤 공백뿐이라, 문자열 다듬기로도 우연히 같은 키가 나오기 때문이다. 즉 `대조키` 가 `LdapName` 파서로 얻는 추가 능력 — 이스케이프된 쉼표를 RDN 경계로 보지 않는 것, 다중값 RDN 의 순서를 흡수하는 것 — 은 전략을 통한 통합 테스트로는 전혀 증명되지 않고, 오직 `LdapDnsTest` 의 단위 테스트만이 이를 잡아낸다. 다음에 `GroupOfNamesStrategy` 의 호출부를 건드리는 사람은 이 사실을 모르고 통합 테스트가 초록불이라는 이유로 안심할 수 있다 — 실제로는 `LdapDnsTest` 가 무너지지 않았는지를 따로 봐야 한다.

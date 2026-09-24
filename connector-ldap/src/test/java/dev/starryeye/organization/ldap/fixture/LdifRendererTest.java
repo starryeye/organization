@@ -115,7 +115,7 @@ class LdifRendererTest {
     }
 
     @Test
-    @DisplayName("DN 은 전략이 재구성하는 형태와 같아야 한다 — externalId 가 어긋나면 안 된다")
+    @DisplayName("픽스처가 심는 DN 과 전략이 읽어 온 DN 이 같아야 한다 — externalId 가 어긋나면 안 된다")
     void DN_규칙이_전략과_일치한다() {
         // given
         String 직원 = CHART.landmarks().L6직속직원();
