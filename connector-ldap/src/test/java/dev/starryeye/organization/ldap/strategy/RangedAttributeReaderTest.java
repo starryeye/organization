@@ -170,7 +170,7 @@ class RangedAttributeReaderTest {
         // given — 늘 "미완료 + 0개" 를 돌려주는 고장난 서버
         LdapOperations 고장난서버 = mock(LdapOperations.class);
         when(고장난서버.lookup(eq("cn=x"), any(String[].class), any(ContextMapper.class)))
-                .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of(), false));
+                .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of(), false, 0));
 
         // when & then — 여기서 안 멈추면 테스트가 영영 끝나지 않는다
         assertThatThrownBy(() -> RangedAttributeReader.전부_읽는다(고장난서버, "cn=x", MEMBER))
@@ -209,12 +209,42 @@ class RangedAttributeReaderTest {
     }
 
     @Test
+    @DisplayName("다음 조각은 받은 개수가 아니라 표준대로 범위 상한 + 1 에서 묻는다")
+    void 다음_위치는_상한_더하기_1이다() {
+        // given — 첫 조각의 범위는 0-1499 인데 값은 1,499개만 왔다. 표준(MS-ADTS)은 다음
+        // 요청을 1500 에서 시작하라고 정한다. 받은 개수로 세면 1499 에서 묻는다
+        List<String> 요청들 = new ArrayList<>();
+        LdapOperations 서버 = mock(LdapOperations.class);
+        when(서버.lookup(eq("cn=전사"), any(String[].class), any(ContextMapper.class)))
+                .thenAnswer(invocation -> {
+                    String 요청이름 = ((String[]) invocation.getArgument(1))[0];
+                    요청들.add(요청이름);
+                    Attributes attributes = new BasicAttributes();
+                    attributes.put(new BasicAttribute(MEMBER));
+                    if (요청이름.equals(MEMBER + ";range=0-*")) {
+                        attributes.put(값이_있는(MEMBER + ";range=0-1499",
+                                IntStream.range(0, 1_499).mapToObj(i -> "cn=u" + i).toArray(String[]::new)));
+                    } else {
+                        attributes.put(값이_있는(MEMBER + ";range=1500-*", "cn=u1500"));
+                    }
+                    ContextMapper<?> mapper = invocation.getArgument(2);
+                    return mapper.mapFromContext(컨텍스트(attributes));
+                });
+
+        // when
+        RangedAttributeReader.전부_읽는다(서버, "cn=전사", MEMBER);
+
+        // then
+        assertThat(요청들).containsExactly(MEMBER + ";range=0-*", MEMBER + ";range=1500-*");
+    }
+
+    @Test
     @DisplayName("조각이 한도를 넘으면 던진다 — 끝없이 조금씩 주는 서버")
     void 조각_한도를_넘으면_던진다() {
         // given — 늘 "미완료 + 1개" 를 돌려주어 영영 안 끝나는 서버
         LdapOperations 찔끔주는서버 = mock(LdapOperations.class);
         when(찔끔주는서버.lookup(eq("cn=x"), any(String[].class), any(ContextMapper.class)))
-                .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of("cn=u"), false));
+                .thenAnswer(invocation -> new RangedAttributeReader.Chunk(List.of("cn=u"), false, 1));
 
         // when & then
         assertThatThrownBy(() -> RangedAttributeReader.전부_읽는다(찔끔주는서버, "cn=x", MEMBER))

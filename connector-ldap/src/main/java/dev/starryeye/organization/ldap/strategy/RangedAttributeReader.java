@@ -69,17 +69,19 @@ final class RangedAttributeReader {
     }
 
     /**
-     * @param values 이번 조각의 값들
-     * @param 완료   더 받을 것이 없는가. 범위 옵션이 아예 없었거나 상한이 {@code *} 면 참
+     * @param values   이번 조각의 값들
+     * @param 완료     더 받을 것이 없는가. 범위 옵션이 아예 없었거나 상한이 {@code *} 면 참
+     * @param 다음시작 완료가 아니면 다음에 물을 위치 — 표준(MS-ADTS)대로 이번 범위의 상한 + 1.
+     *                 완료면 쓰지 않는다({@code -1})
      */
-    record Chunk(List<String> values, boolean 완료) {
+    record Chunk(List<String> values, boolean 완료, int 다음시작) {
 
         Chunk {
             values = List.copyOf(values);
         }
 
         static Chunk 완결(List<String> values) {
-            return new Chunk(values, true);
+            return new Chunk(values, true, -1);
         }
     }
 
@@ -144,7 +146,10 @@ final class RangedAttributeReader {
                 Matcher matcher = RANGE.matcher(id);
                 if (matcher.matches()
                         && matcher.group("name").toLowerCase(Locale.ROOT).equals(찾는이름)) {
-                    return new 훑은것(new Chunk(값들(attribute), "*".equals(matcher.group("high"))), null);
+                    String 상한 = matcher.group("high");
+                    boolean 마지막 = "*".equals(상한);
+                    return new 훑은것(new Chunk(값들(attribute), 마지막,
+                            마지막 ? -1 : Integer.parseInt(상한) + 1), null);
                 }
             }
         } catch (Exception e) {
@@ -192,7 +197,7 @@ final class RangedAttributeReader {
                                 + "dn=%s, 속성=%s, 지금까지 %d개")
                                 .formatted(dn, 속성명, 모은것.size()));
             }
-            다음 += chunk.values().size();
+            다음 = chunk.다음시작();
         }
         throw new IncompleteAttributeReadException(
                 "범위 검색 조각이 %d개를 넘었습니다: dn=%s, 속성=%s, %d개"
