@@ -34,6 +34,11 @@ final class LdapDns {
     static String 절대로(String 상대DN, String baseDn) {
         LdapName 절대 = 파싱한다(baseDn);
         try {
+            // 두 인자 모두 이미 파싱한다() 를 통과한 LdapName 이라 addAll 은 실제로는
+            // 던지지 않는다 — InvalidNameException 은 이 메서드의 체크 예외 시그니처가
+            // 강제하는 것일 뿐이다. 그래도 예외를 지우지 않고 감싸는 것은, 다루는 값이
+            // 문자열이 아니라 파싱된 DN 이라는 전제가 훗날 깨졌을 때 조용히 넘어가지 않기
+            // 위해서다.
             절대.addAll(파싱한다(상대DN));
         } catch (InvalidNameException e) {
             throw new IllegalStateException(
@@ -94,8 +99,8 @@ final class LdapDns {
             return new LdapName(dn == null ? "" : dn);
         } catch (InvalidNameException e) {
             throw new IllegalStateException("DN 을 해석하지 못했습니다: '" + dn + "'."
-                    + " 대조하는 DN 은 모두 서버가 준 값이라 문법은 올바를 것이다 —"
-                    + " 우리가 DN 을 다루는 방식이 틀렸을 수 있다", e);
+                    + " 대조하는 DN 은 모두 서버가 준 값이라 문법은 올바를 것입니다 —"
+                    + " 우리가 DN 을 다루는 방식이 틀렸을 수 있습니다", e);
         }
     }
 }

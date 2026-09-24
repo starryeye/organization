@@ -79,29 +79,30 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
 
         Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
         int 멤버값수 = 0;
-        int 대조된수 = 0;
+        int 사용자대조수 = 0;
+        int 조직대조수 = 0;
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
                 멤버값수++;
-                String key = LdapDns.대조키(memberDn);
+                String key = 대조키(entry, memberDn);
                 String userId = userIdByDn.get(key);
                 if (userId != null) {
                     members.add(MemberRef.user(userId));
-                    대조된수++;
+                    사용자대조수++;
                     continue;
                 }
                 String groupId = groupIdByDn.get(key);
                 if (groupId != null) {
                     members.add(MemberRef.group(groupId));
-                    대조된수++;
+                    조직대조수++;
                     continue;
                 }
                 log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다", entry.id(), memberDn);
             }
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
-        UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 대조된수);
+        UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
         return new DirectorySnapshot(users, groups);
     }
@@ -203,6 +204,22 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      */
     private String 절대DN(DirContextAdapter adapter) {
         return LdapDns.절대로(adapter.getDn().toString(), properties.getBaseDn());
+    }
+
+    /**
+     * {@code member} 값 하나를 대조 키로 바꾼다. {@link LdapDns#대조키} 가 파싱에 실패하면
+     * 어느 DN 인지는 이미 담겨 있지만 <b>어느 조직의 member 인지</b>는 모른다 — 그 문맥을
+     * 여기서 실어 다시 던진다. 대조는 계속 실패로 끝난다(설계 §5) — 문자열 비교로 물러나지
+     * 않는다.
+     */
+    private static String 대조키(RawEntry entry, String memberDn) {
+        try {
+            return LdapDns.대조키(memberDn);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException(
+                    "조직 '" + entry.id() + "'(dn=" + entry.dn() + ") 의 member '" + memberDn
+                            + "' 를 해석하지 못했습니다", e);
+        }
     }
 
     private static String required(Attributes attributes, String name) {
