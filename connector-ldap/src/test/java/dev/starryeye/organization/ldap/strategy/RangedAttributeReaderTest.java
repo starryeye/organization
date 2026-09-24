@@ -180,6 +180,35 @@ class RangedAttributeReaderTest {
     }
 
     @Test
+    @DisplayName("이어받는 중에 범위 속성을 알아볼 수 없는 응답이 오면 던진다 — 읽은 만큼을 완료로 치면 나머지가 삭제된다")
+    void 이어받기_응답을_못_알아보면_던진다() {
+        // given — 첫 조각은 명세대로 오고, 두 번째 응답의 속성 이름은 정규식이 받지 못하는 모양이다.
+        // 표준이 정한 완료 신호(범위 옵션 없는 속성, 또는 상한 *)가 아니므로 완료가 아니다
+        LdapOperations 서버 = mock(LdapOperations.class);
+        when(서버.lookup(eq("cn=전사"), any(String[].class), any(ContextMapper.class)))
+                .thenAnswer(invocation -> {
+                    String 요청이름 = ((String[]) invocation.getArgument(1))[0];
+                    Attributes attributes = new BasicAttributes();
+                    attributes.put(new BasicAttribute(MEMBER));
+                    if (요청이름.equals(MEMBER + ";range=0-*")) {
+                        attributes.put(값이_있는(MEMBER + ";range=0-1499",
+                                IntStream.range(0, 1_500).mapToObj(i -> "cn=u" + i).toArray(String[]::new)));
+                    } else {
+                        attributes.put(값이_있는(MEMBER + ";range=1500-2999;x", "cn=u1500"));
+                    }
+                    ContextMapper<?> mapper = invocation.getArgument(2);
+                    return mapper.mapFromContext(컨텍스트(attributes));
+                });
+
+        // when & then
+        assertThatThrownBy(() -> RangedAttributeReader.전부_읽는다(서버, "cn=전사", MEMBER))
+                .isInstanceOf(IncompleteAttributeReadException.class)
+                .hasMessageContaining("cn=전사")
+                // 운영자가 로그만 보고 서버가 무엇을 보냈는지 알 수 있어야 한다
+                .hasMessageContaining(MEMBER + ";range=1500-2999;x");
+    }
+
+    @Test
     @DisplayName("조각이 한도를 넘으면 던진다 — 끝없이 조금씩 주는 서버")
     void 조각_한도를_넘으면_던진다() {
         // given — 늘 "미완료 + 1개" 를 돌려주어 영영 안 끝나는 서버
