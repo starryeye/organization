@@ -103,14 +103,14 @@ class DitScaleSyncTest {
     @Order(1)
     @DisplayName("DIT 로 심은 조직도가 groupOfNames 와 같은 스냅샷·같은 튜플에 도달한다")
     void DIT가_같은_결과에_도달한다() {
-        // given — 겸직 166건이 빠진 만큼만 튜플이 적다
+        // given — 겸직이 빠진 만큼 튜플이 적다
         int 기대튜플 = ChartExpectation.of(기대).있어야할튜플().size();
 
         // when
         동기화한다().jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.writtenCount").isEqualTo(기대튜플);
 
-        // then — 같은 하네스로 잰다. 두 전략을 다른 잣대로 재면 비교가 성립하지 않는다
+        // then — 같은 잣대(하네스와 OpenFGA 직접 질의)로 잰다. 두 전략을 다른 잣대로 재면 비교가 성립하지 않는다
         검증한다();
     }
 

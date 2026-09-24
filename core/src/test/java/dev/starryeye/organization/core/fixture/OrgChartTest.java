@@ -27,6 +27,6 @@ class OrgChartTest {
         assertThatThrownBy(() -> chart.조상들("A"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("순환")
-                .hasMessageContaining("A");
+                .hasMessageContaining("A → B → A");
     }
 }

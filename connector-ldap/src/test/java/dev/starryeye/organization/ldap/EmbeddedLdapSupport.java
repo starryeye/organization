@@ -7,7 +7,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.LdapContextSource;
-import dev.starryeye.organization.ldap.LdapTemplates;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;

@@ -237,7 +237,6 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
     }
 
-
     private static String firstNonBlank(String... candidates) {
         for (String candidate : candidates) {
             if (candidate != null && !candidate.isBlank()) {

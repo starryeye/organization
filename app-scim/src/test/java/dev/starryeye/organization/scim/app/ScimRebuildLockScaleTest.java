@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
@@ -64,6 +64,15 @@ class ScimRebuildLockScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();
 
+    private static final Duration 리스_TTL = Duration.ofSeconds(2);
+    private static final Duration 갱신_주기 = Duration.ofMillis(500);
+
+    /**
+     * renew 가 이만큼 불렸다면 리스가 제 TTL 을 넘겨 살아있었다는 뜻이다 — TTL 을 갱신 주기로
+     * 나눈 몫만큼 갱신 주기가 지나야 TTL 이 넘어가고, 거기에 한 번을 더해야 "넘겼다" 를 증명한다.
+     */
+    private static final int 최소_갱신_횟수 = (int) (리스_TTL.toMillis() / 갱신_주기.toMillis()) + 1;
+
     @Container
     static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
 
@@ -75,8 +84,8 @@ class ScimRebuildLockScaleTest {
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
 
         // 재적재보다 짧은 리스. 갱신이 안 돌면 재적재가 리스를 잃고 FAILED 로 끝난다.
-        registry.add("dynamodb.lock-ttl", () -> "2s");
-        registry.add("dynamodb.lock-renew-interval", () -> "500ms");
+        registry.add("dynamodb.lock-ttl", () -> 리스_TTL.toMillis() + "ms");
+        registry.add("dynamodb.lock-renew-interval", () -> 갱신_주기.toMillis() + "ms");
         // 짧게 잡는다. 기본 3초로 두면 프로브 쓰기가 3초를 기다렸다가 재적재가 끝난 뒤
         // 성공해 버려서 "재적재 중에는 거절된다" 를 볼 수 없다.
         registry.add("dynamodb.lock-acquire-timeout", () -> "500ms");
@@ -141,12 +150,18 @@ class ScimRebuildLockScaleTest {
                 .collect(java.util.stream.Collectors.groupingBy(
                         code -> code, java.util.TreeMap::new, java.util.stream.Collectors.counting())));
 
-        // then — 재적재가 완주했다. 리스 TTL(2초)보다 오래 걸렸다면 갱신이 실제로 일했다는 뜻이다
+        // then — 재적재가 완주했다
         assertThat(재적재응답).as("재적재가 실패했다 — 리스를 잃었을 수 있다").isEqualTo(200);
-        // 리스 갱신이 실제로 일했다. 쓰기는 델타가 있을 때만 renew 를 부르고(설계 §4.7) 여기서
-        // 두드린 쓰기는 이미 활성인 직원에게 active:true 를 보내 델타가 없다 — 그러므로 이 호출은
-        // 재적재의 하트비트다
-        verify(lock, atLeastOnce()).renew(any());
+        // 리스 갱신이 TTL 을 넘길 만큼 여러 번 일했다. 쓰기는 델타가 있을 때만 renew 를
+        // 부르고(설계 §4.7) 여기서 두드린 쓰기는 이미 활성인 직원에게 active:true 를 보내
+        // 델타가 없다 — 그러므로 이 호출들은 재적재의 하트비트다. 한 번만 불렸다는 것으로는
+        // 재적재가 갱신 주기만큼만 돌았다는 것만 보일 뿐 리스가 제 만료를 넘겨 살아남았다는
+        // 주장은 못 한다 — 그래서 최소 횟수를 요구한다
+        verify(lock, atLeast(최소_갱신_횟수)
+                .description("renew 가 " + 최소_갱신_횟수 + "번 미만으로 불렸다 — 재적재가 리스가"
+                        + " 만료됐을 시점보다 먼저 끝나 갱신이 필요 없었다는 뜻이라, 이 테스트의 전제"
+                        + "(재적재가 리스 TTL 보다 오래 걸린다)가 이 환경에서는 성립하지 않는다"))
+                .renew(any());
 
         // 그동안 들어온 쓰기는 503 이다. IdP 는 503 을 재시도 신호로 보므로 유실되지 않는다
         assertThat(응답들).as("재적재 중에 쓰기를 한 번도 못 시도했다").isNotEmpty();
