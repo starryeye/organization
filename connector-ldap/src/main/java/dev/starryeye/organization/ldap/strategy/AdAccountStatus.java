@@ -35,17 +35,21 @@ final class AdAccountStatus {
     private AdAccountStatus() {
     }
 
-    static boolean 막혔는가(Attributes attributes, Instant 지금) {
-        return 비활성화됐는가(attributes) || 만료됐는가(attributes, 지금);
+    /**
+     * @param dn 판단하는 엔트리. 값이 표준 밖일 때 오류 메시지에 싣는다 — 운영자가 로그만 보고 어느 계정인지
+     *           찾게 한다
+     */
+    static boolean 막혔는가(String dn, Attributes attributes, Instant 지금) {
+        return 비활성화됐는가(dn, attributes) || 만료됐는가(dn, attributes, 지금);
     }
 
-    private static boolean 비활성화됐는가(Attributes attributes) {
-        Long 값 = 정수(attributes, USER_ACCOUNT_CONTROL);
+    private static boolean 비활성화됐는가(String dn, Attributes attributes) {
+        Long 값 = 정수(dn, attributes, USER_ACCOUNT_CONTROL);
         return 값 != null && (값 & ACCOUNTDISABLE) != 0;
     }
 
-    private static boolean 만료됐는가(Attributes attributes, Instant 지금) {
-        Long 값 = 정수(attributes, ACCOUNT_EXPIRES);
+    private static boolean 만료됐는가(String dn, Attributes attributes, Instant 지금) {
+        Long 값 = 정수(dn, attributes, ACCOUNT_EXPIRES);
         if (값 == null || 값 == 0 || 값 == Long.MAX_VALUE) {
             return false;
         }
@@ -53,7 +57,7 @@ final class AdAccountStatus {
         return !만료.isAfter(지금);
     }
 
-    private static Long 정수(Attributes attributes, String 이름) {
+    private static Long 정수(String dn, Attributes attributes, String 이름) {
         Attribute attribute = attributes.get(이름);
         if (attribute == null) {
             return null;
@@ -62,13 +66,14 @@ final class AdAccountStatus {
         try {
             원본 = attribute.get();
         } catch (NamingException e) {
-            throw new IllegalStateException("속성 '" + 이름 + "' 을 읽지 못했습니다", e);
+            throw new DirectoryDataException("속성 '" + 이름 + "' 을 읽지 못했습니다: dn=" + dn, e);
         }
         try {
-            return Long.parseLong(String.valueOf(원본).trim());
+            // 다듬지 않는다 — 공백이 섞인 값은 표준 밖이다
+            return Long.parseLong(String.valueOf(원본));
         } catch (NumberFormatException e) {
-            throw new IllegalStateException("속성 '" + 이름 + "' 의 값 '" + 원본 + "' 가 정수가 아닙니다"
-                    + " — AD 표준 밖이라 계정이 막혔는지 판단할 수 없습니다", e);
+            throw new DirectoryDataException("속성 '" + 이름 + "' 의 값 '" + 원본 + "' 가 정수가 아닙니다"
+                    + " — AD 표준 밖이라 계정이 막혔는지 판단할 수 없습니다: dn=" + dn, e);
         }
     }
 }

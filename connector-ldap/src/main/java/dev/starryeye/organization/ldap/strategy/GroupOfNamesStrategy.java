@@ -36,7 +36,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
 
     private final LdapProperties properties;
 
-    /** 계정 만료를 판정하는 "지금". 동기화마다 한 번 잡는다. */
+    /** 계정 만료를 판정할 "지금" 의 출처. {@code read} 마다 한 번 읽어 그 회차의 모든 직원에게 같은 시각을 쓴다. */
     private final Clock clock;
 
     /** 시스템 UTC 시계를 쓴다. */
@@ -126,15 +126,16 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return context -> {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
+            String dn = 절대DN(adapter);
             return new UserEntry(
                     IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
-                    절대DN(adapter),
+                    dn,
                     firstNonBlank(value(attributes, config.getUserNameAttribute()),
                             value(attributes, "cn"),
                             required(attributes, config.getUserIdAttribute())),
                     value(attributes, config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(attributes, 지금));
+                    !AdAccountStatus.막혔는가(dn, attributes, 지금));
         };
     }
 
@@ -226,7 +227,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         try {
             return LdapDns.대조키(memberDn);
         } catch (RuntimeException e) {
-            throw new IllegalStateException(
+            throw new DirectoryDataException(
                     "조직 '" + entry.id() + "'(dn=" + entry.dn() + ") 의 member '" + memberDn
                             + "' 를 해석하지 못했습니다", e);
         }
@@ -235,7 +236,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     private static String required(Attributes attributes, String name) {
         String value = value(attributes, name);
         if (value == null) {
-            throw new IllegalStateException("필수 속성 '" + name + "' 가 없습니다");
+            throw new DirectoryDataException("필수 속성 '" + name + "' 가 없습니다");
         }
         return value;
     }

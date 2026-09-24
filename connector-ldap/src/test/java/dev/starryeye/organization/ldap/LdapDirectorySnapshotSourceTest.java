@@ -2,6 +2,7 @@ package dev.starryeye.organization.ldap;
 
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
 import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
@@ -53,6 +54,18 @@ class LdapDirectorySnapshotSourceTest {
         public DirectorySnapshot read(LdapTemplate template) {
             호출수.incrementAndGet();
             throw new MemberMatchingFailedException("member 가 하나도 대조되지 않았습니다(테스트)");
+        }
+    }
+
+    /** 항상 {@link DirectoryDataException} 을 던지는 전략 — 정수 아닌 값, 없는 필수 속성, 해석할 수 없는 DN. */
+    private static class 데이터가_어긋난_전략 implements LdapMappingStrategy {
+
+        final AtomicInteger 호출수 = new AtomicInteger();
+
+        @Override
+        public DirectorySnapshot read(LdapTemplate template) {
+            호출수.incrementAndGet();
+            throw new DirectoryDataException("속성 'userAccountControl' 의 값 'abc' 가 정수가 아닙니다(테스트)");
         }
     }
 
@@ -148,6 +161,22 @@ class LdapDirectorySnapshotSourceTest {
                 .hasMessageContaining("member 가 하나도 대조되지 않았습니다");
 
         // then — 최초 1회뿐, 재시도가 걸리지 않았다
+        assertThat(strategy.호출수).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("데이터가 어긋난 실패는 재시도하지 않는다 — 같은 데이터를 다시 읽으면 같은 결과다")
+    void 데이터_오류는_재시도하지_않는다() {
+        // given — 정수가 아닌 계정 상태 값처럼, 기다려도 풀리지 않는 실패
+        var strategy = new 데이터가_어긋난_전략();
+        var source = new LdapDirectorySnapshotSource(안_쓰는_템플릿, strategy, 설정(3));
+
+        // when, then — 원래 예외가 그대로 올라온다. 이력에 남는 문장이 원인을 말해야 한다
+        assertThatThrownBy(() -> source.fetchAll().block())
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("정수가 아닙니다");
+
+        // then — 최초 1회뿐. 재시도에 맡기면 큰 디렉터리를 통째로 몇 번 더 읽고 "일시적 장애" 로 보인다
         assertThat(strategy.호출수).hasValue(1);
     }
 }

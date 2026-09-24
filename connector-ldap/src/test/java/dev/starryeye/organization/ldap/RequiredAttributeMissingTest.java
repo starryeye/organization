@@ -9,10 +9,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 계정 상태 속성의 값이 정수가 아니면 두 전략 모두 읽기를 실패시킨다 — 짐작해 읽으면 막힌 퇴사자를 활성으로
- * 두거나 멀쩡한 직원의 권한을 지운다. 예외는 그 회차의 동기화를 실패시킨다.
+ * 직원 아이디 속성이 없는 엔트리. 두 전략 모두 읽기를 실패시키고, 그 실패는 <b>다시 읽어도 같은 결과</b>인
+ * 종류라 재시도하지 않는다 — 같은 디렉터리를 몇 번 더 읽어도 그 속성은 생기지 않는다.
  */
-class AccountStatusInvalidValueTest extends EmbeddedLdapSupport {
+class RequiredAttributeMissingTest extends EmbeddedLdapSupport {
 
     @Override
     protected String ldif() {
@@ -30,23 +30,21 @@ class AccountStatusInvalidValueTest extends EmbeddedLdapSupport {
                 objectClass: organizationalUnit
                 ou: groups
 
-                dn: uid=odd,ou=company,dc=example,dc=com
+                dn: cn=nobody,ou=company,dc=example,dc=com
                 objectClass: inetOrgPerson
-                uid: odd
-                cn: odd
-                sn: odd
-                userAccountControl: abc
+                cn: nobody
+                sn: nobody
 
                 dn: cn=DEV,ou=groups,dc=example,dc=com
                 objectClass: groupOfNames
                 cn: DEV
-                member: uid=odd,ou=company,dc=example,dc=com
+                member: cn=nobody,ou=company,dc=example,dc=com
                 """;
     }
 
     @Test
-    @DisplayName("groupOfNames — 계정 상태 값이 정수가 아니면 읽기가 실패한다")
-    void groupOfNames는_실패한다() {
+    @DisplayName("groupOfNames — 직원 아이디 속성이 없으면 재시도하지 않는 종류로 실패한다")
+    void groupOfNames는_데이터_오류로_실패한다() {
         // given
         var properties = new LdapProperties();
         properties.setBaseDn(BASE_DN);
@@ -57,13 +55,12 @@ class AccountStatusInvalidValueTest extends EmbeddedLdapSupport {
         // when, then
         assertThatThrownBy(() -> new GroupOfNamesStrategy(properties).read(ldapTemplate))
                 .isInstanceOf(DirectoryDataException.class)
-                .hasMessageContaining("userAccountControl")
-                .hasMessageContaining("uid=odd");
+                .hasMessageContaining("uid");
     }
 
     @Test
-    @DisplayName("DIT — 계정 상태 값이 정수가 아니면 읽기가 실패한다")
-    void dit는_실패한다() {
+    @DisplayName("DIT — 직원 아이디 속성이 없으면 재시도하지 않는 종류로 실패한다")
+    void dit는_데이터_오류로_실패한다() {
         // given
         var properties = new LdapProperties();
         properties.setBaseDn(BASE_DN);
@@ -73,7 +70,7 @@ class AccountStatusInvalidValueTest extends EmbeddedLdapSupport {
         // when, then
         assertThatThrownBy(() -> new DitStrategy(properties).read(ldapTemplate))
                 .isInstanceOf(DirectoryDataException.class)
-                .hasMessageContaining("userAccountControl")
-                .hasMessageContaining("uid=odd");
+                .hasMessageContaining("uid")
+                .hasMessageContaining("cn=nobody");
     }
 }
