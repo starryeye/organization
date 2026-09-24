@@ -28,10 +28,28 @@ class LdapDnsTest {
         String 쉼표가든이름 = "CN=Hong\\, Gildong,OU=Seoul," + BASE;
         String 쉼표가없는동명이인 = "CN=Hong,OU=Gildong,OU=Seoul," + BASE;
 
-        // when, then
-        assertThat(LdapDns.대조키(쉼표가든이름))
-                .as("쉼표를 값으로 읽으면 RDN 은 3개(cn, ou, dc 둘)다")
-                .isNotEqualTo(LdapDns.대조키(쉼표가없는동명이인));
+        // when
+        String 쉼표있는키 = LdapDns.대조키(쉼표가든이름);
+        String 쉼표없는키 = LdapDns.대조키(쉼표가없는동명이인);
+
+        // then — 서로 다른 엔트리는 다른 키가 되어야 한다
+        assertThat(쉼표있는키)
+                .isNotEqualTo(쉼표없는키);
+
+        // 이스케이프된 쉼표는 RDN 경계가 아니다.
+        // 만약 문자열로 잘못 자르면 ou=gildong 같은 RDN 이 생기는데,
+        // 올바른 파싱에서는 이 RDN 이 생기지 않는다.
+        assertThat(쉼표없는키)
+                .as("쉼표가 없는 쪽은 ou=gildong 을 포함함")
+                .contains("ou=gildong");
+        assertThat(쉼표있는키)
+                .as("쉼표가 있는 쪽은 ou=gildong 을 포함하지 않음 — 이스케이프된 쉼표가 RDN 경계가 아니기 때문")
+                .doesNotContain("ou=gildong");
+
+        // 이스케이프된 쉼표가 한 값 안에 남아있다 — 키에서 찾을 수 있다
+        assertThat(쉼표있는키)
+                .as("이스케이프된 쉼표가 값 내에 보존됨")
+                .contains("hong\\, gildong");
     }
 
     @Test
