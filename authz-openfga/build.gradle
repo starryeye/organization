@@ -9,6 +9,7 @@ dependencies {
     // SDK 타입을 공개 표면에 쓰므로 api 로 노출한다.
     testFixturesApi libs.openfga.sdk
     testFixturesApi testFixtures(project(':core'))
+    testFixturesApi libs.testcontainers.junit
 
     testImplementation libs.testcontainers.junit
 }
