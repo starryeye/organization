@@ -78,24 +78,30 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
 
         Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        int 멤버값수 = 0;
+        int 대조된수 = 0;
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
+                멤버값수++;
                 String key = LdapDns.대조키(memberDn);
                 String userId = userIdByDn.get(key);
                 if (userId != null) {
                     members.add(MemberRef.user(userId));
+                    대조된수++;
                     continue;
                 }
                 String groupId = groupIdByDn.get(key);
                 if (groupId != null) {
                     members.add(MemberRef.group(groupId));
+                    대조된수++;
                     continue;
                 }
                 log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다", entry.id(), memberDn);
             }
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
+        UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 대조된수);
 
         return new DirectorySnapshot(users, groups);
     }
