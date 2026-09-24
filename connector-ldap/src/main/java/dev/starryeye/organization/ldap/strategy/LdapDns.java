@@ -62,6 +62,15 @@ final class LdapDns {
     }
 
     /**
+     * 부모 DN — 맨 앞 RDN 하나를 뗀다. 최상위면 빈 문자열이다.
+     * 첫 쉼표에서 자르면 이스케이프된 쉼표({@code ou=R\,D})를 RDN 경계로 오인한다.
+     */
+    static String 부모(String dn) {
+        LdapName name = 파싱한다(dn);
+        return name.isEmpty() ? "" : name.getPrefix(name.size() - 1).toString();
+    }
+
+    /**
      * 대조용 키. 같은 엔트리를 가리키는 두 DN 은 표기가 달라도 같은 키가 된다.
      * 값은 소문자로 맞춘다 — LDAP 의 이름 속성은 대개 대소문자를 가리지 않는다.
      */

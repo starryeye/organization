@@ -124,4 +124,15 @@ class LdapDnsTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("해석하지 못했습니다");
     }
+
+    @Test
+    @DisplayName("부모 DN 은 맨 앞 RDN 하나를 뗀 것이다 — 이스케이프된 쉼표는 경계가 아니다")
+    void 부모_DN을_구한다() {
+        // given, when, then
+        assertThat(LdapDns.대조키(LdapDns.부모("ou=R\\,D,ou=company," + BASE)))
+                .isEqualTo(LdapDns.대조키("ou=company," + BASE));
+        assertThat(LdapDns.부모("ou=company"))
+                .as("최상위면 부모가 없다")
+                .isEmpty();
+    }
 }
