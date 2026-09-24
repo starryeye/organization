@@ -50,14 +50,25 @@ public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Memb
         return all;
     }
 
-    /** 조직 {@code orgCode} 의 조상들을 가까운 순으로. 롤업 검증이 이 체인을 탄다. */
+    /**
+     * 조직 {@code orgCode} 의 조상들을 가까운 순으로. 롤업 검증이 이 체인을 탄다.
+     *
+     * <p><b>순환이면 즉시 던진다.</b> 순환 시나리오(L16/S16)는 조직도에 순환을 일부러 넣는데,
+     * 가드가 없으면 이 루프가 끝나지 않아 결과가 아니라 타임아웃으로 나타난다.
+     */
     public List<String> 조상들(String orgCode) {
         List<String> chain = new ArrayList<>();
+        Set<String> 지나온것 = new HashSet<>(List.of(orgCode));
         String current = orgCode;
         while (true) {
             String parent = 부모(current);
             if (parent == null) {
                 return chain;
+            }
+            if (!지나온것.add(parent)) {
+                throw new IllegalStateException("조직도에 순환이 있습니다: " + orgCode
+                        + (chain.isEmpty() ? "" : " → " + String.join(" → ", chain))
+                        + " → " + parent);
             }
             chain.add(parent);
             current = parent;

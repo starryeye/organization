@@ -100,7 +100,10 @@ class SyncVerifierTest {
         String 조직 = chart.landmarks().대상팀();
         DirectoryGroup 원본 = chart.snapshot().groups().get(조직);
         Set<MemberRef> 줄인것 = new LinkedHashSet<>(원본.members());
-        줄인것.remove(원본.members().iterator().next());
+        // 순회 순서가 실행마다 달라지지 않게 정렬해서 고른다
+        줄인것.remove(원본.members().stream()
+                .min(java.util.Comparator.comparing(MemberRef::id))
+                .orElseThrow());
         state.groups.put(조직, new DirectoryGroup(조직, null, 원본.displayName(), 줄인것));
 
         // when
@@ -256,7 +259,8 @@ class SyncVerifierTest {
     void 아래로_새면_잡는다() {
         // given — 부문 직속 직원이 그 아래 본부의 member 로 성립해 버린 경우
         String 직원 = chart.landmarks().L2직속직원();
-        String 아래조직 = chart.자손들(chart.직속조직(직원)).iterator().next();
+        // 순회 순서가 실행마다 달라지지 않게 정렬해서 고른다
+        String 아래조직 = chart.자손들(chart.직속조직(직원)).stream().sorted().findFirst().orElseThrow();
         assertThat(chart.기대소속(직원)).doesNotContain(아래조직);
         checker.allowed.add(RelationTuple.member(직원, 아래조직));
 
