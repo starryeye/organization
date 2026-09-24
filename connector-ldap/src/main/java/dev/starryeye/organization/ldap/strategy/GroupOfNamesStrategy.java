@@ -9,7 +9,6 @@ import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import dev.starryeye.organization.ldap.LdapTemplates;
-import org.springframework.ldap.core.AttributesMapper;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
@@ -20,10 +19,8 @@ import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -64,7 +61,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             if (DuplicateIdGuard.isDuplicate("직원 아이디", entry.id(), entry.dn(), userDnById)) {
                 continue;
             }
-            userIdByDn.put(normalizeDn(entry.dn()), entry.id());
+            userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
                     entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), true));
         }
@@ -76,7 +73,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             if (DuplicateIdGuard.isDuplicate("조직코드", entry.id(), entry.dn(), groupDnById)) {
                 continue;
             }
-            groupIdByDn.put(normalizeDn(entry.dn()), entry.id());
+            groupIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             survivingGroupEntries.put(entry.id(), entry);
         }
 
@@ -84,7 +81,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
-                String key = normalizeDn(memberDn);
+                String key = LdapDns.대조키(memberDn);
                 String userId = userIdByDn.get(key);
                 if (userId != null) {
                     members.add(MemberRef.user(userId));
@@ -103,22 +100,31 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return new DirectorySnapshot(users, groups);
     }
 
-    private AttributesMapper<RawEntry> userMapper(LdapProperties.GroupOfNames config) {
-        return attributes -> new RawEntry(
-                IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
-                dnOf(attributes, config.getUserIdAttribute(), config.getUserSearchBase()),
-                firstNonBlank(value(attributes, config.getUserNameAttribute()),
-                        value(attributes, "cn"),
-                        required(attributes, config.getUserIdAttribute())),
-                value(attributes, config.getUserMailAttribute()),
-                List.of());
+    /**
+     * <b>{@code ContextMapper} 다.</b> {@code AttributesMapper} 에는 DN 이 넘어오지 않아
+     * 예전에는 검색 베이스와 식별 속성으로 DN 을 조립했는데, 실제 디렉터리는 사용자를 조직
+     * OU 아래에 두고 RDN 도 {@code cn} 인 경우가 많아 서버가 준 {@code member} 값과 하나도
+     * 맞지 않았다(2026-09-11 코드리뷰 H).
+     */
+    private ContextMapper<RawEntry> userMapper(LdapProperties.GroupOfNames config) {
+        return context -> {
+            DirContextAdapter adapter = (DirContextAdapter) context;
+            Attributes attributes = adapter.getAttributes();
+            return new RawEntry(
+                    IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
+                    절대DN(adapter),
+                    firstNonBlank(value(attributes, config.getUserNameAttribute()),
+                            value(attributes, "cn"),
+                            required(attributes, config.getUserIdAttribute())),
+                    value(attributes, config.getUserMailAttribute()),
+                    List.of());
+        };
     }
 
     /**
-     * <b>{@code ContextMapper} 다.</b> {@code AttributesMapper} 에는 DN 이 넘어오지 않는데,
-     * 범위 검색으로 잘린 멤버를 이어받으려면 그 엔트리를 <b>다시 지목해 물어야</b> 하고
-     * 그러려면 서버가 알려준 진짜 DN 이 필요하다. {@link #dnOf} 의 재구성은 조직이 검색
-     * 베이스 바로 아래 있다고 가정하므로 트리가 깊으면 틀린 DN 이 된다.
+     * <b>{@code ContextMapper} 다.</b> 서버가 준 DN 이 두 곳에 필요하다 — 그룹의
+     * {@code member} 값과 대조할 키를 만들 때, 그리고 범위 검색으로 잘린 멤버를 이어받으려
+     * 그 엔트리를 다시 지목해 물을 때.
      */
     private ContextMapper<RawEntry> groupMapper(LdapProperties.GroupOfNames config) {
         return context -> {
@@ -129,16 +135,13 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
                     code,
-                    // externalId 는 지금 형태를 유지한다. 진짜 DN 이 더 정확하지만 저장된 값이
-                    // 전부 바뀌는 데이터 변경이라 이번 범위 밖이다 — 진짜 DN 은 재요청에만 쓴다.
-                    dnOf(attributes, config.getGroupIdAttribute(), config.getGroupSearchBase()),
+                    절대DN(adapter),
                     // 폴백은 정규화된 code 가 아니라 원본이다 — 금지 문자가 있으면 code 에는
                     // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getGroupNameAttribute()),
                             required(attributes, config.getGroupIdAttribute())),
                     null,
                     멤버.values(),
-                    adapter.getDn().toString(),
                     멤버.완료());
         };
     }
@@ -158,19 +161,22 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
         log.info("멤버가 범위 검색으로 잘린 조직 {}개를 이어받는다", 잘린것.size());
 
-        // realDn 으로 색인한다 — entry.id() 는 안 된다. IdNormalizer 가 금지 문자를 뭉개
+        // dn 으로 색인한다 — entry.id() 는 안 된다. IdNormalizer 가 금지 문자를 뭉개
         // 서로 다른 조직코드를 같은 값으로 만들 수 있고(DuplicateIdGuard 가 막는 바로 그
         // 충돌), 그 상태에서 아이디로 색인하면 잘리지 않은 형제 조직까지 이 맵에 걸려
         // 남의 이어받은 멤버 목록을 받는다 — 3명짜리 조직이 조용히 1,600명을 떠안는 권한
-        // 확대다. realDn 은 서버가 돌려준 진짜 DN이라 엔트리마다 유일하다.
+        // 확대다. dn 은 서버가 돌려준 진짜 DN 이라 엔트리마다 유일하다.
         Map<String, List<String>> 이어받은것 = LdapTemplates.한_커넥션에서(template, 한커넥션 -> {
             Map<String, List<String>> 결과 = new LinkedHashMap<>();
             for (RawEntry entry : 잘린것) {
-                List<String> 전부 = RangedAttributeReader.전부_읽는다(
-                        한커넥션, entry.realDn(), config.getMemberAttribute());
+                // 재요청은 ContextSource 의 베이스에 상대적인 DN 을 받는다 —
+                // 절대 DN 을 그대로 넘기면 엔트리를 찾지 못한다
+                List<String> 전부 = RangedAttributeReader.전부_읽는다(한커넥션,
+                        LdapDns.상대로(entry.dn(), properties.getBaseDn()),
+                        config.getMemberAttribute());
                 log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개)",
                         entry.id(), 전부.size(), entry.members().size());
-                결과.put(entry.realDn(), 전부);
+                결과.put(entry.dn(), 전부);
             }
             return 결과;
         });
@@ -178,25 +184,19 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         // 마지막 인자가 무조건 true 인 것은 낙관이 아니다 — 끝까지 못 읽으면
         // 전부_읽는다 가 IncompleteAttributeReadException 을 던지므로 여기 도달하지 못한다.
         return entries.stream()
-                .map(entry -> 이어받은것.containsKey(entry.realDn())
+                .map(entry -> 이어받은것.containsKey(entry.dn())
                         ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(),
-                                이어받은것.get(entry.realDn()), entry.realDn(), true)
+                                이어받은것.get(entry.dn()), true)
                         : entry)
                 .toList();
     }
 
     /**
-     * AttributesMapper 에는 DN 이 넘어오지 않으므로 검색 베이스와 식별 속성으로 재구성한다.
-     * externalId 보관과 member DN 대조에만 쓰이므로 정확한 형태보다 일관성이 중요하다.
+     * 서버가 준 DN 은 {@code ContextSource} 의 베이스에 상대적이다. 그룹의 {@code member}
+     * 값은 절대 DN 이므로 베이스를 붙여야 같은 좌표계에 놓인다.
      */
-    private String dnOf(Attributes attributes, String idAttribute, String searchBase) {
-        return idAttribute + "=" + required(attributes, idAttribute)
-                + "," + searchBase + "," + properties.getBaseDn();
-    }
-
-    /** 대소문자와 공백 차이로 DN 대조가 어긋나지 않게 정규화한다. */
-    private static String normalizeDn(String dn) {
-        return dn.toLowerCase(Locale.ROOT).replace(", ", ",").trim();
+    private String 절대DN(DirContextAdapter adapter) {
+        return LdapDns.절대로(adapter.getDn().toString(), properties.getBaseDn());
     }
 
     private static String required(Attributes attributes, String name) {
@@ -243,15 +243,16 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     }
 
     /**
-     * @param realDn          서버가 알려준 DN. 범위 검색 재요청에만 쓴다. 직원 쪽은 쓰지 않는다
+     * @param dn              <b>서버가 준 절대 DN.</b> member 대조 키이자 externalId 이고,
+     *                        범위 검색 재요청 때 엔트리를 다시 지목하는 좌표이기도 하다
      * @param membersComplete 멤버 목록이 잘리지 않고 다 왔는가
      */
     private record RawEntry(String id, String dn, String displayName, String email,
-                            List<String> members, String realDn, boolean membersComplete) {
+                            List<String> members, boolean membersComplete) {
 
         /** 직원 엔트리용. 다중값 속성을 읽지 않으므로 언제나 완결이다. */
         RawEntry(String id, String dn, String displayName, String email, List<String> members) {
-            this(id, dn, displayName, email, members, dn, true);
+            this(id, dn, displayName, email, members, true);
         }
     }
 }
