@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
@@ -103,6 +104,7 @@ class LdapDeletionGuardScaleTest {
     @Autowired WebTestClient client;
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
+    @Autowired StoreBootstrapper bootstrapper;
 
     @Test
     @Order(1)
@@ -209,7 +211,7 @@ class LdapDeletionGuardScaleTest {
     }
 
     private void 검증한다() {
-        ScaleVerification.하네스로_검증한다(state, checker, 기대);
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
