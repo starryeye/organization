@@ -9,6 +9,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.LdapContextSource;
 
+import java.time.Clock;
+
 @Configuration
 @EnableConfigurationProperties(LdapProperties.class)
 public class LdapConfig {
@@ -31,10 +33,11 @@ public class LdapConfig {
     }
 
     @Bean
-    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties) {
+    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties, Clock clock) {
+        // 계정 만료를 동기화 시각과 비교한다 — 앱의 Clock 빈(DynamoDbConfig)을 쓴다
         return "dit".equalsIgnoreCase(properties.getStrategy())
-                ? new DitStrategy(properties)
-                : new GroupOfNamesStrategy(properties);
+                ? new DitStrategy(properties, clock)
+                : new GroupOfNamesStrategy(properties, clock);
     }
 
     @Bean
