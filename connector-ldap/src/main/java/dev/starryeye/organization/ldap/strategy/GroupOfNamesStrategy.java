@@ -128,11 +128,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
             return new UserEntry(
-                    IdNormalizer.normalize(required(attributes, config.getUserIdAttribute())),
+                    IdNormalizer.normalize(required(adapter, config.getUserIdAttribute())),
                     dn,
                     firstNonBlank(value(attributes, config.getUserNameAttribute()),
                             value(attributes, "cn"),
-                            required(attributes, config.getUserIdAttribute())),
+                            required(adapter, config.getUserIdAttribute())),
                     value(attributes, config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
                     !AdAccountStatus.막혔는가(dn, attributes, 지금));
@@ -148,7 +148,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return context -> {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
-            String code = IdNormalizer.normalize(required(attributes, config.getGroupIdAttribute()));
+            String code = IdNormalizer.normalize(required(adapter, config.getGroupIdAttribute()));
             RangedAttributeReader.Chunk 멤버 =
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
@@ -157,7 +157,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     // 폴백은 정규화된 code 가 아니라 원본이다 — 금지 문자가 있으면 code 에는
                     // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getGroupNameAttribute()),
-                            required(attributes, config.getGroupIdAttribute())),
+                            required(adapter, config.getGroupIdAttribute())),
                     null,
                     멤버.values(),
                     멤버.완료());
@@ -233,10 +233,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
     }
 
-    private static String required(Attributes attributes, String name) {
-        String value = value(attributes, name);
+    private String required(DirContextAdapter adapter, String name) {
+        String value = value(adapter.getAttributes(), name);
         if (value == null) {
-            throw new DirectoryDataException("필수 속성 '" + name + "' 가 없습니다");
+            throw new DirectoryDataException("필수 속성 '" + name + "' 가 없습니다: dn=" + 절대DN(adapter));
         }
         return value;
     }

@@ -113,12 +113,21 @@ class AdAccountStatusTest {
     }
 
     @Test
-    @DisplayName("앞뒤에 공백이 섞인 값도 정수가 아니다 — 표준 밖의 값을 다듬어 받아 주지 않는다")
-    void 공백이_섞이면_정수가_아니다() {
+    @DisplayName("앞에 공백이 섞인 값도 정수가 아니다 — 표준 밖의 값을 다듬어 받아 주지 않는다")
+    void 앞에_공백이_섞이면_정수가_아니다() {
         // given, when, then
         assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", " 514"), 지금))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(DirectoryDataException.class)
                 .hasMessageContaining("userAccountControl");
+    }
+
+    @Test
+    @DisplayName("뒤에 공백이 섞인 값도 정수가 아니다 — 표준 밖의 값을 다듬어 받아 주지 않는다")
+    void 뒤에_공백이_섞이면_정수가_아니다() {
+        // given, when, then
+        assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("accountExpires", "0 "), 지금))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("accountExpires");
     }
 
     /** 서버가 주는 것처럼 대소문자를 가리지 않는 속성 집합을 만든다. */

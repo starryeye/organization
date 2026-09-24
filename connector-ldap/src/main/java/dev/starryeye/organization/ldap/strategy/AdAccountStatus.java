@@ -66,6 +66,8 @@ final class AdAccountStatus {
         try {
             원본 = attribute.get();
         } catch (NamingException e) {
+            // 검색 결과로 이미 받아 둔 속성이라 서버에 다시 묻지 않는다 — 여기서 나는 실패는 통신이 아니라
+            // 값의 문제이고, 다시 읽어도 같다. 그래서 재시도하지 않는 종류로 던진다
             throw new DirectoryDataException("속성 '" + 이름 + "' 을 읽지 못했습니다: dn=" + dn, e);
         }
         try {

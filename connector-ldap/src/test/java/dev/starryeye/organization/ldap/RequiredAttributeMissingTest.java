@@ -55,7 +55,8 @@ class RequiredAttributeMissingTest extends EmbeddedLdapSupport {
         // when, then
         assertThatThrownBy(() -> new GroupOfNamesStrategy(properties).read(ldapTemplate))
                 .isInstanceOf(DirectoryDataException.class)
-                .hasMessageContaining("uid");
+                .hasMessageContaining("uid")
+                .hasMessageContaining("cn=nobody");
     }
 
     @Test
