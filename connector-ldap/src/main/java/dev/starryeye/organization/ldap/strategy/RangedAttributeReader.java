@@ -84,13 +84,51 @@ final class RangedAttributeReader {
     }
 
     /**
-     * 응답에서 그 속성을 읽는다. 범위 옵션이 붙은 쪽이 있으면 <b>그쪽을 쓴다</b> — 범위가
-     * 걸린 응답에는 원래 이름의 속성도 함께 오지만 값이 비어 있기 때문이다.
+     * <b>첫 읽기</b> — 검색 응답에서 그 속성을 읽는다. 범위 옵션이 붙은 쪽이 있으면
+     * <b>그쪽을 쓴다</b> — 범위가 걸린 응답에는 원래 이름의 속성도 함께 오지만 값이 비어
+     * 있기 때문이다.
+     *
+     * <p>범위 속성이 없으면 완료다. 범위 옵션 없는 속성은 표준이 정한 "이게 전부다" 이고,
+     * 속성이 아예 없으면 멤버가 0명인 것이다 — 둘 다 정상이다.
      */
     static Chunk 읽는다(Attributes attributes, String 속성명) {
         if (attributes == null) {
             return Chunk.완결(List.of());
         }
+        훑은것 훑은 = 훑는다(attributes, 속성명);
+        if (훑은.범위조각() != null) {
+            return 훑은.범위조각();
+        }
+        return Chunk.완결(훑은.평범한것() == null ? List.of() : 값들(훑은.평범한것()));
+    }
+
+    /**
+     * <b>이어받기</b> — {@code 속성;range=N-*} 로 되물은 응답을 읽는다. 첫 읽기와 계약이
+     * 다르다: 우리는 범위를 <b>물었으므로</b> 답은 범위 속성이어야 한다.
+     *
+     * <p>범위 속성을 찾지 못하면 완료로 보지 않고 던진다. 표준이 정한 완료 신호는 상한
+     * {@code *} 뿐인데, 그것이 오지 않았다 — 여기서 완료로 치면 그때까지 읽은 조각이 전부로
+     * 둔갑하고 나머지 멤버의 권한이 삭제된다. 예외는 그 회차 전체를 실패시킨다.
+     */
+    private static Chunk 이어받은_조각을_읽는다(Attributes attributes, String 속성명, String dn) {
+        훑은것 훑은 = attributes == null ? new 훑은것(null, null) : 훑는다(attributes, 속성명);
+        if (훑은.범위조각() == null) {
+            throw new IncompleteAttributeReadException(
+                    ("범위 검색을 이어받는 중인데 응답에 알아볼 수 있는 범위 속성이 없습니다"
+                            + " — 완료 신호가 아니므로 완료로 보지 않습니다: dn=%s, 속성=%s, 받은 속성=%s")
+                            .formatted(dn, 속성명, 이름들(attributes)));
+        }
+        return 훑은.범위조각();
+    }
+
+    /**
+     * @param 범위조각 범위 옵션이 붙은 그 속성을 찾았으면 그 조각, 아니면 {@code null}
+     * @param 평범한것 범위 옵션 없는 그 속성. 범위조각을 찾았으면 보지 않는다
+     */
+    private record 훑은것(Chunk 범위조각, Attribute 평범한것) {
+    }
+
+    private static 훑은것 훑는다(Attributes attributes, String 속성명) {
         String 찾는이름 = 속성명.toLowerCase(Locale.ROOT);
         Attribute 평범한것 = null;
 
@@ -106,14 +144,31 @@ final class RangedAttributeReader {
                 Matcher matcher = RANGE.matcher(id);
                 if (matcher.matches()
                         && matcher.group("name").toLowerCase(Locale.ROOT).equals(찾는이름)) {
-                    return new Chunk(값들(attribute), "*".equals(matcher.group("high")));
+                    return new 훑은것(new Chunk(값들(attribute), "*".equals(matcher.group("high"))), null);
                 }
             }
         } catch (Exception e) {
             throw new IncompleteAttributeReadException(
                     "속성 '%s' 을 읽지 못했습니다".formatted(속성명), e);
         }
-        return Chunk.완결(평범한것 == null ? List.of() : 값들(평범한것));
+        return new 훑은것(null, 평범한것);
+    }
+
+    /** 실패 메시지용 — 서버가 실제로 무엇을 보냈는지 운영자가 로그만 보고 알 수 있게 한다. */
+    private static List<String> 이름들(Attributes attributes) {
+        List<String> 이름들 = new ArrayList<>();
+        if (attributes == null) {
+            return 이름들;
+        }
+        try {
+            NamingEnumeration<String> ids = attributes.getIDs();
+            while (ids.hasMore()) {
+                이름들.add(ids.next());
+            }
+        } catch (Exception e) {
+            이름들.add("(속성 이름을 읽지 못함)");
+        }
+        return 이름들;
     }
 
     /**
@@ -148,7 +203,7 @@ final class RangedAttributeReader {
         String 요청이름 = 속성명 + ";range=" + 시작 + "-*";
         return 한커넥션.lookup(dn, new String[]{요청이름},
                 (org.springframework.ldap.core.ContextMapper<Chunk>) context ->
-                        읽는다(((DirContextAdapter) context).getAttributes(), 속성명));
+                        이어받은_조각을_읽는다(((DirContextAdapter) context).getAttributes(), 속성명, dn));
     }
 
     private static List<String> 값들(Attribute attribute) {
