@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.ldap.LdapProperties;
+import dev.starryeye.organization.ldap.LdapTemplates;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -49,8 +50,6 @@ class LdifRendererTest {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
         config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("fixture", 0));
-        // 빈 조직은 groupOfNames 의 member 필수 제약에 걸린다. 스키마 검사를 끄는 것은
-        // 그 형태를 일부러 살려 빈 델타 경로를 태우기 위해서다.
         // 스키마 검사를 <b>켜 둔다.</b> 껐더니 실제 OpenLDAP 이 거부하는 엔트리(member 없는
         // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
         // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
@@ -68,9 +67,7 @@ class LdifRendererTest {
         contextSource.setPassword(BIND_PASSWORD);
         contextSource.afterPropertiesSet();
 
-        LdapTemplate template = new LdapTemplate(contextSource);
-        template.setIgnorePartialResultException(true);
-        template.setIgnoreSizeLimitExceededException(false);
+        LdapTemplate template = LdapTemplates.configured(contextSource);
 
         읽은것 = new GroupOfNamesStrategy(설정()).read(template);
     }
