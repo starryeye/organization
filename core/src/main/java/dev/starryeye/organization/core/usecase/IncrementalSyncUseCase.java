@@ -175,8 +175,7 @@ public class IncrementalSyncUseCase {
     }
 
     private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user, LockLease lease) {
-        DirectoryUser neverStored = new DirectoryUser(
-                user.id(), user.externalId(), user.userName(), user.displayName(), user.email(), false);
+        DirectoryUser neverStored = user.withActive(false);
 
         return affectedGroupHeadersOf(user.id())
                 .flatMap(headers -> state.findUser(user.id())
@@ -675,8 +674,7 @@ public class IncrementalSyncUseCase {
         if (!result.hasFailure()) {
             return requested;
         }
-        return new DirectoryUser(requested.id(), requested.externalId(), requested.userName(),
-                requested.displayName(), requested.email(), existing.active());
+        return requested.withActive(existing.active());
     }
 
     /**

@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.query.UserSummary;
 import dev.starryeye.organization.core.usecase.AdminQueryUseCase;
@@ -112,6 +113,21 @@ class AdminQueryControllerTest {
                 .jsonPath("$.paths[0].orgCode").isEqualTo("DEV002")
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
                 .jsonPath("$.paths[0].openFgaCheck").isEqualTo(true);
+    }
+
+    @Test
+    @DisplayName("직원 상세에 이름 여섯 칸이 나온다")
+    void 직원_상세에_이름이_나온다() {
+        // given
+        state.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true,
+                new PersonName(null, "홍", "길동", null, null, null))).block();
+
+        // when, then
+        client.get().uri("/admin/employees/hong")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.name.familyName").isEqualTo("홍")
+                .jsonPath("$.name.givenName").isEqualTo("길동");
     }
 
     @Test

@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -610,5 +611,24 @@ class IncrementalSyncUseCaseTest {
         assertThat(retry.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toDelete())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
+    }
+
+    @Test
+    @DisplayName("반영이 실패해 active 를 되돌려도 요청의 이름은 남는다")
+    void 실패해_되돌려도_이름은_남는다() {
+        // given — 조직에 속한 활성 직원을 비활성으로 바꾸되 튜플 반영이 전부 실패한다
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV", null, "개발팀", Set.of(MemberRef.user("kim")))).block();
+        openFga를_상태와_맞춘다();
+        writer.failFor(tuple -> true);
+        PersonName 이름 = new PersonName(null, "김", "철수", null, null, null);
+
+        // when
+        useCase.upsertUser(new DirectoryUser("kim", null, "kim", "김철수", null, false, 이름)).block();
+
+        // then
+        DirectoryUser 저장 = state.users.get("kim");
+        assertThat(저장.active()).isTrue();
+        assertThat(저장.name()).isEqualTo(이름);
     }
 }
