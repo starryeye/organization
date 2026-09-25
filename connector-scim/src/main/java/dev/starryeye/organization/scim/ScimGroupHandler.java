@@ -35,16 +35,10 @@ public class ScimGroupHandler {
 
     public Mono<ServerResponse> get(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> {
-            // members 가 응답에 없으면 조직 파티션(멤버 줄 전부)을 읽지 않는다 — Entra 가 늘 붙이는 조건이다
-            Mono<ScimGroup> group = projection.includes("members")
-                    ? state.findGroup(id).map(ScimMapper::toScimGroup)
-                    : state.findGroupHeader(id).map(ScimMapper::toScimGroup);
-            return group
-                    .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                    .flatMap(scim -> ServerResponse.ok().contentType(SCIM_JSON)
-                            .bodyValue(projection.apply(ScimJson.tree(scim))));
-        });
+        return projection(request).flatMap(projection -> byProjection(id, projection)
+                .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
+                .flatMap(scim -> ServerResponse.ok().contentType(SCIM_JSON)
+                        .bodyValue(projection.apply(ScimJson.tree(scim)))));
     }
 
     public Mono<ServerResponse> replace(ServerRequest request) {
@@ -93,11 +87,21 @@ public class ScimGroupHandler {
             return Mono.error(ScimException.internal(
                     "일부 튜플 적용에 실패했습니다. 재시도해 주세요: " + id));
         }
-        return state.findGroup(id)
+        return byProjection(id, projection)
                 .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
-                .flatMap(saved -> ServerResponse.status(status)
+                .flatMap(scim -> ServerResponse.status(status)
                         .contentType(SCIM_JSON)
-                        .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimGroup(saved)))));
+                        .bodyValue(projection.apply(ScimJson.tree(scim))));
+    }
+
+    /**
+     * members 가 응답에 없으면 조직 파티션(멤버 줄 전부)을 읽지 않는다 — Entra 가 늘 붙이는 조건이고,
+     * 쓰기 응답(create/replace/patch)도 이 규칙을 따른다(S-1 설계 §4.5).
+     */
+    private Mono<ScimGroup> byProjection(String id, ScimAttributeProjection projection) {
+        return projection.includes("members")
+                ? state.findGroup(id).map(ScimMapper::toScimGroup)
+                : state.findGroupHeader(id).map(ScimMapper::toScimGroup);
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */

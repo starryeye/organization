@@ -105,6 +105,33 @@ class ScimListHandlerTest {
     }
 
     @Test
+    @DisplayName("조직 쓰기 응답도 members 를 빼면 조직 파티션을 다시 읽지 않는다")
+    void 쓰기_응답도_members_를_빼면_읽지_않는다() {
+        // given
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"externalId":"%s","displayName":"%s",
+                 "members":[{"value":"park","type":"User"}]}
+                """;
+
+        // when — 같은 모양의 조직 둘을 만들되 하나만 members 를 뺀다
+        state.findGroupCalls.clear();
+        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body.formatted("grp-a", "A"))
+                .exchange().expectStatus().isCreated();
+        int 멤버포함 = state.findGroupCalls.size();
+
+        state.findGroupCalls.clear();
+        client.post().uri("/scim/v2/Groups?excludedAttributes=members").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body.formatted("grp-b", "B"))
+                .exchange().expectStatus().isCreated()
+                .expectBody().jsonPath("$.members").doesNotExist();
+        int 멤버제외 = state.findGroupCalls.size();
+
+        // then — 응답을 그리려 읽던 한 번이 빠진다
+        assertThat(멤버제외).isEqualTo(멤버포함 - 1);
+    }
+
+    @Test
     @DisplayName("단건 GET 과 쓰기 응답에도 attributes 를 적용한다")
     void 단건과_쓰기_응답의_속성_선택() {
         client.get().uri("/scim/v2/Users/park?attributes=userName")
