@@ -41,7 +41,7 @@ final class LdapDns {
             // 위해서다.
             절대.addAll(파싱한다(상대DN));
         } catch (InvalidNameException e) {
-            throw new IllegalStateException(
+            throw new DirectoryDataException(
                     "DN 을 합치지 못했습니다: '" + 상대DN + "' 아래 '" + baseDn + "'", e);
         }
         return 절대.toString();
@@ -55,7 +55,7 @@ final class LdapDns {
         LdapName 절대 = 파싱한다(절대DN);
         LdapName 베이스 = 파싱한다(baseDn);
         if (!절대.startsWith(베이스)) {
-            throw new IllegalStateException(
+            throw new DirectoryDataException(
                     "DN '" + 절대DN + "' 이 베이스 '" + baseDn + "' 아래에 있지 않습니다");
         }
         return 절대.getSuffix(베이스.size()).toString();
@@ -97,7 +97,7 @@ final class LdapDns {
                 }
             }
         } catch (NamingException e) {
-            throw new IllegalStateException("RDN '" + rdn + "' 을 읽지 못했습니다", e);
+            throw new DirectoryDataException("RDN '" + rdn + "' 을 읽지 못했습니다", e);
         }
         Collections.sort(쌍들);
         return String.join("+", 쌍들);
@@ -107,7 +107,7 @@ final class LdapDns {
         try {
             return new LdapName(dn == null ? "" : dn);
         } catch (InvalidNameException e) {
-            throw new IllegalStateException("DN 을 해석하지 못했습니다: '" + dn + "'."
+            throw new DirectoryDataException("DN 을 해석하지 못했습니다: '" + dn + "'."
                     + " 대조하는 DN 은 모두 서버가 준 값이라 문법은 올바를 것입니다 —"
                     + " 우리가 DN 을 다루는 방식이 틀렸을 수 있습니다", e);
         }

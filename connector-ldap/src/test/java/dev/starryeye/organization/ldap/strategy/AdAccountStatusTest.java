@@ -19,6 +19,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class AdAccountStatusTest {
 
     private static final Instant 지금 = Instant.parse("2026-01-01T00:00:00Z");
+    /** 오류 메시지에 실려야 하는 엔트리 — 운영자가 로그만 보고 어느 계정인지 찾게 한다. */
+    private static final String DN = "uid=kim,ou=people,dc=example,dc=com";
     /** 2026-01-01T00:00:00Z = (1767225600 + 11644473600) 초 × 10^7 */
     private static final String 지금의_FILETIME = "134116992000000000";
     private static final String 일초_전 = "134116991990000000";
@@ -28,21 +30,21 @@ class AdAccountStatusTest {
     @DisplayName("두 속성이 모두 없으면 막히지 않은 것이다 — OpenLDAP 과 지금의 테스트 서버")
     void 속성이_없으면_막히지_않았다() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들(), 지금)).isFalse();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들(), 지금)).isFalse();
     }
 
     @Test
     @DisplayName("보통 계정(512)은 막히지 않았다")
     void 보통_계정() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("userAccountControl", "512"), 지금)).isFalse();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", "512"), 지금)).isFalse();
     }
 
     @Test
     @DisplayName("비활성화 비트가 켜진 계정(514)은 막혔다")
     void 비활성화된_계정() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("userAccountControl", "514"), 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", "514"), 지금)).isTrue();
     }
 
     @Test
@@ -50,36 +52,36 @@ class AdAccountStatusTest {
     void 플래그가_더해져도_비트로_읽는다() {
         // given — 514 와 같은지 비교하면 이 계정을 놓친다
         // when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("userAccountControl", "66050"), 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", "66050"), 지금)).isTrue();
     }
 
     @Test
     @DisplayName("만료일이 지났으면 막혔다")
     void 만료일이_지났다() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("accountExpires", 일초_전), 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("accountExpires", 일초_전), 지금)).isTrue();
     }
 
     @Test
     @DisplayName("만료 시각이 정확히 지금이면 막혔다 — 그 시각에 만료된다")
     void 만료_시각이_지금이다() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("accountExpires", 지금의_FILETIME), 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("accountExpires", 지금의_FILETIME), 지금)).isTrue();
     }
 
     @Test
     @DisplayName("만료일이 아직 오지 않았으면 막히지 않았다")
     void 만료일이_아직이다() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("accountExpires", 일초_후), 지금)).isFalse();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("accountExpires", 일초_후), 지금)).isFalse();
     }
 
     @Test
     @DisplayName("만료일 0 과 최댓값은 '만료 없음' 이다 — 막힘으로 읽으면 전원이 권한을 잃는다")
     void 만료_없음_두_값() {
         // given, when, then
-        assertThat(AdAccountStatus.막혔는가(속성들("accountExpires", "0"), 지금)).isFalse();
-        assertThat(AdAccountStatus.막혔는가(속성들("accountExpires", "9223372036854775807"), 지금)).isFalse();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("accountExpires", "0"), 지금)).isFalse();
+        assertThat(AdAccountStatus.막혔는가(DN, 속성들("accountExpires", "9223372036854775807"), 지금)).isFalse();
     }
 
     @Test
@@ -91,20 +93,40 @@ class AdAccountStatusTest {
         var 비활성화만 = 속성들("userAccountControl", "514", "accountExpires", "0");
 
         // when, then
-        assertThat(AdAccountStatus.막혔는가(만료만, 지금)).isTrue();
-        assertThat(AdAccountStatus.막혔는가(비활성화만, 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 만료만, 지금)).isTrue();
+        assertThat(AdAccountStatus.막혔는가(DN, 비활성화만, 지금)).isTrue();
     }
 
     @Test
     @DisplayName("정수가 아닌 값은 짐작하지 않고 실패한다 — 표준 밖이다")
     void 정수가_아니면_실패한다() {
         // given, when, then
-        assertThatThrownBy(() -> AdAccountStatus.막혔는가(속성들("userAccountControl", "abc"), 지금))
+        assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", "abc"), 지금))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("userAccountControl")
-                .hasMessageContaining("abc");
-        assertThatThrownBy(() -> AdAccountStatus.막혔는가(속성들("accountExpires", "내일"), 지금))
+                .hasMessageContaining("abc")
+                .as("5,000명 디렉터리에서 어느 엔트리인지 로그만으로 찾을 수 있어야 한다")
+                .hasMessageContaining(DN);
+        assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("accountExpires", "내일"), 지금))
                 .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("accountExpires");
+    }
+
+    @Test
+    @DisplayName("앞에 공백이 섞인 값도 정수가 아니다 — 표준 밖의 값을 다듬어 받아 주지 않는다")
+    void 앞에_공백이_섞이면_정수가_아니다() {
+        // given, when, then
+        assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("userAccountControl", " 514"), 지금))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("userAccountControl");
+    }
+
+    @Test
+    @DisplayName("뒤에 공백이 섞인 값도 정수가 아니다 — 표준 밖의 값을 다듬어 받아 주지 않는다")
+    void 뒤에_공백이_섞이면_정수가_아니다() {
+        // given, when, then
+        assertThatThrownBy(() -> AdAccountStatus.막혔는가(DN, 속성들("accountExpires", "0 "), 지금))
+                .isInstanceOf(DirectoryDataException.class)
                 .hasMessageContaining("accountExpires");
     }
 

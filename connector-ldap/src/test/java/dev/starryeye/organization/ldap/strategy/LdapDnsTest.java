@@ -110,7 +110,8 @@ class LdapDnsTest {
     void 베이스_밖의_DN은_거부한다() {
         // given, when, then
         assertThatThrownBy(() -> LdapDns.상대로("cn=dev,ou=groups,dc=other,dc=com", BASE))
-                .isInstanceOf(IllegalStateException.class)
+                .as("다시 읽어도 같은 결과라 재시도하지 않는 종류여야 한다")
+                .isInstanceOf(DirectoryDataException.class)
                 .hasMessageContaining("베이스");
     }
 
@@ -121,7 +122,8 @@ class LdapDnsTest {
         // 우리가 DN 을 다루는 방식이 틀린 것이다
         // when, then
         assertThatThrownBy(() -> LdapDns.대조키("이건 DN 이 아니다"))
-                .isInstanceOf(IllegalStateException.class)
+                .as("다시 읽어도 같은 결과라 재시도하지 않는 종류여야 한다")
+                .isInstanceOf(DirectoryDataException.class)
                 .hasMessageContaining("해석하지 못했습니다");
     }
 

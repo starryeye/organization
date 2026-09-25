@@ -33,7 +33,7 @@ public class DitStrategy implements LdapMappingStrategy {
 
     private final LdapProperties properties;
 
-    /** 계정 만료를 판정하는 "지금". 동기화마다 한 번 잡는다. */
+    /** 계정 만료를 판정할 "지금" 의 출처. {@code read} 마다 한 번 읽어 그 회차의 모든 직원에게 같은 시각을 쓴다. */
     private final Clock clock;
 
     /** 시스템 UTC 시계를 쓴다. */
@@ -72,7 +72,7 @@ public class DitStrategy implements LdapMappingStrategy {
         // 산하 엔트리는 "부모를 찾지 못함"으로 자연히 스킵된다.
         Map<String, String> groupDnByCode = new LinkedHashMap<>();
         for (Entry entry : orgEntries) {
-            String code = IdNormalizer.normalize(entry.attribute(config.getGroupIdAttribute()));
+            String code = IdNormalizer.normalize(필수(entry, config.getGroupIdAttribute()));
             if (DuplicateIdGuard.isDuplicate("조직코드", code, entry.dn(), groupDnByCode)) {
                 continue;
             }
@@ -103,7 +103,7 @@ public class DitStrategy implements LdapMappingStrategy {
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
         for (Entry entry : userEntries) {
-            String userId = IdNormalizer.normalize(entry.attribute(config.getUserIdAttribute()));
+            String userId = IdNormalizer.normalize(필수(entry, config.getUserIdAttribute()));
             if (DuplicateIdGuard.isDuplicate("직원 아이디", userId, entry.dn(), userDnById)) {
                 continue;
             }
@@ -116,7 +116,7 @@ public class DitStrategy implements LdapMappingStrategy {
                             entry.attribute(config.getUserIdAttribute())),
                     entry.attribute(config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(entry.adapter().getAttributes(), 지금)));
+                    !AdAccountStatus.막혔는가(entry.dn(), entry.adapter().getAttributes(), 지금)));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
@@ -140,6 +140,18 @@ public class DitStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             return new Entry(adapter.getDn().toString(), adapter);
         };
+    }
+
+    /**
+     * 식별 속성. 없으면 그 엔트리는 조직코드도 직원 아이디도 가질 수 없다 — 같은 디렉터리를 다시 읽어도 생기지
+     * 않으므로 재시도하지 않는 종류로 던진다.
+     */
+    private static String 필수(Entry entry, String 이름) {
+        String 값 = entry.attribute(이름);
+        if (값 == null || 값.isBlank()) {
+            throw new DirectoryDataException("필수 속성 '" + 이름 + "' 가 없습니다: dn=" + entry.dn());
+        }
+        return 값;
     }
 
     private static String firstNonBlank(String... candidates) {

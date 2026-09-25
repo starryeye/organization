@@ -12,7 +12,7 @@ package dev.starryeye.organization.ldap.strategy;
  * <p><b>재시도하지 않는다.</b> 같은 설정으로 다시 읽어도 같은 결과다
  * ({@code LdapDirectorySnapshotSource} 가 재시도에서 뺀다).
  */
-public class MemberMatchingFailedException extends RuntimeException {
+public class MemberMatchingFailedException extends DirectoryDataException {
 
     public MemberMatchingFailedException(String message) {
         super(message);
