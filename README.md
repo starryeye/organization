@@ -109,7 +109,13 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 결과만 돌려주며, 그 상태에서 일어나는 삭제는 조용히 권한을 남긴다.
 
 **S-1(SCIM 목록·필터)도 키를 바꾼다** — GSI1 정렬키가 소문자가 되고(`userName`·조직명을 대소문자 없이 찾기 위해)
-`externalId` 로 찾는 GSI3 와 책갈피 만료(TTL)가 생긴다. 기존 테이블은 다시 만들어야 한다.
+`externalId` 로 찾는 GSI3 가 생기고, 테이블 TTL(`expiresAt`)이 켜진다. 이 TTL 은 책갈피 전용이 아니다 —
+페이지 책갈피뿐 아니라 이미 `expiresAt` 을 갖고 있던 튜플 스냅샷·동기화 실행 이력·쓰기 락 아이템도 함께
+만료시킨다. 기존 테이블은 다시 만들어야 한다.
+
+직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
+GSI2(파티션키 `GSI1PK`, 정렬키 `displayName`, 프로젝션 `INCLUDE` — `userName`·`active`), GSI3(파티션키
+`externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
 
 | 서비스 | 주소 |
 |---|---|

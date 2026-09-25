@@ -49,7 +49,6 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String CREATED_AT = "createdAt";
     private static final String SOURCE = "source";
     private static final String TUPLE_COUNT = "tupleCount";
-    private static final String EXPIRES_AT = "expiresAt";
     private static final String SNAPSHOT_ID = "snapshotId";
 
     private final DynamoDbAsyncClient client;
@@ -88,7 +87,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)));
         item.put(Keys.SK, Attrs.s(Keys.tupleSk(tuple)));
-        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
         return item;
     }
 
@@ -101,7 +100,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
         item.put(SOURCE, Attrs.s(snapshot.source().name()));
         item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
-        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
         return putItem(item);
     }
 
@@ -207,7 +206,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     public Mono<Integer> purgeExpired() {
         long now = clock.instant().getEpochSecond();
         return snapshotIndexItems()
-                .filter(item -> Attrs.longValue(item, EXPIRES_AT) <= now)
+                .filter(item -> Attrs.longValue(item, Keys.EXPIRES_AT) <= now)
                 .map(item -> Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)))
                 .flatMap(id -> deleteSnapshot(id).thenReturn(1), DELETE_CONCURRENCY)
                 .reduce(0, Integer::sum)

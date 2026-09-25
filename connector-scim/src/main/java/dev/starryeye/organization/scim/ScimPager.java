@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import dev.starryeye.organization.core.query.ListingKind;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.PageBookmark;
+import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 import reactor.util.function.Tuple2;
 import reactor.util.function.Tuples;
@@ -17,6 +18,7 @@ import java.util.function.Supplier;
 /**
  * 페이지 자르기 (S-1 설계 §4.4). 필터 없는 목록은 책갈피로 이어 읽고, 필터 결과는 메모리에서 자른다.
  */
+@Slf4j
 final class ScimPager {
 
     record Slice<T>(List<T> items, long totalResults) {
@@ -42,7 +44,11 @@ final class ScimPager {
         }
         long start = query.startIndex();
         boolean descending = query.descending();
-        Mono<PageBookmark> bookmark = start == 1 ? Mono.empty() : bookmarks.find(kind, descending, start);
+        Mono<PageBookmark> bookmark = start == 1 ? Mono.empty() : bookmarks.find(kind, descending, start)
+                .onErrorResume(error -> {
+                    log.warn("책갈피 조회 실패 — 건너뛰기로 대신한다 (kind={}, startIndex={})", kind, start, error);
+                    return Mono.empty();
+                });
         Mono<Tuple2<Optional<String>, Long>> origin = bookmark
                 .map(found -> Tuples.of(Optional.of(found.position()), found.totalResults()))
                 .switchIfEmpty(Mono.defer(() -> Mono.zip(
@@ -58,6 +64,11 @@ final class ScimPager {
                         }
                         long next = start + page.items().size();
                         return bookmarks.save(kind, descending, next, new PageBookmark(page.nextCursor(), total))
+                                .onErrorResume(error -> {
+                                    log.warn("책갈피 저장 실패 — 이번 페이지는 그대로 돌려주고, 다음 페이지는 건너뛰기로 떨어진다"
+                                                    + " (kind={}, startIndex={})", kind, next, error);
+                                    return Mono.empty();
+                                })
                                 .thenReturn(slice);
                     });
         });

@@ -5,12 +5,14 @@ import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import dev.starryeye.organization.core.query.ListingKind;
 import dev.starryeye.organization.core.query.PageBookmark;
 import dev.starryeye.organization.scim.dto.ScimListResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -105,6 +107,40 @@ class ScimUserListingTest {
         // then
         assertThat(아이디들(page)).startsWith("u100").endsWith("u199");
         assertThat(query.calls).contains("skipUsers:100", "countUsers");
+    }
+
+    @Test
+    @DisplayName("책갈피 조회가 실패하면 건너뛰기로 대신하고 페이지는 그대로 준다")
+    void 책갈피_조회_실패는_건너뛰기로_대신한다() {
+        // given
+        직원들을_둔다(250);
+        ScimUserListing listingWithFailingFind =
+                new ScimUserListing(state, query, new FindFailingBookmarkRepository());
+
+        // when
+        ScimListResponse page = listingWithFailingFind.list(ScimQuery.of(ScimResourceType.USER, null, 101L, 100L,
+                null, null, null, null)).block();
+
+        // then
+        assertThat(아이디들(page)).startsWith("u100").endsWith("u199");
+        assertThat(query.calls).contains("skipUsers:100", "countUsers");
+    }
+
+    @Test
+    @DisplayName("책갈피 저장이 실패해도 이번 페이지는 그대로 돌려준다")
+    void 책갈피_저장_실패해도_페이지는_준다() {
+        // given
+        직원들을_둔다(250);
+        ScimUserListing listingWithFailingSave =
+                new ScimUserListing(state, query, new SaveFailingBookmarkRepository());
+
+        // when
+        ScimListResponse page = listingWithFailingSave.list(ScimQuery.of(ScimResourceType.USER, null, 1L, 100L,
+                null, null, null, null)).block();
+
+        // then
+        assertThat(page.resources()).hasSize(100);
+        assertThat(page.totalResults()).isEqualTo(250);
     }
 
     @Test
@@ -241,5 +277,31 @@ class ScimUserListingTest {
         JsonNode resource = page.resources().get(0);
         assertThat(resource.has("userName")).isTrue();
         assertThat(resource.has("displayName")).isFalse();
+    }
+
+    /** {@code find} 만 장애를 낸다 — 책갈피는 느릴 뿐 틀리지 않아야 한다. */
+    private static class FindFailingBookmarkRepository implements PageBookmarkRepository {
+        @Override
+        public Mono<PageBookmark> find(ListingKind kind, boolean descending, long startIndex) {
+            return Mono.error(new IllegalStateException("책갈피 저장소 장애"));
+        }
+
+        @Override
+        public Mono<Void> save(ListingKind kind, boolean descending, long startIndex, PageBookmark bookmark) {
+            return Mono.empty();
+        }
+    }
+
+    /** {@code save} 만 장애를 낸다 — 이번 페이지는 이미 다 읽었으니 그대로 돌려줘야 한다. */
+    private static class SaveFailingBookmarkRepository implements PageBookmarkRepository {
+        @Override
+        public Mono<PageBookmark> find(ListingKind kind, boolean descending, long startIndex) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<Void> save(ListingKind kind, boolean descending, long startIndex, PageBookmark bookmark) {
+            return Mono.error(new IllegalStateException("책갈피 저장소 장애"));
+        }
     }
 }

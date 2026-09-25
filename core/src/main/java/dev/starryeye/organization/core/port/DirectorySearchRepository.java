@@ -19,10 +19,23 @@ import reactor.core.publisher.Mono;
  */
 public interface DirectorySearchRepository {
 
+    /**
+     * {@code userName} 접두사 검색. <b>대소문자를 가리지 않는다</b> — GSI1 정렬키가 소문자라
+     * ({@code Keys#indexKey}) {@code prefix} 도 소문자·대문자 구분 없이 맞는다(RFC 7643
+     * {@code caseExact=false}).
+     */
     Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit);
 
+    /**
+     * 직원 {@code displayName} 접두사 검색. GSI2 정렬키가 속성값을 그대로 쓰므로
+     * <b>대소문자를 가린다</b> — {@link #searchUsersByUserName}·{@link #searchGroupsByDisplayName}
+     * 과 다르다.
+     */
     Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit);
 
+    /**
+     * 조직 {@code displayName} 접두사 검색. GSI1 정렬키가 소문자라 <b>대소문자를 가리지 않는다</b>.
+     */
     Mono<Page<GroupSummary>> searchGroupsByDisplayName(String prefix, String cursor, int limit);
 
     /**

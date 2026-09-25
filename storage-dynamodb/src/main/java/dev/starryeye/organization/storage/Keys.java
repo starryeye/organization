@@ -83,7 +83,12 @@ public final class Keys {
     /** SCIM 목록 책갈피 파티션 접두사 (S-1 설계 §5.3). */
     public static final String PAGE_PREFIX = "PAGE#";
 
-    /** 책갈피 만료 시각(epoch 초) 속성. 테이블 TTL 이 이 속성을 본다. */
+    /**
+     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피뿐 아니라 튜플 스냅샷, 동기화 실행
+     * 이력, 쓰기 락까지 이 한 속성을 공유한다 — 테이블 TTL 이 이 속성 하나만 보고 지운다.
+     * 이름을 바꾸면 넷 다 조용히 만료가 멈춘다({@link TableInitializer#createTable} 이 TTL 을
+     * 이 상수로 켜므로).
+     */
     public static final String EXPIRES_AT = "expiresAt";
 
     /** 전역 변경 락. 파티션 하나에 아이템 하나다 (설계 §4.2). */

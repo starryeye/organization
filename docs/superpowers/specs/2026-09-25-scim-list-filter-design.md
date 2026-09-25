@@ -103,7 +103,7 @@ compValue = JSON 문자열 / "true" / "false"
 ```
 startIndex=1         → COUNT 질의로 totalResults + 인덱스 처음부터 count 건 → 책갈피(1+count) 저장
 startIndex=N, 책갈피 있음 → 책갈피 위치부터 count 건 이어 읽기, totalResults 는 책갈피 값 → 책갈피(N+count) 저장
-startIndex=N, 책갈피 없음 → COUNT + 앞의 N-1건 건너뛰기(키만 읽음) + count 건 → 책갈피 저장
+startIndex=N, 책갈피 없음 → COUNT + 앞의 N-1건 건너뛰기(프로젝션으로 전송만 줄인다) + count 건 → 책갈피 저장
 ```
 
 - 책갈피 키는 `(리소스 종류, 정렬 방향, startIndex)` 다. `count` 는 키에 넣지 않는다 — 책갈피가 가리키는 것은
@@ -113,6 +113,8 @@ startIndex=N, 책갈피 없음 → COUNT + 앞의 N-1건 건너뛰기(키만 읽
   줄어도 반영하지 않는다 — RFC 7644 §3.4.2.4 는 페이지 요청 사이에 결과가 달라질 수 있음을 인정한다.
 - 책갈피가 없으면 건너뛰어서라도 **정확한** 페이지를 준다. 느릴 뿐 틀리지 않는다.
 - 내림차순은 DynamoDB 역방향 질의(`ScanIndexForward=false`)다.
+- **건너뛰기는 COUNT 만큼 싸지 않다.** 프로젝션은 네트워크로 나가는 양만 줄일 뿐, 읽기 용량과 1MB 페이지 한계는
+  속성을 다 읽을 때와 같다 — 건너뛰기 한 번의 비용은 사실상 COUNT 처럼 파티션 전체를 읽는 것과 같다.
 
 ### 4.5 `attributes` · `excludedAttributes` (RFC 7644 §3.9)
 
@@ -261,7 +263,7 @@ Mono<Void>         save(ListingKind kind, boolean descending, long startIndex, P
 | 조직 조회 + `excludedAttributes=members` | META 한 줄 |
 | 필터 없는 목록, 책갈피 있음 | 페이지당 `count` 건 + 책갈피 PutItem 1번 |
 | 필터 없는 목록, 첫 페이지 | COUNT(파티션 한 번, 약 40MB 분량, 1~2초) + `count` 건 |
-| 필터 없는 목록, 책갈피 없음 | COUNT + 건너뛰기 N-1건(키만) + `count` 건 |
+| 필터 없는 목록, 책갈피 없음 | COUNT + 건너뛰기 N-1건(프로젝션은 전송만 줄인다 — 읽기 용량은 COUNT 와 같은 파티션 전체) + `count` 건 |
 | Okta 가져오기 한 번 | 약 `2N` 아이템 읽기(40GB → 약 80MB) |
 | 조직 목록 + 멤버 | 페이지의 조직마다 파티션 1번. 가져오기 전체는 멤버십 총수에 선형 |
 | GSI3 쓰기 증폭 | `externalId` 가 있는 아이템 쓰기마다 KEYS_ONLY 인덱스 쓰기 1번 |
@@ -311,6 +313,8 @@ DynamoDB 에 두는 것과 같은 이유로 DynamoDB 에 둔다.
 - **GSI 는 최종 일관성이다.** 막 만든 직원을 직후 수 ms 안에 `userName`·`externalId` 필터로 못 찾을 수 있다. IdP 가
   다시 생성하려 해도 `id` 중복은 강한 일관성 GetItem 으로 걸린다 — 빠지는 것은 "대소문자만 다른 `userName` 을 수 ms
   안에 연달아 생성" 뿐이다.
+- `userName`·`displayName` 필터 결과는 GSI1(ALL 프로젝션)의 값이라 쓰기 직후 잠깐 낡은 속성을 돌려줄 수 있다
+  (`externalId` 는 본 테이블을 다시 읽는다). `and` 뒤 조건 확인도 그 값으로 한다. 곧 맞춰진다.
 - **`totalResults` 는 가져오기 시작 시점의 값이다**(§4.4). 표준이 허용한다.
 - **`externalId` 가 2,048바이트를 넘으면 쓰기가 실패한다** — DynamoDB 인덱스 파티션키 한계. LDAP 은 DN 이
   `externalId` 라 그 길이의 DN 이 있으면 동기화 회차가 실패한다.

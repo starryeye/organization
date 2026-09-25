@@ -16,7 +16,9 @@ public interface DirectoryStateRepository {
     Mono<DirectoryUser> findUser(String userId);
 
     /**
-     * {@code userName} 으로 직원 아이디를 찾는다.
+     * {@code userName} 으로 직원 아이디를 찾는다. <b>대소문자를 가리지 않는다</b> — RFC 7643 은
+     * {@code userName} 을 {@code caseExact=false} 로 정한다. SCIM 생성의 409 중복 판정이 이 성질에
+     * 기댄다: 대소문자만 다른 {@code userName} 으로 다시 만들려 하면 여기서 걸려야 한다.
      *
      * <p>{@link DirectoryUser#id()} 는 생성 시점의 {@code userName} 에서 파생되고 그 뒤의
      * {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은 {@code id} 다). 그래서 이름이

@@ -169,7 +169,7 @@ class TableInitializerTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("테이블을 만들 때 책갈피 만료(TTL)를 켠다")
+    @DisplayName("테이블을 만들 때 테이블 TTL(expiresAt)을 켠다")
     void TTL_을_켠다() {
         // when
         var ttl = client.describeTimeToLive(DescribeTimeToLiveRequest.builder()
