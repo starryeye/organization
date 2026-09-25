@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.regex.Matcher;
@@ -159,6 +160,9 @@ public final class ScimPatchApplier {
     private static final Pattern EMAIL_FILTER = Pattern.compile(
             "^emails\\[\\s*type\\s+eq\\s+\"(?<type>[^\"]*)\"\\s*](?<value>\\.value)?$", Pattern.CASE_INSENSITIVE);
 
+    /** 코어 스키마 URN 접두(RFC 7643 §3.10) — path·경로 없는 값의 키 모두에서 대소문자 없이 뗀다(F1). */
+    private static final String CORE_USER_URN = "urn:ietf:params:scim:schemas:core:2.0:user:";
+
     /** {@code name} 의 하위 속성 여섯. 키는 소문자. */
     private static final Map<String, BiFunction<PersonName, String, PersonName>> NAME_PARTS = Map.of(
             "formatted", PersonName::withFormatted,
@@ -174,13 +178,26 @@ public final class ScimPatchApplier {
 
         if (path == null || path.isBlank()) {
             requireReplaceOrAdd(op, operation.op());
-            return mergeUserAttributes(user, asAttributeMap(operation.value()));
+            return mergeUserAttributes(op, user, asAttributeMap(operation.value()));
         }
 
-        String target = path.trim();
+        return applyPath(user, op, path.trim(), operation.value())
+                .orElseThrow(() -> ScimException.invalidPath("지원하지 않는 path 입니다: " + path));
+    }
+
+    /**
+     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 몰라서 못 적용하면
+     * {@link Optional#empty()}. path 형식은 이를 400 {@code invalidPath} 로 바꾸고, 경로 없는 값은
+     * 그 키를 무시하고 원래 값을 지킨다(§7.3).
+     */
+    private static Optional<DirectoryUser> applyPath(DirectoryUser user, String op, String path, Object value) {
+        String target = stripCoreUrn(path);
         Matcher email = EMAIL_FILTER.matcher(target);
         if (email.matches()) {
-            return applyWorkEmail(user, op, operation, email, path);
+            if (!email.group("type").equalsIgnoreCase("work")) {
+                return Optional.empty();
+            }
+            return Optional.of(applyWorkEmail(user, op, value, email, path));
         }
 
         boolean remove = op.equals("remove");
@@ -188,65 +205,67 @@ public final class ScimPatchApplier {
         if (lower.startsWith("name.")) {
             BiFunction<PersonName, String, PersonName> part = NAME_PARTS.get(lower.substring("name.".length()));
             if (part == null) {
-                throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+                return Optional.empty();
             }
-            return user.withName(part.apply(user.name(), remove ? null : asString(operation.value())));
+            return Optional.of(user.withName(part.apply(user.name(), remove ? null : asString(value))));
         }
         return switch (lower) {
-            case "username" -> {
-                if (remove) {
-                    throw ScimException.mutability("userName 은 필수라 지울 수 없습니다");
-                }
-                yield user.withUserName(asString(operation.value()));
-            }
-            case "displayname" -> user.withDisplayName(remove ? null : asString(operation.value()));
-            case "externalid" -> user.withExternalId(remove ? null : asString(operation.value()));
+            case "username" -> Optional.of(applyUserName(user, remove, value));
+            case "displayname" -> Optional.of(user.withDisplayName(remove ? null : asString(value)));
+            case "externalid" -> Optional.of(user.withExternalId(remove ? null : asString(value)));
             // active 가 없으면 활성이다 — POST 에 active 가 없을 때와 같은 규칙
-            case "active" -> user.withActive(remove || asBoolean(operation.value()));
-            case "name" -> user.withName(remove ? PersonName.EMPTY : mergeName(user.name(), asAttributeMap(operation.value())));
-            case "emails" -> user.withEmail(remove ? null : primaryEmail(operation.value()));
-            default -> throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+            case "active" -> Optional.of(user.withActive(remove || asBoolean(value)));
+            case "name" -> Optional.of(user.withName(remove ? PersonName.EMPTY : mergeName(user.name(), asAttributeMap(value))));
+            case "emails" -> Optional.of(user.withEmail(remove ? null : primaryEmail(value)));
+            default -> Optional.empty();
         };
     }
 
-    /** RFC 7644 §3.5.2.3 — 이메일이 없는데 replace 하면 가리킬 값이 없다. add 는 새로 담는다. */
-    private static DirectoryUser applyWorkEmail(DirectoryUser user, String op, ScimOperation operation,
-                                                Matcher filter, String path) {
-        if (!filter.group("type").equalsIgnoreCase("work")) {
-            throw ScimException.invalidPath("이메일은 type \"work\" 하나만 담습니다: " + path);
+    /** {@code userName} remove 는 필수 속성이라 400 {@code mutability}, 빈 값은 400 {@code invalidValue}(F3, RFC 7644 §3.12). */
+    private static DirectoryUser applyUserName(DirectoryUser user, boolean remove, Object value) {
+        if (remove) {
+            throw ScimException.mutability("userName 은 필수라 지울 수 없습니다");
         }
+        String userName = asString(value);
+        if (userName == null || userName.isBlank()) {
+            throw ScimException.invalidValue("userName 은 필수입니다 — 빈 값으로 바꿀 수 없습니다");
+        }
+        return user.withUserName(userName);
+    }
+
+    /** 코어 스키마 URN 접두를 대소문자 없이 뗀다(F1) — 확장 스키마(enterprise 등) 접두는 그대로 두어 모르는 경로가 된다. */
+    private static String stripCoreUrn(String path) {
+        if (path.length() > CORE_USER_URN.length()
+                && path.substring(0, CORE_USER_URN.length()).equalsIgnoreCase(CORE_USER_URN)) {
+            return path.substring(CORE_USER_URN.length());
+        }
+        return path;
+    }
+
+    /** RFC 7644 §3.5.2.3 — 이메일이 없는데 replace 하면 가리킬 값이 없다. add 는 새로 담는다. */
+    private static DirectoryUser applyWorkEmail(DirectoryUser user, String op, Object value,
+                                                Matcher filter, String path) {
         if (op.equals("remove")) {
             return user.withEmail(null);
         }
         if (op.equals("replace") && user.email() == null) {
             throw ScimException.noTarget("바꿀 work 이메일이 없습니다: " + path);
         }
-        String value = filter.group("value") != null
-                ? asString(operation.value())
-                : asString(attribute(asAttributeMap(operation.value()), "value"));
-        return user.withEmail(value);
+        String resolved = filter.group("value") != null
+                ? asString(value)
+                : asString(attribute(asAttributeMap(value), "value"));
+        return user.withEmail(resolved);
     }
 
-    /** 경로 없는 add/replace — 우리가 저장하는 속성 전부를 반영한다. 모르는 키는 POST 처럼 무시한다. */
-    private static DirectoryUser mergeUserAttributes(DirectoryUser user, Map<String, Object> attributes) {
+    /**
+     * 경로 없는 add/replace — 값 객체의 키마다 {@code (op, path=키, value=값)} 연산 하나로 보고
+     * {@link #applyPath} 로 적용한다(F1). 모르는 키(저장하지 않는 속성)는 무시한다(§7.3). Jackson 은
+     * 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
+     */
+    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes) {
         DirectoryUser merged = user;
-        if (has(attributes, "userName")) {
-            merged = merged.withUserName(asString(attribute(attributes, "userName")));
-        }
-        if (has(attributes, "displayName")) {
-            merged = merged.withDisplayName(asString(attribute(attributes, "displayName")));
-        }
-        if (has(attributes, "externalId")) {
-            merged = merged.withExternalId(asString(attribute(attributes, "externalId")));
-        }
-        if (has(attributes, "active")) {
-            merged = merged.withActive(asBoolean(attribute(attributes, "active")));
-        }
-        if (has(attributes, "name")) {
-            merged = merged.withName(mergeName(merged.name(), asAttributeMap(attribute(attributes, "name"))));
-        }
-        if (has(attributes, "emails")) {
-            merged = merged.withEmail(primaryEmail(attribute(attributes, "emails")));
+        for (Map.Entry<String, Object> entry : attributes.entrySet()) {
+            merged = applyPath(merged, op, entry.getKey(), entry.getValue()).orElse(merged);
         }
         return merged;
     }
@@ -309,7 +328,7 @@ public final class ScimPatchApplier {
         if (op == null || op.isBlank()) {
             throw ScimException.invalidSyntax("op 가 비어 있습니다");
         }
-        return op.trim().toLowerCase(java.util.Locale.ROOT);
+        return op.trim().toLowerCase(Locale.ROOT);
     }
 
     private static void requireReplaceOrAdd(String normalizedOp, String originalOp) {
@@ -335,16 +354,18 @@ public final class ScimPatchApplier {
                 .map(members -> members);
     }
 
+    @SuppressWarnings("unchecked")
     private static Mono<MemberRef> memberRef(Object element, MemberTypeResolver resolver) {
-        if (!(element instanceof Map<?, ?> map)) {
+        if (!(element instanceof Map<?, ?> rawMap)) {
             return Mono.error(ScimException.invalidSyntax("members 원소는 객체여야 합니다"));
         }
-        Object rawId = map.get("value");
+        Map<String, Object> map = (Map<String, Object>) rawMap;
+        Object rawId = attribute(map, "value");
         if (rawId == null || rawId.toString().isBlank()) {
             return Mono.error(ScimException.invalidSyntax("members 원소에 value 가 없습니다"));
         }
         String id = IdNormalizer.normalize(rawId.toString());
-        Object type = map.get("type");
+        Object type = attribute(map, "type");
         // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고 현재상태로 판정한다.
         if (type == null || type.toString().isBlank()) {
             return resolver.resolve(id).map(resolved -> new MemberRef(resolved, id));

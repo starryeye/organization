@@ -121,4 +121,29 @@ class ScimNameEndToEndTest {
                 .exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.name.givenName").isEqualTo("길동");
     }
+
+    @Test
+    @Order(4)
+    @DisplayName("Entra 표준 호환 모드(aadOptscim062020) 식 PATCH — 경로 없는 값의 점 표기 키도 반영된다")
+    void Entra_표준_호환_모드_식_PATCH() {
+        client.patch().uri("/scim/v2/Users/hong@example.com")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","value":{
+                           "displayName":"새이름",
+                           "name.givenName":"새길동",
+                           "name.familyName":"새성",
+                           "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber":"E123"}}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk();
+
+        client.get().uri("/scim/v2/Users/hong@example.com")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.displayName").isEqualTo("새이름")
+                .jsonPath("$.name.givenName").isEqualTo("새길동")
+                .jsonPath("$.name.familyName").isEqualTo("새성");
+    }
 }

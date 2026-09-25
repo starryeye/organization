@@ -12,6 +12,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -464,5 +466,119 @@ class ScimPatchApplierTest {
         assertThat(추가.members()).contains(MemberRef.user("park"));
         assertThat(제거.members()).containsExactly(MemberRef.user("kim"));
         assertThat(이름.displayName()).isEqualTo("새 팀");
+    }
+
+    // ---------- F1: 경로 없는 값 키도 path 와 같은 해석기로 푼다 ----------
+
+    @Test
+    @DisplayName("Entra 표준 호환 모드(aadOptscim062020) — 경로 없는 값의 점 표기 키도 path 와 같은 해석기로 푼다")
+    void Entra_표준_호환_모드_경로_없는_값() {
+        // given — 이름 변경을 경로 없이 점 표기 키로 보낸다. employeeNumber 는 우리가 저장하지 않는 속성이다.
+        Map<String, Object> 값 = new LinkedHashMap<>();
+        값.put("displayName", "Bjfe");
+        값.put("name.givenName", "Kkom");
+        값.put("name.familyName", "Unua");
+        값.put("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber", "Aklq");
+
+        // when
+        DirectoryUser after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치("replace", null, 값));
+
+        // then — employeeNumber 는 조용히 무시되고 예외도 없다
+        assertThat(after.displayName()).isEqualTo("Bjfe");
+        assertThat(after.name().givenName()).isEqualTo("Kkom");
+        assertThat(after.name().familyName()).isEqualTo("Unua");
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 emails[type eq \"work\"].value 키도 반영된다")
+    void 경로_없는_값의_이메일_필터_키() {
+        // when
+        DirectoryUser after = ScimPatchApplier.applyToUser(이름있는_직원(),
+                패치("replace", null, Map.of("emails[type eq \"work\"].value", "a@x")));
+
+        // then
+        assertThat(after.email()).isEqualTo("a@x");
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 모르는 name 하위 키(name.nickName)는 무시하고 나머지 키는 반영한다")
+    void 경로_없는_값의_모르는_name_하위_키는_무시한다() {
+        // given
+        Map<String, Object> 값 = new LinkedHashMap<>();
+        값.put("name.nickName", "x");
+        값.put("displayName", "새이름");
+
+        // when
+        DirectoryUser after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치("replace", null, 값));
+
+        // then
+        assertThat(after.displayName()).isEqualTo("새이름");
+        assertThat(after.name()).isEqualTo(홍길동);
+    }
+
+    @Test
+    @DisplayName("path 의 코어 스키마 URN 접두는 대소문자 없이 떼고 해석한다")
+    void path_코어_URN_접두를_뗀다() {
+        // when
+        DirectoryUser after = ScimPatchApplier.applyToUser(이름있는_직원(),
+                패치("replace", "URN:ietf:params:scim:schemas:Core:2.0:User:name.givenName", "길순"));
+
+        // then
+        assertThat(after.name().givenName()).isEqualTo("길순");
+    }
+
+    @Test
+    @DisplayName("확장 스키마 URN 이 붙은 path 는 모르는 경로라 400 invalidPath 다")
+    void 확장_스키마_URN_path는_invalidPath() {
+        거절한다(패치("replace",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber", "Aklq"),
+                "invalidPath");
+    }
+
+    // ---------- F3: 빈 userName ----------
+
+    @Test
+    @DisplayName("빈 userName 으로 add/replace 하면 400 invalidValue 다 — path·경로 없는 값 모두")
+    void 빈_userName은_invalidValue() {
+        // path 형식
+        거절한다(패치("replace", "userName", ""), "invalidValue");
+
+        // 경로 없는 값 형식 — Map.of 는 null 값을 못 담아 HashMap 을 쓴다
+        Map<String, Object> 값 = new HashMap<>();
+        값.put("userName", null);
+        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(이름있는_직원(), 패치("replace", null, 값)))
+                .isInstanceOfSatisfying(ScimException.class,
+                        e -> assertThat(e.getScimType()).isEqualTo("invalidValue"));
+    }
+
+    // ---------- F4: 멤버 객체 키도 대소문자 무시 ----------
+
+    @Test
+    @DisplayName("멤버 객체의 키(value·type)도 대소문자를 가리지 않는다")
+    void 멤버_객체_키도_대소문자를_가리지_않는다() {
+        // given
+        var before = 조직();
+
+        // when
+        var after = ScimPatchApplier.applyToGroup(before,
+                패치("add", "members", List.of(Map.of("VALUE", "u1", "Type", "User"))), USER_ONLY).block();
+
+        // then
+        assertThat(after.members()).containsExactly(MemberRef.user("u1"));
+    }
+
+    // ---------- F8: 테스트 빈틈 ----------
+
+    @Test
+    @DisplayName("맨 emails[type eq \"work\"] 필터(.value 없이)도 이메일이 없으면 replace 가 400 noTarget 이다")
+    void 맨_이메일_필터도_이메일_없으면_noTarget() {
+        // given
+        DirectoryUser 메일없음 = 이름있는_직원().withEmail(null);
+
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(메일없음,
+                패치("replace", "emails[type eq \"work\"]", Map.of("value", "a@x.com", "type", "work"))))
+                .isInstanceOfSatisfying(ScimException.class,
+                        e -> assertThat(e.getScimType()).isEqualTo("noTarget"));
     }
 }
