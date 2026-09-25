@@ -19,9 +19,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -205,7 +207,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // given — QUERY_CONCURRENCY(8)를 훌쩍 넘는 24개 조직에 같은 멤버를 넣어야 확인
         // GetItem 이 항상 동시에 여러 건 떠서, 완료 순서가 삽입/정렬 순서와 우연히 같을
         // 가능성이 사실상 없다. 삽입은 정렬키 순서(오름차순)와 반대로 한다.
-        List<String> 정렬키_오름차순 = java.util.stream.IntStream.rangeClosed(1, 24)
+        List<String> 정렬키_오름차순 = IntStream.rangeClosed(1, 24)
                 .mapToObj(i -> String.format("DEV%03d", i))
                 .toList();
         for (int i = 정렬키_오름차순.size() - 1; i >= 0; i--) {
@@ -698,5 +700,99 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(counter.puts()).isZero();
+    }
+
+    /** 직원 n명(u000…)과 조직 셋 — 조직 G1 은 u000·u001, G2 는 이름 없는 조직, G3 은 멤버 없는 조직. */
+    private static DirectorySnapshot 조직도(int n) {
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            String id = "u%03d".formatted(i);
+            users.put(id, new DirectoryUser(id, "ext-" + id, id, "직원 " + i, i % 2 == 0 ? null : id + "@example.com", true));
+        }
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        groups.put("G1", new DirectoryGroup("G1", "g1", "개발팀", Set.of(MemberRef.user("u000"), MemberRef.user("u001"))));
+        groups.put("G2", new DirectoryGroup("G2", "g2", null, Set.of(MemberRef.user("u002"))));
+        groups.put("G3", new DirectoryGroup("G3", "g3", "빈 조직", Set.of()));
+        return new DirectorySnapshot(users, groups);
+    }
+
+    @Test
+    @DisplayName("같은 조직도로 전체 교체를 다시 하면 아무것도 쓰지 않는다")
+    void 같은_조직도는_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        세는.replaceWith(조직도(50)).block();
+        counter.reset();
+
+        // when
+        세는.replaceWith(조직도(50)).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
+
+    @Test
+    @DisplayName("일부만 바뀌면 그만큼만 쓰고 그것만 updatedAt 이 바뀐다")
+    void 바뀐_만큼만_쓴다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        세는.replaceWith(조직도(50)).block();
+        counter.reset();
+        clock.앞으로(Duration.ofHours(1));
+
+        DirectorySnapshot 바뀐 = 조직도(50);
+        Map<String, DirectoryUser> users = new LinkedHashMap<>(바뀐.users());
+        for (int i = 10; i < 15; i++) {
+            String id = "u%03d".formatted(i);
+            users.put(id, new DirectoryUser(id, "ext-" + id, id, "이름 바뀜 " + i, null, true));
+        }
+        users.put("new", new DirectoryUser("new", "ext-new", "new", "새 직원", null, true));
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>(바뀐.groups());
+        groups.put("G3", new DirectoryGroup("G3", "g3", "빈 조직", Set.of(MemberRef.user("u003"))));
+
+        // when
+        세는.replaceWith(new DirectorySnapshot(users, groups)).block();
+
+        // then — 직원 5명 + 새 직원 1명 + 조직 G3 (META 1 + 소속 줄 1 + 멤버 줄 1)
+        assertThat(counter.puts()).isEqualTo(5 + 1 + 3);
+        assertThat(updatedAt(Keys.userPk("u010"))).isEqualTo("2026-01-01T01:00:00Z");
+        assertThat(updatedAt(Keys.userPk("u020"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("G3"))).isEqualTo("2026-01-01T01:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("G1"))).isEqualTo("2026-01-01T00:00:00Z");
+    }
+
+    @Test
+    @DisplayName("전체 교체에서도 키가 예전 규칙인 저장본은 값이 같아도 다시 쓴다")
+    void 전체_교체도_예전_키를_고친다() {
+        // given
+        DirectorySnapshot 조직도 = 조직도(3);
+        repository.replaceWith(조직도).block();
+        Map<String, AttributeValue> 예전 = new HashMap<>(meta(Keys.userPk("u001")));
+        예전.put(Keys.GSI1SK, Attrs.s("U001"));
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(예전).build()).join();
+
+        // when
+        repository.replaceWith(조직도).block();
+
+        // then
+        assertThat(meta(Keys.userPk("u001")).get(Keys.GSI1SK).s()).isEqualTo("u001");
+    }
+
+    @Test
+    @DisplayName("전체 교체는 직원·조직마다 저장본을 따로 읽지 않는다 — GSI1 을 훑은 결과로 비교한다")
+    void 전체_교체는_하나씩_읽지_않는다() {
+        // given
+        GetCounter gets = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(gets.wrap(client), properties, clock);
+        세는.replaceWith(조직도(50)).block();
+        gets.reset();
+
+        // when
+        세는.replaceWith(조직도(50)).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
     }
 }

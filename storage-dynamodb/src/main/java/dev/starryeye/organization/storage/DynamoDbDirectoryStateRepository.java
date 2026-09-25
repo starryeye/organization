@@ -448,27 +448,56 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 전체 ----------
 
+    /**
+     * LDAP 전체 동기화·재적재. 삭제 판단 때문에 원래 GSI1 을 훑던 조회에서 <b>저장본을 함께</b> 받아(GSI1 은 ALL
+     * 프로젝션이라 더 읽지 않는다) 비교하고, 새로 생기거나 바뀐 것만 쓴다(GSI 설계 §4).
+     *
+     * <p><b>비교 기준이 최종 일관성 인덱스다.</b> 이 메서드에 내용을 넣어 부르는 것은 LDAP 의 전체 동기화와 재적재뿐이고,
+     * LDAP 앱에는 그와 동시에 직원·조직을 쓰는 경로가 없다 — 인덱스는 이전 회차 뒤로 이미 맞춰져 있다. 늦은 인덱스가 부를
+     * 수 있는 일은 "같은데 다르다고 보고 한 번 더 쓰기" 로, 무해하다.
+     */
     @Override
     public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
-        Mono<Void> removeStaleUsers = enumerateIds(Keys.USER_INDEX, Keys::parseUserPk)
-                .filter(id -> !snapshot.users().containsKey(id))
-                .flatMap(this::deleteUser, QUERY_CONCURRENCY)
-                .then();
+        return Mono.zip(
+                        storedIndex(Keys.USER_INDEX, this::storedUser, DirectoryUser::id),
+                        storedIndex(Keys.GROUP_INDEX, this::storedGroup, GroupHeader::id))
+                .flatMap(stored -> {
+                    Map<String, Stored<DirectoryUser>> users = stored.getT1();
+                    Map<String, Stored<GroupHeader>> groups = stored.getT2();
 
-        Mono<Void> removeStaleGroups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
-                .filter(id -> !snapshot.groups().containsKey(id))
-                .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
-                .then();
+                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
+                            .filter(id -> !snapshot.users().containsKey(id))
+                            .flatMap(this::deleteUser, QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
+                            .filter(id -> !snapshot.groups().containsKey(id))
+                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
+                            .flatMap(user -> writeUser(user, users.get(user.id())), QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
+                            .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
+                            .then();
 
-        Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
-                .flatMap(this::saveUser, QUERY_CONCURRENCY)
-                .then();
+                    return removeStaleUsers.then(removeStaleGroups).then(upsertUsers).then(upsertGroups);
+                });
+    }
 
-        Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
-                .flatMap(this::saveGroup, QUERY_CONCURRENCY)
-                .then();
-
-        return removeStaleUsers.then(removeStaleGroups).then(upsertUsers).then(upsertGroups);
+    /** GSI1 파티션 하나를 훑어 id → 저장본. 삭제 판단과 변경 비교를 한 번의 조회로 한다. */
+    private <T> Mono<Map<String, Stored<T>>> storedIndex(String indexPartition,
+                                                        Function<Map<String, AttributeValue>, Stored<T>> toStored,
+                                                        Function<T, String> idOf) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(indexPartition)))
+                .build();
+        return Paginator.queryAll(client, request)
+                .map(toStored)
+                .collectMap(stored -> idOf.apply(stored.value()), stored -> stored);
     }
 
     @Override
