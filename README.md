@@ -319,7 +319,8 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | User | `userName` | `replace` / `add` (`remove` 는 400 `mutability` — 필수 속성) |
 | User | `displayName` / `externalId` / `active` | `replace` / `add` / `remove`(비움. `active` 는 "없음" = 활성) |
 | User | `name`, `name.givenName`·`familyName`·`middleName`·`formatted`·`honorificPrefix`·`honorificSuffix` | `replace` / `add`(`name` 은 준 하위 속성만 바꿈) / `remove` |
-| User | `emails` / `emails[type eq "work"]` / `emails[type eq "work"].value` | `replace` / `add` / `remove` — 이메일이 없는데 `replace` 하면 400 `noTarget` |
+| User | `emails` | `replace` / `add`(목록 중 primary, 없으면 첫째를 이메일로) / `remove`(비움) |
+| User | `emails[type eq "work"]` / `emails[type eq "work"].value` | `add` / `replace`(이메일이 없으면 400 `noTarget`) / `remove`(비움) |
 | User | (path 없음) | `replace` / `add` — 위 속성 전부를 병합 |
 
 그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
