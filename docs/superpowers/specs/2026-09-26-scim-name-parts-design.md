@@ -92,11 +92,15 @@ op(`add`/`replace`/`remove`)는 지금처럼 대소문자를 가리지 않는다
 | `emails[type eq "work"].value` | `add`: 설정. `replace`: 이메일이 있으면 설정, 없으면 400 `noTarget`(RFC 7644 §3.5.2.3) | 비움 |
 | `emails[type eq "work"]` | 값 객체의 `value` 로 위와 같다 | 비움 |
 | 그 밖의 필터(`type eq "home"` 등), 그 밖의 경로 | 400 `invalidPath` | 같음 |
+| `userName` 값이 null·빈 문자열·공백만 | 400 `invalidValue`(RFC 7644 §3.12 "required value was missing") | (해당 없음 — remove 는 위 `mutability`) |
 
 - 우리는 이메일을 하나만 담고 `type: "work"` 로 내보낸다 — 그래서 값 경로 필터는 `type eq "work"` 하나만 받는다. 필터의 `eq` 와
   `"work"` 비교는 대소문자를 가리지 않는다(`type` 은 RFC 7643 에서 `caseExact=false`).
-- **경로 없는 PATCH**(값 객체 병합, `add`/`replace`)도 같은 속성을 모두 반영한다: `userName`, `displayName`, `active`,
-  `externalId`, `name`(하위 속성 병합), `emails`(목록 규칙). 값 객체의 키 이름도 대소문자를 가리지 않는다.
+- **경로 없는 PATCH**(값 객체 병합, `add`/`replace`)는 값 객체의 키 하나하나를 `path` 와 **같은 해석기**로 푼다 — `name.givenName`,
+  `emails[type eq "work"].value` 같은 점 표기·필터 키까지 그대로 받는다(Entra 표준 호환 모드 `aadOptscim062020` 이 이 모양으로
+  보낸다). path 의 코어 스키마 URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`)도 대소문자 없이 떼고 같은 해석기를 태운다.
+  해석기가 모르는 키는 §7.3 대로 조용히 무시한다 — path 형식에서만 모르는 경로가 400 `invalidPath` 다. 값 객체의 키 이름도
+  대소문자를 가리지 않는다.
 - 여러 연산은 순서대로 적용하고, 하나라도 실패하면 요청 전체가 실패하고 아무것도 반영되지 않는다(지금과 같다).
 
 ### 7.3 우리가 저장하지 않는 속성
