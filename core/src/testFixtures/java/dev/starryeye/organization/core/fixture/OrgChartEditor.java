@@ -77,8 +77,7 @@ public final class OrgChartEditor {
 
     public OrgChartEditor 직원속성을_바꾼다(String userId, String 표시명, String 메일) {
         DirectoryUser 원본 = require(users.get(userId), "직원", userId);
-        users.put(userId, new DirectoryUser(원본.id(), 원본.externalId(), 원본.userName(),
-                표시명, 메일, 원본.active()));
+        users.put(userId, 원본.withDisplayName(표시명).withEmail(메일));
         return this;
     }
 
@@ -111,8 +110,7 @@ public final class OrgChartEditor {
 
     private OrgChartEditor 활성을_바꾼다(String userId, boolean active) {
         DirectoryUser 원본직원 = require(users.get(userId), "직원", userId);
-        users.put(userId, new DirectoryUser(원본직원.id(), 원본직원.externalId(), 원본직원.userName(),
-                원본직원.displayName(), 원본직원.email(), active));
+        users.put(userId, 원본직원.withActive(active));
         return this;
     }
 
