@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
@@ -12,24 +13,26 @@ import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * SCIM PATCH 연산을 도메인 객체에 적용한다.
  *
- * <p>설계 §10.1 이 정한 여섯 가지 형태만 지원한다. 일반적인 SCIM 필터 문법 파서는 만들지 않는다.
- * 지원하지 않는 path 는 조용히 무시하지 않고 거절한다 — IdP 는 2xx 를 받으면 반영됐다고 믿고
- * 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다.
+ * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName(S-3 설계 §7.2). 속성 이름은
+ * 대소문자를 가리지 않는다. 지원하지 않는 path 는 조용히 무시하지 않고 거절한다 — IdP 는 2xx 를
+ * 받으면 반영됐다고 믿고 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다.
  */
 @Slf4j
 public final class ScimPatchApplier {
 
     /** {@code members[value eq "kim"]} 한 가지 패턴만 인식한다. 따옴표는 큰/작은 둘 다 받는다. */
-    private static final Pattern MEMBER_VALUE_FILTER =
-            Pattern.compile("^members\\[\\s*value\\s+eq\\s+[\"'](?<value>[^\"']+)[\"']\\s*]$");
+    private static final Pattern MEMBER_VALUE_FILTER = Pattern.compile(
+            "^members\\[\\s*value\\s+eq\\s+[\"'](?<value>[^\"']+)[\"']\\s*]$", Pattern.CASE_INSENSITIVE);
 
     private ScimPatchApplier() {
     }
@@ -83,7 +86,7 @@ public final class ScimPatchApplier {
             return removeMemberById(group, IdNormalizer.normalize(filter.group("value")), resolver);
         }
 
-        if (path.trim().equals("members")) {
+        if (path.trim().equalsIgnoreCase("members")) {
             return switch (op) {
                 case "add" -> toMemberRefs(operation.value(), resolver).map(added -> {
                     Set<MemberRef> members = new LinkedHashSet<>(group.members());
@@ -97,7 +100,7 @@ public final class ScimPatchApplier {
             };
         }
 
-        if (path.trim().equals("displayName")) {
+        if (path.trim().equalsIgnoreCase("displayName")) {
             requireReplaceOrAdd(op, operation.op());
             return Mono.just(new DirectoryGroup(group.id(), group.externalId(),
                     asString(operation.value()), group.members()));
@@ -136,11 +139,11 @@ public final class ScimPatchApplier {
     private static Mono<DirectoryGroup> mergeGroupAttributes(DirectoryGroup group,
                                                              Map<String, Object> attributes,
                                                              MemberTypeResolver resolver) {
-        String displayName = attributes.containsKey("displayName")
-                ? asString(attributes.get("displayName"))
+        String displayName = has(attributes, "displayName")
+                ? asString(attribute(attributes, "displayName"))
                 : group.displayName();
-        Mono<Set<MemberRef>> members = attributes.containsKey("members")
-                ? toMemberRefs(attributes.get("members"), resolver)
+        Mono<Set<MemberRef>> members = has(attributes, "members")
+                ? toMemberRefs(attribute(attributes, "members"), resolver)
                 : Mono.just(group.members());
         return members.map(resolved ->
                 new DirectoryGroup(group.id(), group.externalId(), displayName, resolved));
@@ -152,8 +155,21 @@ public final class ScimPatchApplier {
 
     // ---------- 직원 ----------
 
+    /** {@code emails[type eq "work"]} 와 {@code .value} — 우리는 이메일을 하나만 담고 type "work" 로 내보낸다. */
+    private static final Pattern EMAIL_FILTER = Pattern.compile(
+            "^emails\\[\\s*type\\s+eq\\s+\"(?<type>[^\"]*)\"\\s*](?<value>\\.value)?$", Pattern.CASE_INSENSITIVE);
+
+    /** {@code name} 의 하위 속성 여섯. 키는 소문자. */
+    private static final Map<String, BiFunction<PersonName, String, PersonName>> NAME_PARTS = Map.of(
+            "formatted", PersonName::withFormatted,
+            "familyname", PersonName::withFamilyName,
+            "givenname", PersonName::withGivenName,
+            "middlename", PersonName::withMiddleName,
+            "honorificprefix", PersonName::withHonorificPrefix,
+            "honorificsuffix", PersonName::withHonorificSuffix);
+
     private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation) {
-        String op = normalizeOp(operation.op());
+        String op = requireKnownOp(operation.op());
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
@@ -161,26 +177,130 @@ public final class ScimPatchApplier {
             return mergeUserAttributes(user, asAttributeMap(operation.value()));
         }
 
-        requireReplaceOrAdd(op, operation.op());
-        return switch (path.trim()) {
-            case "active" -> new DirectoryUser(user.id(), user.externalId(), user.userName(),
-                    user.displayName(), user.email(), asBoolean(operation.value()));
-            case "displayName" -> new DirectoryUser(user.id(), user.externalId(), user.userName(),
-                    asString(operation.value()), user.email(), user.active());
-            case "userName" -> new DirectoryUser(user.id(), user.externalId(),
-                    asString(operation.value()), user.displayName(), user.email(), user.active());
+        String target = path.trim();
+        Matcher email = EMAIL_FILTER.matcher(target);
+        if (email.matches()) {
+            return applyWorkEmail(user, op, operation, email, path);
+        }
+
+        boolean remove = op.equals("remove");
+        String lower = target.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("name.")) {
+            BiFunction<PersonName, String, PersonName> part = NAME_PARTS.get(lower.substring("name.".length()));
+            if (part == null) {
+                throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+            }
+            return user.withName(part.apply(user.name(), remove ? null : asString(operation.value())));
+        }
+        return switch (lower) {
+            case "username" -> {
+                if (remove) {
+                    throw ScimException.mutability("userName 은 필수라 지울 수 없습니다");
+                }
+                yield user.withUserName(asString(operation.value()));
+            }
+            case "displayname" -> user.withDisplayName(remove ? null : asString(operation.value()));
+            case "externalid" -> user.withExternalId(remove ? null : asString(operation.value()));
+            // active 가 없으면 활성이다 — POST 에 active 가 없을 때와 같은 규칙
+            case "active" -> user.withActive(remove || asBoolean(operation.value()));
+            case "name" -> user.withName(remove ? PersonName.EMPTY : mergeName(user.name(), asAttributeMap(operation.value())));
+            case "emails" -> user.withEmail(remove ? null : primaryEmail(operation.value()));
             default -> throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
         };
     }
 
+    /** RFC 7644 §3.5.2.3 — 이메일이 없는데 replace 하면 가리킬 값이 없다. add 는 새로 담는다. */
+    private static DirectoryUser applyWorkEmail(DirectoryUser user, String op, ScimOperation operation,
+                                                Matcher filter, String path) {
+        if (!filter.group("type").equalsIgnoreCase("work")) {
+            throw ScimException.invalidPath("이메일은 type \"work\" 하나만 담습니다: " + path);
+        }
+        if (op.equals("remove")) {
+            return user.withEmail(null);
+        }
+        if (op.equals("replace") && user.email() == null) {
+            throw ScimException.noTarget("바꿀 work 이메일이 없습니다: " + path);
+        }
+        String value = filter.group("value") != null
+                ? asString(operation.value())
+                : asString(attribute(asAttributeMap(operation.value()), "value"));
+        return user.withEmail(value);
+    }
+
+    /** 경로 없는 add/replace — 우리가 저장하는 속성 전부를 반영한다. 모르는 키는 POST 처럼 무시한다. */
     private static DirectoryUser mergeUserAttributes(DirectoryUser user, Map<String, Object> attributes) {
-        return new DirectoryUser(
-                user.id(),
-                user.externalId(),
-                attributes.containsKey("userName") ? asString(attributes.get("userName")) : user.userName(),
-                attributes.containsKey("displayName") ? asString(attributes.get("displayName")) : user.displayName(),
-                user.email(),
-                attributes.containsKey("active") ? asBoolean(attributes.get("active")) : user.active());
+        DirectoryUser merged = user;
+        if (has(attributes, "userName")) {
+            merged = merged.withUserName(asString(attribute(attributes, "userName")));
+        }
+        if (has(attributes, "displayName")) {
+            merged = merged.withDisplayName(asString(attribute(attributes, "displayName")));
+        }
+        if (has(attributes, "externalId")) {
+            merged = merged.withExternalId(asString(attribute(attributes, "externalId")));
+        }
+        if (has(attributes, "active")) {
+            merged = merged.withActive(asBoolean(attribute(attributes, "active")));
+        }
+        if (has(attributes, "name")) {
+            merged = merged.withName(mergeName(merged.name(), asAttributeMap(attribute(attributes, "name"))));
+        }
+        if (has(attributes, "emails")) {
+            merged = merged.withEmail(primaryEmail(attribute(attributes, "emails")));
+        }
+        return merged;
+    }
+
+    /** RFC 7644 §3.5.2.3 — 준 하위 속성만 바꾸고 나머지는 그대로 둔다. 모르는 하위 속성은 무시한다. */
+    private static PersonName mergeName(PersonName current, Map<String, Object> parts) {
+        PersonName merged = current;
+        for (Map.Entry<String, Object> entry : parts.entrySet()) {
+            BiFunction<PersonName, String, PersonName> part = NAME_PARTS.get(entry.getKey().toLowerCase(Locale.ROOT));
+            if (part != null) {
+                merged = part.apply(merged, asString(entry.getValue()));
+            }
+        }
+        return merged;
+    }
+
+    /** POST 와 같은 규칙 — primary 가 참인 것, 없으면 첫째. 빈 목록이면 없음. */
+    private static String primaryEmail(Object value) {
+        if (!(value instanceof List<?> emails)) {
+            throw ScimException.invalidSyntax("emails 값은 배열이어야 합니다");
+        }
+        Map<String, Object> chosen = null;
+        for (Object element : emails) {
+            Map<String, Object> email = asAttributeMap(element);
+            if (chosen == null || Boolean.TRUE.equals(attribute(email, "primary"))) {
+                chosen = email;
+                if (Boolean.TRUE.equals(attribute(email, "primary"))) {
+                    break;
+                }
+            }
+        }
+        return chosen == null ? null : asString(attribute(chosen, "value"));
+    }
+
+    /** 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1). */
+    private static Object attribute(Map<String, Object> attributes, String name) {
+        for (Map.Entry<String, Object> entry : attributes.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(name)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static boolean has(Map<String, Object> attributes, String name) {
+        return attributes.keySet().stream().anyMatch(key -> key.equalsIgnoreCase(name));
+    }
+
+    private static String requireKnownOp(String op) {
+        String normalized = normalizeOp(op);
+        if (!normalized.equals("add") && !normalized.equals("replace") && !normalized.equals("remove")) {
+            throw ScimException.invalidSyntax("알 수 없는 op 입니다: " + op);
+        }
+        return normalized;
     }
 
     // ---------- 값 해석 ----------
@@ -237,7 +357,7 @@ public final class ScimPatchApplier {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asAttributeMap(Object value) {
         if (!(value instanceof Map<?, ?> map)) {
-            throw ScimException.invalidSyntax("path 없는 연산의 값은 객체여야 합니다");
+            throw ScimException.invalidSyntax("값은 객체여야 합니다");
         }
         return (Map<String, Object>) map;
     }

@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockObserver;
@@ -270,5 +271,29 @@ class ScimUserHandlerTest {
                 .jsonPath("$.name.familyName").isEqualTo("홍")
                 .jsonPath("$.name.givenName").isEqualTo("길동");
         assertThat(state.users.get("hong").name().givenName()).isEqualTo("길동");
+    }
+
+    @Test
+    @DisplayName("Entra 의 이메일+성 PATCH 가 200 이고 둘 다 반영된다")
+    void Entra_PATCH_가_200() {
+        // given
+        state.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", "old@example.com", true,
+                new PersonName(null, "홍", "길동", null, null, null))).block();
+
+        // when, then
+        client.patch().uri("/scim/v2/Users/hong")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[
+                           {"op":"Replace","path":"emails[type eq \\"work\\"].value","value":"updatedEmail@microsoft.com"},
+                           {"op":"Replace","path":"name.familyName","value":"updatedFamilyName"}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.emails[0].value").isEqualTo("updatedEmail@microsoft.com")
+                .jsonPath("$.name.familyName").isEqualTo("updatedFamilyName")
+                .jsonPath("$.name.givenName").isEqualTo("길동");
     }
 }

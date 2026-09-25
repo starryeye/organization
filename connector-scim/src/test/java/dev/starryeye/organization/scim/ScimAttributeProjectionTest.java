@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.PersonName;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -67,6 +68,24 @@ class ScimAttributeProjectionTest {
 
         // then
         assertThat(필드((ObjectNode) node.get("emails").get(0))).contains("value").doesNotContain("type");
+    }
+
+    @Test
+    @DisplayName("name 의 하위 속성도 골라 남기거나 뺄 수 있다")
+    void name_하위_속성도_고르거나_뺀다() {
+        // given
+        ObjectNode 홍길동 = ScimJson.tree(ScimMapper.toScimUser(new DirectoryUser("hong", null, "hong", "홍길동", null,
+                true, new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr."))));
+
+        // when
+        ObjectNode 골라남김 = 선택(List.of("name.middleName"), List.of()).apply(홍길동.deepCopy());
+        ObjectNode 빼기 = 선택(List.of(), List.of("name.honorificSuffix")).apply(홍길동.deepCopy());
+
+        // then
+        assertThat(필드(골라남김)).containsExactlyInAnyOrder("schemas", "id", "name");
+        assertThat(필드((ObjectNode) 골라남김.get("name"))).containsExactly("middleName");
+        assertThat(필드((ObjectNode) 빼기.get("name"))).contains("familyName", "givenName", "middleName", "honorificPrefix")
+                .doesNotContain("honorificSuffix");
     }
 
     @Test
