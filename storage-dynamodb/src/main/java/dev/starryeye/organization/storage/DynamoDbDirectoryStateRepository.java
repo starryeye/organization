@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -70,6 +71,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String USER_NAME = "userName";
     private static final String DISPLAY_NAME = "displayName";
     private static final String EMAIL = "email";
+    /** 이름 여섯 칸(S-3 설계 §4). {@code formatted} 만 이름을 바꾼 것은 {@code displayName} 과 헷갈리지 않게 하려는 것이다. */
+    private static final String GIVEN_NAME = "givenName";
+    private static final String FAMILY_NAME = "familyName";
+    private static final String MIDDLE_NAME = "middleName";
+    private static final String HONORIFIC_PREFIX = "honorificPrefix";
+    private static final String HONORIFIC_SUFFIX = "honorificSuffix";
+    private static final String NAME_FORMATTED = "nameFormatted";
     private static final String ACTIVE = "active";
     /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
@@ -148,6 +156,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         Attrs.putIfPresent(item, USER_NAME, user.userName());
         Attrs.putIfPresent(item, DISPLAY_NAME, user.displayName());
         Attrs.putIfPresent(item, EMAIL, user.email());
+        PersonName name = user.name();
+        Attrs.putIfPresent(item, NAME_FORMATTED, name.formatted());
+        Attrs.putIfPresent(item, FAMILY_NAME, name.familyName());
+        Attrs.putIfPresent(item, GIVEN_NAME, name.givenName());
+        Attrs.putIfPresent(item, MIDDLE_NAME, name.middleName());
+        Attrs.putIfPresent(item, HONORIFIC_PREFIX, name.honorificPrefix());
+        Attrs.putIfPresent(item, HONORIFIC_SUFFIX, name.honorificSuffix());
         return item;
     }
 
@@ -219,7 +234,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 Attrs.str(item, USER_NAME),
                 Attrs.str(item, DISPLAY_NAME),
                 Attrs.str(item, EMAIL),
-                Attrs.flag(item, ACTIVE));
+                Attrs.flag(item, ACTIVE),
+                new PersonName(
+                        Attrs.str(item, NAME_FORMATTED),
+                        Attrs.str(item, FAMILY_NAME),
+                        Attrs.str(item, GIVEN_NAME),
+                        Attrs.str(item, MIDDLE_NAME),
+                        Attrs.str(item, HONORIFIC_PREFIX),
+                        Attrs.str(item, HONORIFIC_SUFFIX)));
     }
 
     /** 조직 META 아이템을 읽는다. 조회 저장소가 함께 쓴다. */

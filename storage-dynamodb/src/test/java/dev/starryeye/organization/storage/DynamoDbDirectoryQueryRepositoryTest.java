@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.query.Page;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -209,5 +210,17 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(second.items()).extracting(DirectoryUser::id).containsExactly("D", "e", "F");
+    }
+
+    @Test
+    @DisplayName("목록과 userName 일치 조회에도 이름이 실린다 — GSI1 은 속성을 전부 담는다")
+    void 목록에도_이름이_실린다() {
+        // given
+        PersonName 이름 = new PersonName(null, "홍", "길동", null, null, null);
+        state.saveUser(new DirectoryUser("hong", "ext-hong", "hong", "홍길동", null, true, 이름)).block();
+
+        // when, then
+        assertThat(query.findUsersByUserName("HONG").blockFirst().name()).isEqualTo(이름);
+        assertThat(query.listUsers(null, 10, false).block().items().get(0).name()).isEqualTo(이름);
     }
 }
