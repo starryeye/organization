@@ -61,7 +61,9 @@ PATCH(부분 리소스 병합)는 `name`·`emails`·`externalId` 를 조용히 �
 
 ## 6. admin
 
-직원 상세(`EmployeeDetail`)에 `name`(`PersonName`)을 더한다. JSON 에는 값이 있는 칸만 나간다.
+직원 상세(`EmployeeDetail`)에 `name`(`PersonName`)을 더한다. JSON 에는 여섯 칸이 모두 나가고 없는 칸은 `null` 이다 — 계획
+작성 때 바꿨다(`PersonName` 은 Jackson 이 없는 core 에 있고, admin 은 지금도 없는 값을 `null` 로 내보낸다). `PersonName` 에는
+`isEmpty()` 같은 `is…` 메서드를 두지 않는다 — Jackson 이 게터로 보고 `"empty"` 칸을 내보낸다(최종 리뷰에서 발견).
 
 ## 7. SCIM
 
@@ -128,7 +130,29 @@ op(`add`/`replace`/`remove`)는 지금처럼 대소문자를 가리지 않는다
 
 ## 9. 결과 (구현 후 기록)
 
-머지 전 `test`·`scaleTest` 시간을 구현이 끝나면 여기에 적는다.
+6과제를 Subagent-Driven 으로 구현했다(`cf28cc1..`). 최종 전체 리뷰(opus)는 "고치면 머지" — 중요 2, 사소 7. 한 번에 고쳤다.
+
+- **경로 없는 PATCH 가 `name.givenName` 을 버렸다(중요).** Entra 표준 호환 모드(`aadOptscim062020`)는 이름 변경을 경로 없는
+  `replace` 의 값 객체에 `"name.givenName": "…"` 처럼 **경로 표기 키**로 보낸다. 맨 이름 키만 보던 병합이 이를 무시하고 200 을
+  냈다 — §1 이 없애려던 바로 그 결함. 값 객체의 키를 `path` 와 같은 해석기로 푸는 한 규칙으로 고쳤다(§7.2). 코어 URN 접두도 같은
+  해석기에서 뗀다.
+- **admin JSON 에 `"empty"` 가 샜다(중요).** §6 참고.
+- 사소: 빈 `userName` → 400 `invalidValue`, 멤버 객체 키(`value`·`type`)도 대소문자 무시, 테스트 픽스처의 6인자 복사를 `with…` 로,
+  맨 `emails[type eq "work"]` 의 `noTarget`·이름 있는 직원을 두 번 저장해도 다시 쓰지 않음 테스트, README.
+
+| 검증 | 결과 | 시간 |
+|---|---|---|
+| `./gradlew cleanTest test` | 751 통과 | 2분 11초 |
+| `./gradlew cleanScaleTest scaleTest` | 67 통과 | 12분 28초 |
+
+**보류한 것.** 규모 테스트는 이름을 비교하지 않는다 — 검증기(`SyncVerifier`)가 필드별로 비교하며 `name` 을 건너뛰고, SCIM
+렌더러는 이름을 보내지 않으며, LDIF 는 `sn: <id>` 를 써서 LDAP 으로 읽은 직원은 `familyName` 이 채워지지만 기대값 픽스처는 비어
+있다. 이름 보존은 전략별 내장 LDAP 테스트와 E2E 가 본다. 이름이 저장 비교("바뀐 것만 쓴다")를 흔들지 않는다는 것은 저장소
+테스트가 본다.
+
+**이 슬라이드 밖에서 발견한 것(백로그).** 조직 PATCH 의 `{"op":"remove","path":"members","value":[{"value":"u1"}]}` 는 **멤버
+전부를 지운다.** RFC 로는 필터 없는 `remove` 가 속성 전체 삭제지만, Entra 기본 모드는 멤버 한 명을 이 모양으로 뺀다 — 조직의
+튜플이 한꺼번에 사라진다. 원래부터 있던 동작이라 여기서 고치지 않았다.
 
 ## 10. 왜 다른 길을 안 갔나
 
@@ -150,4 +174,6 @@ op(`add`/`replace`/`remove`)는 지금처럼 대소문자를 가리지 않는다
 - **IdP 동작은 문서 기준이다.** 실제 테넌트 검증은 인증 슬라이드 뒤다.
 - **이메일은 하나만 담는다.** `emails` 에 여러 개를 보내면 primary(없으면 첫째) 하나만 남고, `add` 로 이메일을 더해도 하나로 바뀐다.
 - **LDAP 의 `formatted`·`honorificPrefix` 는 비어 있다** — 표준 속성이 없다.
-- **POST 본문의 저장하지 않는 속성은 여전히 조용히 무시된다**(§7.3). 경로 PATCH 만 거절한다.
+- **POST 본문의 저장하지 않는 속성은 여전히 조용히 무시된다**(§7.3). 경로 PATCH 만 거절한다. 경로 없는 PATCH 도 무시하므로,
+  Entra 표준 호환 모드에서 운영자가 지우지 않은 매핑은 400 이 아니라 조용히 버려진다.
+- **10만 명 규모 테스트는 이름 보존을 보지 않는다**(§9 보류).
