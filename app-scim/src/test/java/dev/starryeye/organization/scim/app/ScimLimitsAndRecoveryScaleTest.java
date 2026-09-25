@@ -295,14 +295,17 @@ class ScimLimitsAndRecoveryScaleTest {
     }
 
     private void 보낸다(ScimRequest request, int 기대상태) {
+        // 기본 5초로는 부족하다 — 5,000명 조직도에 쓰는 요청은 부하가 걸린 머신에서 5초를 넘기고,
+        // 그러면 기준 상태 적재가 끊겨 뒤의 시나리오가 전부 실패한다. 다른 스케일 테스트와 같은 2분이다
+        WebTestClient 느긋한 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build();
         var spec = switch (request.method()) {
-            case "POST" -> client.post().uri(request.path())
+            case "POST" -> 느긋한.post().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON).bodyValue(request.body());
-            case "PUT" -> client.put().uri(request.path())
+            case "PUT" -> 느긋한.put().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON).bodyValue(request.body());
-            case "PATCH" -> client.patch().uri(request.path())
+            case "PATCH" -> 느긋한.patch().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON).bodyValue(request.body());
-            case "DELETE" -> client.delete().uri(request.path());
+            case "DELETE" -> 느긋한.delete().uri(request.path());
             default -> throw new IllegalArgumentException("알 수 없는 메서드: " + request.method());
         };
         spec.exchange().expectStatus().isEqualTo(기대상태);
