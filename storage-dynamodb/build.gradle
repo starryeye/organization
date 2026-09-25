@@ -4,4 +4,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
 
     testImplementation libs.testcontainers.junit
+
+    // @ScaleTest(core testFixtures) — 10만 명 전체 교체 규모 테스트가 쓴다
+    testImplementation testFixtures(project(':core'))
 }

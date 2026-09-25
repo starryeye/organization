@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -70,6 +71,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String DISPLAY_NAME = "displayName";
     private static final String EMAIL = "email";
     private static final String ACTIVE = "active";
+    /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
 
     private final DynamoDbAsyncClient client;
@@ -98,26 +100,55 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(response -> toUser(userId, response.item()));
     }
 
+    /**
+     * 저장된 META 와 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
+     * 프로젝션)이 매번 {@code updatedAt} 때문에 다시 쓰여 {@code USER_INDEX} 한 파티션키로 몰렸다.
+     *
+     * <p>저장본은 <b>강한 일관성</b>으로 한 건 읽는다 — SCIM 요청 하나의 쓰기 경로라 한 건 더 읽어도 싸다.
+     */
     @Override
     public Mono<Void> saveUser(DirectoryUser user) {
+        return findMeta(Keys.userPk(user.id()))
+                .map(this::storedUser)
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(stored -> writeUser(user, stored.orElse(null)));
+    }
+
+    /**
+     * 저장본과 같으면 쓰지 않는다. 다르거나 없으면 {@code updatedAt} 을 찍어 쓴다.
+     *
+     * <p>{@code user} 를 그대로 비교하지 않고 {@code userItem} 으로 한 번 인코딩했다가 다시
+     * {@code toUser} 로 읽어(round-trip) 비교한다 — 빈 문자열은 애초에 속성으로 저장되지
+     * 않으므로({@link Attrs#putIfPresent}) 저장본을 되읽으면 {@code null} 이 된다. 들어온
+     * {@code user} 가 빈 문자열을 그대로 들고 있으면 라운드트립 없이는 "저장했다면 나왔을 값"과
+     * 영원히 달라 보여 매번 다시 쓴다 — 이 태스크가 없애려는 바로 그 재기록이다.
+     */
+    private Mono<Void> writeUser(DirectoryUser user, Stored<DirectoryUser> stored) {
+        if (stored != null && stored.sameAs(toUser(user.id(), userItem(user)))) {
+            return Mono.empty();
+        }
+        return putItem(stamped(userItem(user)));
+    }
+
+    /** 직원 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다 — 바뀌었을 때만 {@link #stamped} 가 넣는다. */
+    private Map<String, AttributeValue> userItem(DirectoryUser user) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
         item.put(Keys.GSI1PK, Attrs.s(Keys.USER_INDEX));
-        item.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(user.userName() == null ? user.id() : user.userName())));
+        item.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(presentOr(user.userName(), user.id()))));
         // GSI2(표시명 검색)를 위해 따로 쓸 것이 없다 — 파티션키는 위의 GSI1PK 를 그대로 쓰고
         // 정렬키는 아래 putIfPresent 가 쓰는 displayName 속성 그 자체다(Keys.GSI2PK 참고).
         // 표시명이 없는 직원은 그 속성이 아예 없어 GSI2 에 실리지 않는다 — DynamoDB 는 정렬키
         // 속성이 없는 아이템을 인덱스에 넣지 않는다. 의도한 동작이며, 아이디·계정명으로는
         // 여전히 찾힌다.
         item.put(ACTIVE, Attrs.bool(user.active()));
-        item.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
         Attrs.putIfPresent(item, EXTERNAL_ID, user.externalId());
         Attrs.putIfPresent(item, USER_NAME, user.userName());
         Attrs.putIfPresent(item, DISPLAY_NAME, user.displayName());
         Attrs.putIfPresent(item, EMAIL, user.email());
-
-        return putItem(item);
+        return item;
     }
 
     /**
@@ -246,17 +277,18 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(GetItemResponse::hasItem);
     }
 
+    /** 직원과 같은 규칙으로 쓴다. 조직의 변경은 META 또는 멤버 구성의 변경이다(GSI 설계 §3). */
     @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
-        Map<String, AttributeValue> meta = new HashMap<>();
-        meta.put(Keys.PK, Attrs.s(Keys.groupPk(group.id())));
-        meta.put(Keys.SK, Attrs.s(Keys.META));
-        meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
-        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(group.displayName() == null ? group.id() : group.displayName())));
-        meta.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
-        Attrs.putIfPresent(meta, EXTERNAL_ID, group.externalId());
-        Attrs.putIfPresent(meta, DISPLAY_NAME, group.displayName());
+        return findMeta(Keys.groupPk(group.id()))
+                .map(this::storedGroup)
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(stored -> writeGroup(group, stored.orElse(null)));
+    }
 
+    private Mono<Void> writeGroup(DirectoryGroup group, Stored<GroupHeader> stored) {
+        GroupHeader header = new GroupHeader(group.id(), group.externalId(), group.displayName());
         Set<String> targetSks = group.members().stream().map(Keys::memberSk).collect(Collectors.toSet());
 
         return existingMemberSks(group.id())
@@ -273,6 +305,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
 
+                    // 조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다.
+                    // header 를 그대로 비교하지 않고 라운드트립하는 이유는 writeUser 의 자바독과 같다 —
+                    // 빈 문자열 displayName 은 저장되지 않아 되읽으면 null 이 된다.
+                    boolean 바뀜 = stored == null || !stored.sameAs(toGroupHeader(header.id(), groupMeta(header)))
+                            || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
+                    Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
+
                     // 소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5).
                     // 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
                     // "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면
@@ -282,13 +321,25 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .flatMap(ref -> deleteItem(Keys.groupPk(group.id()), Keys.memberSk(ref))
                                     .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(group.id()))),
                                     QUERY_CONCURRENCY)
-                            .then(putItem(meta))
+                            .then(meta)
                             .then(Flux.fromIterable(새로온멤버)
                                     .flatMap(member -> putItem(belongsToItem(member, group.id()))
                                             .then(putItem(memberItem(group.id(), member))),
                                             QUERY_CONCURRENCY)
                                     .then());
                 });
+    }
+
+    /** 조직 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다. */
+    private Map<String, AttributeValue> groupMeta(GroupHeader header) {
+        Map<String, AttributeValue> meta = new HashMap<>();
+        meta.put(Keys.PK, Attrs.s(Keys.groupPk(header.id())));
+        meta.put(Keys.SK, Attrs.s(Keys.META));
+        meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
+        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(presentOr(header.displayName(), header.id()))));
+        Attrs.putIfPresent(meta, EXTERNAL_ID, header.externalId());
+        Attrs.putIfPresent(meta, DISPLAY_NAME, header.displayName());
+        return meta;
     }
 
     /**
@@ -397,27 +448,76 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     // ---------- 전체 ----------
 
+    /**
+     * LDAP 전체 동기화·재적재. 삭제 판단 때문에 원래 GSI1 을 훑던 조회에서 <b>저장본을 함께</b> 받아(GSI1 은 ALL
+     * 프로젝션이라 더 읽지 않는다) 비교하고, 새로 생기거나 바뀐 것만 쓴다(GSI 설계 §4).
+     *
+     * <p><b>순서 — 직원 갱신 → 조직 갱신 → 폐지된 조직 삭제 → 퇴사한 직원 삭제.</b> {@link #writeGroup} 은 "떠난
+     * 멤버" 를 그 조직의 현재 멤버 줄(existingMemberSks)과 스냅샷의 목표 멤버를 견주어 스스로 찾아낸다(설계 §3
+     * "조직의 변경은 … 멤버 구성의 변경"). 퇴사한 직원을 먼저 지워 버리면 {@link #deleteUser} 가 그 직원이 속한
+     * 조직들의 {@code MEMBER#} 줄부터 지우므로, 그 뒤에 도는 {@code writeGroup} 은 이미 멤버 줄이 없는 조직만 보고
+     * "떠난 멤버 없음" 으로 읽는다 — META 도 그대로면 조직 자체가 안 바뀐 것처럼 건너뛰어 {@code updatedAt} 도
+     * 못 찍고 멤버 구성 변경이 사라진다. 조직을 먼저 갱신하면 {@code writeGroup} 자신이 떠난 멤버를 보고(
+     * {@code MEMBER#} 를 지운 다음 {@code BELONGS_TO#} 를 지운다) 변경으로 잡아 낸다. 폐지된 조직·퇴사한 직원의
+     * 삭제는 그 뒤에 와도 안전하다 — {@link #deleteGroup}/{@code deleteUser} 는 이미 지워진 줄을 다시 지우려
+     * 해도 {@code DeleteItem} 은 없는 키에도 성공한다.
+     *
+     * <p><b>비교 기준이 최종 일관성 인덱스다.</b> 인덱스가 늦어 생길 수 있는 일은 두 방향이다(GSI 설계 §4).
+     *
+     * <ul>
+     *     <li>"다르다" 로 잘못 보고 한 번 더 쓴다 — 무해하다.</li>
+     *     <li>"같다" 로 잘못 보고 안 쓴다 — 이 테이블에 아직 GSI1 로 전파되지 않은 쓰기가 있어야 생긴다. 예전의
+     *     무조건 재기록과 달리 <b>이 회차로 낫지 않는다</b> — 그 엔티티가 다음에 다시 바뀔 때까지 낡은 값과
+     *     못 찍힌 {@code updatedAt} 이 그대로 남는다.</li>
+     * </ul>
+     *
+     * <p><b>전제 — 이 메서드가 시작할 때 이 테이블에 아직 GSI1 로 전파되지 않은 쓰기가 없어야 한다.</b> 이
+     * 메서드에 내용을 넣어 부르는 것은 LDAP 의 전체 동기화(FullSyncUseCase)와 재적재(RebuildUseCase)뿐이고,
+     * LDAP 앱에는 그와 동시에 직원·조직을 쓰는 경로가 없어 이전 회차는 오래전에 끝나 있다 — 인덱스는 이미
+     * 맞춰져 있다. SCIM 재적재(ScimRebuildUseCase)는 이 메서드를 빈 스냅샷으로만 불러 비교할 것이 없다.
+     */
     @Override
     public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
-        Mono<Void> removeStaleUsers = enumerateIds(Keys.USER_INDEX, Keys::parseUserPk)
-                .filter(id -> !snapshot.users().containsKey(id))
-                .flatMap(this::deleteUser, QUERY_CONCURRENCY)
-                .then();
+        return Mono.zip(
+                        storedIndex(Keys.USER_INDEX, this::storedUser, DirectoryUser::id),
+                        storedIndex(Keys.GROUP_INDEX, this::storedGroup, GroupHeader::id))
+                .flatMap(stored -> {
+                    Map<String, Stored<DirectoryUser>> users = stored.getT1();
+                    Map<String, Stored<GroupHeader>> groups = stored.getT2();
 
-        Mono<Void> removeStaleGroups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
-                .filter(id -> !snapshot.groups().containsKey(id))
-                .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
-                .then();
+                    Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
+                            .flatMap(user -> writeUser(user, users.get(user.id())), QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
+                            .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
+                            .filter(id -> !snapshot.groups().containsKey(id))
+                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
+                            .filter(id -> !snapshot.users().containsKey(id))
+                            .flatMap(this::deleteUser, QUERY_CONCURRENCY)
+                            .then();
 
-        Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
-                .flatMap(this::saveUser, QUERY_CONCURRENCY)
-                .then();
+                    return upsertUsers.then(upsertGroups).then(removeStaleGroups).then(removeStaleUsers);
+                });
+    }
 
-        Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
-                .flatMap(this::saveGroup, QUERY_CONCURRENCY)
-                .then();
-
-        return removeStaleUsers.then(removeStaleGroups).then(upsertUsers).then(upsertGroups);
+    /** GSI1 파티션 하나를 훑어 id → 저장본. 삭제 판단과 변경 비교를 한 번의 조회로 한다. */
+    private <T> Mono<Map<String, Stored<T>>> storedIndex(String indexPartition,
+                                                        Function<Map<String, AttributeValue>, Stored<T>> toStored,
+                                                        Function<T, String> idOf) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI1)
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(indexPartition)))
+                .build();
+        return Paginator.queryAll(client, request)
+                .map(toStored)
+                .collectMap(stored -> idOf.apply(stored.value()), stored -> stored);
     }
 
     @Override
@@ -448,6 +548,60 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     // ---------- 공통 ----------
+
+    /**
+     * 저장본을 도메인 값과 "그 아이템이 지금 규칙으로 만든 아이템과 같은가" 로 줄여 든다(GSI 설계 §3).
+     *
+     * <p>아이템 맵을 그대로 들지 않는 이유 — 전체 동기화는 직원 10만 명의 저장본을 한꺼번에 들고 비교하는데,
+     * {@code AttributeValue} 맵은 한 건에 1KB 를 넘게 먹는다. "도메인 값이 같고 {@code current}" 는 "updatedAt 을 뺀
+     * 아이템 전체가 같다" 와 같은 판단이다 — 키 규칙이 바뀌면 {@code current} 가 거짓이 되어 값이 같아도 다시 쓴다.
+     */
+    record Stored<T>(T value, boolean current) {
+
+        boolean sameAs(T incoming) {
+            return current && value.equals(incoming);
+        }
+    }
+
+    private Stored<DirectoryUser> storedUser(Map<String, AttributeValue> item) {
+        DirectoryUser user = toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item);
+        return new Stored<>(user, sameContent(userItem(user), item));
+    }
+
+    private Stored<GroupHeader> storedGroup(Map<String, AttributeValue> item) {
+        GroupHeader header = toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item);
+        return new Stored<>(header, sameContent(groupMeta(header), item));
+    }
+
+    /** {@link Attrs#putIfPresent} 와 같은 규칙 — null 과 빈 문자열은 "없음" 이다. 키와 속성이 같은 규칙이어야 되읽은 값으로 같은 아이템이 나온다. */
+    private static String presentOr(String value, String fallback) {
+        return value == null || value.isEmpty() ? fallback : value;
+    }
+
+    /** {@code updatedAt} 을 뺀 저장 아이템이 쓰려는 아이템과 같은가. */
+    private static boolean sameContent(Map<String, AttributeValue> expected, Map<String, AttributeValue> stored) {
+        Map<String, AttributeValue> withoutStamp = new HashMap<>(stored);
+        withoutStamp.remove(UPDATED_AT);
+        return expected.equals(withoutStamp);
+    }
+
+    /** 바뀐 아이템에만 쓰는 시각. 이 값은 이제 "마지막 동기화" 가 아니라 "마지막 변경" 이다. */
+    private Map<String, AttributeValue> stamped(Map<String, AttributeValue> item) {
+        Map<String, AttributeValue> copy = new HashMap<>(item);
+        copy.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
+        return copy;
+    }
+
+    /** META 한 건을 <b>강한 일관성</b>으로 읽는다. 쓰기 전 비교용이다. */
+    private Mono<Map<String, AttributeValue>> findMeta(String pk) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(GetItemResponse::item);
+    }
 
     /** 메인 테이블의 파티션 하나를 <b>강한 일관성</b>으로 읽는다. 클래스 자바독 참고. */
     private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
