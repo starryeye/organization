@@ -110,10 +110,10 @@ public record ScimFilter(List<Term> terms) {
                 position++;
             }
             String token = text.substring(start, position);
-            if (token.equalsIgnoreCase("true")) {
+            if ("true".equals(token)) {
                 return Boolean.TRUE;
             }
-            if (token.equalsIgnoreCase("false")) {
+            if ("false".equals(token)) {
                 return Boolean.FALSE;
             }
             throw fail("지원하지 않는 값입니다: '" + token + "' — 문자열과 true/false 만 받습니다");

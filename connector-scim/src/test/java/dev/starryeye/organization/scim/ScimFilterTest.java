@@ -36,7 +36,7 @@ class ScimFilterTest {
     @DisplayName("연산자와 속성 이름은 대소문자를 가리지 않는다")
     void 연산자와_속성_이름은_대소문자를_가리지_않는다() {
         // when
-        ScimFilter filter = 파싱("USERNAME EQ \"kim\" AND Active Eq TRUE");
+        ScimFilter filter = 파싱("USERNAME EQ \"kim\" AND Active Eq true");
 
         // then
         assertThat(filter.terms()).containsExactly(
@@ -106,6 +106,14 @@ class ScimFilterTest {
         거절한다("userName eq kim");
         거절한다("userName eq 1");
         거절한다("userName eq null");
+    }
+
+    @Test
+    @DisplayName("true·false 는 JSON 처럼 소문자만 받는다")
+    void 불리언은_소문자만_받는다() {
+        거절한다("active eq TRUE");
+        거절한다("active eq True");
+        거절한다("active eq FALSE");
     }
 
     @Test
