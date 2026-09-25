@@ -679,4 +679,24 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then — META 도 다시 쓰여 updatedAt 이 그 시각이 된다
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T02:00:00Z");
     }
+
+    @Test
+    @DisplayName("userName·조직명이 빈 문자열이어도 같은 값이면 다시 쓰지 않는다")
+    void 빈_문자열_이름도_같으면_쓰지_않는다() {
+        // given — 빈 문자열은 속성으로 저장되지 않으므로 키도 id 로 만들어져야 되읽은 값과 맞는다
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 빈이름 = new DirectoryUser("choi", null, "", null, null, true);
+        DirectoryGroup 빈조직 = new DirectoryGroup("EMPTY", null, "", Set.of());
+        세는.saveUser(빈이름).block();
+        세는.saveGroup(빈조직).block();
+        counter.reset();
+
+        // when
+        세는.saveUser(빈이름).block();
+        세는.saveGroup(빈조직).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
 }

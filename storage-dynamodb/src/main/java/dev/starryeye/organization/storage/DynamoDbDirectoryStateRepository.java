@@ -115,9 +115,17 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .flatMap(stored -> writeUser(user, stored.orElse(null)));
     }
 
-    /** 저장본과 같으면 쓰지 않는다. 다르거나 없으면 {@code updatedAt} 을 찍어 쓴다. */
+    /**
+     * 저장본과 같으면 쓰지 않는다. 다르거나 없으면 {@code updatedAt} 을 찍어 쓴다.
+     *
+     * <p>{@code user} 를 그대로 비교하지 않고 {@code userItem} 으로 한 번 인코딩했다가 다시
+     * {@code toUser} 로 읽어(round-trip) 비교한다 — 빈 문자열은 애초에 속성으로 저장되지
+     * 않으므로({@link Attrs#putIfPresent}) 저장본을 되읽으면 {@code null} 이 된다. 들어온
+     * {@code user} 가 빈 문자열을 그대로 들고 있으면 라운드트립 없이는 "저장했다면 나왔을 값"과
+     * 영원히 달라 보여 매번 다시 쓴다 — 이 태스크가 없애려는 바로 그 재기록이다.
+     */
     private Mono<Void> writeUser(DirectoryUser user, Stored<DirectoryUser> stored) {
-        if (stored != null && stored.sameAs(user)) {
+        if (stored != null && stored.sameAs(toUser(user.id(), userItem(user)))) {
             return Mono.empty();
         }
         return putItem(stamped(userItem(user)));
@@ -129,7 +137,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
         item.put(Keys.GSI1PK, Attrs.s(Keys.USER_INDEX));
-        item.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(user.userName() == null ? user.id() : user.userName())));
+        item.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(presentOr(user.userName(), user.id()))));
         // GSI2(표시명 검색)를 위해 따로 쓸 것이 없다 — 파티션키는 위의 GSI1PK 를 그대로 쓰고
         // 정렬키는 아래 putIfPresent 가 쓰는 displayName 속성 그 자체다(Keys.GSI2PK 참고).
         // 표시명이 없는 직원은 그 속성이 아예 없어 GSI2 에 실리지 않는다 — DynamoDB 는 정렬키
@@ -297,8 +305,10 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
 
-                    // 조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다
-                    boolean 바뀜 = stored == null || !stored.sameAs(header)
+                    // 조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다.
+                    // header 를 그대로 비교하지 않고 라운드트립하는 이유는 writeUser 의 자바독과 같다 —
+                    // 빈 문자열 displayName 은 저장되지 않아 되읽으면 null 이 된다.
+                    boolean 바뀜 = stored == null || !stored.sameAs(toGroupHeader(header.id(), groupMeta(header)))
                             || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
                     Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
 
@@ -326,7 +336,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         meta.put(Keys.PK, Attrs.s(Keys.groupPk(header.id())));
         meta.put(Keys.SK, Attrs.s(Keys.META));
         meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
-        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(header.displayName() == null ? header.id() : header.displayName())));
+        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(presentOr(header.displayName(), header.id()))));
         Attrs.putIfPresent(meta, EXTERNAL_ID, header.externalId());
         Attrs.putIfPresent(meta, DISPLAY_NAME, header.displayName());
         return meta;
@@ -512,6 +522,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private Stored<GroupHeader> storedGroup(Map<String, AttributeValue> item) {
         GroupHeader header = toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item);
         return new Stored<>(header, sameContent(groupMeta(header), item));
+    }
+
+    /** {@link Attrs#putIfPresent} 와 같은 규칙 — null 과 빈 문자열은 "없음" 이다. 키와 속성이 같은 규칙이어야 되읽은 값으로 같은 아이템이 나온다. */
+    private static String presentOr(String value, String fallback) {
+        return value == null || value.isEmpty() ? fallback : value;
     }
 
     /** {@code updatedAt} 을 뺀 저장 아이템이 쓰려는 아이템과 같은가. */
