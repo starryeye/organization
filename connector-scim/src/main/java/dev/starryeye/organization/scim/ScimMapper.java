@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.scim.dto.ScimEmail;
 import dev.starryeye.organization.scim.dto.ScimGroup;
@@ -47,7 +48,26 @@ public final class ScimMapper {
                 firstNonBlank(scim.displayName(), formatted(scim), scim.userName()),
                 primaryEmail(scim.emails()),
                 // SCIM 에서 active 는 선택 필드다. 없으면 활성으로 본다.
-                scim.active() == null || scim.active());
+                scim.active() == null || scim.active(),
+                toPersonName(scim.name()));
+    }
+
+    /** 보낸 그대로 담는다(S-3 설계 §7.1). 없으면 이름 없음. */
+    public static PersonName toPersonName(ScimName name) {
+        if (name == null) {
+            return PersonName.EMPTY;
+        }
+        return new PersonName(name.formatted(), name.familyName(), name.givenName(),
+                name.middleName(), name.honorificPrefix(), name.honorificSuffix());
+    }
+
+    /** 저장된 그대로 돌려준다. 이름이 없으면 null — 응답에 {@code name} 을 넣지 않는다. */
+    public static ScimName toScimName(PersonName name) {
+        if (name.isEmpty()) {
+            return null;
+        }
+        return new ScimName(name.formatted(), name.familyName(), name.givenName(),
+                name.middleName(), name.honorificPrefix(), name.honorificSuffix());
     }
 
     /**
@@ -129,7 +149,7 @@ public final class ScimMapper {
                 user.id(),
                 user.externalId(),
                 user.userName(),
-                new ScimName(user.displayName(), null, null),
+                toScimName(user.name()),
                 user.displayName(),
                 emails,
                 user.active(),

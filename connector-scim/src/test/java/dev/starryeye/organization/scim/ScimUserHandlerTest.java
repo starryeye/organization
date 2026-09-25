@@ -249,4 +249,26 @@ class ScimUserHandlerTest {
         client.get().uri("/scim/v2/Users/kim")
                 .exchange().expectStatus().isOk();
     }
+
+    @Test
+    @DisplayName("PUT 은 경로의 id 로 고정하되 본문의 이름을 담는다")
+    void PUT_은_이름을_담는다() {
+        // given
+        state.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true)).block();
+
+        // when, then
+        client.put().uri("/scim/v2/Users/hong")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"hong",
+                         "name":{"familyName":"홍","givenName":"길동"},"active":true}
+                        """)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.id").isEqualTo("hong")
+                .jsonPath("$.name.familyName").isEqualTo("홍")
+                .jsonPath("$.name.givenName").isEqualTo("길동");
+        assertThat(state.users.get("hong").name().givenName()).isEqualTo("길동");
+    }
 }

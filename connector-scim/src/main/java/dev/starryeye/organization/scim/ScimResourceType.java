@@ -14,6 +14,7 @@ public enum ScimResourceType {
     USER(ScimSchemas.USER, "userName", Set.of(
             "schemas", "id", "externalid", "username",
             "name", "name.formatted", "name.familyname", "name.givenname",
+            "name.middlename", "name.honorificprefix", "name.honorificsuffix",
             "displayname", "emails", "emails.value", "emails.type", "emails.primary",
             "active", "meta", "meta.resourcetype", "meta.location")),
 

@@ -66,8 +66,7 @@ public class ScimUserHandler {
                         .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
                 .map(ScimMapper::toDirectoryUser)
                 // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 userName 이 달라도 리소스를 옮기지 않는다.
-                .map(user -> new DirectoryUser(id, user.externalId(), user.userName(),
-                        user.displayName(), user.email(), user.active()))
+                .map(user -> user.withId(id))
                 .flatMap(user -> sync.upsertUser(user)
                         .flatMap(result -> respond(HttpStatus.OK, id, result, projection))));
     }

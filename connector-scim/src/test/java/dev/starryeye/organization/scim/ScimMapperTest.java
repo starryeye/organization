@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.scim.dto.ScimEmail;
 import dev.starryeye.organization.scim.dto.ScimGroup;
 import dev.starryeye.organization.scim.dto.ScimMember;
@@ -31,7 +32,7 @@ class ScimMapperTest {
     void 유저를_도메인으로_변환한다() {
         // given
         var scim = new ScimUser(List.of(ScimSchemas.USER), null, "emp-1001", "kim",
-                new ScimName("김철수", null, null), "철수",
+                new ScimName("김철수", null, null, null, null, null), "철수",
                 List.of(new ScimEmail("kim@example.com", "work", true)), true, null);
 
         // when
@@ -50,7 +51,7 @@ class ScimMapperTest {
     void 표시명이_없으면_formatted를_쓴다() {
         // given
         var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "kim",
-                new ScimName("김철수", null, null), null, List.of(), null, null);
+                new ScimName("김철수", null, null, null, null, null), null, List.of(), null, null);
 
         // when
         DirectoryUser user = ScimMapper.toDirectoryUser(scim);
@@ -358,5 +359,33 @@ class ScimMapperTest {
         assertThat(scim.id()).isEqualTo("kim");
         assertThat(scim.userName()).isEqualTo("kim.lee");
         assertThat(scim.externalId()).isEqualTo("emp-1001");
+    }
+
+    @Test
+    @DisplayName("name 여섯 칸을 보낸 그대로 담고 그대로 돌려준다")
+    void 이름을_그대로_담고_돌려준다() {
+        // given
+        ScimUser scim = new ScimUser(List.of(ScimSchemas.USER), null, "e1", "hong",
+                new ScimName("홍길동", "홍", "길동", "철", "Mr.", "Jr."), null, null, true, null);
+
+        // when
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        ScimUser 응답 = ScimMapper.toScimUser(user);
+
+        // then
+        assertThat(user.name()).isEqualTo(new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr."));
+        assertThat(user.displayName()).isEqualTo("홍길동");
+        assertThat(응답.name()).isEqualTo(new ScimName("홍길동", "홍", "길동", "철", "Mr.", "Jr."));
+    }
+
+    @Test
+    @DisplayName("이름이 없으면 응답에 name 을 넣지 않는다 — formatted 를 지어내지 않는다")
+    void 이름이_없으면_name_이_없다() {
+        // when
+        ScimUser 응답 = ScimMapper.toScimUser(new DirectoryUser("kim", null, "kim", "김철수", null, true));
+
+        // then
+        assertThat(응답.name()).isNull();
+        assertThat(응답.displayName()).isEqualTo("김철수");
     }
 }
