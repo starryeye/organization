@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
@@ -147,6 +148,17 @@ public final class ScimMapper {
                 group.displayName(),
                 members,
                 new ScimMeta("Group", "/scim/v2/Groups/" + group.id()));
+    }
+
+    /** 멤버 없이 조직을 그린다 — {@code members} 가 응답에 필요 없을 때 멤버 줄을 읽지 않기 위해서다. */
+    public static ScimGroup toScimGroup(GroupHeader header) {
+        return new ScimGroup(
+                List.of(ScimSchemas.GROUP),
+                header.id(),
+                header.externalId(),
+                header.displayName(),
+                null,
+                new ScimMeta("Group", "/scim/v2/Groups/" + header.id()));
     }
 
     private static String firstNonBlank(String... candidates) {
