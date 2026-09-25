@@ -954,4 +954,40 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(repository.findUser("hong").block().name().familyName()).isEqualTo("洪");
         assertThat(updatedAt(Keys.userPk("hong"))).isEqualTo("2026-01-01T01:00:00Z");
     }
+
+    @Test
+    @DisplayName("이름이 있는 직원도 saveUser 로 같은 값을 두 번 저장하면 다시 쓰지 않는다")
+    void 이름이_있어도_saveUser는_같으면_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 이름있음 = new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동);
+        세는.saveUser(이름있음).block();
+        counter.reset();
+
+        // when
+        세는.saveUser(이름있음).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
+
+    @Test
+    @DisplayName("이름이 있는 직원도 같은 조직도로 전체 교체를 다시 하면 다시 쓰지 않는다")
+    void 이름이_있어도_전체_교체는_같으면_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectorySnapshot 조직도 = new DirectorySnapshot(
+                Map.of("hong", new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동)),
+                Map.of());
+        세는.replaceWith(조직도).block();
+        counter.reset();
+
+        // when
+        세는.replaceWith(조직도).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
 }
