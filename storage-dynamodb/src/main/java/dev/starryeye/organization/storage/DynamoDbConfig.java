@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -82,5 +83,12 @@ public class DynamoDbConfig {
                                      Clock clock) {
         return new DynamoDbMutationLock(client, properties, clock,
                 java.util.UUID.randomUUID().toString());
+    }
+
+    @Bean
+    public PageBookmarkRepository pageBookmarkRepository(DynamoDbAsyncClient client,
+                                                         DynamoDbProperties properties,
+                                                         Clock clock) {
+        return new DynamoDbPageBookmarkRepository(client, properties, clock);
     }
 }

@@ -19,7 +19,9 @@ import software.amazon.awssdk.services.dynamodb.model.Projection;
 import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import software.amazon.awssdk.services.dynamodb.model.TimeToLiveSpecification;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.UpdateTimeToLiveRequest;
 
 @Slf4j
 @RequiredArgsConstructor
@@ -72,7 +74,21 @@ public class TableInitializer implements InitializingBean {
                         externalIdIndex())
                 .build();
 
-        return Mono.fromFuture(() -> client.createTable(request)).then();
+        // TTL 은 테이블이 ACTIVE 가 된 뒤에만 켤 수 있다 — AWS 에서는 생성 직후 CREATING 이다
+        return Mono.fromFuture(() -> client.createTable(request))
+                .then(Mono.usingWhen(
+                        Mono.fromSupplier(client::waiter),
+                        waiter -> Mono.fromFuture(() -> waiter.waitUntilTableExists(
+                                DescribeTableRequest.builder().tableName(table).build())),
+                        waiter -> Mono.fromRunnable(waiter::close)))
+                .then(Mono.fromFuture(() -> client.updateTimeToLive(UpdateTimeToLiveRequest.builder()
+                        .tableName(table)
+                        .timeToLiveSpecification(TimeToLiveSpecification.builder()
+                                .attributeName(Keys.EXPIRES_AT)
+                                .enabled(true)
+                                .build())
+                        .build())))
+                .then();
     }
 
     /**

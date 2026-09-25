@@ -80,6 +80,12 @@ public final class Keys {
     public static final String TUPLE_PREFIX = "TUPLE#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
 
+    /** SCIM 목록 책갈피 파티션 접두사 (S-1 설계 §5.3). */
+    public static final String PAGE_PREFIX = "PAGE#";
+
+    /** 책갈피 만료 시각(epoch 초) 속성. 테이블 TTL 이 이 속성을 본다. */
+    public static final String EXPIRES_AT = "expiresAt";
+
     /** 전역 변경 락. 파티션 하나에 아이템 하나다 (설계 §4.2). */
     public static final String LOCK_PK = "LOCK#SCIM_WRITE";
 
@@ -104,6 +110,16 @@ public final class Keys {
      */
     public static String indexKey(String raw) {
         return raw.toLowerCase(Locale.ROOT);
+    }
+
+    /** 책갈피 파티션키 — 종류·방향별로 하나. 예: {@code PAGE#USER#ASC}. */
+    public static String pagePk(String kind, boolean descending) {
+        return PAGE_PREFIX + kind + (descending ? "#DESC" : "#ASC");
+    }
+
+    /** 책갈피 정렬키 — 이 책갈피로 이어 읽는 {@code startIndex}. 예: {@code START#101}. */
+    public static String pageSk(long startIndex) {
+        return "START#" + startIndex;
     }
 
     /**

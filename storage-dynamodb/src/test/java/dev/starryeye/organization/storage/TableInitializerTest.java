@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.DescribeTimeToLiveRequest;
 import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
 import software.amazon.awssdk.services.dynamodb.model.IndexStatus;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
@@ -17,6 +18,7 @@ import software.amazon.awssdk.services.dynamodb.model.Projection;
 import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import software.amazon.awssdk.services.dynamodb.model.TimeToLiveStatus;
 
 import java.time.Duration;
 import java.util.Map;
@@ -164,6 +166,18 @@ class TableInitializerTest extends DynamoDbTestSupport {
                 .findFirst().orElseThrow();
         assertThat(gsi3.keySchema()).extracting(k -> k.attributeName()).containsExactly("externalId", "PK");
         assertThat(gsi3.projection().projectionType()).isEqualTo(ProjectionType.KEYS_ONLY);
+    }
+
+    @Test
+    @DisplayName("테이블을 만들 때 책갈피 만료(TTL)를 켠다")
+    void TTL_을_켠다() {
+        // when
+        var ttl = client.describeTimeToLive(DescribeTimeToLiveRequest.builder()
+                .tableName(properties.getTableName()).build()).join().timeToLiveDescription();
+
+        // then
+        assertThat(ttl.attributeName()).isEqualTo(Keys.EXPIRES_AT);
+        assertThat(ttl.timeToLiveStatus()).isIn(TimeToLiveStatus.ENABLED, TimeToLiveStatus.ENABLING);
     }
 
     private static AttributeDefinition attribute(String name) {
