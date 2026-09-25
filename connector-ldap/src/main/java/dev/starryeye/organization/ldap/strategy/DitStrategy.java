@@ -116,7 +116,8 @@ public class DitStrategy implements LdapMappingStrategy {
                             entry.attribute(config.getUserIdAttribute())),
                     entry.attribute(config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(entry.dn(), entry.adapter().getAttributes(), 지금)));
+                    !AdAccountStatus.막혔는가(entry.dn(), entry.adapter().getAttributes(), 지금),
+                    LdapPersonName.from(entry.adapter().getAttributes())));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
