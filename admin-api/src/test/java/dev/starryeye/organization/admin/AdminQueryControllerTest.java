@@ -127,7 +127,8 @@ class AdminQueryControllerTest {
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.name.familyName").isEqualTo("홍")
-                .jsonPath("$.name.givenName").isEqualTo("길동");
+                .jsonPath("$.name.givenName").isEqualTo("길동")
+                .jsonPath("$.name.empty").doesNotExist();
     }
 
     @Test

@@ -63,7 +63,7 @@ public final class ScimMapper {
 
     /** 저장된 그대로 돌려준다. 이름이 없으면 null — 응답에 {@code name} 을 넣지 않는다. */
     public static ScimName toScimName(PersonName name) {
-        if (name.isEmpty()) {
+        if (PersonName.EMPTY.equals(name)) {
             return null;
         }
         return new ScimName(name.formatted(), name.familyName(), name.givenName(),

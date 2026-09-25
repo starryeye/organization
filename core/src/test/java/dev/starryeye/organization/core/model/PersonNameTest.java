@@ -15,7 +15,6 @@ class PersonNameTest {
 
         // then
         assertThat(name).isEqualTo(PersonName.EMPTY);
-        assertThat(name.isEmpty()).isTrue();
         assertThat(new PersonName(null, "홍", "", null, null, null).givenName()).isNull();
     }
 
@@ -26,7 +25,7 @@ class PersonNameTest {
         PersonName name = PersonName.EMPTY.withGivenName("길동");
 
         // then
-        assertThat(name.isEmpty()).isFalse();
+        assertThat(name).isNotEqualTo(PersonName.EMPTY);
         assertThat(name.givenName()).isEqualTo("길동");
     }
 

@@ -29,10 +29,6 @@ public record PersonName(
         honorificSuffix = present(honorificSuffix);
     }
 
-    public boolean isEmpty() {
-        return equals(EMPTY);
-    }
-
     private static String present(String value) {
         return value == null || value.isEmpty() ? null : value;
     }
