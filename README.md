@@ -276,6 +276,9 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 DN, 멤버가 하나도 대조되지 않는 설정이 여기 속한다 — 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
 통신이 끊기는 것 같은 일시적 실패만 설정한 횟수(`ldap.max-retries`)만큼 다시 읽는다.
 
+**이름은 표준 속성에서 읽는다** — `givenName`→이름, `sn`→성, `generationQualifier`→접미(Jr. 등), AD 의 `middleName`→중간
+이름. 속성이 없으면 빈칸이다. admin 직원 상세(`GET /admin/employees/{id}`)의 `name` 에 나온다.
+
 ## SCIM
 
 SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP가 보내는 요청은 항상 리소스
@@ -313,11 +316,21 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | Group | `members[value eq "..."]` | `remove` |
 | Group | `displayName` | `replace` / `add` |
 | Group | (path 없음) | `replace` / `add` — 본문을 부분 리소스로 보고 `displayName`·`members`만 병합 |
-| User | `active` / `displayName` / `userName` | `replace` / `add` |
-| User | (path 없음) | `replace` / `add` — `active`·`displayName`·`userName`만 병합 |
+| User | `userName` | `replace` / `add` (`remove` 는 400 `mutability` — 필수 속성) |
+| User | `displayName` / `externalId` / `active` | `replace` / `add` / `remove`(비움. `active` 는 "없음" = 활성) |
+| User | `name`, `name.givenName`·`familyName`·`middleName`·`formatted`·`honorificPrefix`·`honorificSuffix` | `replace` / `add`(`name` 은 준 하위 속성만 바꿈) / `remove` |
+| User | `emails` / `emails[type eq "work"]` / `emails[type eq "work"].value` | `replace` / `add` / `remove` — 이메일이 없는데 `replace` 하면 400 `noTarget` |
+| User | (path 없음) | `replace` / `add` — 위 속성 전부를 병합 |
 
 그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
-않은 변경을 반영됐다고 오해하면 안 되기 때문이다. `path`는 대소문자를 구분한다.
+않은 변경을 반영됐다고 오해하면 안 되기 때문이다.
+
+`op` 와 `path` 의 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1).
+
+**우리가 저장하는 직원 속성은** `userName`, `displayName`, `externalId`, `active`, `name`(여섯 칸), 이메일 하나(`type: "work"`)
+뿐이다. `title`, `phoneNumbers`, `addresses`, 엔터프라이즈 확장(`department`, `manager` 등)을 경로로 PATCH 하면 400
+`invalidPath` 다 — 반영되지 않은 변경을 반영됐다고 IdP 가 오해하지 않게 하려는 것이다. **IdP 의 속성 매핑에서 이 속성들을 뺀다**
+(Entra 는 기본 매핑에 넣을 수 있다).
 
 `members[].value`는 `userName`·`externalId`과 같은 규칙(`IdNormalizer`)으로 정규화한다.
 `members[].type`은 RFC 7643에서 선택 필드라 없을 수 있는데, 그때는 User로 단정하지 않고
