@@ -180,7 +180,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
     }
 
-    private DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
+    /** 직원 META 아이템을 읽는다. GSI1(ALL 프로젝션) 아이템도 같은 속성을 가져 조회 저장소가 함께 쓴다. */
+    static DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
         return new DirectoryUser(
                 userId,
                 Attrs.str(item, EXTERNAL_ID),
@@ -188,6 +189,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 Attrs.str(item, DISPLAY_NAME),
                 Attrs.str(item, EMAIL),
                 Attrs.flag(item, ACTIVE));
+    }
+
+    /** 조직 META 아이템을 읽는다. 조회 저장소가 함께 쓴다. */
+    static GroupHeader toGroupHeader(String groupId, Map<String, AttributeValue> item) {
+        return new GroupHeader(groupId, Attrs.str(item, EXTERNAL_ID), Attrs.str(item, DISPLAY_NAME));
     }
 
     // ---------- 조직 ----------
@@ -215,9 +221,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .consistentRead(true)
                         .build()))
                 .filter(GetItemResponse::hasItem)
-                .map(response -> new GroupHeader(groupId,
-                        Attrs.str(response.item(), EXTERNAL_ID),
-                        Attrs.str(response.item(), DISPLAY_NAME)));
+                .map(response -> toGroupHeader(groupId, response.item()));
     }
 
     /**

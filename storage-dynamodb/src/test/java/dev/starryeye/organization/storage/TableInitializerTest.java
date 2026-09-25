@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 class TableInitializerTest extends DynamoDbTestSupport {
 
     @Test
-    @DisplayName("테이블이 없으면 PK/SK 와 GSI1, GSI2 를 갖춘 테이블을 생성한다")
+    @DisplayName("테이블이 없으면 PK/SK 와 GSI1, GSI2, GSI3 를 갖춘 테이블을 생성한다")
     void 테이블과_GSI를_생성한다() {
         // given — DynamoDbTestSupport 가 이미 ensureTable 을 호출했다
 
@@ -39,7 +39,7 @@ class TableInitializerTest extends DynamoDbTestSupport {
         assertThat(described.keySchema()).extracting(k -> k.attributeName())
                 .containsExactly(Keys.PK, Keys.SK);
         assertThat(described.globalSecondaryIndexes()).extracting(i -> i.indexName())
-                .containsExactlyInAnyOrder(Keys.GSI1, Keys.GSI2);
+                .containsExactlyInAnyOrder(Keys.GSI1, Keys.GSI2, Keys.GSI3);
 
         var gsi1 = described.globalSecondaryIndexes().stream()
                 .filter(i -> Keys.GSI1.equals(i.indexName())).findFirst().orElseThrow();
@@ -149,6 +149,21 @@ class TableInitializerTest extends DynamoDbTestSupport {
                     assertThat(gsi2.indexStatus()).isEqualTo(IndexStatus.ACTIVE);
                     assertThat(gsi2.backfilling()).isNotEqualTo(Boolean.TRUE);
                 });
+    }
+
+    @Test
+    @DisplayName("externalId 로 찾는 GSI3 를 키만 담아 만든다")
+    void GSI3_를_만든다() {
+        // when
+        var table = client.describeTable(DescribeTableRequest.builder()
+                .tableName(properties.getTableName()).build()).join().table();
+
+        // then
+        var gsi3 = table.globalSecondaryIndexes().stream()
+                .filter(index -> Keys.GSI3.equals(index.indexName()))
+                .findFirst().orElseThrow();
+        assertThat(gsi3.keySchema()).extracting(k -> k.attributeName()).containsExactly("externalId", "PK");
+        assertThat(gsi3.projection().projectionType()).isEqualTo(ProjectionType.KEYS_ONLY);
     }
 
     private static AttributeDefinition attribute(String name) {

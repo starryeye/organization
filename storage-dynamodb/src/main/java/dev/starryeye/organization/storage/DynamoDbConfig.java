@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.MutationLock;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -63,6 +64,13 @@ public class DynamoDbConfig {
     public DirectorySearchRepository directorySearchRepository(DynamoDbAsyncClient client,
                                                                DynamoDbProperties properties) {
         return new DynamoDbDirectorySearchRepository(client, properties);
+    }
+
+    @Bean
+    public DirectoryQueryRepository directoryQueryRepository(DynamoDbAsyncClient client,
+                                                             DynamoDbProperties properties,
+                                                             DynamoDbDirectoryStateRepository state) {
+        return new DynamoDbDirectoryQueryRepository(client, properties, state);
     }
 
     /**

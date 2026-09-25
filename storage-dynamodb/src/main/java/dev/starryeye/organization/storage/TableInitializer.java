@@ -56,7 +56,7 @@ public class TableInitializer implements InitializingBean {
                 .attributeDefinitions(
                         attribute(Keys.PK), attribute(Keys.SK),
                         attribute(Keys.GSI1PK), attribute(Keys.GSI1SK),
-                        attribute(Keys.GSI2SK))
+                        attribute(Keys.GSI2SK), attribute(Keys.GSI3PK))
                 .keySchema(
                         KeySchemaElement.builder().attributeName(Keys.PK).keyType(KeyType.HASH).build(),
                         KeySchemaElement.builder().attributeName(Keys.SK).keyType(KeyType.RANGE).build())
@@ -68,7 +68,8 @@ public class TableInitializer implements InitializingBean {
                                         KeySchemaElement.builder().attributeName(Keys.GSI1SK).keyType(KeyType.RANGE).build())
                                 .projection(Projection.builder().projectionType(ProjectionType.ALL).build())
                                 .build(),
-                        userDisplayNameIndex())
+                        userDisplayNameIndex(),
+                        externalIdIndex())
                 .build();
 
         return Mono.fromFuture(() -> client.createTable(request)).then();
@@ -101,6 +102,23 @@ public class TableInitializer implements InitializingBean {
                         .projectionType(ProjectionType.INCLUDE)
                         .nonKeyAttributes("userName", "active")
                         .build())
+                .build();
+    }
+
+    /**
+     * {@code externalId} 로 찾는 인덱스. {@code KEYS_ONLY} 인 이유 — 찾은 {@code PK} 로 본 테이블을 GetItem 해
+     * 최신 값을 읽는다. 인덱스가 늦어도 낡은 속성을 돌려주지 않고, 인덱스가 작다(S-1 설계 §5.2).
+     *
+     * <p>기존 테이블에 없으면 더하는 경로({@link #addMissingIndex})는 두지 않는다 — S-1 은 GSI1 키 값도 바꾸므로
+     * 기존 테이블은 어차피 재생성해야 한다(설계 §5.4).
+     */
+    private static GlobalSecondaryIndex externalIdIndex() {
+        return GlobalSecondaryIndex.builder()
+                .indexName(Keys.GSI3)
+                .keySchema(
+                        KeySchemaElement.builder().attributeName(Keys.GSI3PK).keyType(KeyType.HASH).build(),
+                        KeySchemaElement.builder().attributeName(Keys.GSI3SK).keyType(KeyType.RANGE).build())
+                .projection(Projection.builder().projectionType(ProjectionType.KEYS_ONLY).build())
                 .build();
     }
 

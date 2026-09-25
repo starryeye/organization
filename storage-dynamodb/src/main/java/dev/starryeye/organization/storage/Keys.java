@@ -49,6 +49,16 @@ public final class Keys {
     /** @see #GSI2PK — 아이템 속성 {@code displayName} 그 자체다. */
     public static final String GSI2SK = "displayName";
 
+    /**
+     * GSI3 — {@code externalId} 로 직원·조직을 찾는다(S-1 설계 §5.2). GSI2 처럼 <b>새 속성을 만들지
+     * 않는다</b> — 파티션키는 아이템이 이미 가진 {@code externalId} 속성, 정렬키는 본 테이블의 {@link #PK} 다.
+     * {@code externalId} 가 없는 아이템(멤버 줄·소속 줄·스냅샷)은 인덱스에 실리지 않는다.
+     */
+    public static final String GSI3 = "GSI3";
+    public static final String GSI3PK = "externalId";
+    /** @see #GSI3 — 본 테이블의 파티션키 속성 그 자체다. {@code USER#}/{@code GROUP#} 접두사로 종류를 가른다. */
+    public static final String GSI3SK = PK;
+
     public static final String META = "META";
 
     /** 전체 직원 열거용 GSI 파티션 */
