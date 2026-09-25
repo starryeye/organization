@@ -1,6 +1,8 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.fake.FakeMutationLock;
+import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
+import dev.starryeye.organization.core.fake.FakeQueryRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
@@ -36,9 +38,13 @@ class ScimGroupHandlerTest {
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
         var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var query = new FakeQueryRepository(state);
+        var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                                new ScimGroupListing(state, query, bookmarks)))).build();
     }
 
     @Test
@@ -236,7 +242,7 @@ class ScimGroupHandlerTest {
     }
 
     @Test
-    @DisplayName("ServiceProviderConfig 는 지원하지 않는 기능을 정직하게 선언한다")
+    @DisplayName("ServiceProviderConfig 는 지원하는 기능과 지원하지 않는 기능을 정직하게 선언한다")
     void 지원기능을_선언한다() {
         // given, when, then
         client.get().uri("/scim/v2/ServiceProviderConfig")
@@ -244,7 +250,7 @@ class ScimGroupHandlerTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.patch.supported").isEqualTo(true)
-                .jsonPath("$.filter.supported").isEqualTo(false)
+                .jsonPath("$.filter.supported").isEqualTo(true)
                 .jsonPath("$.bulk.supported").isEqualTo(false);
     }
 }

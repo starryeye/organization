@@ -31,21 +31,35 @@ public final class ScimRouter {
     }
 
     public static RouterFunction<ServerResponse> scimRoutes(ScimUserHandler users,
-                                                            ScimGroupHandler groups) {
+                                                            ScimGroupHandler groups,
+                                                            ScimListHandler lists) {
         return RouterFunctions.route()
+                .GET("/scim/v2/Users", lists::listUsers)
+                .POST("/scim/v2/Users/.search", lists::searchUsers)
                 .POST("/scim/v2/Users", users::create)
                 .GET("/scim/v2/Users/{id}", users::get)
                 .PUT("/scim/v2/Users/{id}", users::replace)
                 .PATCH("/scim/v2/Users/{id}", users::patch)
                 .DELETE("/scim/v2/Users/{id}", users::delete)
+                .GET("/scim/v2/Groups", lists::listGroups)
+                .POST("/scim/v2/Groups/.search", lists::searchGroups)
                 .POST("/scim/v2/Groups", groups::create)
                 .GET("/scim/v2/Groups/{id}", groups::get)
                 .PUT("/scim/v2/Groups/{id}", groups::replace)
                 .PATCH("/scim/v2/Groups/{id}", groups::patch)
                 .DELETE("/scim/v2/Groups/{id}", groups::delete)
                 .GET("/scim/v2/ServiceProviderConfig", request -> serviceProviderConfig())
+                // 서버 루트 조회(여러 리소스 종류를 한꺼번에)는 지원하지 않는다 — S-1 설계 §4.6
+                .GET("/scim/v2", request -> rootQuery())
+                .GET("/scim/v2/", request -> rootQuery())
+                .POST("/scim/v2/.search", request -> rootQuery())
                 .onError(Throwable.class, ScimRouter::toScimError)
                 .build();
+    }
+
+    private static Mono<ServerResponse> rootQuery() {
+        return Mono.error(ScimException.notImplemented(
+                "서버 루트 조회는 지원하지 않습니다 — /scim/v2/Users 나 /scim/v2/Groups 로 조회하세요"));
     }
 
     private static Mono<ServerResponse> toScimError(Throwable error, ServerRequest request) {
@@ -81,17 +95,18 @@ public final class ScimRouter {
     }
 
     /**
-     * 지원하지 않는 기능을 정직하게 선언한다. 여기서 filter 를 지원한다고 하면
-     * IdP 가 필터 질의를 보내기 시작하고, 우리는 그것을 처리할 수 없다.
+     * 지원하는 기능을 정직하게 선언한다. 필터는 {@code eq}·{@code and} 만 받고 나머지는 {@code invalidFilter}
+     * 다 — RFC 7644 는 필터 지원 여부만 선언하게 하고 부분 지원을 400 으로 알리게 한다(S-1 설계 §4.1).
+     * 정렬은 인덱스 키({@code userName}/{@code displayName})로만 한다.
      */
     private static Mono<ServerResponse> serviceProviderConfig() {
         Map<String, Object> config = Map.of(
                 "schemas", List.of(ScimSchemas.SERVICE_PROVIDER_CONFIG),
                 "patch", Map.of("supported", true),
                 "bulk", Map.of("supported", false, "maxOperations", 0, "maxPayloadSize", 0),
-                "filter", Map.of("supported", false, "maxResults", 0),
+                "filter", Map.of("supported", true, "maxResults", ScimQuery.MAX_COUNT),
                 "changePassword", Map.of("supported", false),
-                "sort", Map.of("supported", false),
+                "sort", Map.of("supported", true),
                 "etag", Map.of("supported", false),
                 "authenticationSchemes", List.of());
         return ServerResponse.ok().contentType(SCIM_JSON).bodyValue(config);

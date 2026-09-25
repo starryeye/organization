@@ -1,6 +1,8 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.fake.FakeMutationLock;
+import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
+import dev.starryeye.organization.core.fake.FakeQueryRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
@@ -36,9 +38,13 @@ class ScimUserHandlerTest {
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
         var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var query = new FakeQueryRepository(state);
+        var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)))).build();
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                                new ScimGroupListing(state, query, bookmarks)))).build();
     }
 
     @Test

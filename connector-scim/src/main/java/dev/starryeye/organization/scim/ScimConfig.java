@@ -1,6 +1,8 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -27,7 +29,25 @@ public class ScimConfig {
     }
 
     @Bean
-    public RouterFunction<ServerResponse> scimRouterFunction(ScimUserHandler users, ScimGroupHandler groups) {
-        return ScimRouter.scimRoutes(users, groups);
+    public ScimUserListing scimUserListing(DirectoryStateRepository state, DirectoryQueryRepository query,
+                                           PageBookmarkRepository bookmarks) {
+        return new ScimUserListing(state, query, bookmarks);
+    }
+
+    @Bean
+    public ScimGroupListing scimGroupListing(DirectoryStateRepository state, DirectoryQueryRepository query,
+                                             PageBookmarkRepository bookmarks) {
+        return new ScimGroupListing(state, query, bookmarks);
+    }
+
+    @Bean
+    public ScimListHandler scimListHandler(ScimUserListing users, ScimGroupListing groups) {
+        return new ScimListHandler(users, groups);
+    }
+
+    @Bean
+    public RouterFunction<ServerResponse> scimRouterFunction(ScimUserHandler users, ScimGroupHandler groups,
+                                                             ScimListHandler lists) {
+        return ScimRouter.scimRoutes(users, groups, lists);
     }
 }
