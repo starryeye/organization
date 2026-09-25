@@ -12,6 +12,7 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class FakeStateRepository implements DirectoryStateRepository {
@@ -46,8 +47,10 @@ public class FakeStateRepository implements DirectoryStateRepository {
         if (userName == null) {
             return Flux.empty();
         }
+        // 실제 저장소처럼 대소문자를 가리지 않는다(RFC 7643 userName caseExact=false)
+        String key = userName.toLowerCase(Locale.ROOT);
         return Flux.fromIterable(users.values())
-                .filter(user -> userName.equals(user.userName()))
+                .filter(user -> user.userName() != null && key.equals(user.userName().toLowerCase(Locale.ROOT)))
                 .map(DirectoryUser::id);
     }
 
