@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -70,6 +71,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String DISPLAY_NAME = "displayName";
     private static final String EMAIL = "email";
     private static final String ACTIVE = "active";
+    /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
 
     private final DynamoDbAsyncClient client;
@@ -98,8 +100,31 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(response -> toUser(userId, response.item()));
     }
 
+    /**
+     * 저장된 META 와 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
+     * 프로젝션)이 매번 {@code updatedAt} 때문에 다시 쓰여 {@code USER_INDEX} 한 파티션키로 몰렸다.
+     *
+     * <p>저장본은 <b>강한 일관성</b>으로 한 건 읽는다 — SCIM 요청 하나의 쓰기 경로라 한 건 더 읽어도 싸다.
+     */
     @Override
     public Mono<Void> saveUser(DirectoryUser user) {
+        return findMeta(Keys.userPk(user.id()))
+                .map(this::storedUser)
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(stored -> writeUser(user, stored.orElse(null)));
+    }
+
+    /** 저장본과 같으면 쓰지 않는다. 다르거나 없으면 {@code updatedAt} 을 찍어 쓴다. */
+    private Mono<Void> writeUser(DirectoryUser user, Stored<DirectoryUser> stored) {
+        if (stored != null && stored.sameAs(user)) {
+            return Mono.empty();
+        }
+        return putItem(stamped(userItem(user)));
+    }
+
+    /** 직원 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다 — 바뀌었을 때만 {@link #stamped} 가 넣는다. */
+    private Map<String, AttributeValue> userItem(DirectoryUser user) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
@@ -111,13 +136,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         // 속성이 없는 아이템을 인덱스에 넣지 않는다. 의도한 동작이며, 아이디·계정명으로는
         // 여전히 찾힌다.
         item.put(ACTIVE, Attrs.bool(user.active()));
-        item.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
         Attrs.putIfPresent(item, EXTERNAL_ID, user.externalId());
         Attrs.putIfPresent(item, USER_NAME, user.userName());
         Attrs.putIfPresent(item, DISPLAY_NAME, user.displayName());
         Attrs.putIfPresent(item, EMAIL, user.email());
-
-        return putItem(item);
+        return item;
     }
 
     /**
@@ -246,17 +269,18 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(GetItemResponse::hasItem);
     }
 
+    /** 직원과 같은 규칙으로 쓴다. 조직의 변경은 META 또는 멤버 구성의 변경이다(GSI 설계 §3). */
     @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
-        Map<String, AttributeValue> meta = new HashMap<>();
-        meta.put(Keys.PK, Attrs.s(Keys.groupPk(group.id())));
-        meta.put(Keys.SK, Attrs.s(Keys.META));
-        meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
-        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(group.displayName() == null ? group.id() : group.displayName())));
-        meta.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
-        Attrs.putIfPresent(meta, EXTERNAL_ID, group.externalId());
-        Attrs.putIfPresent(meta, DISPLAY_NAME, group.displayName());
+        return findMeta(Keys.groupPk(group.id()))
+                .map(this::storedGroup)
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(stored -> writeGroup(group, stored.orElse(null)));
+    }
 
+    private Mono<Void> writeGroup(DirectoryGroup group, Stored<GroupHeader> stored) {
+        GroupHeader header = new GroupHeader(group.id(), group.externalId(), group.displayName());
         Set<String> targetSks = group.members().stream().map(Keys::memberSk).collect(Collectors.toSet());
 
         return existingMemberSks(group.id())
@@ -273,6 +297,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
 
+                    // 조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다
+                    boolean 바뀜 = stored == null || !stored.sameAs(header)
+                            || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
+                    Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
+
                     // 소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5).
                     // 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
                     // "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면
@@ -282,13 +311,25 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .flatMap(ref -> deleteItem(Keys.groupPk(group.id()), Keys.memberSk(ref))
                                     .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(group.id()))),
                                     QUERY_CONCURRENCY)
-                            .then(putItem(meta))
+                            .then(meta)
                             .then(Flux.fromIterable(새로온멤버)
                                     .flatMap(member -> putItem(belongsToItem(member, group.id()))
                                             .then(putItem(memberItem(group.id(), member))),
                                             QUERY_CONCURRENCY)
                                     .then());
                 });
+    }
+
+    /** 조직 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다. */
+    private Map<String, AttributeValue> groupMeta(GroupHeader header) {
+        Map<String, AttributeValue> meta = new HashMap<>();
+        meta.put(Keys.PK, Attrs.s(Keys.groupPk(header.id())));
+        meta.put(Keys.SK, Attrs.s(Keys.META));
+        meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
+        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(header.displayName() == null ? header.id() : header.displayName())));
+        Attrs.putIfPresent(meta, EXTERNAL_ID, header.externalId());
+        Attrs.putIfPresent(meta, DISPLAY_NAME, header.displayName());
+        return meta;
     }
 
     /**
@@ -448,6 +489,55 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     // ---------- 공통 ----------
+
+    /**
+     * 저장본을 도메인 값과 "그 아이템이 지금 규칙으로 만든 아이템과 같은가" 로 줄여 든다(GSI 설계 §3).
+     *
+     * <p>아이템 맵을 그대로 들지 않는 이유 — 전체 동기화는 직원 10만 명의 저장본을 한꺼번에 들고 비교하는데,
+     * {@code AttributeValue} 맵은 한 건에 1KB 를 넘게 먹는다. "도메인 값이 같고 {@code current}" 는 "updatedAt 을 뺀
+     * 아이템 전체가 같다" 와 같은 판단이다 — 키 규칙이 바뀌면 {@code current} 가 거짓이 되어 값이 같아도 다시 쓴다.
+     */
+    record Stored<T>(T value, boolean current) {
+
+        boolean sameAs(T incoming) {
+            return current && value.equals(incoming);
+        }
+    }
+
+    private Stored<DirectoryUser> storedUser(Map<String, AttributeValue> item) {
+        DirectoryUser user = toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item);
+        return new Stored<>(user, sameContent(userItem(user), item));
+    }
+
+    private Stored<GroupHeader> storedGroup(Map<String, AttributeValue> item) {
+        GroupHeader header = toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item);
+        return new Stored<>(header, sameContent(groupMeta(header), item));
+    }
+
+    /** {@code updatedAt} 을 뺀 저장 아이템이 쓰려는 아이템과 같은가. */
+    private static boolean sameContent(Map<String, AttributeValue> expected, Map<String, AttributeValue> stored) {
+        Map<String, AttributeValue> withoutStamp = new HashMap<>(stored);
+        withoutStamp.remove(UPDATED_AT);
+        return expected.equals(withoutStamp);
+    }
+
+    /** 바뀐 아이템에만 쓰는 시각. 이 값은 이제 "마지막 동기화" 가 아니라 "마지막 변경" 이다. */
+    private Map<String, AttributeValue> stamped(Map<String, AttributeValue> item) {
+        Map<String, AttributeValue> copy = new HashMap<>(item);
+        copy.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
+        return copy;
+    }
+
+    /** META 한 건을 <b>강한 일관성</b>으로 읽는다. 쓰기 전 비교용이다. */
+    private Mono<Map<String, AttributeValue>> findMeta(String pk) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(GetItemResponse::item);
+    }
 
     /** 메인 테이블의 파티션 하나를 <b>강한 일관성</b>으로 읽는다. 클래스 자바독 참고. */
     private Flux<Map<String, AttributeValue>> queryPartition(String pk) {

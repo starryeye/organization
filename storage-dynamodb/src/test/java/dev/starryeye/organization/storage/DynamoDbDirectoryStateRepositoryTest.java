@@ -6,6 +6,9 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import org.junit.jupiter.api.BeforeEach;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -15,6 +18,7 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -554,5 +558,125 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
                 .tableName(properties.getTableName())
                 .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
                 .build()).join();
+    }
+
+    /** META 의 updatedAt 을 직접 읽는다. 저장소 API 는 이 값을 노출하지 않는다. */
+    private String updatedAt(String pk) {
+        return meta(pk).get("updatedAt").s();
+    }
+
+    private Map<String, AttributeValue> meta(String pk) {
+        return client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build())
+                .join().item();
+    }
+
+    /** PutItem 을 세는 저장소. 같은 테이블·시계를 쓴다. */
+    private DynamoDbDirectoryStateRepository 세는_저장소(WriteCounter counter) {
+        return new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, clock);
+    }
+
+    @Test
+    @DisplayName("같은 직원을 다시 저장하면 쓰지 않고 updatedAt 도 첫 시각 그대로다")
+    void 같은_직원은_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser kim = new DirectoryUser("kim", "e1", "kim", "김철수", "kim@example.com", true);
+        세는.saveUser(kim).block();
+        String 처음 = updatedAt(Keys.userPk("kim"));
+        counter.reset();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        세는.saveUser(kim).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+        assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo(처음);
+    }
+
+    @Test
+    @DisplayName("값이 없는 칸이 있는 직원도 같은 값이면 다시 쓰지 않는다")
+    void 빈_칸이_있어도_같으면_쓰지_않는다() {
+        // given — email·displayName 이 null 이면 저장본에는 그 속성이 아예 없다
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 빈칸 = new DirectoryUser("park", null, "park", null, null, false);
+        세는.saveUser(빈칸).block();
+        counter.reset();
+
+        // when
+        세는.saveUser(빈칸).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
+
+    @Test
+    @DisplayName("속성이 바뀌면 다시 쓰고 updatedAt 이 그 시각이 된다")
+    void 바뀌면_updatedAt_이_그_시각이다() {
+        // given
+        repository.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, false)).block();
+
+        // then
+        assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T01:00:00Z");
+        assertThat(repository.findUser("kim").block().active()).isFalse();
+    }
+
+    @Test
+    @DisplayName("키가 예전 규칙으로 저장돼 있으면 값이 같아도 다시 써서 키를 고친다")
+    void 예전_키는_값이_같아도_고친다() {
+        // given — GSI1 정렬키가 소문자가 되기 전(원문 대소문자)의 저장본을 흉내낸다
+        DirectoryUser kim = new DirectoryUser("Kim", "e1", "Kim", "김철수", null, true);
+        repository.saveUser(kim).block();
+        Map<String, AttributeValue> 예전 = new HashMap<>(meta(Keys.userPk("Kim")));
+        예전.put(Keys.GSI1SK, Attrs.s("Kim"));
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(예전).build()).join();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.saveUser(kim).block();
+
+        // then
+        assertThat(meta(Keys.userPk("Kim")).get(Keys.GSI1SK).s()).isEqualTo("kim");
+        assertThat(updatedAt(Keys.userPk("Kim"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("조직은 META 와 멤버가 같으면 쓰지 않고, 멤버만 바뀌어도 updatedAt 이 갱신된다")
+    void 조직은_멤버가_바뀌면_갱신된다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        세는.saveUser(new DirectoryUser("kim", null, "kim", null, null, true)).block();
+        세는.saveUser(new DirectoryUser("park", null, "park", null, null, true)).block();
+        DirectoryGroup 개발팀 = new DirectoryGroup("DEV", "g1", "개발팀", Set.of(MemberRef.user("kim")));
+        세는.saveGroup(개발팀).block();
+        String 처음 = updatedAt(Keys.groupPk("DEV"));
+        counter.reset();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when — 같은 조직을 다시 저장한다
+        세는.saveGroup(개발팀).block();
+
+        // then — 아무것도 쓰지 않는다
+        assertThat(counter.puts()).isZero();
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo(처음);
+
+        // when — 멤버만 바꾼다
+        clock.앞으로(Duration.ofHours(1));
+        세는.saveGroup(new DirectoryGroup("DEV", "g1", "개발팀",
+                Set.of(MemberRef.user("kim"), MemberRef.user("park")))).block();
+
+        // then — META 도 다시 쓰여 updatedAt 이 그 시각이 된다
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T02:00:00Z");
     }
 }
