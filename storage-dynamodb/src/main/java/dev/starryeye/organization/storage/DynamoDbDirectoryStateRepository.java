@@ -452,9 +452,29 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * LDAP 전체 동기화·재적재. 삭제 판단 때문에 원래 GSI1 을 훑던 조회에서 <b>저장본을 함께</b> 받아(GSI1 은 ALL
      * 프로젝션이라 더 읽지 않는다) 비교하고, 새로 생기거나 바뀐 것만 쓴다(GSI 설계 §4).
      *
-     * <p><b>비교 기준이 최종 일관성 인덱스다.</b> 이 메서드에 내용을 넣어 부르는 것은 LDAP 의 전체 동기화와 재적재뿐이고,
-     * LDAP 앱에는 그와 동시에 직원·조직을 쓰는 경로가 없다 — 인덱스는 이전 회차 뒤로 이미 맞춰져 있다. 늦은 인덱스가 부를
-     * 수 있는 일은 "같은데 다르다고 보고 한 번 더 쓰기" 로, 무해하다.
+     * <p><b>순서 — 직원 갱신 → 조직 갱신 → 폐지된 조직 삭제 → 퇴사한 직원 삭제.</b> {@link #writeGroup} 은 "떠난
+     * 멤버" 를 그 조직의 현재 멤버 줄(existingMemberSks)과 스냅샷의 목표 멤버를 견주어 스스로 찾아낸다(설계 §3
+     * "조직의 변경은 … 멤버 구성의 변경"). 퇴사한 직원을 먼저 지워 버리면 {@link #deleteUser} 가 그 직원이 속한
+     * 조직들의 {@code MEMBER#} 줄부터 지우므로, 그 뒤에 도는 {@code writeGroup} 은 이미 멤버 줄이 없는 조직만 보고
+     * "떠난 멤버 없음" 으로 읽는다 — META 도 그대로면 조직 자체가 안 바뀐 것처럼 건너뛰어 {@code updatedAt} 도
+     * 못 찍고 멤버 구성 변경이 사라진다. 조직을 먼저 갱신하면 {@code writeGroup} 자신이 떠난 멤버를 보고(
+     * {@code MEMBER#} 를 지운 다음 {@code BELONGS_TO#} 를 지운다) 변경으로 잡아 낸다. 폐지된 조직·퇴사한 직원의
+     * 삭제는 그 뒤에 와도 안전하다 — {@link #deleteGroup}/{@code deleteUser} 는 이미 지워진 줄을 다시 지우려
+     * 해도 {@code DeleteItem} 은 없는 키에도 성공한다.
+     *
+     * <p><b>비교 기준이 최종 일관성 인덱스다.</b> 인덱스가 늦어 생길 수 있는 일은 두 방향이다(GSI 설계 §4).
+     *
+     * <ul>
+     *     <li>"다르다" 로 잘못 보고 한 번 더 쓴다 — 무해하다.</li>
+     *     <li>"같다" 로 잘못 보고 안 쓴다 — 이 테이블에 아직 GSI1 로 전파되지 않은 쓰기가 있어야 생긴다. 예전의
+     *     무조건 재기록과 달리 <b>이 회차로 낫지 않는다</b> — 그 엔티티가 다음에 다시 바뀔 때까지 낡은 값과
+     *     못 찍힌 {@code updatedAt} 이 그대로 남는다.</li>
+     * </ul>
+     *
+     * <p><b>전제 — 이 메서드가 시작할 때 이 테이블에 아직 GSI1 로 전파되지 않은 쓰기가 없어야 한다.</b> 이
+     * 메서드에 내용을 넣어 부르는 것은 LDAP 의 전체 동기화(FullSyncUseCase)와 재적재(RebuildUseCase)뿐이고,
+     * LDAP 앱에는 그와 동시에 직원·조직을 쓰는 경로가 없어 이전 회차는 오래전에 끝나 있다 — 인덱스는 이미
+     * 맞춰져 있다. SCIM 재적재(ScimRebuildUseCase)는 이 메서드를 빈 스냅샷으로만 불러 비교할 것이 없다.
      */
     @Override
     public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
@@ -465,22 +485,22 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                     Map<String, Stored<DirectoryUser>> users = stored.getT1();
                     Map<String, Stored<GroupHeader>> groups = stored.getT2();
 
-                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
-                            .filter(id -> !snapshot.users().containsKey(id))
-                            .flatMap(this::deleteUser, QUERY_CONCURRENCY)
-                            .then();
-                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
-                            .filter(id -> !snapshot.groups().containsKey(id))
-                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
-                            .then();
                     Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
                             .flatMap(user -> writeUser(user, users.get(user.id())), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
                             .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
                             .then();
+                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
+                            .filter(id -> !snapshot.groups().containsKey(id))
+                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                            .then();
+                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
+                            .filter(id -> !snapshot.users().containsKey(id))
+                            .flatMap(this::deleteUser, QUERY_CONCURRENCY)
+                            .then();
 
-                    return removeStaleUsers.then(removeStaleGroups).then(upsertUsers).then(upsertGroups);
+                    return upsertUsers.then(upsertGroups).then(removeStaleGroups).then(removeStaleUsers);
                 });
     }
 

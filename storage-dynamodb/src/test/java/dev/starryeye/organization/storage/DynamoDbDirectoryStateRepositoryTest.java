@@ -653,6 +653,91 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("직원 속성이 하나 바뀔 때마다 PutItem 이 정확히 한 번씩만 나간다")
+    void 직원_속성_변경마다_PutItem이_한번이다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 기준 = new DirectoryUser("kim", "e1", "kim", "김철수", "kim@example.com", true);
+        세는.saveUser(기준).block();
+        counter.reset();
+
+        // when — externalId 변경
+        세는.saveUser(new DirectoryUser("kim", "e2", "kim", "김철수", "kim@example.com", true)).block();
+        // then
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — externalId → null
+        세는.saveUser(new DirectoryUser("kim", null, "kim", "김철수", "kim@example.com", true)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — userName 대소문자만 변경("kim" → "Kim")
+        세는.saveUser(new DirectoryUser("kim", null, "Kim", "김철수", "kim@example.com", true)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — displayName 변경
+        세는.saveUser(new DirectoryUser("kim", null, "Kim", "김철수2", "kim@example.com", true)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — displayName → null
+        세는.saveUser(new DirectoryUser("kim", null, "Kim", null, "kim@example.com", true)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — email → null
+        세는.saveUser(new DirectoryUser("kim", null, "Kim", null, null, true)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — active 반전
+        세는.saveUser(new DirectoryUser("kim", null, "Kim", null, null, false)).block();
+        assertThat(counter.puts()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("조직 속성이 하나 바뀔 때마다 PutItem 이 정확히 한 번씩만 나간다")
+    void 조직_속성_변경마다_PutItem이_한번이다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        세는.saveGroup(new DirectoryGroup("DEV", "cn=dev", "개발팀", Set.of())).block();
+        counter.reset();
+
+        // when — displayName 변경(개명)
+        세는.saveGroup(new DirectoryGroup("DEV", "cn=dev", "플랫폼팀", Set.of())).block();
+        // then
+        assertThat(counter.puts()).isEqualTo(1);
+        counter.reset();
+
+        // when — externalId 변경
+        세는.saveGroup(new DirectoryGroup("DEV", "cn=dev-changed", "플랫폼팀", Set.of())).block();
+        assertThat(counter.puts()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("조직도 GSI1 정렬키가 예전 규칙(원문 대소문자)이면 값이 같아도 다시 써서 키를 고친다")
+    void 조직도_예전_키는_값이_같아도_고친다() {
+        // given — GSI1 정렬키가 소문자가 되기 전(원문 대소문자)의 저장본을 흉내낸다
+        DirectoryGroup dev = new DirectoryGroup("DEV", "g1", "DevTeam", Set.of());
+        repository.saveGroup(dev).block();
+        Map<String, AttributeValue> 예전 = new HashMap<>(meta(Keys.groupPk("DEV")));
+        예전.put(Keys.GSI1SK, Attrs.s("DevTeam"));
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(예전).build()).join();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.saveGroup(dev).block();
+
+        // then
+        assertThat(meta(Keys.groupPk("DEV")).get(Keys.GSI1SK).s()).isEqualTo("devteam");
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
     @DisplayName("조직은 META 와 멤버가 같으면 쓰지 않고, 멤버만 바뀌어도 updatedAt 이 갱신된다")
     void 조직은_멤버가_바뀌면_갱신된다() {
         // given
@@ -761,6 +846,28 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(updatedAt(Keys.userPk("u020"))).isEqualTo("2026-01-01T00:00:00Z");
         assertThat(updatedAt(Keys.groupPk("G3"))).isEqualTo("2026-01-01T01:00:00Z");
         assertThat(updatedAt(Keys.groupPk("G1"))).isEqualTo("2026-01-01T00:00:00Z");
+    }
+
+    @Test
+    @DisplayName("퇴사로 조직 멤버가 줄면 그 조직도 다시 찍는다 — 직원 삭제보다 조직 갱신이 먼저다")
+    void 퇴사한_멤버는_조직도_다시_찍는다() {
+        // given
+        repository.replaceWith(조직도(50)).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        DirectorySnapshot 원본 = 조직도(50);
+        Map<String, DirectoryUser> users = new LinkedHashMap<>(원본.users());
+        users.remove("u001");
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>(원본.groups());
+        groups.put("G1", new DirectoryGroup("G1", "g1", "개발팀", Set.of(MemberRef.user("u000"))));
+
+        // when — u001 이 직원 목록과 G1 멤버에서 모두 빠진 채로 다시 전체 교체한다
+        repository.replaceWith(new DirectorySnapshot(users, groups)).block();
+
+        // then — G1 은 멤버가 줄었으니 updatedAt 이 이번 시각으로 찍히고, u001 은 사라지고, G1 멤버에도 없다
+        assertThat(updatedAt(Keys.groupPk("G1"))).isEqualTo("2026-01-01T01:00:00Z");
+        assertThat(repository.findUser("u001").block()).isNull();
+        assertThat(repository.findGroup("G1").block().members()).doesNotContain(MemberRef.user("u001"));
     }
 
     @Test

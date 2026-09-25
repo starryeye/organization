@@ -47,18 +47,20 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("10만 명을 적재한 뒤 같은 조직도는 PutItem 0번, 100명을 바꾸면 PutItem 100번이다")
     void 바뀐_만큼만_쓴다() {
-        // given
+        // given — 스냅샷 구성은 시계에 넣지 않는다. replaceWith 만 잰다
         WriteCounter counter = new WriteCounter();
         var repository = new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, Clock.systemUTC());
+        DirectorySnapshot 최초 = 조직도(Map.of());
         long 시작 = System.currentTimeMillis();
-        repository.replaceWith(조직도(Map.of())).block(Duration.ofMinutes(30));
+        repository.replaceWith(최초).block(Duration.ofMinutes(30));
         long 적재 = System.currentTimeMillis() - 시작;
         long 적재쓰기 = counter.puts();
 
         // when — 같은 조직도
+        DirectorySnapshot 그대로 = 조직도(Map.of());
         counter.reset();
         시작 = System.currentTimeMillis();
-        repository.replaceWith(조직도(Map.of())).block(Duration.ofMinutes(30));
+        repository.replaceWith(그대로).block(Duration.ofMinutes(30));
         long 같음 = System.currentTimeMillis() - 시작;
         long 같음쓰기 = counter.puts();
 
@@ -68,15 +70,17 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
             String id = "u%06d".formatted(i * 1_000);
             바뀐직원.put(id, new DirectoryUser(id, "ext-" + id, id, "이름 바뀜 " + i, null, true));
         }
+        DirectorySnapshot 일부변경 = 조직도(바뀐직원);
         counter.reset();
         시작 = System.currentTimeMillis();
-        repository.replaceWith(조직도(바뀐직원)).block(Duration.ofMinutes(30));
+        repository.replaceWith(일부변경).block(Duration.ofMinutes(30));
         long 일부 = System.currentTimeMillis() - 시작;
         long 일부쓰기 = counter.puts();
 
-        // then
+        // then — 최초 적재는 직원 10만 + 조직 META 100 + 소속 줄 1,000 + 멤버 줄 1,000 = 102,100건
         System.out.printf("적재: %,dms PutItem %,d / 같은 조직도: %,dms PutItem %,d / 100명 변경: %,dms PutItem %,d%n",
                 적재, 적재쓰기, 같음, 같음쓰기, 일부, 일부쓰기);
+        assertThat(적재쓰기).isEqualTo(102_100);
         assertThat(같음쓰기).isZero();
         assertThat(일부쓰기).isEqualTo(100);
     }
