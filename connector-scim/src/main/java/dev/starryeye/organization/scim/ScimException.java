@@ -32,6 +32,21 @@ public class ScimException extends RuntimeException {
         return new ScimException(HttpStatus.BAD_REQUEST, "invalidPath", detail);
     }
 
+    /** RFC 7644 §3.12 — 필터 문법이 틀렸거나 지원하지 않는 속성·연산자 조합이다. */
+    public static ScimException invalidFilter(String detail) {
+        return new ScimException(HttpStatus.BAD_REQUEST, "invalidFilter", detail);
+    }
+
+    /** RFC 7644 §3.12 — 값이 없거나 작업과 맞지 않는다. 조회 파라미터(정렬·페이지·속성 선택)의 잘못된 값에 쓴다. */
+    public static ScimException invalidValue(String detail) {
+        return new ScimException(HttpStatus.BAD_REQUEST, "invalidValue", detail);
+    }
+
+    /** RFC 7644 §3.12 — 서비스 제공자가 지원하지 않는 작업이다(서버 루트 조회 등). */
+    public static ScimException notImplemented(String detail) {
+        return new ScimException(HttpStatus.NOT_IMPLEMENTED, null, detail);
+    }
+
     public static ScimException uniqueness(String detail) {
         return new ScimException(HttpStatus.CONFLICT, "uniqueness", detail);
     }

@@ -1,7 +1,9 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -65,6 +67,13 @@ public class DynamoDbConfig {
         return new DynamoDbDirectorySearchRepository(client, properties);
     }
 
+    @Bean
+    public DirectoryQueryRepository directoryQueryRepository(DynamoDbAsyncClient client,
+                                                             DynamoDbProperties properties,
+                                                             DynamoDbDirectoryStateRepository state) {
+        return new DynamoDbDirectoryQueryRepository(client, properties, state);
+    }
+
     /**
      * 인스턴스 식별자. 배제 판단에는 쓰지 않고 "누가 쥐고 있나" 를 로그로 보기 위한 값이라
      * 재시작마다 달라져도 무방하다.
@@ -74,5 +83,12 @@ public class DynamoDbConfig {
                                      Clock clock) {
         return new DynamoDbMutationLock(client, properties, clock,
                 java.util.UUID.randomUUID().toString());
+    }
+
+    @Bean
+    public PageBookmarkRepository pageBookmarkRepository(DynamoDbAsyncClient client,
+                                                         DynamoDbProperties properties,
+                                                         Clock clock) {
+        return new DynamoDbPageBookmarkRepository(client, properties, clock);
     }
 }

@@ -104,7 +104,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
         item.put(Keys.GSI1PK, Attrs.s(Keys.USER_INDEX));
-        item.put(Keys.GSI1SK, Attrs.s(user.userName() == null ? user.id() : user.userName()));
+        item.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(user.userName() == null ? user.id() : user.userName())));
         // GSI2(표시명 검색)를 위해 따로 쓸 것이 없다 — 파티션키는 위의 GSI1PK 를 그대로 쓰고
         // 정렬키는 아래 putIfPresent 가 쓰는 displayName 속성 그 자체다(Keys.GSI2PK 참고).
         // 표시명이 없는 직원은 그 속성이 아예 없어 GSI2 에 실리지 않는다 — DynamoDB 는 정렬키
@@ -160,7 +160,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     /**
      * {@link #saveUser} 가 GSI1 의 정렬키에 {@code userName} 을 넣어 두므로 Scan 없이
-     * 정확 일치 Query 로 찾을 수 있다.
+     * 정확 일치 Query 로 찾을 수 있다. 정렬키는 소문자다({@link Keys#indexKey}) — {@code Kim}
+     * 이 있으면 {@code kim} 으로도 찾힌다.
      */
     @Override
     public Flux<String> findUserIdsByUserName(String userName) {
@@ -173,13 +174,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .keyConditionExpression("#pk = :pk AND #sk = :sk")
                 .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK, "#sk", Keys.GSI1SK))
                 .expressionAttributeValues(Map.of(
-                        ":pk", Attrs.s(Keys.USER_INDEX), ":sk", Attrs.s(userName)))
+                        ":pk", Attrs.s(Keys.USER_INDEX), ":sk", Attrs.s(Keys.indexKey(userName))))
                 .build();
 
         return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
     }
 
-    private DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
+    /** 직원 META 아이템을 읽는다. GSI1(ALL 프로젝션) 아이템도 같은 속성을 가져 조회 저장소가 함께 쓴다. */
+    static DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
         return new DirectoryUser(
                 userId,
                 Attrs.str(item, EXTERNAL_ID),
@@ -187,6 +189,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 Attrs.str(item, DISPLAY_NAME),
                 Attrs.str(item, EMAIL),
                 Attrs.flag(item, ACTIVE));
+    }
+
+    /** 조직 META 아이템을 읽는다. 조회 저장소가 함께 쓴다. */
+    static GroupHeader toGroupHeader(String groupId, Map<String, AttributeValue> item) {
+        return new GroupHeader(groupId, Attrs.str(item, EXTERNAL_ID), Attrs.str(item, DISPLAY_NAME));
     }
 
     // ---------- 조직 ----------
@@ -214,9 +221,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .consistentRead(true)
                         .build()))
                 .filter(GetItemResponse::hasItem)
-                .map(response -> new GroupHeader(groupId,
-                        Attrs.str(response.item(), EXTERNAL_ID),
-                        Attrs.str(response.item(), DISPLAY_NAME)));
+                .map(response -> toGroupHeader(groupId, response.item()));
     }
 
     /**
@@ -247,7 +252,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         meta.put(Keys.PK, Attrs.s(Keys.groupPk(group.id())));
         meta.put(Keys.SK, Attrs.s(Keys.META));
         meta.put(Keys.GSI1PK, Attrs.s(Keys.GROUP_INDEX));
-        meta.put(Keys.GSI1SK, Attrs.s(group.displayName() == null ? group.id() : group.displayName()));
+        meta.put(Keys.GSI1SK, Attrs.s(Keys.indexKey(group.displayName() == null ? group.id() : group.displayName())));
         meta.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
         Attrs.putIfPresent(meta, EXTERNAL_ID, group.externalId());
         Attrs.putIfPresent(meta, DISPLAY_NAME, group.displayName());

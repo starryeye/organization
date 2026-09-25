@@ -42,7 +42,6 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     private static final String FAILURE_COUNT = "failureCount";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String MESSAGE = "message";
-    private static final String EXPIRES_AT = "expiresAt";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -76,7 +75,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         item.put(WRITTEN_COUNT, Attrs.n(run.writtenCount()));
         item.put(DELETED_COUNT, Attrs.n(run.deletedCount()));
         item.put(FAILURE_COUNT, Attrs.n(run.failureCount()));
-        item.put(EXPIRES_AT, Attrs.n(expiresAt));
+        item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
         if (run.finishedAt() != null) {
             item.put(FINISHED_AT, Attrs.s(run.finishedAt().toString()));
         }

@@ -105,6 +105,22 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("계정명·조직명 접두사 검색은 대소문자를 가리지 않는다 — 결과의 값은 보낸 그대로다")
+    void 접두사_검색은_대소문자를_가리지_않는다() {
+        // given
+        state.saveUser(new DirectoryUser("gd.hong", "e1", "GD.Hong", "홍길동", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV001", "g1", "Dev Team", Set.of())).block();
+
+        // when
+        var users = search.searchUsersByUserName("gd.h", null, 20).block();
+        var groups = search.searchGroupsByDisplayName("DEV", null, 20).block();
+
+        // then
+        assertThat(users.items()).extracting(UserSummary::userName).containsExactly("GD.Hong");
+        assertThat(groups.items()).extracting("displayName").containsExactly("Dev Team");
+    }
+
+    @Test
     @DisplayName("커서로 다음 페이지를 이어 읽으면 중복도 누락도 없다")
     void 커서로_이어_읽는다() {
         // given — 같은 접두사를 가진 직원 5명

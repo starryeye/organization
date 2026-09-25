@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 
 /**
  * 단일 테이블 설계의 PK/SK/GSI 키를 만들고 파싱한다.
@@ -48,6 +49,16 @@ public final class Keys {
     /** @see #GSI2PK — 아이템 속성 {@code displayName} 그 자체다. */
     public static final String GSI2SK = "displayName";
 
+    /**
+     * GSI3 — {@code externalId} 로 직원·조직을 찾는다(S-1 설계 §5.2). GSI2 처럼 <b>새 속성을 만들지
+     * 않는다</b> — 파티션키는 아이템이 이미 가진 {@code externalId} 속성, 정렬키는 본 테이블의 {@link #PK} 다.
+     * {@code externalId} 가 없는 아이템(멤버 줄·소속 줄·스냅샷)은 인덱스에 실리지 않는다.
+     */
+    public static final String GSI3 = "GSI3";
+    public static final String GSI3PK = "externalId";
+    /** @see #GSI3 — 본 테이블의 파티션키 속성 그 자체다. {@code USER#}/{@code GROUP#} 접두사로 종류를 가른다. */
+    public static final String GSI3SK = PK;
+
     public static final String META = "META";
 
     /** 전체 직원 열거용 GSI 파티션 */
@@ -69,6 +80,17 @@ public final class Keys {
     public static final String TUPLE_PREFIX = "TUPLE#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
 
+    /** SCIM 목록 책갈피 파티션 접두사 (S-1 설계 §5.3). */
+    public static final String PAGE_PREFIX = "PAGE#";
+
+    /**
+     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피뿐 아니라 튜플 스냅샷, 동기화 실행
+     * 이력, 쓰기 락까지 이 한 속성을 공유한다 — 테이블 TTL 이 이 속성 하나만 보고 지운다.
+     * 이름을 바꾸면 넷 다 조용히 만료가 멈춘다({@link TableInitializer#createTable} 이 TTL 을
+     * 이 상수로 켜므로).
+     */
+    public static final String EXPIRES_AT = "expiresAt";
+
     /** 전역 변경 락. 파티션 하나에 아이템 하나다 (설계 §4.2). */
     public static final String LOCK_PK = "LOCK#SCIM_WRITE";
 
@@ -84,6 +106,25 @@ public final class Keys {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private Keys() {
+    }
+
+    /**
+     * GSI1 정렬키에 넣는 값. {@code userName}·조직 {@code displayName} 은 RFC 7643 에서
+     * {@code caseExact=false} 라 대소문자를 가리지 않고 찾아야 한다 — 키만 소문자로 두고 속성은
+     * 보낸 그대로 둔다(S-1 설계 §5.1). 쓰는 쪽과 묻는 쪽이 반드시 이 한 메서드를 거친다.
+     */
+    public static String indexKey(String raw) {
+        return raw.toLowerCase(Locale.ROOT);
+    }
+
+    /** 책갈피 파티션키 — 종류·방향별로 하나. 예: {@code PAGE#USER#ASC}. */
+    public static String pagePk(String kind, boolean descending) {
+        return PAGE_PREFIX + kind + (descending ? "#DESC" : "#ASC");
+    }
+
+    /** 책갈피 정렬키 — 이 책갈피로 이어 읽는 {@code startIndex}. 예: {@code START#101}. */
+    public static String pageSk(long startIndex) {
+        return "START#" + startIndex;
     }
 
     /**

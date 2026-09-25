@@ -10,7 +10,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * 메모리 위에서 접두사 검색과 커서 페이징을 흉내낸다.
@@ -67,36 +69,56 @@ public class FakeSearchRepository implements DirectorySearchRepository {
                 .findFirst().orElse(null);
     }
 
+    /**
+     * {@code userName} 은 GSI1 의 소문자 키로 찾으므로 대소문자를 가리지 않는다(운영 코드와 맞춘다).
+     */
     @Override
     public Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
-        return Mono.just(page(users, UserSummary::userName, prefix, cursor, limit));
+        return Mono.just(page(users, UserSummary::userName, prefix, cursor, limit, true));
     }
 
+    /**
+     * 직원 {@code displayName} 은 GSI2 가 속성값을 그대로 키로 쓰므로 대소문자를 가린다.
+     */
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
         // displayName 이 없는 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
         List<UserSummary> indexed = users.stream().filter(u -> u.displayName() != null).toList();
-        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit));
+        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit, false));
     }
 
+    /**
+     * 조직 {@code displayName} 은 GSI1 의 소문자 키로 찾으므로 대소문자를 가리지 않는다(운영 코드와 맞춘다).
+     */
     @Override
     public Mono<Page<GroupSummary>> searchGroupsByDisplayName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
-        return Mono.just(page(groups, GroupSummary::displayName, prefix, cursor, limit));
+        return Mono.just(page(groups, GroupSummary::displayName, prefix, cursor, limit, true));
     }
 
-    private <T> Page<T> page(List<T> source, java.util.function.Function<T, String> sortKey,
-                             String prefix, String cursor, int limit) {
+    /**
+     * {@code caseInsensitive} 면 정렬·비교를 모두 소문자로 바꿔서 한다 — GSI1 정렬키가 소문자인 것과
+     * 같은 순서가 되도록.
+     */
+    private <T> Page<T> page(List<T> source, Function<T, String> sortKey,
+                             String prefix, String cursor, int limit, boolean caseInsensitive) {
+        Function<T, String> key = caseInsensitive ? item -> lower(sortKey.apply(item)) : sortKey;
+        String matchPrefix = caseInsensitive ? lower(prefix) : prefix;
+
         List<T> matched = source.stream()
-                .filter(item -> sortKey.apply(item) != null && sortKey.apply(item).startsWith(prefix))
-                .sorted(Comparator.comparing(sortKey))
+                .filter(item -> key.apply(item) != null && key.apply(item).startsWith(matchPrefix))
+                .sorted(Comparator.comparing(key))
                 .toList();
 
         int from = cursor == null ? 0 : Integer.parseInt(cursor);
         int to = Math.min(from + limit, matched.size());
         String next = to < matched.size() ? String.valueOf(to) : null;
         return new Page<>(matched.subList(from, to), next);
+    }
+
+    private static String lower(String value) {
+        return value == null ? null : value.toLowerCase(Locale.ROOT);
     }
 }

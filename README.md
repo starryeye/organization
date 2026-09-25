@@ -108,6 +108,15 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 전부 `BELONGS_TO#` 줄이 없는 채로 남고, 그 멤버에 대한 역참조(`findGroupIdsContaining`)는 빈
 결과만 돌려주며, 그 상태에서 일어나는 삭제는 조용히 권한을 남긴다.
 
+**S-1(SCIM 목록·필터)도 키를 바꾼다** — GSI1 정렬키가 소문자가 되고(`userName`·조직명을 대소문자 없이 찾기 위해)
+`externalId` 로 찾는 GSI3 가 생기고, 테이블 TTL(`expiresAt`)이 켜진다. 이 TTL 은 책갈피 전용이 아니다 —
+페이지 책갈피뿐 아니라 이미 `expiresAt` 을 갖고 있던 튜플 스냅샷·동기화 실행 이력·쓰기 락 아이템도 함께
+만료시킨다. 기존 테이블은 다시 만들어야 한다.
+
+직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
+GSI2(파티션키 `GSI1PK`, 정렬키 `displayName`, 프로젝션 `INCLUDE` — `userName`·`active`), GSI3(파티션키
+`externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
+
 | 서비스 | 주소 |
 |---|---|
 | OpenFGA | http://localhost:8080 (플레이그라운드 http://localhost:3000) |
@@ -275,13 +284,26 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 지원 엔드포인트:
 
-| 리소스 | POST | GET (단건) | PUT | PATCH | DELETE |
-|---|---|---|---|---|---|
-| `/scim/v2/Users` | O | O | O | O | O |
-| `/scim/v2/Groups` | O | O | O | O | O |
-| `/scim/v2/ServiceProviderConfig` | - | O | - | - | - |
+| 리소스 | POST | GET (단건) | GET (목록·필터) | PUT | PATCH | DELETE |
+|---|---|---|---|---|---|---|
+| `/scim/v2/Users` | O | O | O | O | O | O |
+| `/scim/v2/Groups` | O | O | O | O | O | O |
+| `/scim/v2/ServiceProviderConfig` | - | O | - | - | - | - |
 
-**목록 조회(`GET /Users`, `GET /Groups`)와 필터는 지원하지 않는다.**
+목록·필터 조회(RFC 7644 §3.4.2)와, 같은 조회를 본문으로 보내는 `POST /scim/v2/Users/.search`·`/Groups/.search` 를
+지원한다.
+
+| | 지원 범위 |
+|---|---|
+| `filter` | `eq` 와 `and` 만. 직원은 `id`·`userName`·`externalId`, 조직은 `id`·`displayName`·`externalId` 중 하나의 `eq` 가 있어야 한다(`and` 뒤에는 직원 `displayName`·`active` 도 온다). 그 밖은 400 `invalidFilter` |
+| 대소문자 | `userName`·조직 `displayName` 은 가리지 않는다(RFC 7643 `caseExact=false`) — `Kim` 이 있으면 `kim` 생성은 409 다. `id`·`externalId` 는 가린다 |
+| `startIndex`·`count` | `count` 기본값·상한 100 |
+| `sortBy`·`sortOrder` | 직원 `userName`, 조직 `displayName` 만 |
+| `attributes`·`excludedAttributes` | 리소스를 돌려주는 모든 응답. 조직에서 `members` 를 빼면 멤버를 읽지 않는다 |
+
+필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
+동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센
+값이다. 서버 루트 조회(`GET /scim/v2?filter=`)는 501 이다. 설계: `docs/superpowers/specs/2026-09-25-scim-list-filter-design.md`.
 
 지원하는 PATCH는 다음이 전부다.
 

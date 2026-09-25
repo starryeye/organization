@@ -40,7 +40,6 @@ public class DynamoDbMutationLock implements MutationLock {
     private static final String TOKEN = "token";
     private static final String HOLDER = "holder";
     private static final String PURPOSE = "purpose";
-    private static final String EXPIRES_AT = "expiresAt";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -61,14 +60,14 @@ public class DynamoDbMutationLock implements MutationLock {
             item.put(TOKEN, Attrs.s(token));
             item.put(HOLDER, Attrs.s(holderId));
             item.put(PURPOSE, Attrs.s(purpose.name()));
-            item.put(EXPIRES_AT, Attrs.n(expiresAt.getEpochSecond()));
+            item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt.getEpochSecond()));
 
             return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
                             .tableName(properties.getTableName())
                             .item(item)
                             // 아무도 없거나, 있어도 이미 만료됐으면 가져간다
                             .conditionExpression("attribute_not_exists(#pk) OR #expiresAt < :now")
-                            .expressionAttributeNames(Map.of("#pk", Keys.PK, "#expiresAt", EXPIRES_AT))
+                            .expressionAttributeNames(Map.of("#pk", Keys.PK, "#expiresAt", Keys.EXPIRES_AT))
                             .expressionAttributeValues(Map.of(":now", Attrs.n(now.getEpochSecond())))
                             .build()))
                     .thenReturn(new LockLease(token, expiresAt))
@@ -108,7 +107,7 @@ public class DynamoDbMutationLock implements MutationLock {
                             .key(Map.of(Keys.PK, Attrs.s(Keys.LOCK_PK), Keys.SK, Attrs.s(Keys.META)))
                             .updateExpression("SET #expiresAt = :expiresAt")
                             .conditionExpression("#token = :token")
-                            .expressionAttributeNames(Map.of("#expiresAt", EXPIRES_AT, "#token", TOKEN))
+                            .expressionAttributeNames(Map.of("#expiresAt", Keys.EXPIRES_AT, "#token", TOKEN))
                             .expressionAttributeValues(Map.of(
                                     ":expiresAt", Attrs.n(expiresAt.getEpochSecond()),
                                     ":token", Attrs.s(lease.token())))

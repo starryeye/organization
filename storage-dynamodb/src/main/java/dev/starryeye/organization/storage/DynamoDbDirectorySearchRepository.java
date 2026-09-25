@@ -31,8 +31,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
     @Override
     public Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit) {
+        // GSI1 정렬키는 소문자다(Keys.indexKey) — 접두사도 소문자로 묻는다
         return query(Keys.GSI1, Keys.GSI1PK, Keys.GSI1SK, Keys.USER_INDEX,
-                prefix, cursor, limit, DynamoDbDirectorySearchRepository::toUserSummary);
+                Keys.indexKey(prefix), cursor, limit, DynamoDbDirectorySearchRepository::toUserSummary);
     }
 
     @Override
@@ -47,7 +48,7 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     @Override
     public Mono<Page<GroupSummary>> searchGroupsByDisplayName(String prefix, String cursor, int limit) {
         return query(Keys.GSI1, Keys.GSI1PK, Keys.GSI1SK, Keys.GROUP_INDEX,
-                prefix, cursor, limit, DynamoDbDirectorySearchRepository::toGroupSummary);
+                Keys.indexKey(prefix), cursor, limit, DynamoDbDirectorySearchRepository::toGroupSummary);
     }
 
     /**
