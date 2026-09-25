@@ -4,6 +4,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -130,5 +132,17 @@ class ScimFilterTest {
     @DisplayName("다른 리소스의 스키마 URN 이 붙은 이름은 받지 않는다")
     void 다른_스키마_URN_은_받지_않는다() {
         거절한다("urn:ietf:params:scim:schemas:core:2.0:Group:displayName eq \"a\"");
+    }
+
+    @Test
+    @DisplayName("주어진 속성 순서대로 처음 나오는 조건을 고른다 — 없으면 빈 값이다")
+    void 우선순위대로_조건을_고른다() {
+        // given
+        ScimFilter filter = 파싱("externalId eq \"e1\" and userName eq \"kim\"");
+
+        // when, then
+        assertThat(filter.first(List.of("id", "username", "externalid")))
+                .contains(new ScimFilter.Term("username", "kim"));
+        assertThat(filter.first(List.of("id"))).isEmpty();
     }
 }

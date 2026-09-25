@@ -59,7 +59,8 @@ public class ScimGroupListing {
     private Mono<ScimPager.Slice<GroupHeader>> filtered(ScimQuery request) {
         List<ScimFilter.Term> terms = request.filter().terms();
         terms.forEach(ScimGroupListing::check);
-        ScimFilter.Term driver = driver(terms);
+        ScimFilter.Term driver = request.filter().first(INDEXED).orElseThrow(() ->
+                ScimException.invalidFilter("id·displayName·externalId 중 하나의 eq 가 있어야 합니다"));
         return candidates(driver)
                 .filter(group -> terms.stream().allMatch(term -> matches(group, term)))
                 .collectList()
@@ -73,17 +74,6 @@ public class ScimGroupListing {
         if (!(term.value() instanceof String)) {
             throw ScimException.invalidFilter("속성 '" + term.attribute() + "' 에 맞지 않는 값입니다: " + term.value());
         }
-    }
-
-    private static ScimFilter.Term driver(List<ScimFilter.Term> terms) {
-        for (String attribute : INDEXED) {
-            for (ScimFilter.Term term : terms) {
-                if (term.attribute().equals(attribute)) {
-                    return term;
-                }
-            }
-        }
-        throw ScimException.invalidFilter("id·displayName·externalId 중 하나의 eq 가 있어야 합니다");
     }
 
     private Flux<GroupHeader> candidates(ScimFilter.Term driver) {

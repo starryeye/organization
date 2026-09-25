@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -46,6 +47,21 @@ public record ScimFilter(List<Term> terms) {
             terms.add(parser.term());
         }
         return new ScimFilter(List.copyOf(terms));
+    }
+
+    /**
+     * {@code attributes} 순서대로 보며 처음 나오는 속성의 조건 하나. 조회가 인덱스로 찾을 조건을 고를 때 쓴다
+     * (S-1 설계 §4.2 — 우선순위는 리소스마다 다르다).
+     */
+    public Optional<Term> first(List<String> attributes) {
+        for (String attribute : attributes) {
+            for (Term term : terms) {
+                if (term.attribute().equals(attribute)) {
+                    return Optional.of(term);
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private static final class Parser {

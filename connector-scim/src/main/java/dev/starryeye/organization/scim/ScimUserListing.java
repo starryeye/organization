@@ -52,7 +52,8 @@ public class ScimUserListing {
     private Mono<ScimPager.Slice<DirectoryUser>> filtered(ScimQuery request) {
         List<ScimFilter.Term> terms = request.filter().terms();
         terms.forEach(ScimUserListing::check);
-        ScimFilter.Term driver = driver(terms);
+        ScimFilter.Term driver = request.filter().first(INDEXED).orElseThrow(() -> ScimException.invalidFilter(
+                "id·userName·externalId 중 하나의 eq 가 있어야 합니다 — 전원을 훑는 필터는 받지 않습니다"));
         return candidates(driver)
                 .filter(user -> terms.stream().allMatch(term -> matches(user, term)))
                 .collectList()
@@ -67,18 +68,6 @@ public class ScimUserListing {
         if (!type.isInstance(term.value())) {
             throw ScimException.invalidFilter("속성 '" + term.attribute() + "' 에 맞지 않는 값입니다: " + term.value());
         }
-    }
-
-    private static ScimFilter.Term driver(List<ScimFilter.Term> terms) {
-        for (String attribute : INDEXED) {
-            for (ScimFilter.Term term : terms) {
-                if (term.attribute().equals(attribute)) {
-                    return term;
-                }
-            }
-        }
-        throw ScimException.invalidFilter(
-                "id·userName·externalId 중 하나의 eq 가 있어야 합니다 — 전원을 훑는 필터는 받지 않습니다");
     }
 
     private Flux<DirectoryUser> candidates(ScimFilter.Term driver) {
