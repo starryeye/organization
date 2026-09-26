@@ -232,7 +232,7 @@ public class AdminQueryUseCase {
                                         entry.via, user.active(), null, entry.cycle)),
                         CHECK_CONCURRENCY)
                 .collectList()
-                .map(paths -> new EmployeeDetail(user.id(), user.userName(), user.displayName(),
+                .map(paths -> new EmployeeDetail(user.id(), user.userName(), user.displayName(), user.name(),
                         user.email(), user.active(), paths, reached.truncated));
     }
 

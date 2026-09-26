@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
@@ -72,7 +73,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
-                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), entry.active()));
+                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), entry.active(),
+                    entry.name()));
         }
 
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
@@ -135,7 +137,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                             required(adapter, config.getUserIdAttribute())),
                     value(attributes, config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(dn, attributes, 지금));
+                    !AdAccountStatus.막혔는가(dn, attributes, 지금),
+                    LdapPersonName.from(attributes));
         };
     }
 
@@ -260,7 +263,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     }
 
     /** 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다. */
-    private record UserEntry(String id, String dn, String displayName, String email, boolean active) {
+    private record UserEntry(String id, String dn, String displayName, String email, boolean active,
+                             PersonName name) {
     }
 
     /**

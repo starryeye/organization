@@ -1,0 +1,179 @@
+# 직원 이름 칸과 직원 PATCH (S-3) — 설계
+
+> 브랜치 `scim-name-parts` (origin/main `cf28cc1` 에서 분기).
+> 발단: IdP 호환성 감사 [`2026-09-09-idp-conformance-audit.md`](2026-09-09-idp-conformance-audit.md) §2.3 — "중".
+
+## 1. 문제
+
+**이름이 사라진다.** 도메인 모델(`DirectoryUser`)에 성·이름 칸이 없다. `ScimMapper` 는 들어온 `name` 에서 `formatted` 만
+`displayName` 의 대체값으로 쓰고, 응답은 `new ScimName(displayName, null, null)` — 이름이 없어도 `formatted` 를 지어낸다.
+Okta 의 최소 요구 속성 넷(`userName`, `name.givenName`, `name.familyName`, `emails`) 중 둘을 잃는다.
+
+**PATCH 가 요청째 실패한다 (감사 문서에 없던 것).** Entra 문서의 사용자 PATCH 예시는 한 요청에 `name.familyName` 과
+`emails[type eq "work"].value` 를 함께 보낸다. `ScimPatchApplier` 가 받는 직원 경로는 `active`·`displayName`·`userName`
+셋뿐이고 나머지는 400 `invalidPath` 라, **Entra 가 사용자의 이름이나 이메일을 바꾸면 요청 전체가 실패한다.** 경로 없는
+PATCH(부분 리소스 병합)는 `name`·`emails`·`externalId` 를 조용히 버린다.
+
+**LDAP 은 이름을 읽지 않는다.** 표준 속성(`givenName`, `sn`)이 있는데도 읽지 않고, 읽어도 보여 줄 곳(admin 직원 상세)이 없다.
+
+## 2. 결정 — 사용자와 정한 것 (2026-09-26)
+
+| 주제 | 결정 | 버린 안 |
+|---|---|---|
+| 이름 범위 | **RFC 7643 `name` 하위 속성 여섯 전부를 한 묶음으로** — `formatted`, `familyName`, `givenName`, `middleName`, `honorificPrefix`, `honorificSuffix` | `givenName`·`familyName` 만, 셋만 |
+| PATCH 범위 | **우리가 저장하는 직원 속성 전부** — 지금의 `userName`·`displayName`·`active` + `externalId`, `name`·`name.*`, `emails`·`emails[type eq "work"]` | `name` 만, `name`+`emails` 만 |
+| LDAP·admin | **둘 다** — LDAP 은 표준 이름 속성을 읽고, admin 직원 상세가 이름을 보여 준다 | SCIM 만, SCIM+admin |
+| 저장하지 않는 속성 | **지금 규칙 유지** — 경로로 오면 400 `invalidPath`(IdP 가 반영됐다고 오해하지 않게). README 에 저장하는 속성과 IdP 매핑에서 뺄 것을 적는다 | 조용히 무시하기 |
+
+## 3. 도메인
+
+- 새 값 객체 **`PersonName(formatted, familyName, givenName, middleName, honorificPrefix, honorificSuffix)`** (core/model).
+  빈 문자열은 "없음"(null)으로 정규화한다. 여섯 칸이 모두 없으면 `PersonName.EMPTY` 와 같다.
+- `DirectoryUser` 에 칸 하나 **`name`** 을 더한다. null 로 들어오면 `PersonName.EMPTY` 로 바꾼다.
+- **기존 6인자 생성자를 남긴다**(이름 없음). 호출 100곳 중 테스트 89곳은 이름과 무관하다. 이름을 채우는 운영 코드(SCIM 매퍼,
+  PATCH, LDAP 두 전략, 저장소)만 7인자를 쓴다.
+- 튜플에는 쓰지 않는다 — 권한과 무관하다.
+
+## 4. 저장소
+
+- 직원 META 에 평평한 문자열 속성 여섯: `givenName`, `familyName`, `middleName`, `honorificPrefix`, `honorificSuffix`,
+  `nameFormatted`. 값이 없는 칸은 두지 않는다(`Attrs.putIfPresent`). `formatted` 만 이름을 바꾼 것은 `displayName` 과 헷갈리지
+  않게 하려는 것이다.
+- GSI 쏠림 작업의 "바뀐 것만 쓴다"(`userItem`·`toUser` 로 비교)가 이름 칸도 그대로 비교한다 — 이름만 바뀌어도 쓰고
+  `updatedAt` 을 찍는다.
+- **키·인덱스는 바뀌지 않는다.** GSI1 은 ALL 프로젝션이라 목록·필터 조회에도 이름이 실린다. GSI2(`INCLUDE userName, active`)·
+  GSI3(`KEYS_ONLY`)는 이름을 담지 않는다. **테이블 재생성은 필요 없다.**
+
+## 5. LDAP
+
+두 전략(`GroupOfNamesStrategy`, `DitStrategy`)이 표준 속성을 읽는다. 속성 이름은 설정으로 빼지 않는다 — ⑥ 의 AD 계정 상태와
+같은 방식이다(표준을 따른다).
+
+| LDAP 속성 | → `PersonName` | 출처 |
+|---|---|---|
+| `givenName` | `givenName` | RFC 4519 |
+| `sn` | `familyName` | RFC 4519 |
+| `generationQualifier` | `honorificSuffix` | RFC 4519 (Jr., III) |
+| `middleName` | `middleName` | AD 스키마 |
+
+- `formatted`·`honorificPrefix` 는 LDAP 표준 속성이 없어 비운다. 속성이 없으면 빈칸이다.
+- 엔트리를 이미 속성 목록 없이 검색하므로 검색은 바꾸지 않는다.
+
+## 6. admin
+
+직원 상세(`EmployeeDetail`)에 `name`(`PersonName`)을 더한다. JSON 에는 여섯 칸이 모두 나가고 없는 칸은 `null` 이다 — 계획
+작성 때 바꿨다(`PersonName` 은 Jackson 이 없는 core 에 있고, admin 은 지금도 없는 값을 `null` 로 내보낸다). `PersonName` 에는
+`isEmpty()` 같은 `is…` 메서드를 두지 않는다 — Jackson 이 게터로 보고 `"empty"` 칸을 내보낸다(최종 리뷰에서 발견).
+
+## 7. SCIM
+
+### 7.1 생성·교체와 응답
+
+- POST/PUT 의 `name` 여섯 칸을 **보낸 그대로** 저장한다.
+- `displayName` 대체 규칙(`displayName` → `name.formatted` → `userName`)은 그대로다.
+- **응답의 `name` 은 저장된 값이다.** 모두 비었으면 `name` 을 넣지 않는다 — 지금처럼 `formatted` 를 지어내지 않는다(Entra: "Values
+  sent should be stored in the same format they were sent").
+- `ScimName` DTO 에 `middleName`·`honorificPrefix`·`honorificSuffix` 를 더한다. `ScimResourceType.USER` 의 속성 목록에
+  `name.middlename`·`name.honorificprefix`·`name.honorificsuffix` 를 더한다(`attributes`·`excludedAttributes` 가 안다).
+- `name.*` 필터는 인덱스가 없어 지금처럼 400 `invalidFilter` 다.
+
+### 7.2 직원 PATCH
+
+op(`add`/`replace`/`remove`)는 지금처럼 대소문자를 가리지 않는다. **경로의 속성 이름도 대소문자를 가리지 않게 바꾼다**(RFC 7643
+§2.1 "Attribute names are case insensitive"). 지금 README 는 "`path`는 대소문자를 구분한다" 고 적고 있다 — 표준과 어긋나므로
+고치고, 규칙이 갈리지 않도록 **조직 PATCH 경로(`members`, `displayName`, `members[value eq "…"]`)에도 같이 적용한다.**
+
+| 경로 | `add` / `replace` | `remove` |
+|---|---|---|
+| `userName` | 값 설정 | 400 `mutability` — 필수 속성(RFC 7644 §3.5.2.2) |
+| `displayName`, `externalId` | 값 설정 | 비움 |
+| `active` | 값 설정 | "없음" = 활성 — POST 에 `active` 가 없을 때와 같은 규칙 |
+| `name` | 준 하위 속성만 바꾸고 나머지는 그대로(RFC 7644 §3.5.2.3) | 이름 전부 비움 |
+| `name.formatted`, `name.familyName`, `name.givenName`, `name.middleName`, `name.honorificPrefix`, `name.honorificSuffix` | 그 칸 설정 | 그 칸 비움 |
+| `emails` | 목록 중 `primary` 가 참인 것, 없으면 첫째를 이메일로 — POST 와 같은 규칙 | 비움 |
+| `emails[type eq "work"].value` | `add`: 설정. `replace`: 이메일이 있으면 설정, 없으면 400 `noTarget`(RFC 7644 §3.5.2.3) | 비움 |
+| `emails[type eq "work"]` | 값 객체의 `value` 로 위와 같다 | 비움 |
+| 그 밖의 필터(`type eq "home"` 등), 그 밖의 경로 | 400 `invalidPath` | 같음 |
+| `userName` 값이 null·빈 문자열·공백만 | 400 `invalidValue`(RFC 7644 §3.12 "required value was missing") | (해당 없음 — remove 는 위 `mutability`) |
+
+- 우리는 이메일을 하나만 담고 `type: "work"` 로 내보낸다 — 그래서 값 경로 필터는 `type eq "work"` 하나만 받는다. 필터의 `eq` 와
+  `"work"` 비교는 대소문자를 가리지 않는다(`type` 은 RFC 7643 에서 `caseExact=false`).
+- **경로 없는 PATCH**(값 객체 병합, `add`/`replace`)는 값 객체의 키 하나하나를 `path` 와 **같은 해석기**로 푼다 — `name.givenName`,
+  `emails[type eq "work"].value` 같은 점 표기·필터 키까지 그대로 받는다(Entra 표준 호환 모드 `aadOptscim062020` 이 이 모양으로
+  보낸다). path 의 코어 스키마 URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`)도 대소문자 없이 떼고 같은 해석기를 태운다.
+  해석기가 모르는 키는 §7.3 대로 조용히 무시한다 — path 형식에서만 모르는 경로가 400 `invalidPath` 다. 값 객체의 키 이름도
+  대소문자를 가리지 않는다.
+- 여러 연산은 순서대로 적용하고, 하나라도 실패하면 요청 전체가 실패하고 아무것도 반영되지 않는다(지금과 같다).
+
+### 7.3 우리가 저장하지 않는 속성
+
+`title`, `phoneNumbers`, `addresses`, 엔터프라이즈 확장(`department`, `manager`, `employeeNumber`) 등은 저장하지 않는다.
+
+- PATCH 에 **경로로** 오면 400 `invalidPath` — 지금 규칙을 유지한다. 반영되지 않은 변경을 반영됐다고 IdP 가 오해하면 안 된다.
+  Entra 는 기본 속성 매핑에 이런 속성을 넣을 수 있으므로, **운영자가 IdP 의 속성 매핑에서 빼야 한다.** README 에 우리가 저장하는
+  속성 목록과 함께 적는다.
+- POST 본문이나 경로 없는 PATCH 의 값 객체에 섞여 오면 지금처럼 무시한다.
+
+## 8. 검증
+
+테스트 규칙은 기존과 같다 — Lombok, AssertJ, BDD(given/when/then), 한글 `@DisplayName`.
+
+1. **core** — `PersonName` 정규화(빈 문자열 → 없음, 여섯 칸 모두 없으면 `EMPTY`), 6인자 생성자 → `EMPTY`, null → `EMPTY`.
+2. **저장소** — 이름 저장·되읽기, 이름만 바뀌어도 PutItem 과 `updatedAt`, 이름이 없으면 속성을 두지 않음, 목록 조회(GSI1)에도
+   이름이 실림.
+3. **SCIM (connector-scim)** — POST 로 여섯 칸 저장·응답, 이름이 없으면 응답에 `name` 없음; §7.2 표의 각 줄;
+   **Entra 문서의 PATCH 예시를 글자 그대로**(이메일 + 성 한 요청) 보내 둘 다 반영; 400 `noTarget`·`mutability`·`invalidPath`;
+   경로 없는 병합; `attributes=name.middleName`.
+4. **LDAP (connector-ldap)** — 두 전략이 네 속성을 읽음, 속성이 없으면 빈칸.
+5. **admin** — 직원 상세 JSON 에 `name`.
+6. **E2E (app-scim)** — Okta 식 POST(성·이름) → GET·`userName eq` 조회에 이름; Entra 식 PATCH.
+
+## 9. 결과 (구현 후 기록)
+
+6과제를 Subagent-Driven 으로 구현했다(`cf28cc1..`). 최종 전체 리뷰(opus)는 "고치면 머지" — 중요 2, 사소 7. 한 번에 고쳤다.
+
+- **경로 없는 PATCH 가 `name.givenName` 을 버렸다(중요).** Entra 표준 호환 모드(`aadOptscim062020`)는 이름 변경을 경로 없는
+  `replace` 의 값 객체에 `"name.givenName": "…"` 처럼 **경로 표기 키**로 보낸다. 맨 이름 키만 보던 병합이 이를 무시하고 200 을
+  냈다 — §1 이 없애려던 바로 그 결함. 값 객체의 키를 `path` 와 같은 해석기로 푸는 한 규칙으로 고쳤다(§7.2). 코어 URN 접두도 같은
+  해석기에서 뗀다.
+- **admin JSON 에 `"empty"` 가 샜다(중요).** §6 참고.
+- 사소: 빈 `userName` → 400 `invalidValue`, 멤버 객체 키(`value`·`type`)도 대소문자 무시, 테스트 픽스처의 6인자 복사를 `with…` 로,
+  맨 `emails[type eq "work"]` 의 `noTarget`·이름 있는 직원을 두 번 저장해도 다시 쓰지 않음 테스트, README.
+
+| 검증 | 결과 | 시간 |
+|---|---|---|
+| `./gradlew cleanTest test` | 751 통과 | 2분 11초 |
+| `./gradlew cleanScaleTest scaleTest` | 67 통과 | 12분 28초 |
+
+**보류한 것.** 규모 테스트는 이름을 비교하지 않는다 — 검증기(`SyncVerifier`)가 필드별로 비교하며 `name` 을 건너뛰고, SCIM
+렌더러는 이름을 보내지 않으며, LDIF 는 `sn: <id>` 를 써서 LDAP 으로 읽은 직원은 `familyName` 이 채워지지만 기대값 픽스처는 비어
+있다. 이름 보존은 전략별 내장 LDAP 테스트와 E2E 가 본다. 이름이 저장 비교("바뀐 것만 쓴다")를 흔들지 않는다는 것은 저장소
+테스트가 본다.
+
+**이 슬라이드 밖에서 발견한 것(백로그).** 조직 PATCH 의 `{"op":"remove","path":"members","value":[{"value":"u1"}]}` 는 **멤버
+전부를 지운다.** RFC 로는 필터 없는 `remove` 가 속성 전체 삭제지만, Entra 기본 모드는 멤버 한 명을 이 모양으로 뺀다 — 조직의
+튜플이 한꺼번에 사라진다. 원래부터 있던 동작이라 여기서 고치지 않았다.
+
+## 10. 왜 다른 길을 안 갔나
+
+**`givenName`·`familyName` 만.** 두 IdP 의 필수 매핑은 이 둘이지만, Okta 프로필에는 `middleName`·경칭도 있고 RFC 가 정한 칸은
+여섯이다. 한 묶음(`PersonName`)으로 담으면 `DirectoryUser` 에는 칸 하나만 늘어 비용 차이가 거의 없다.
+
+**PATCH 를 `name` 만.** Entra 가 이름과 이메일을 한 요청에 보내므로 이름 경로만 받으면 그 요청은 여전히 400 이다.
+
+**6인자 생성자 없애기.** 호출 100곳(테스트 89곳)이 이름과 무관한데 전부 고쳐야 한다. 남겨 두면 "이름 없음" 이 기본값이라는 뜻도
+분명하다.
+
+**`name` 을 DynamoDB 맵(M) 속성 하나로.** 평평한 문자열이 `Attrs.putIfPresent`·"바뀐 것만 쓴다" 비교와 그대로 맞고, GSI 프로젝션
+규칙도 단순하다.
+
+**저장하지 않는 속성을 조용히 무시.** IdP 가 반영됐다고 믿게 된다 — README 의 기존 원칙과 어긋난다.
+
+## 11. 이 설계가 말할 수 없는 것
+
+- **IdP 동작은 문서 기준이다.** 실제 테넌트 검증은 인증 슬라이드 뒤다.
+- **이메일은 하나만 담는다.** `emails` 에 여러 개를 보내면 primary(없으면 첫째) 하나만 남고, `add` 로 이메일을 더해도 하나로 바뀐다.
+- **LDAP 의 `formatted`·`honorificPrefix` 는 비어 있다** — 표준 속성이 없다.
+- **POST 본문의 저장하지 않는 속성은 여전히 조용히 무시된다**(§7.3). 경로 PATCH 만 거절한다. 경로 없는 PATCH 도 무시하므로,
+  Entra 표준 호환 모드에서 운영자가 지우지 않은 매핑은 400 이 아니라 조용히 버려진다.
+- **10만 명 규모 테스트는 이름 보존을 보지 않는다**(§9 보류).

@@ -5,5 +5,6 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record ScimName(String formatted, String familyName, String givenName) {
+public record ScimName(String formatted, String familyName, String givenName,
+                       String middleName, String honorificPrefix, String honorificSuffix) {
 }

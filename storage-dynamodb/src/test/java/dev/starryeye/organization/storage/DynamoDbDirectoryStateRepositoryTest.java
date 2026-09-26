@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import org.junit.jupiter.api.BeforeEach;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
@@ -55,6 +56,8 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         @Override public Clock withZone(ZoneId zone) { return this; }
         @Override public Instant instant() { return now; }
     }
+
+    private static final PersonName 홍길동 = new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr.");
 
     private static DirectoryUser 직원(String id) {
         return new DirectoryUser(id, "uid=" + id + ",ou=people", id, id + " 님", id + "@example.com", true);
@@ -901,5 +904,90 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(gets.gets()).isZero();
+    }
+
+    @Test
+    @DisplayName("이름 여섯 칸을 저장하고 되읽는다")
+    void 이름을_저장하고_되읽는다() {
+        // given
+        repository.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동)).block();
+
+        // when
+        DirectoryUser 되읽음 = repository.findUser("hong").block();
+
+        // then
+        assertThat(되읽음.name()).isEqualTo(홍길동);
+        assertThat(meta(Keys.userPk("hong")).get("nameFormatted").s()).isEqualTo("홍길동");
+    }
+
+    @Test
+    @DisplayName("이름이 없으면 이름 속성을 두지 않고, 같은 값을 다시 저장하면 쓰지 않는다")
+    void 이름이_없으면_속성이_없다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 이름없음 = new DirectoryUser("kim", null, "kim", "김철수", null, true);
+        세는.saveUser(이름없음).block();
+        counter.reset();
+
+        // when
+        세는.saveUser(이름없음).block();
+
+        // then
+        assertThat(meta(Keys.userPk("kim"))).doesNotContainKeys(
+                "givenName", "familyName", "middleName", "honorificPrefix", "honorificSuffix", "nameFormatted");
+        assertThat(counter.puts()).isZero();
+    }
+
+    @Test
+    @DisplayName("이름만 바뀌어도 다시 쓰고 updatedAt 이 그 시각이 된다")
+    void 이름만_바뀌어도_쓴다() {
+        // given
+        repository.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동)).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true,
+                홍길동.withFamilyName("洪"))).block();
+
+        // then
+        assertThat(repository.findUser("hong").block().name().familyName()).isEqualTo("洪");
+        assertThat(updatedAt(Keys.userPk("hong"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("이름이 있는 직원도 saveUser 로 같은 값을 두 번 저장하면 다시 쓰지 않는다")
+    void 이름이_있어도_saveUser는_같으면_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectoryUser 이름있음 = new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동);
+        세는.saveUser(이름있음).block();
+        counter.reset();
+
+        // when
+        세는.saveUser(이름있음).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+    }
+
+    @Test
+    @DisplayName("이름이 있는 직원도 같은 조직도로 전체 교체를 다시 하면 다시 쓰지 않는다")
+    void 이름이_있어도_전체_교체는_같으면_다시_쓰지_않는다() {
+        // given
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        DirectorySnapshot 조직도 = new DirectorySnapshot(
+                Map.of("hong", new DirectoryUser("hong", null, "hong", "홍길동", null, true, 홍길동)),
+                Map.of());
+        세는.replaceWith(조직도).block();
+        counter.reset();
+
+        // when
+        세는.replaceWith(조직도).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
     }
 }

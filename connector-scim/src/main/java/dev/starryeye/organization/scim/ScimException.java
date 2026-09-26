@@ -51,6 +51,16 @@ public class ScimException extends RuntimeException {
         return new ScimException(HttpStatus.CONFLICT, "uniqueness", detail);
     }
 
+    /** RFC 7644 §3.5.2.2 — 필수·읽기 전용 속성을 지우려 했다. */
+    public static ScimException mutability(String detail) {
+        return new ScimException(HttpStatus.BAD_REQUEST, "mutability", detail);
+    }
+
+    /** RFC 7644 §3.5.2.3 — 값 경로 필터가 가리킨 값이 없다. */
+    public static ScimException noTarget(String detail) {
+        return new ScimException(HttpStatus.BAD_REQUEST, "noTarget", detail);
+    }
+
     /** 하위 시스템(OpenFGA/DynamoDB) 실패. IdP 가 재시도하도록 5xx 로 돌려준다. */
     public static ScimException internal(String detail) {
         return new ScimException(HttpStatus.INTERNAL_SERVER_ERROR, null, detail);
