@@ -215,8 +215,9 @@ class ScimGroupMemberPatchEndToEndTest {
     }
 
     private int 넣을때까지(String code, String userName) {
+        int status = 503;
         for (int 시도 = 0; 시도 < 10; 시도++) {
-            int status = client.patch().uri("/scim/v2/Groups/" + code).contentType(MediaType.APPLICATION_JSON)
+            status = client.patch().uri("/scim/v2/Groups/" + code).contentType(MediaType.APPLICATION_JSON)
                     .bodyValue("""
                             {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
                              "Operations":[{"op":"add","path":"members","value":[{"value":"%s","type":"User"}]}]}
@@ -225,7 +226,17 @@ class ScimGroupMemberPatchEndToEndTest {
             if (status != 503) {
                 return status;
             }
+            // 다섯 스레드가 전역 락 하나를 다투므로 즉시 재시도는 다시 충돌하기 쉽다 —
+            // ScimRebuildLockScaleTest.보낸다 와 같이 200ms 쉬고 다시 보낸다
+            if (시도 < 9) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
-        return 503;
+        return status;
     }
 }
