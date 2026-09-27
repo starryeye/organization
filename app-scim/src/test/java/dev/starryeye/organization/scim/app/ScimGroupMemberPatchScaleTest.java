@@ -44,7 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("test")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(DynamoDbReadCounter.class)
+@Import({DynamoDbReadCounter.class, TupleCheckCounter.class})
 @ScaleTest
 class ScimGroupMemberPatchScaleTest {
 
@@ -67,6 +67,7 @@ class ScimGroupMemberPatchScaleTest {
     @Autowired IncrementalSyncUseCase sync;
     @Autowired StoreBootstrapper bootstrapper;
     @Autowired DynamoDbReadCounter counter;
+    @Autowired TupleCheckCounter checks;
 
     private static String 멤버(int i) {
         return "m%06d".formatted(i);
@@ -91,9 +92,9 @@ class ScimGroupMemberPatchScaleTest {
     }
 
     private void 읽은양을_찍는다(String 이름, long 시작) {
-        System.out.printf("%s: %,dms, Query %,d번, 훑은 아이템 %,d, GetItem %,d번, BatchGet 키 %,d%n",
+        System.out.printf("%s: %,dms, Query %,d번, 훑은 아이템 %,d, GetItem %,d번, BatchGet 키 %,d, Check 튜플 %,d%n",
                 이름, System.currentTimeMillis() - 시작, counter.queries.get(), counter.scannedItems.get(),
-                counter.getItems.get(), counter.batchGetKeys.get());
+                counter.getItems.get(), counter.batchGetKeys.get(), checks.checkedTuples.get());
     }
 
     @Test
@@ -123,6 +124,7 @@ class ScimGroupMemberPatchScaleTest {
     void 한명을_넣는다() {
         // given
         counter.reset();
+        checks.reset();
         long 시작 = System.currentTimeMillis();
 
         // when
@@ -135,6 +137,7 @@ class ScimGroupMemberPatchScaleTest {
         assertThat(counter.queries.get()).as("조직 파티션을 훑지 않는다").isZero();
         assertThat(counter.getItems.get()).isLessThanOrEqualTo(10);
         assertThat(counter.batchGetKeys.get()).isLessThanOrEqualTo(2);
+        assertThat(checks.checkedTuples.get()).as("바뀌는 한 명만 Check 한다").isLessThanOrEqualTo(2);
         assertThat(check("user:newbie1", "member", "group:" + 조직)).isTrue();
     }
 
@@ -144,6 +147,7 @@ class ScimGroupMemberPatchScaleTest {
     void 한명을_뺀다() {
         // given
         counter.reset();
+        checks.reset();
         long 시작 = System.currentTimeMillis();
 
         // when
@@ -154,7 +158,9 @@ class ScimGroupMemberPatchScaleTest {
         // then
         읽은양을_찍는다("한 명 빼기", 시작);
         assertThat(counter.queries.get()).isZero();
+        assertThat(counter.getItems.get()).isLessThanOrEqualTo(10);
         assertThat(counter.batchGetKeys.get()).isLessThanOrEqualTo(2);
+        assertThat(checks.checkedTuples.get()).as("바뀌는 한 명만 Check 한다").isLessThanOrEqualTo(2);
         assertThat(state.findMembers(조직, Set.of(MemberRef.user(멤버(1)))).block()).isEmpty();
     }
 
@@ -167,6 +173,7 @@ class ScimGroupMemberPatchScaleTest {
         목표.remove(MemberRef.user(멤버(2)));
         목표.add(MemberRef.user("newbie2"));
         counter.reset();
+        checks.reset();
         long 시작 = System.currentTimeMillis();
 
         // when — 10만 명 본문은 HTTP 한도(256KB)를 넘으므로 유스케이스를 직접 부른다
@@ -178,6 +185,8 @@ class ScimGroupMemberPatchScaleTest {
         assertThat(result.fullyApplied()).isTrue();
         assertThat(counter.scannedItems.get()).as("멤버 줄을 한 번만 훑는다").isLessThanOrEqualTo(전체 + 10);
         assertThat(counter.getItems.get()).isLessThanOrEqualTo(20);
+        assertThat(counter.batchGetKeys.get()).as("목록 전체를 BatchGet 으로 읽지 않는다").isLessThanOrEqualTo(10);
+        assertThat(checks.checkedTuples.get()).isLessThanOrEqualTo(4);
         assertThat(check("user:newbie2", "member", "group:" + 조직)).isTrue();
         assertThat(state.findMembers(조직, Set.of(MemberRef.user(멤버(2)))).block()).isEmpty();
     }
