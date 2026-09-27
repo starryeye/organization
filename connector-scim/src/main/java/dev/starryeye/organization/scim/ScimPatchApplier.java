@@ -1,13 +1,12 @@
 package dev.starryeye.organization.scim;
 
-import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
-import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -26,9 +25,9 @@ import java.util.regex.Pattern;
  *
  * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName(S-3 설계 §7.2). 속성 이름은
  * 대소문자를 가리지 않는다. 지원하지 않는 path 는 조용히 무시하지 않고 거절한다 — IdP 는 2xx 를
- * 받으면 반영됐다고 믿고 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다.
+ * 받으면 반영됐다고 믿고 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다. 조직은
+ * {@link GroupChange} 로 정리만 하고 적용은 유스케이스가 한다.
  */
-@Slf4j
 public final class ScimPatchApplier {
 
     /** {@code members[value eq "kim"]} 한 가지 패턴만 인식한다. 따옴표는 큰/작은 둘 다 받는다. */
@@ -38,15 +37,19 @@ public final class ScimPatchApplier {
     private ScimPatchApplier() {
     }
 
+    /** 값 붙은 remove members — RFC 7644 에 없는 모양이라 "그 멤버만" 으로 추측하지 않는다(조직 멤버 PATCH 설계 §2·§7). */
+    static final String REMOVE_WITH_VALUE = "members 에서 멤버를 골라 빼려면 path 에 필터를 쓰세요: members[value eq \"<id>\"]. "
+            + "Microsoft Entra ID 는 SCIM 테넌트 URL 에 ?aadOptscim062020 을 붙이면 이 형식으로 보냅니다.";
+
     /**
-     * {@code type} 이 빠진 멤버나 {@code members[value eq "..."]} 필터를 만나면 현재상태를
-     * 조회해야 하므로 반환값이 {@link Mono} 다. 연산은 배열 순서대로 누적 적용된다.
+     * 조직 PATCH 를 <b>저장소를 읽지 않고</b> {@link GroupChange} 로 정리한다(조직 멤버 PATCH 설계 §4). 연산은 배열 순서대로 쌓인다.
+     * {@code type} 이 빠진 멤버의 종류만 {@code resolver} 로 판정한다. 멤버십을 보고 하는 판단(지금 멤버인가, id 빼기가 직원·하위
+     * 조직 중 무엇인가)은 유스케이스가 락 안에서 한다 — 락 밖에서 읽은 목록으로 계산하면 동시에 온 PATCH 가 서로를 지운다.
      */
-    public static Mono<DirectoryGroup> applyToGroup(DirectoryGroup before, ScimPatchOp patch,
-                                                    MemberTypeResolver resolver) {
-        Mono<DirectoryGroup> current = Mono.just(before);
+    public static Mono<GroupChange> toGroupChange(ScimPatchOp patch, MemberTypeResolver resolver) {
+        Mono<GroupChange> current = Mono.just(GroupChange.delta());
         for (ScimOperation operation : operations(patch)) {
-            current = current.flatMap(group -> applyOne(group, operation, resolver));
+            current = current.flatMap(change -> applyOne(change, operation, resolver));
         }
         return current;
     }
@@ -68,14 +71,14 @@ public final class ScimPatchApplier {
 
     // ---------- 그룹 ----------
 
-    private static Mono<DirectoryGroup> applyOne(DirectoryGroup group, ScimOperation operation,
-                                                 MemberTypeResolver resolver) {
+    private static Mono<GroupChange> applyOne(GroupChange change, ScimOperation operation,
+                                              MemberTypeResolver resolver) {
         String op = normalizeOp(operation.op());
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
             requireReplaceOrAdd(op, operation.op());
-            return mergeGroupAttributes(group, asAttributeMap(operation.value()), resolver);
+            return mergeGroupAttributes(change, asAttributeMap(operation.value()), resolver);
         }
 
         Matcher filter = MEMBER_VALUE_FILTER.matcher(path.trim());
@@ -84,74 +87,40 @@ public final class ScimPatchApplier {
                 throw ScimException.invalidPath(
                         "members 필터는 remove 에만 지원합니다: op=" + operation.op() + ", path=" + path);
             }
-            return removeMemberById(group, IdNormalizer.normalize(filter.group("value")), resolver);
+            return Mono.just(change.removingId(IdNormalizer.normalize(filter.group("value"))));
         }
 
         if (path.trim().equalsIgnoreCase("members")) {
             return switch (op) {
-                case "add" -> toMemberRefs(operation.value(), resolver).map(added -> {
-                    Set<MemberRef> members = new LinkedHashSet<>(group.members());
-                    members.addAll(added);
-                    return withMembers(group, members);
-                });
-                case "remove" -> Mono.just(withMembers(group, Set.of()));
-                case "replace" -> toMemberRefs(operation.value(), resolver)
-                        .map(members -> withMembers(group, members));
+                case "add" -> toMemberRefs(operation.value(), resolver).map(change::adding);
+                case "remove" -> {
+                    // RFC 7644 §3.5.2.2 — 필터 없는 remove 는 전원 삭제다. remove 의 value 는 RFC 가 정하지 않은 칸이다
+                    if (operation.value() != null) {
+                        throw ScimException.invalidValue(REMOVE_WITH_VALUE);
+                    }
+                    yield Mono.just(change.replacing(Set.of()));
+                }
+                case "replace" -> toMemberRefs(operation.value(), resolver).map(change::replacing);
                 default -> throw ScimException.invalidSyntax("알 수 없는 op 입니다: " + operation.op());
             };
         }
 
         if (path.trim().equalsIgnoreCase("displayName")) {
             requireReplaceOrAdd(op, operation.op());
-            return Mono.just(new DirectoryGroup(group.id(), group.externalId(),
-                    asString(operation.value()), group.members()));
+            return Mono.just(change.renamed(asString(operation.value())));
         }
 
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
     }
 
-    /**
-     * {@code members[value eq "x"]} 는 필터에 종류가 없다. 조직코드와 직원 아이디는 서로 다른
-     * 네임스페이스라 같은 값이 둘 다 멤버일 수 있는데, id 만 보고 지우면 둘 다 사라진다.
-     *
-     * <p>대부분의 경우 그 id 를 가진 멤버는 이 조직 안에 하나뿐이므로 조회 없이 그것만 지운다.
-     * 직원과 하위 조직이 같은 id 로 동시에 멤버인 진짜 모호한 경우에만 현재상태로 종류를
-     * 판정해 한쪽만 지운다 — 어느 쪽이든 SCIM 필터로는 구분할 수 없으니 경고를 남긴다.
-     */
-    private static Mono<DirectoryGroup> removeMemberById(DirectoryGroup group, String target,
-                                                         MemberTypeResolver resolver) {
-        List<MemberRef> matching = group.members().stream()
-                .filter(member -> member.id().equals(target))
-                .toList();
-        if (matching.size() <= 1) {
-            Set<MemberRef> members = new LinkedHashSet<>(group.members());
-            members.removeAll(matching);
-            return Mono.just(withMembers(group, members));
-        }
-        log.warn("members[value eq \"{}\"] 가 직원과 하위 조직 양쪽에 걸립니다. 현재상태로 한쪽만 지웁니다: 조직={}",
-                target, group.id());
-        return resolver.resolve(target).map(type -> {
-            Set<MemberRef> members = new LinkedHashSet<>(group.members());
-            members.remove(new MemberRef(type, target));
-            return withMembers(group, members);
-        });
-    }
-
-    private static Mono<DirectoryGroup> mergeGroupAttributes(DirectoryGroup group,
-                                                             Map<String, Object> attributes,
-                                                             MemberTypeResolver resolver) {
-        String displayName = has(attributes, "displayName")
-                ? asString(attribute(attributes, "displayName"))
-                : group.displayName();
-        Mono<Set<MemberRef>> members = has(attributes, "members")
-                ? toMemberRefs(attribute(attributes, "members"), resolver)
-                : Mono.just(group.members());
-        return members.map(resolved ->
-                new DirectoryGroup(group.id(), group.externalId(), displayName, resolved));
-    }
-
-    private static DirectoryGroup withMembers(DirectoryGroup group, Set<MemberRef> members) {
-        return new DirectoryGroup(group.id(), group.externalId(), group.displayName(), members);
+    private static Mono<GroupChange> mergeGroupAttributes(GroupChange change, Map<String, Object> attributes,
+                                                          MemberTypeResolver resolver) {
+        GroupChange renamed = has(attributes, "displayName")
+                ? change.renamed(asString(attribute(attributes, "displayName")))
+                : change;
+        return has(attributes, "members")
+                ? toMemberRefs(attribute(attributes, "members"), resolver).map(renamed::replacing)
+                : Mono.just(renamed);
     }
 
     // ---------- 직원 ----------

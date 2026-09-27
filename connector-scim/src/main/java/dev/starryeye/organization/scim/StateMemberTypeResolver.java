@@ -22,8 +22,9 @@ public class StateMemberTypeResolver implements MemberTypeResolver {
 
     @Override
     public Mono<MemberType> resolve(String id) {
-        return state.findGroup(id)
-                .map(group -> MemberType.GROUP)
+        // 존재만 보면 된다 — findGroup 은 그 조직의 멤버 줄까지 통째로 읽는다(조직 멤버 PATCH 설계 §1.4)
+        return state.findGroupHeader(id)
+                .map(header -> MemberType.GROUP)
                 .switchIfEmpty(Mono.defer(() -> state.findUser(id).map(user -> MemberType.USER)))
                 .defaultIfEmpty(MemberType.USER)
                 .doOnNext(type -> log.warn(

@@ -43,6 +43,14 @@ class ScimRequestRendererTest {
         return Mono.empty();
     };
 
+    /** PATCH 를 {@link dev.starryeye.organization.core.model.GroupChange} 로 정리해 before 에 적용한다. 이 조직도엔 직원·하위 조직 id 가 겹치지 않아 모호한 빼기가 없다. */
+    private static DirectoryGroup 적용한다(DirectoryGroup before, ScimPatchOp patch, MemberTypeResolver resolver) {
+        return ScimPatchApplier.toGroupChange(patch, resolver).block()
+                .applyTo(before, id -> {
+                    throw new AssertionError("모호하지 않은데 종류를 물었다: " + id);
+                });
+    }
+
     @Test
     @DisplayName("최초 싱크는 직원을 먼저, 조직을 깊은 곳부터 만든다")
     void 최초싱크_순서() {
@@ -133,8 +141,8 @@ class ScimRequestRendererTest {
         MemberRef 신입 = MemberRef.user("new.hire");
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                JSON을_거친다(ScimRequestRenderer.멤버추가(before.id(), 신입)), 추정금지).block();
+        var after = 적용한다(before,
+                JSON을_거친다(ScimRequestRenderer.멤버추가(before.id(), 신입)), 추정금지);
 
         // then
         assertThat(after).isNotNull();
@@ -150,8 +158,8 @@ class ScimRequestRendererTest {
         MemberRef 뺄사람 = before.members().iterator().next();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                JSON을_거친다(ScimRequestRenderer.멤버제거(before.id(), 뺄사람.id())), 추정금지).block();
+        var after = 적용한다(before,
+                JSON을_거친다(ScimRequestRenderer.멤버제거(before.id(), 뺄사람.id())), 추정금지);
 
         // then
         assertThat(after).isNotNull();
@@ -166,8 +174,8 @@ class ScimRequestRendererTest {
         DirectoryGroup before = CHART.snapshot().groups().get(CHART.landmarks().대상팀());
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                JSON을_거친다(ScimRequestRenderer.멤버전체제거(before.id())), 추정금지).block();
+        var after = 적용한다(before,
+                JSON을_거친다(ScimRequestRenderer.멤버전체제거(before.id())), 추정금지);
 
         // then
         assertThat(after).isNotNull();
@@ -182,8 +190,8 @@ class ScimRequestRendererTest {
         List<MemberRef> 새목록 = List.of(MemberRef.user("only.one"), MemberRef.group("SUB"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                JSON을_거친다(ScimRequestRenderer.멤버전체교체(before.id(), 새목록)), 추정금지).block();
+        var after = 적용한다(before,
+                JSON을_거친다(ScimRequestRenderer.멤버전체교체(before.id(), 새목록)), 추정금지);
 
         // then
         assertThat(after).isNotNull();

@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
@@ -25,7 +26,7 @@ public class ScimGroupHandler {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, memberTypes))
-                .flatMap(group -> state.findGroup(group.id())
+                .flatMap(group -> state.findGroupHeader(group.id())
                         .flatMap(existing -> Mono.<DirectoryGroup>error(ScimException.uniqueness(
                                 "이미 존재하는 조직입니다: " + group.id())))
                         .switchIfEmpty(Mono.just(group)))
@@ -41,29 +42,34 @@ public class ScimGroupHandler {
                         .bodyValue(projection.apply(ScimJson.tree(scim)))));
     }
 
+    /** PUT — 전체 교체로 처리한다(조직 멤버 PATCH 설계 §4). 존재 확인은 락 안에서 한다. */
     public Mono<ServerResponse> replace(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> state.findGroup(id)
-                .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .then(request.bodyToMono(ScimGroup.class)
-                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
+        return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
+                .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, memberTypes))
                 // 경로의 조직코드가 정본이다. 본문의 externalId 가 달라도 리소스를 옮기지 않는다.
-                .map(group -> new DirectoryGroup(id, group.externalId(),
-                        group.displayName(), group.members()))
-                .flatMap(group -> sync.upsertGroup(group)
-                        .flatMap(result -> respond(HttpStatus.OK, id, result, projection))));
+                .map(group -> GroupChange.replacement(group.externalId(), group.displayName(), group.members()))
+                .flatMap(change -> sync.changeGroup(id, change)
+                        .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id))))
+                .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
     }
 
+    /**
+     * 조직 PATCH — 성공하면 본문 없이 204 다(조직 멤버 PATCH 설계 §7). RFC 7644 §3.5.2 가 허용하고, Entra 는 멤버 전체를 담은
+     * 본문을 권하지 않는다. 응답을 만들려고 멤버를 읽지 않는다. 잘못된 attributes 는 지금처럼 쓰기 전에 400 이다.
+     */
     public Mono<ServerResponse> patch(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> state.findGroup(id)
-                .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .zipWith(request.bodyToMono(ScimPatchOp.class)
+        return projection(request)
+                .then(request.bodyToMono(ScimPatchOp.class)
                         .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
-                .flatMap(both -> ScimPatchApplier.applyToGroup(both.getT1(), both.getT2(), memberTypes))
-                .flatMap(group -> sync.upsertGroup(group)
-                        .flatMap(result -> respond(HttpStatus.OK, id, result, projection))));
+                .flatMap(patch -> ScimPatchApplier.toGroupChange(patch, memberTypes))
+                .flatMap(change -> sync.changeGroup(id, change)
+                        .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id))))
+                .flatMap(result -> result.fullyApplied()
+                        ? ServerResponse.noContent().build()
+                        : Mono.error(ScimException.internal("일부 튜플 적용에 실패했습니다. 재시도해 주세요: " + id)));
     }
 
     public Mono<ServerResponse> delete(ServerRequest request) {
@@ -96,7 +102,7 @@ public class ScimGroupHandler {
 
     /**
      * members 가 응답에 없으면 조직 파티션(멤버 줄 전부)을 읽지 않는다 — Entra 가 늘 붙이는 조건이고,
-     * 쓰기 응답(create/replace/patch)도 이 규칙을 따른다(S-1 설계 §4.5).
+     * 쓰기 응답(create/replace)도 이 규칙을 따른다(S-1 설계 §4.5).
      */
     private Mono<ScimGroup> byProjection(String id, ScimAttributeProjection projection) {
         return projection.includes("members")
