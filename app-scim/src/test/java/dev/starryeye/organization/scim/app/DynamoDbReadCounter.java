@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim.app;
 
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 
 import java.lang.reflect.InvocationTargetException;
@@ -20,11 +21,13 @@ class DynamoDbReadCounter implements BeanPostProcessor {
     final AtomicLong queries = new AtomicLong();
     final AtomicLong scannedItems = new AtomicLong();
     final AtomicLong getItems = new AtomicLong();
+    final AtomicLong batchGetKeys = new AtomicLong();
 
     void reset() {
         queries.set(0);
         scannedItems.set(0);
         getItems.set(0);
+        batchGetKeys.set(0);
     }
 
     @Override
@@ -50,6 +53,11 @@ class DynamoDbReadCounter implements BeanPostProcessor {
                     }
                     if (method.getName().equals("getItem")) {
                         getItems.incrementAndGet();
+                    }
+                    if (method.getName().equals("batchGetItem") && args != null
+                            && args[0] instanceof BatchGetItemRequest request) {
+                        request.requestItems().values()
+                                .forEach(keys -> batchGetKeys.addAndGet(keys.keys().size()));
                     }
                     return result;
                 });
