@@ -152,11 +152,11 @@ class IncrementalSyncDriftTest {
     }
 
     @Test
-    @DisplayName("락을 못 잡으면 다섯 변경 경로 모두 아무것도 쓰지 않고 실패한다")
+    @DisplayName("락을 못 잡으면 여덟 변경 경로 모두 아무것도 쓰지 않고 실패한다")
     void 락을_못_잡으면_쓰지_않는다() {
-        // given — 핸들러가 아니라 유스케이스에서 막으므로 다섯 경로가 빠짐없이 덮여야 한다
+        // given — 핸들러가 아니라 유스케이스에서 막으므로 여덟 경로가 빠짐없이 덮여야 한다
         // (IncrementalSyncUseCaseTest.재적재_중에는_변경이_거절된다 가 게이트 시절 못박던 것과
-        // 같은 성질이다. withLock 을 다섯 곳 중 하나에서라도 빼면 이 테스트가 잡는다 — 예를 들어
+        // 같은 성질이다. withLock 을 여덟 곳 중 하나에서라도 빼면 이 테스트가 잡는다 — 예를 들어
         // removeGroup 에서 withLock 을 지우고 removeGroupInternal 을 직접 부르게 하면
         // removeGroup 쪽 단언만 예외 없이 끝나 실패한다. 직접 확인함(아래 리포트 참고).
         lock.failAcquire = true;
@@ -176,6 +176,12 @@ class IncrementalSyncDriftTest {
                 .isInstanceOf(LockUnavailableException.class);
         assertThatThrownBy(() -> useCase.changeGroup("DEV001",
                 GroupChange.delta().adding(Set.of(MemberRef.user("kim")))).block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.createUser(직원("park", true)).block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.changeUser("kim", u -> u.withActive(false)).block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block())
                 .isInstanceOf(LockUnavailableException.class);
 
         // 거절된 요청은 아무것도 건드리지 않는다

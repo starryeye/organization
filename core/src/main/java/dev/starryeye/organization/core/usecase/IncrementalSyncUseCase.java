@@ -503,8 +503,9 @@ public class IncrementalSyncUseCase {
      * 변경 하나를 락 안에서 실행한다 (설계 §4).
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
-     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 다섯 경로({@link #upsertUser}·
-     * {@link #upsertGroup}·{@link #changeGroup}·{@link #removeUser}·{@link #removeGroup})가
+     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 여덟 경로({@link #upsertUser}·
+     * {@link #createUser}·{@link #changeUser}·{@link #removeUser}·{@link #upsertGroup}·
+     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가
      * 빠짐없이 덮이고 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
      * 같은 이유로 여기(구 버전의 이 자리)에 있었지만, 인스턴스가 둘이면 아무것도 막지 못했다
      * (설계 §4.5). 지금은 그 자리를 이 분산 락이 대신한다.

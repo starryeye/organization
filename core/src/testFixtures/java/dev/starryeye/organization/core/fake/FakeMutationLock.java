@@ -41,6 +41,11 @@ public class FakeMutationLock implements MutationLock {
 
     private final AtomicReference<String> heldToken = new AtomicReference<>();
 
+    /** 지금 누군가 쥐고 있는가. 판단 읽기가 락 안에서 일어나는지 보는 테스트가 쓴다. */
+    public boolean isHeld() {
+        return heldToken.get() != null;
+    }
+
     @Override
     public Mono<LockLease> acquire(LockPurpose purpose) {
         return Mono.defer(() -> {
