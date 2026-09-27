@@ -132,17 +132,17 @@ class IncrementalSyncReadScopeTest {
     }
 
     /**
-     * 위 테스트는 삭제 튜플이 전부 성공하는 경로만 지킨다 —
-     * {@code reconcileRemovedMember} 가 실패 시 되돌아가는 원본({@code groups}, 즉
-     * {@code affectedGroupsOf} 가 돌려준 전체 멤버 조직)은 그 경로에서 전혀 쓰이지 않는다.
-     * 원본을 좁혀서 넘겨도 이 테스트는 여전히 통과한다 — 아무것도 지키지 못한다.
+     * 직원 삭제는 소속 조직의 <b>헤더만</b> 읽는다({@code affectedGroupHeadersOf}) — 멤버 목록은 읽지 않는다.
      *
-     * <p>그래서 삭제 튜플 하나를 실패시켜 fallback 을 강제로 타게 만든다. 원본이 좁혀져
-     * 있었다면 이 실패 경로에서 조직 멤버가 u0 하나로 줄어버린다 — 튜플 삭제가 실패했을
-     * 뿐인데 멤버 299명이 함께 사라지는, 원래 위험보다 더 조용한 데이터 손실이다.
+     * <p>조직마다 그 직원의 멤버십 튜플이 <b>실제로 지워졌거나 처음부터 없었을 때만</b>
+     * {@code saveGroupChange(헤더, 추가 없음, 제거 {이 직원})} 를 부른다. 삭제 튜플이 실패한 조직은
+     * {@code saveGroupChange} 를 부르지 않으므로 멤버 줄이 그대로 남고, 직원 레코드도 지우지 않는다.
+     *
+     * <p>이 테스트는 그 실패 경로를 강제로 타게 해서, 실패 하나가 조직의 다른 멤버(동료 299명)까지
+     * 지우지 않는지 지킨다.
      */
     @Test
-    @DisplayName("삭제 튜플이 실패해도 조직 멤버십은 그대로다 — fallback 원본이 좁혀지면 실패 하나로 동료가 전부 사라진다")
+    @DisplayName("삭제 튜플이 실패해도 조직 멤버십은 그대로다 — 실패한 조직은 멤버 줄을 건드리지 않아 동료가 사라지지 않는다")
     void 삭제_튜플_실패시_동료의_멤버십이_사라지지_않는다() {
         // given — u0 의 PLANT 삭제 튜플만 실패하게 만든다
         writer.failFor(tuple -> tuple.equals(RelationTuple.directMember("u0", 대형조직)));
@@ -169,5 +169,35 @@ class IncrementalSyncReadScopeTest {
         assertThat(state.findGroupCalls).as("존재는 헤더로, 하위 조직 id 는 하위 조직 줄로").doesNotContain(대형조직);
         assertThat(state.findGroupHeaderCalls).contains(대형조직);
         assertThat(state.findChildGroupIdsCalls).contains(대형조직);
+    }
+
+    @Test
+    @DisplayName("직원을 삭제할 때 소속 조직을 통째로 읽지 않는다 — 헤더만 읽고 그 직원의 줄만 지운다")
+    void 삭제에_조직을_통째로_읽지_않는다() {
+        // when
+        useCase.removeUser("u0").block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(state.findGroupCalls).as("조직 파티션을 통째로 읽지 않는다").isEmpty();
+        assertThat(state.findGroupHeaderCalls).contains(대형조직);
+        assertThat(state.groups.get(대형조직).members())
+                .hasSize(대형조직_멤버수 - 1)
+                .doesNotContain(MemberRef.user("u0"));
+        assertThat(writer.deleted).containsExactly(RelationTuple.directMember("u0", 대형조직));
+        assertThat(state.users).doesNotContainKey("u0");
+    }
+
+    @Test
+    @DisplayName("소속이 없는 직원도 지운다")
+    void 소속_없는_직원도_지운다() {
+        // given
+        state.users.put("loner", 직원("loner", true));
+
+        // when
+        var result = useCase.removeUser("loner").block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.users).doesNotContainKey("loner");
     }
 }

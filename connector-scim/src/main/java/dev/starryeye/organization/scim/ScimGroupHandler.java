@@ -1,6 +1,5 @@
 package dev.starryeye.organization.scim;
 
-import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
@@ -26,11 +25,8 @@ public class ScimGroupHandler {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, memberTypes))
-                .flatMap(group -> state.findGroupHeader(group.id())
-                        .flatMap(existing -> Mono.<DirectoryGroup>error(ScimException.uniqueness(
-                                "이미 존재하는 조직입니다: " + group.id())))
-                        .switchIfEmpty(Mono.just(group)))
-                .flatMap(group -> sync.upsertGroup(group)
+                // 이미 있는지는 락 안에서 확인한다(SCIM 쓰기 락 설계 §3)
+                .flatMap(group -> sync.createGroup(group)
                         .flatMap(result -> respond(HttpStatus.CREATED, group.id(), result, projection))));
     }
 
@@ -79,9 +75,9 @@ public class ScimGroupHandler {
 
     public Mono<ServerResponse> delete(ServerRequest request) {
         String id = request.pathVariable("id");
-        return state.findGroup(id)
+        // 존재 확인은 락 안에서 한다 — 락 밖에서 조직 파티션을 통째로 읽지 않는다(SCIM 쓰기 락 설계 §3)
+        return sync.removeGroup(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .then(sync.removeGroup(id))
                 .flatMap(result -> result.fullyApplied()
                         ? ServerResponse.noContent().build()
                         : Mono.error(ScimException.internal(

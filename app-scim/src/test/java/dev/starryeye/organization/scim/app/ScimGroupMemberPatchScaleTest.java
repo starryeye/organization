@@ -190,4 +190,31 @@ class ScimGroupMemberPatchScaleTest {
         assertThat(check("user:newbie2", "member", "group:" + 조직)).isTrue();
         assertThat(state.findMembers(조직, Set.of(MemberRef.user(멤버(2)))).block()).isEmpty();
     }
+
+    @Test
+    @Order(5)
+    @DisplayName("10만 명 조직에 속한 직원 한 명을 지워도 조직 파티션을 훑지 않는다")
+    void 소속_직원_삭제는_조직을_훑지_않는다() {
+        // given — leaver 를 ALL 에 넣는다
+        state.saveUser(new DirectoryUser("leaver", "ext-leaver", "leaver", "퇴사자", null, true)).block();
+        보낸다("""
+                [{"op":"add","path":"members","value":[{"value":"leaver","type":"User"}]}]
+                """);
+        assertThat(check("user:leaver", "member", "group:" + 조직)).isTrue();
+        counter.reset();
+        checks.reset();
+        long 시작 = System.currentTimeMillis();
+
+        // when
+        client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
+                .delete().uri("/scim/v2/Users/leaver").exchange().expectStatus().isNoContent();
+
+        // then — 직원 파티션만 읽는다(소속 줄 찾기, 삭제). 조직 파티션 10만 줄은 읽지 않는다
+        읽은양을_찍는다("소속 직원 삭제", 시작);
+        assertThat(counter.queries.get()).isLessThanOrEqualTo(2);
+        assertThat(counter.scannedItems.get()).isLessThanOrEqualTo(10);
+        assertThat(checks.checkedTuples.get()).isLessThanOrEqualTo(1);
+        assertThat(state.findMembers(조직, Set.of(MemberRef.user("leaver"))).block()).isEmpty();
+        assertThat(check("user:leaver", "member", "group:" + 조직)).isFalse();
+    }
 }
