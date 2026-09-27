@@ -30,11 +30,13 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -205,6 +207,60 @@ public class IncrementalSyncUseCase {
     }
 
     /**
+     * 직원 생성(POST). 아이디·userName 중복을 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §3·§4). 겹치면
+     * {@link DirectoryConflictException}.
+     *
+     * <p>아이디 중복뿐 아니라 {@code userName} 중복도 막는다. 아이디는 생성 시점의 {@code userName} 에서 발급되고 그 뒤의
+     * {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은 id 다). 그래서 이름이 바뀐 사람을 IdP 가 <b>새 userName 으로</b>
+     * 다시 POST 하면 그 아이디로는 아무도 찾지 못해 같은 사람의 레코드가 둘 생긴다 — 튜플도 두 벌이 되고, 한쪽을 비활성화해도
+     * 다른 쪽 권한이 남는다.
+     */
+    public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
+        return withLock(lease -> state.findUser(user.id())
+                .flatMap(existing -> Mono.<IncrementalSyncResult>error(
+                        new DirectoryConflictException("이미 존재하는 직원입니다: " + user.id())))
+                .switchIfEmpty(Mono.defer(() -> userName을_확인한다(user.userName(), user.id())
+                        .then(Mono.defer(() -> upsertUserInternal(user, lease))))));
+    }
+
+    /**
+     * 직원 PATCH·PUT. 락을 잡은 뒤 직원을 읽어 {@code 계산} 을 적용한다(SCIM 쓰기 락 설계 §3). 직원이 없으면 빈 {@code Mono} 다.
+     *
+     * <p>전에는 핸들러가 락 밖에서 읽은 직원으로 계산해, 동시에 온 비활성화와 이름 변경 중 늦게 저장된 쪽이 비활성화를
+     * 되돌렸고(퇴사자 권한 부활), 그 사이 DELETE 가 끝났으면 지운 직원을 다시 만들었다(설계 §1.1·§1.2). 계산이 던지는
+     * 예외는 그대로 나오고 아무것도 쓰지 않는다. 계산 결과의 아이디는 무시하고 {@code userId} 로 저장한다 — 경로가 정본이다.
+     * {@code userName} 이 바뀌었으면 중복을 확인한다(§4).
+     */
+    public Mono<IncrementalSyncResult> changeUser(String userId, UnaryOperator<DirectoryUser> 계산) {
+        return withLock(lease -> state.findUser(userId)
+                .flatMap(before -> {
+                    DirectoryUser after = 계산.apply(before).withId(userId);
+                    Mono<Void> 확인 = Objects.equals(before.userName(), after.userName())
+                            ? Mono.empty()
+                            : userName을_확인한다(after.userName(), userId);
+                    return 확인.then(Mono.defer(() -> upsertUserInternal(after, lease)));
+                }));
+    }
+
+    /**
+     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신을
+     * 뺀 뒤, 후보마다 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 {@code userName} 일 때만 충돌이다 — GSI 에 잠깐 남은
+     * 옛 값(방금 지웠거나 이름을 바꾼 직원) 때문에 잘못 거절하지 않는다. 남는 틈은 방금 저장돼 아직 GSI 에 없는 직원뿐이다(설계 §10).
+     */
+    private Mono<Void> userName을_확인한다(String userName, String selfId) {
+        if (userName == null) {
+            return Mono.empty();
+        }
+        return state.findUserIdsByUserName(userName)
+                .filter(id -> !id.equals(selfId))
+                .concatMap(state::findUser)
+                .filter(other -> userName.equalsIgnoreCase(other.userName()))
+                .next()
+                .flatMap(other -> Mono.error(new DirectoryConflictException(
+                        "이미 같은 userName 을 쓰는 직원이 있습니다: userName=%s, id=%s".formatted(userName, other.id()))));
+    }
+
+    /**
      * 조직 생성(POST). 수정(PATCH·PUT)은 {@link #changeGroup} 이다. 멤버 목록을 통째로 교체한다.
      *
      * <p><b>상위 조직도 함께 싣는다.</b> child 엣지 {@code (group:자식, child, group:부모)} 는
@@ -258,6 +314,14 @@ public class IncrementalSyncUseCase {
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), lease, commit);
                 }));
+    }
+
+    /** 조직 생성(POST). 이미 있는지를 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §3). 있으면 {@link DirectoryConflictException}. */
+    public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
+        return withLock(lease -> state.findGroupHeader(group.id())
+                .flatMap(existing -> Mono.<IncrementalSyncResult>error(
+                        new DirectoryConflictException("이미 존재하는 조직입니다: " + group.id())))
+                .switchIfEmpty(Mono.defer(() -> upsertGroupInternal(group, lease))));
     }
 
     /**
@@ -345,6 +409,8 @@ public class IncrementalSyncUseCase {
      * <p>삭제 튜플이 실패한 조직은 멤버 목록을 원래대로 유지한다({@link #reconcileRemovedMember}).
      * 하나라도 실패하면 직원 레코드 자체도 지우지 않는다 — 지워버리면 다음 재시도가 diff 할
      * "이전"이 사라져 남은 튜플을 영원히 다시 잡지 못한다.
+     *
+     * <p>대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      */
     public Mono<IncrementalSyncResult> removeUser(String userId) {
         return withLock(lease -> removeUserInternal(userId, lease));
@@ -380,8 +446,7 @@ public class IncrementalSyncUseCase {
                     };
 
                     return diffAndApply(before, after, RelationTuple.userRef(userId), lease, commit);
-                }))
-                .defaultIfEmpty(IncrementalSyncResult.noChange());
+                }));
     }
 
     /**
@@ -391,6 +456,8 @@ public class IncrementalSyncUseCase {
      * ({@link #reconcileRemovedMember}), 이 조직 자신의 멤버 튜플 삭제가 실패한 것은
      * 이 조직 자신의 멤버 목록에서 그 멤버를 남긴다({@link #reconcileGroupMembers} 를
      * "멤버 없는 목표"로 재사용). 하나라도 실패하면 이 조직 레코드 자체는 지우지 않는다.
+     *
+     * <p>대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
         return withLock(lease -> removeGroupInternal(groupId, lease));
@@ -424,8 +491,7 @@ public class IncrementalSyncUseCase {
                     };
 
                     return diffAndApply(before, after, RelationTuple.groupRef(groupId), lease, commit);
-                }))
-                .defaultIfEmpty(IncrementalSyncResult.noChange());
+                }));
     }
 
     // ---------- 공통 ----------

@@ -487,13 +487,13 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
-    @DisplayName("존재하지 않는 직원을 삭제해도 예외 없이 끝난다")
+    @DisplayName("존재하지 않는 직원을 삭제하면 빈 결과다 — 핸들러가 404 로 바꾼다")
     void 없는_직원_삭제는_조용히_끝난다() {
         // given, when
-        var result = useCase.removeUser("ghost").block();
+        var result = useCase.removeUser("ghost").blockOptional(Duration.ofSeconds(10));
 
         // then
-        assertThat(result.fullyApplied()).isTrue();
+        assertThat(result).isEmpty();
         assertThat(writer.appliedDeltas).isEmpty();
     }
 
