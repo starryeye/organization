@@ -196,6 +196,14 @@ class GroupChangeEquivalenceTest {
     }
 
     @Test
+    @DisplayName("전체 교체에서 OpenFGA 쓰기·삭제가 일부 실패하면 반영된 멤버만 저장된다")
+    void 전체_교체_일부_실패() {
+        같은_결과다(GroupChange.delta().replacing(Set.of(MemberRef.user("kim"), MemberRef.user("lee"))),
+                w -> w.writer().failFor(tuple -> tuple.equals(RelationTuple.directMember("lee", 조직))
+                        || tuple.equals(RelationTuple.directMember("park", 조직))));
+    }
+
+    @Test
     @DisplayName("전체 비우기")
     void 전체_비우기() {
         같은_결과다(GroupChange.delta().replacing(Set.of()));
