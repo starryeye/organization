@@ -170,4 +170,34 @@ class IncrementalSyncReadScopeTest {
         assertThat(state.findGroupHeaderCalls).contains(대형조직);
         assertThat(state.findChildGroupIdsCalls).contains(대형조직);
     }
+
+    @Test
+    @DisplayName("직원을 삭제할 때 소속 조직을 통째로 읽지 않는다 — 헤더만 읽고 그 직원의 줄만 지운다")
+    void 삭제에_조직을_통째로_읽지_않는다() {
+        // when
+        useCase.removeUser("u0").block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(state.findGroupCalls).as("조직 파티션을 통째로 읽지 않는다").isEmpty();
+        assertThat(state.findGroupHeaderCalls).contains(대형조직);
+        assertThat(state.groups.get(대형조직).members())
+                .hasSize(대형조직_멤버수 - 1)
+                .doesNotContain(MemberRef.user("u0"));
+        assertThat(writer.deleted).containsExactly(RelationTuple.directMember("u0", 대형조직));
+        assertThat(state.users).doesNotContainKey("u0");
+    }
+
+    @Test
+    @DisplayName("소속이 없는 직원도 지운다")
+    void 소속_없는_직원도_지운다() {
+        // given
+        state.users.put("loner", 직원("loner", true));
+
+        // when
+        var result = useCase.removeUser("loner").block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.users).doesNotContainKey("loner");
+    }
 }

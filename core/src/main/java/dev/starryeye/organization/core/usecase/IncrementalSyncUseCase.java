@@ -62,10 +62,9 @@ import java.util.stream.Collectors;
  *       (강한 일관성, 정확함) 하나지만 그 뒤가 갈린다. {@link #upsertUser} 는 조직마다
  *       {@link #affectedGroupHeadersOf} 로 <b>헤더만</b> 읽는다(멤버 목록은 필요 없다 — 커밋이
  *       {@code saveUser} 뿐이라서다) — 역참조가 강한 일관성이라 그대로 믿는다.
- *       {@link #removeUser} 는 반대로 {@link #affectedGroupsOf} 로 조직을 <b>멤버 목록째로</b>
- *       그대로 읽는다 — 커밋이 {@code saveGroup} 이라 최종 멤버 목록 전체를 요구해서다(설계
- *       §4.4). 어느 경로든 {@code active} 가 뒤집히거나(또는 유저가 삭제되면) 그 유저의 모든
- *       {@code direct_member} 튜플이 생기거나 사라진다</li>
+ *       {@link #removeUser} 도 헤더만 읽고, 커밋은 {@code saveGroupChange} 로 그 직원의 줄만
+ *       지운다(SCIM 쓰기 락 설계 §5). 어느 경로든 {@code active} 가 뒤집히거나(또는 유저가
+ *       삭제되면) 그 유저의 모든 {@code direct_member} 튜플이 생기거나 사라진다</li>
  * </ul>
  *
  * <p><b>최소 스냅샷이 볼 수 있는 규칙과 볼 수 없는 규칙(설계의 경계).</b>
@@ -406,7 +405,7 @@ public class IncrementalSyncUseCase {
     /**
      * 직원 삭제. 그 직원이 속한 모든 조직에서 멤버십도 함께 지운다.
      *
-     * <p>삭제 튜플이 실패한 조직은 멤버 목록을 원래대로 유지한다({@link #reconcileRemovedMember}).
+     * <p>삭제 튜플이 실패한 조직은 멤버십을 그대로 둔다.
      * 하나라도 실패하면 직원 레코드 자체도 지우지 않는다 — 지워버리면 다음 재시도가 diff 할
      * "이전"이 사라져 남은 튜플을 영원히 다시 잡지 못한다.
      *
@@ -417,27 +416,20 @@ public class IncrementalSyncUseCase {
     }
 
     private Mono<IncrementalSyncResult> removeUserInternal(String userId, LockLease lease) {
+        MemberRef 이직원 = MemberRef.user(userId);
         return state.findUser(userId)
-                .flatMap(user -> affectedGroupsOf(userId).flatMap(groups -> {
+                .flatMap(user -> affectedGroupHeadersOf(userId).flatMap(headers -> {
                     // 스냅샷은 좁힌다 — 델타에는 이 직원의 튜플만 남으므로 동료가 필요 없다.
-                    Set<GroupHeader> headers = groups.stream()
-                            .map(group -> new GroupHeader(
-                                    group.id(), group.externalId(), group.displayName()))
-                            .collect(Collectors.toCollection(LinkedHashSet::new));
                     Mono<DirectorySnapshot> before = 직원한명_그림(headers, userId, Mono.just(user));
                     // 삭제 후에는 어느 조직에도 속하지 않으므로 조직이 하나도 없는 그림이 맞다.
                     Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
 
-                    // 커밋에는 좁히지 않은 groups/without 을 쓴다 — saveGroup 은 members() 를
-                    // 최종 목록으로 받아 거기 없는 멤버 줄을 지운다. 좁힌 것을 넘기면
-                    // 이 조직의 멤버가 통째로 삭제된다.
-                    Set<DirectoryGroup> without = removeMemberFrom(groups, MemberRef.user(userId));
-
                     Commit commit = (result, beforeTuples, afterTuples) -> {
-                        Set<DirectoryGroup> reconciled = reconcileRemovedMember(
-                                groups, without, MemberRef.user(userId), beforeTuples, result);
-                        Mono<Void> saveGroups = Flux.fromIterable(reconciled)
-                                .flatMap(state::saveGroup, LOAD_CONCURRENCY)
+                        // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(reconcileRemovedMember 와 같은 판단).
+                        // 나머지는 그 직원의 멤버 줄·소속 줄만 지운다 — 조직 멤버 목록 전체를 읽고 쓰지 않는다(설계 §5).
+                        Mono<Void> saveGroups = Flux.fromIterable(headers)
+                                .filter(header -> 멤버십을_지운다(tupleFor(이직원, header.id()), beforeTuples, result))
+                                .flatMap(header -> state.saveGroupChange(header, Set.of(), Set.of(이직원)), LOAD_CONCURRENCY)
                                 .then();
                         if (result.hasFailure()) {
                             return saveGroups;
@@ -447,6 +439,11 @@ public class IncrementalSyncUseCase {
 
                     return diffAndApply(before, after, RelationTuple.userRef(userId), lease, commit);
                 }));
+    }
+
+    /** 튜플이 원래 없었거나 이번에 지워졌으면 멤버십도 지운다. 원래 있었는데 지우지 못했으면 남겨 재시도가 다시 보게 한다. */
+    private static boolean 멤버십을_지운다(RelationTuple tuple, Set<RelationTuple> beforeTuples, TupleWriteResult result) {
+        return !beforeTuples.contains(tuple) || result.deleted().contains(tuple);
     }
 
     /**
@@ -912,13 +909,6 @@ public class IncrementalSyncUseCase {
                 : RelationTuple.child(member.id(), groupId);
     }
 
-    /** 이 직원이 속한 모든 조직. 활성 여부가 뒤집히면 전부 영향을 받는다. */
-    private Mono<Set<DirectoryGroup>> affectedGroupsOf(String userId) {
-        return state.findGroupIdsContaining(MemberRef.user(userId))
-                .flatMap(state::findGroup, LOAD_CONCURRENCY)
-                .collect(LinkedHashSet<DirectoryGroup>::new, Set::add);
-    }
-
     /** 이 조직을 하위 조직으로 갖는 상위 조직들. */
     private Mono<Set<DirectoryGroup>> parentsOf(String groupId) {
         return state.findGroupIdsContaining(MemberRef.group(groupId))
@@ -969,7 +959,7 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 {@link #upsertUser} 에서만 쓴다.
+     * 이 직원이 속한 모든 조직의 헤더. 멤버 목록이 필요 없는 {@link #upsertUser}·{@link #removeUser} 가 쓴다.
      *
      * <p>역참조가 강한 일관성이고 정확하므로(포트 계약 참고) 여기서 멤버십을 다시 확인하지 않는다.
      * 확인은 저장소 안에서 이미 끝났다.
