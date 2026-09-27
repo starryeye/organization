@@ -108,6 +108,7 @@ RFC 7643 은 `userName` 을 `uniqueness: server`, `caseExact: false` 로 정하�
 | 직원 PATCH·PUT 으로 남의 `userName` | **통과** | **409 `uniqueness`** |
 | PATCH·PUT·DELETE 대상 없음 | 404(락 밖) | 404(락 안) |
 | PATCH 규칙 위반 | 400 | 400 — 대상이 없으면 404 가 먼저(계산은 직원을 읽은 뒤 적용) |
+| 본문이 잘못된 PUT, 대상 없음 | 404 | 400 — 본문 해석이 락 앞이다(PATCH 는 계산이 직원을 읽은 뒤라 404 가 먼저) |
 | 락을 못 잡음 | 503 | 503 |
 
 응답 본문은 그대로다(직원 POST 201, PATCH·PUT 200 + 직원, DELETE 204). README: SCIM 절에 "`userName` 은 POST·PUT·PATCH 모두에서
@@ -161,6 +162,8 @@ Entra·Okta 는 `userName`(UPN)을 테넌트 안에서 이미 유일하게 관�
 
 - **userName 의 GSI 지연 틈.** 방금(GSI 반영 전) 저장된 직원과 대소문자만 다른 `userName` 으로 만들거나 바꾸는 요청은 통과할 수 있다.
   DynamoDB Local 로는 재현할 수 없어 설계로만 다룬다.
+- **경합 E2E 의 대소문자 POST 시나리오는 락 직렬화만 증명한다.** DynamoDB Local 의 GSI 는 즉시 반영돼 두 번째 POST 가 늘 첫 번째를 찾는다.
+  실제 DynamoDB 에서는 이 시나리오가 바로 위 틈에 들어간다.
 - **시간은 추정이다** — 규모 테스트는 요청 수로 증명한다.
 - **전역 락은 그대로다.** 쓰기끼리는 한 줄로 선다(동시성 설계의 전제).
 
@@ -169,3 +172,5 @@ Entra·Okta 는 `userName`(UPN)을 테넌트 안에서 이미 유일하게 관�
 - 조직 멤버 PATCH 설계 §12 의 나머지 — 큰 변경의 리스 갱신, BatchGet 재시도 상한·백오프, 요청 본문 256KB 한도, POST·DELETE 의 `parentsOf`
   통째 읽기.
 - 사용자 제안: 유명 SCIM·LDAP 오픈소스와 코드 비교, 전체 코드·요구사항 리뷰, IdP·IAM 공식 문서 비교 분석.
+- 직원 아이디를 생성 시점 `userName` 에서 만든다. 이름을 바꾼 사람의 옛 `userName` 으로 새 입사자를 POST 하면 아이디 충돌로 늘 409 다(이
+  슬라이드 이전부터 있던 동작). §9 의 B(`USERNAME#` 표지판)로 갈 때 같이 본다.

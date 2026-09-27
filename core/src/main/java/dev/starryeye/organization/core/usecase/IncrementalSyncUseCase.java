@@ -148,6 +148,9 @@ public class IncrementalSyncUseCase {
     /**
      * 직원 생성·수정. 활성 여부가 바뀌면 그 직원이 속한 모든 조직의 튜플이 함께 움직인다.
      *
+     * <p><b>SCIM 입구가 아니다.</b> 생성·중복 판단 없이 그대로 덮어쓴다 — 테스트와 등가 비교용이다. SCIM 쓰기는
+     * {@link #createUser}·{@link #changeUser} 를 쓴다(판단 읽기가 락 안).
+     *
      * <p>반영이 실패하면 {@code active} 를 요청값 그대로 저장하지 않고 이전 값으로 되돌린다.
      * 그대로 저장하면 다음 동기화가 "이미 목표 상태"라고 오판해 실패한 튜플을 영원히
      * 다시 시도하지 못한다.
@@ -260,7 +263,10 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 생성(POST). 수정(PATCH·PUT)은 {@link #changeGroup} 이다. 멤버 목록을 통째로 교체한다.
+     * 멤버 목록을 통째로 교체한다.
+     *
+     * <p><b>SCIM 입구가 아니다.</b> 존재 판단 없이 그대로 덮어쓴다 — 테스트와 등가 비교용이다. SCIM 쓰기는
+     * {@link #createGroup}·{@link #changeGroup} 을 쓴다(판단 읽기가 락 안).
      *
      * <p><b>상위 조직도 함께 싣는다.</b> child 엣지 {@code (group:자식, child, group:부모)} 는
      * 부모의 멤버 목록에서 나오므로, 이 조직만 실은 스냅샷에는 그 엣지가 아예 등장하지 않는다.

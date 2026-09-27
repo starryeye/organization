@@ -109,6 +109,19 @@ class IncrementalSyncWriteDecisionTest {
     }
 
     @Test
+    @DisplayName("직원 변경 — userName 을 바꾸지 않으면 중복을 확인하지 않는다, 이미 겹친 직원도 비활성화된다")
+    void userName을_안_바꾸면_중복을_확인하지_않는다() {
+        // given — lee 가 이미 kim 과 같은 userName 을 쓰고 있다(GSI 지연 틈·LDAP 동기화로 생길 수 있는 상태)
+        state.users.put("lee", 직원("lee", "kim", true));
+
+        // when
+        useCase.changeUser("lee", u -> u.withActive(false)).block();
+
+        // then — 409 로 막히면 IdP 가 재시도를 멈춰 퇴사자 권한이 남는다
+        assertThat(state.users.get("lee").active()).isFalse();
+    }
+
+    @Test
     @DisplayName("GSI 에만 남은 옛 후보(지워졌거나 이름이 바뀐 직원)는 중복으로 보지 않는다")
     void GSI에만_남은_후보는_무시한다() {
         // given — GSI 가 "park" 로 찾으면 지워진 ghost 와 이름을 바꾼 lee 를 돌려준다

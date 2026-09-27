@@ -233,6 +233,13 @@ class ScimWriteRaceEndToEndTest {
         }
     }
 
+    /**
+     * 이 시나리오는 <b>락이 두 POST 를 한 줄로 세운다</b>는 것만 증명한다.
+     *
+     * <p>DynamoDB Local 의 GSI 는 즉시 반영되므로 두 번째 POST 가 첫 번째를 GSI 로 찾는다. 실제 DynamoDB 의
+     * GSI 는 결과적 일관성이라, 첫 POST 직후(반영 전)에 온 두 번째 POST 는 통과할 수 있다 — 설계 §10
+     * "userName 의 GSI 지연 틈" 이 수용한 한계다({@code docs/superpowers/specs/2026-09-28-scim-write-lock-design.md}).
+     */
     @Test
     @DisplayName("대소문자만 다른 userName 으로 동시에 만들면 하나만 201 이고 하나는 409 다")
     void 대소문자만_다른_생성() throws Exception {

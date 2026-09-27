@@ -384,7 +384,7 @@ organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 
 ### app-scim 여러 대 띄우기(동시성 제어)
 
 **`app-scim`은 여러 인스턴스를 액티브-액티브로 띄울 수 있다.** IdP가 여러 인스턴스로 요청을
-분산해도 안전하도록, SCIM 쓰기 하나(`upsertUser`/`upsertGroup`/`changeGroup`/`removeUser`/`removeGroup`)와
+분산해도 안전하도록, SCIM 쓰기 하나(`createUser`/`changeUser`/`removeUser`/`createGroup`/`changeGroup`/`removeGroup`)와
 재적재(`POST /admin/sync/rebuild`)는 **같은 DynamoDB 조건부 쓰기 전역 락**을 잡은 뒤에만
 진행한다. 인스턴스가 몇 대든, 그리고 그 인스턴스가 SCIM 쓰기든 재적재든, 서로 겹치지 않고
 직렬화된다 — 인메모리 락(예전의 `MutationGate`)은 인스턴스 하나 안에서만 유효해 여러 대를
