@@ -52,7 +52,10 @@ import java.util.stream.Collectors;
  *       그대로. {@link #upsertGroup} 참고) + 그 조직들의 멤버 유저들(활성 여부 판정에 필요) +
  *       멤버로 참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child
  *       엣지를 만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
- *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고)</li>
+ *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고). 조직 PATCH·PUT
+ *       ({@link #changeGroup})은 이와 달리 <b>바뀌는 멤버만 담은 그림</b>을 쓰고 상위 조직을
+ *       싣지 않는다(이미 있는 조직이라 상위와의 child 엣지가 바뀌지 않아서다) — 자세한 이유는
+ *       {@link #changeGroup} 참고</li>
  *   <li>유저 변경 — 그 유저가 속한 모든 조직을 찾는 것은 {@code findGroupIdsContaining}
  *       (강한 일관성, 정확함) 하나지만 그 뒤가 갈린다. {@link #upsertUser} 는 조직마다
  *       {@link #affectedGroupHeadersOf} 로 <b>헤더만</b> 읽는다(멤버 목록은 필요 없다 — 커밋이
@@ -202,7 +205,7 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 생성·수정. 멤버 목록을 통째로 교체한다.
+     * 조직 생성(POST). 수정(PATCH·PUT)은 {@link #changeGroup} 이다. 멤버 목록을 통째로 교체한다.
      *
      * <p><b>상위 조직도 함께 싣는다.</b> child 엣지 {@code (group:자식, child, group:부모)} 는
      * 부모의 멤버 목록에서 나오므로, 이 조직만 실은 스냅샷에는 그 엣지가 아예 등장하지 않는다.
@@ -295,7 +298,7 @@ public class IncrementalSyncUseCase {
                 }));
     }
 
-    /** 그림에 실을 멤버의 변경 전·후 소속. 둘 다 이 조직 멤버 중 일부다. */
+    /** 그림에 실을 멤버의 변경 전·후 소속. 전 은 지금 멤버 중 그림에 실을 것, 후 는 반영 뒤 멤버가 될 것(아직 멤버가 아닌 넣을 멤버 포함). */
     private record 멤버전후(Set<MemberRef> 전, Set<MemberRef> 후) {
     }
 
@@ -437,8 +440,9 @@ public class IncrementalSyncUseCase {
      * 변경 하나를 락 안에서 실행한다 (설계 §4).
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
-     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 네 경로가 빠짐없이 덮이고
-     * 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
+     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 다섯 경로({@link #upsertUser}·
+     * {@link #upsertGroup}·{@link #changeGroup}·{@link #removeUser}·{@link #removeGroup})가
+     * 빠짐없이 덮이고 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
      * 같은 이유로 여기(구 버전의 이 자리)에 있었지만, 인스턴스가 둘이면 아무것도 막지 못했다
      * (설계 §4.5). 지금은 그 자리를 이 분산 락이 대신한다.
      *

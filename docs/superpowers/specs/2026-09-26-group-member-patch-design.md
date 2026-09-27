@@ -49,7 +49,7 @@ IdP 는 A 추가에 2xx 를 받았으니 다시 보내지 않는다.
 | 값 붙은 `remove members` | **400 `invalidValue`**. Entra 는 `aadOptscim062020` 을 켜야 한다(README 에 필수로) | 적힌 멤버만 삭제(AWS 식), 적힌 멤버만 + PATCH 로 전원 비우기 금지 |
 | 범위 | **오류 + 조직 멤버 증분(1.2) + 락 안에서 읽기(1.3)**. 직원 쪽(락 밖 읽기, PATCH/PUT `userName` 중복)은 **바로 다음 슬라이드** | 오류만, 직원까지 한 번에 |
 | 접근 | **A. 바뀌는 멤버만 보는 좁힌 그림** — 지금의 비교 엔진(`diffAndApply`)을 그대로 쓰고 그림만 좁힌다 | B. 전체 비교를 유지하고 빠르게, C. 조직별 락 (§10) |
-| 추가 범위 | **전체 교체는 멤버 아이디만 읽어 차이만 처리**, **조직 PATCH 응답은 204** | 204 만, 둘 다 빼기 |
+| 추가 범위 | **전체 교체는 멤버 아이디만 읽어 차이만 처리**, **조직 PATCH 응답은 204**(`attributes` 가 있으면 200 — 최종 리뷰에서 RFC MUST 로 고침) | 204 만, 둘 다 빼기 |
 | PUT | 전체 교체와 같은 길 | — (1절 제시 때 이의 없음) |
 
 **거절을 고른 이유(사용자와 합의).** 이 서버는 우리 회사 디렉터리를 동기화하므로 Entra 설정(`?aadOptscim062020`)을 우리가 바꿀 수
@@ -92,7 +92,8 @@ RFC 정오표나 SCIM 개정 초안 중 이 모호함을 다루는 것은 없다
 **PATCH 응답.** Entra: "Update to the group PATCH request should yield an HTTP 204 No Content in the response. Returning a body with a
 list of all the members isn't advisable" ([Entra SCIM 튜토리얼](https://learn.microsoft.com/en-us/entra/identity/app-provisioning/use-scim-to-provision-users-and-groups)).
 Okta: "The SCIM server response to PATCH method requests can also be an HTTP 204 response" (Okta SCIM 2.0). RFC 7644 §3.5.2: 200 과
-리소스, 또는 204.
+리소스, 또는 204. RFC 7644 §3.5.2 는 또 "The server MUST return a 200 OK if the "attributes" parameter is specified in the request"
+라고 정한다.
 
 ## 4. 요청 해석 — 조직 PATCH·PUT 을 "변경" 으로 정리한다
 
@@ -109,8 +110,11 @@ Okta: "The SCIM server response to PATCH method requests can also be an HTTP 204
 | `remove members`, `value` 없음 또는 `null` | 전체 교체(빈 목록) — 표준대로 전원 빼기 |
 | `replace members [...]` | 전체 교체 |
 | `replace displayName`, 경로 없는 `{"displayName": …}` | 증분: 이름만 |
-| 경로 없는 `{"members": [...]}` | 전체 교체 |
+| 경로 없는 `add` 의 `members` | 증분: 추가(RFC 7644 §3.5.2.1) |
+| 경로 없는 `replace` 의 `members` | 전체 교체 |
 | `PUT /Groups/{id}` | 전체 교체(이름·`externalId` 포함) |
+
+경로 없는 add 가 전체 교체이던 것은 원래 있던 결함이다 — §1.1 과 같은 조용한 전원 삭제라 최종 리뷰에서 고쳤다.
 
 - **여러 연산은 순서대로 쌓는다** — 지금 코드가 멤버 집합에 순서대로 적용하는 것과 같은 뜻이다. "A 추가 → A 빼기" 는 변화 없음.
   중간에 전체 교체가 나오면 그 목록이 목표가 되고, 뒤의 연산은 목표 목록에 적용한다(저장소 없이 계산된다).
@@ -129,8 +133,9 @@ id 의 종류라 드물게 바뀐다).
 
 1. 조직 META 1건(`findGroupHeader`) — 없으면 404.
 2. 연산에 나온 멤버들만 **지금 멤버인지** 멤버 줄로 확인한다(종류 모르는 빼기는 두 종류 다). 연산을 순서대로 되감아 각 멤버의
-   변경 전·후 소속을 구한다. **요청에 나온 멤버는 전후가 같아도(이미 있는데 추가, 없는데 빼기) 그림에 남긴다** — 그 멤버의 권한
-   어긋남은 지금처럼 고친다(IdP 의 재전송이 흔한 복구 경로다). 그림에서 빠지는 것은 요청에 나오지 않은 멤버뿐이다.
+   변경 전·후 소속을 구한다. **이미 멤버인 채로 요청에 나온 멤버는 그림에 남아 어긋남을 고친다**(IdP 의 재전송이 흔한 복구
+   경로다). **멤버가 아닌 id 빼기는 그림에 싣지 않는다** — 비멤버의 고아 튜플은 옛 방식과 같이 고치지 않는다
+   (`ScimLimitsAndRecoveryScaleTest` 의 고아 튜플 시나리오와 같은 한계). 그림에서 빠지는 것은 요청에 나오지 않은 멤버뿐이다.
 3. 그림에 실을 직원은 `findUser`(활성 여부), 하위 조직은 `findGroupHeader`(존재 여부).
 4. **좁힌 그림** 두 장 — 이 조직의 멤버 목록을 "바뀌는 멤버만" 으로 좁힌 변경 전·후 스냅샷. 직원은 바뀌는 직원만, 하위 조직은 멤버를
    비운 헤더로 싣는다. 상위 조직은 싣지 않는다. 이것을 지금의 `diffAndApply(before, after, group:G, …)` 에 넣는다 — Check 기준선,
@@ -176,8 +181,9 @@ id 의 종류라 드물게 바뀐다).
 
 ## 7. 응답·오류·README
 
-- **조직 PATCH 성공은 `204 No Content`**(본문 없음), `attributes` 가 있어도. 잘못된 `attributes`·`excludedAttributes` 는 지금처럼 쓰기 전에
-  400. 부분 실패는 지금처럼 5xx(IdP 재시도).
+- **조직 PATCH 성공은 `attributes` 가 없으면 `204 No Content`**(본문 없음), 있으면 RFC 7644 §3.5.2 의 MUST 대로 200 + 요청한 속성.
+  잘못된 `attributes`·`excludedAttributes` 는 지금처럼 쓰기 전에 400. 부분 실패는 지금처럼 5xx(IdP 재시도). 본문이 잘못된 요청(값
+  붙은 remove 포함)은 조직이 없어도 400 이다 — 본문 해석이 락 안의 존재 확인보다 먼저다. RFC 는 순서를 정하지 않는다.
 - PUT 은 RFC 7644 §3.5.1 대로 200 + 리소스(지금처럼 `attributes` 규칙 — 멤버를 빼 달라면 헤더만). 직원 PATCH 는 200 + 본문 그대로.
 - **값 붙은 remove.** `op` 가 `remove`, `path` 가 `members`, `value` 칸이 있고 `null` 이 아니면(빈 목록 포함) 400 `invalidValue`.
   메시지: `members 에서 멤버를 골라 빼려면 path 에 필터를 쓰세요: members[value eq "<id>"]. Microsoft Entra ID 는 SCIM 테넌트 URL 에
@@ -240,6 +246,10 @@ id 의 종류라 드물게 바뀐다).
 - **요청 본문 한도(WebFlux 기본 256KB)** 는 멤버 약 7천 명 분량이다. 그보다 큰 목록의 전체 교체는 이 슬라이드와 무관하게 지금도 본문
   해석 단계에서 막힌다(§12).
 - **Entra 옵션을 켜기 전까지 Entra 의 멤버 빼기는 반영되지 않는다**(400).
+- **조직 쓰기는 이제 이 조직의 상위 엣지 `child(G,P)` 의 어긋남도 점검하지 않는다.** 옛 `upsertGroup` 은 상위 조직을 멤버째 실어
+  점검했다. 상위 조직의 쓰기나 재적재가 본다.
+- **자기 상위 조직을 하위로 넣는 한 홉 순환**은 옛 방식(상위 조직을 멤버째 실어 스냅샷 안 DFS 가 순서에 따라 기존 엣지를 버릴 수
+  있었다)과 달리 새 엣지만 버리고 기존 `child(G,P)` 를 건드리지 않는다 — 더 맞는 동작이다.
 
 ## 12. 범위 밖 (백로그)
 
@@ -247,5 +257,10 @@ id 의 종류라 드물게 바뀐다).
 - 조직 POST 의 중복 확인이 락 밖이다(같은 조직 POST 두 개가 동시에 오면 둘 다 통과).
 - 요청 본문 한도 256KB — 멤버 7천 명 넘는 전체 교체가 들어오지 못한다. 한도를 올릴지(메모리·인증 전 노출), 넘으면 어떤 상태코드로
   답하는지(500 이면 IdP 가 영구 실패로 읽는다) 확인할 것.
-- 조직 POST·DELETE 의 `parentsOf` 가 상위 조직 파티션을 통째로 읽는다(상위 조직에 직원이 많으면 그만큼).
+- 조직 POST·DELETE 의 `parentsOf` 가 상위 조직 파티션을 통째로 읽는다(상위 조직에 직원이 많으면 그만큼, 상위 조직의 직원마다
+  `findUser` 까지 한다).
+- `removeUser` 가 소속 조직마다 `findGroup` 전체와 `saveGroup` 의 멤버 키 전체를 락 안에서 읽는다(10만 명 조직 소속 직원 한 명
+  삭제마다) — 직원 슬라이드에서 `saveGroupChange` 로 바꿀 수 있다. 아주 큰 변경(10만 명 조직 비우기 등)은 바뀌는 멤버 수만큼
+  `findUser`·차례 BatchCheck 를 하는데 리스는 OpenFGA 쓰기 직전에만 갱신한다 — 30초 TTL 을 넘기면 재시도해도 매번 실패할 수
+  있다. BatchGet 미처리 키 재시도에 상한·백오프가 없고 100개 묶음을 차례로 읽는다.
 - 이 슬라이드 뒤 사용자 제안: 유명 SCIM·LDAP 오픈소스와 코드 비교, 전체 코드·요구사항 리뷰, IdP·IAM 공식 문서 비교 분석.
