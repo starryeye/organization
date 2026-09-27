@@ -28,6 +28,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>경합을 재현하는 대신 <b>경합이 남겼을 결과를 직접 심는다</b>. 타이밍에 기대지 않아
  * 흔들리지 않으면서, 설계가 막으려는 위험(퇴사자 권한 생존)을 그대로 못박는다.
+ *
+ * <p>조직 멤버 PATCH 설계(2026-09-26) §11 이후 조직 쓰기는 <b>요청에 나온 멤버</b>만 점검한다 — 그래서 "건드리는" 쓰기는 그 직원을
+ * 가리키는 조직 PATCH 다. 그 직원을 가리키지 않는 조직 PUT·PATCH 는 이 튜플을 보지 않는다(직원 쪽 쓰기와 재적재는 여전히 본다).
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -79,7 +82,7 @@ class ScimDriftHealingEndToEndTest {
     }
 
     @Test
-    @DisplayName("경합이 남긴 퇴사자 튜플을 다음 SCIM 쓰기가 걷어낸다")
+    @DisplayName("경합이 남긴 퇴사자 튜플을 그 직원을 가리키는 다음 SCIM 쓰기가 걷어낸다")
     void 어긋난_튜플이_치유된다() {
         // given — kim 을 만들고 DEV001 에 넣은 뒤 비활성으로 바꾼다
         client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
@@ -111,14 +114,13 @@ class ScimDriftHealingEndToEndTest {
         잔여튜플을_심는다("user:kim", "direct_member", "group:DEV001");
         assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
 
-        // when — DEV001 을 아무렇게나 한 번 건드린다
-        client.put().uri("/scim/v2/Groups/DEV001").contentType(MediaType.APPLICATION_JSON)
+        // when — kim 을 가리키는 조직 쓰기가 한 번 온다(IdP 의 재전송 같은)
+        client.patch().uri("/scim/v2/Groups/DEV001").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
-                         "externalId":"DEV001","displayName":"개발본부",
-                         "members":[{"value":"kim","type":"User"}]}
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"add","path":"members","value":[{"value":"kim","type":"User"}]}]}
                         """)
-                .exchange().expectStatus().isOk();
+                .exchange().expectStatus().isNoContent();
 
         // then — 상태 기준선이었다면 델타가 비어 그대로 남는다
         assertThat(check("user:kim", "member", "group:DEV001"))

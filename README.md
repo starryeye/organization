@@ -312,7 +312,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 | 대상 | `path` | 지원 `op` |
 |---|---|---|
-| Group | `members` | `add` / `remove`(전체 비움) / `replace` |
+| Group | `members` | `add` / `replace` / `remove` — `value` 가 없으면 전원 빼기(RFC 7644 §3.5.2.2), **`value` 가 있으면 400 `invalidValue`** |
 | Group | `members[value eq "..."]` | `remove` |
 | Group | `displayName` | `replace` / `add` |
 | Group | (path 없음) | `replace` / `add` — 본문을 부분 리소스로 보고 `displayName`·`members`만 병합 |
@@ -325,6 +325,20 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
 않은 변경을 반영됐다고 오해하면 안 되기 때문이다.
+
+**조직 PATCH 는 성공하면 `204 No Content` 다**(본문 없음). RFC 7644 §3.5.2 가 허용하고, Entra 는 조직 PATCH 에 멤버 전체를 담아
+돌려주는 것을 권하지 않으며 Okta 도 204 를 받는다. PUT 과 직원 PATCH 는 200 과 리소스다.
+
+**Microsoft Entra ID 로 연결할 때는 SCIM 테넌트 URL 끝에 `?aadOptscim062020` 을 반드시 붙인다.** 이 옵션이 없으면 Entra 는 멤버
+한 명을 `{"op":"Remove","path":"members","value":[{"value":"…"}]}` 로 빼는데, RFC 7644 로 읽으면 이것은 "멤버 전원 삭제" 이고
+`value` 는 remove 에 정의되지 않은 칸이다. 추측하지 않고 400 `invalidValue` 로 거절한다 — 그 멤버는 빠지지 않고 Entra 프로비저닝
+로그에 실패로 남는다. 옵션을 켜면 Entra 는 `members[value eq "…"]` 로 보낸다(Okta 는 원래 이 모양이다). 이 옵션은 비활성화·경로
+없는 PATCH 의 모양도 표준으로 바꾸는데, 그 모양들은 이미 받는다. 설계: `docs/superpowers/specs/2026-09-26-group-member-patch-design.md`.
+
+**조직 멤버 변경의 비용.** 멤버 추가·빼기와 이름 변경은 조직 크기와 무관하게 요청에 나온 멤버만 읽고 쓴다. 전체 교체(`replace
+members`, 경로 없는 `members`, `PUT`)는 저장된 멤버 아이디를 한 번 훑고 바뀐 멤버만 처리한다. 조직 PATCH·PUT 은 요청에 나온(전체
+교체는 바뀐) 멤버의 권한만 OpenFGA 와 맞춰 본다 — 조직 전원을 맞추려면 `POST /admin/sync/rebuild?mode=tuples` 다. 요청 본문은
+WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못한다.
 
 `op` 와 `path` 의 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1).
 
