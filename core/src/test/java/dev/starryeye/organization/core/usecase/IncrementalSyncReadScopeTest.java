@@ -142,7 +142,7 @@ class IncrementalSyncReadScopeTest {
      * 지우지 않는지 지킨다.
      */
     @Test
-    @DisplayName("삭제 튜플이 실패해도 조직 멤버십은 그대로다 — fallback 원본이 좁혀지면 실패 하나로 동료가 전부 사라진다")
+    @DisplayName("삭제 튜플이 실패해도 조직 멤버십은 그대로다 — 실패한 조직은 멤버 줄을 건드리지 않아 동료가 사라지지 않는다")
     void 삭제_튜플_실패시_동료의_멤버십이_사라지지_않는다() {
         // given — u0 의 PLANT 삭제 튜플만 실패하게 만든다
         writer.failFor(tuple -> tuple.equals(RelationTuple.directMember("u0", 대형조직)));
