@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -33,6 +34,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -253,6 +255,85 @@ public class IncrementalSyncUseCase {
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), lease, commit);
                 }));
+    }
+
+    /**
+     * 조직 PATCH·PUT (조직 멤버 PATCH 설계 §5). 조직이 없으면 빈 {@code Mono} 다.
+     *
+     * <p><b>모든 판단을 락을 잡은 뒤 읽은 값으로 한다.</b> 전에는 핸들러가 락 밖에서 읽은 멤버 목록으로 목표를 계산해, 동시에 온 두
+     * PATCH 가 서로가 넣은 멤버를 지웠다(설계 §1.3). {@link GroupChange} 는 저장소를 읽지 않고 만들어진다.
+     *
+     * <p><b>바뀌는 멤버만 담은 조직</b>을 {@link #diffAndApply} 에 넣는다. 멤버십에서 나오는 튜플은
+     * {@code direct_member(user:X, group:G)}·{@code child(group:S, group:G)} 뿐이라 한 멤버와 이 조직만 언급한다 — 그림에 없는 멤버의
+     * 튜플은 델타에 들어오지 않는다. 이미 있는 조직이라 상위 조직과의 child 엣지도 바뀌지 않으므로 상위 조직을 싣지 않는다
+     * ({@link #upsertGroup} 이 싣는 이유는 새로 생기는 조직이다). 그래서 비용이 조직 크기가 아니라 바뀌는 멤버 수를 따른다.
+     * {@link #직원한명_그림} 과 같은 논리다.
+     *
+     * <p>증분은 요청에 나온 멤버를 전후가 같아도 그림에 남긴다 — 그 멤버의 어긋남은 지금처럼 고친다. 요청에 나오지 않은 멤버는
+     * 점검하지 않는다(설계 §11). 전체 교체는 목록이 전원을 가리키므로 바뀌는 멤버만 싣는다.
+     */
+    public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
+        return withLock(lease -> changeGroupInternal(groupId, change, lease));
+    }
+
+    private Mono<IncrementalSyncResult> changeGroupInternal(String groupId, GroupChange change, LockLease lease) {
+        return state.findGroupHeader(groupId)
+                .flatMap(header -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
+                    GroupHeader 바뀐헤더 = change.applyTo(header);
+                    DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
+                    DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
+
+                    Commit commit = (result, beforeTuples, afterTuples) -> {
+                        DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
+                        Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
+                        Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
+                        return Mono.defer(() -> state.saveGroupChange(바뀐헤더, 넣을것, 뺄것));
+                    };
+
+                    return diffAndApply(snapshotOfGroups(Set.of(전)), snapshotOfGroups(Set.of(후)),
+                            RelationTuple.groupRef(groupId), lease, commit);
+                }));
+    }
+
+    /** 그림에 실을 멤버의 변경 전·후 소속. 둘 다 이 조직 멤버 중 일부다. */
+    private record 멤버전후(Set<MemberRef> 전, Set<MemberRef> 후) {
+    }
+
+    private Mono<멤버전후> 바뀌는_멤버(String groupId, GroupChange change) {
+        if (change.replacesMembers()) {
+            return state.findMemberRefs(groupId)
+                    .collect(LinkedHashSet<MemberRef>::new, Set::add)
+                    .flatMap(지금 -> 종류판정(groupId, change, change.base()).map(조직이면 -> {
+                        Set<MemberRef> 목표 = change.replay(change.base(), 조직이면);
+                        return new 멤버전후(차집합(지금, 목표), 차집합(목표, 지금));
+                    }));
+        }
+        return state.findMembers(groupId, change.mentioned())
+                .flatMap(지금 -> 종류판정(groupId, change, 지금)
+                        .map(조직이면 -> new 멤버전후(지금, change.replay(지금, 조직이면))));
+    }
+
+    /**
+     * 직원·하위 조직이 같은 id 로 둘 다 멤버일 때 id 로 빼면 — 전처럼 현재상태에 그 조직이 있으면 하위 조직을 뺀다
+     * ({@code StateMemberTypeResolver} 의 순서). 모호할 수 있는 id 만 묻는다.
+     */
+    private Mono<Predicate<String>> 종류판정(String groupId, GroupChange change, Set<MemberRef> start) {
+        Set<String> ids = change.ambiguousIds(start);
+        if (ids.isEmpty()) {
+            return Mono.<Predicate<String>>just(id -> false);
+        }
+        ids.forEach(id -> log.warn("members[value eq \"{}\"] 가 직원과 하위 조직 양쪽에 걸립니다. 현재상태로 한쪽만 지웁니다: 조직={}",
+                id, groupId));
+        return Flux.fromIterable(ids)
+                .filterWhen(id -> state.findGroupHeader(id).hasElement())
+                .collect(Collectors.toSet())
+                .<Predicate<String>>map(조직 -> 조직::contains);
+    }
+
+    private static Set<MemberRef> 차집합(Set<MemberRef> from, Set<MemberRef> minus) {
+        Set<MemberRef> result = new LinkedHashSet<>(from);
+        result.removeAll(minus);
+        return result;
     }
 
     /**
@@ -617,12 +698,8 @@ public class IncrementalSyncUseCase {
                     "조직 계층 순환 검사가 %d개 조직을 넘겼습니다. 계층이 비정상적으로 크거나 깊습니다: %s"
                             .formatted(MAX_GRAPH_EXPANSIONS, groupId)));
         }
-        return state.findGroup(groupId)
-                .map(group -> group.members().stream()
-                        .filter(member -> member.type() == MemberType.GROUP)
-                        .map(MemberRef::id)
-                        .toList())
-                .defaultIfEmpty(List.of())
+        return state.findChildGroupIds(groupId)
+                .collectList()
                 .doOnNext(ids -> scan.childIds.put(groupId, ids));
     }
 
@@ -847,6 +924,8 @@ public class IncrementalSyncUseCase {
      * {@code containsKey} 는 통과시키되 {@code collectDirectMembers}/{@code collectChildEdges} 가
      * 이 하위 조직으로부터는 아무 튜플도 만들지 않게 한다 — 그러면 어느 쪽 스냅샷에 들어있든
      * 기여가 0이라 결과가 대칭이다. 하위 구조를 재귀적으로 채우지 않는 것도 같은 이유다.
+     *
+     * <p>존재만 확인하므로 헤더만 읽는다 — 파티션을 통째로 읽으면 하위 조직의 직원 줄까지 읽는다(조직 멤버 PATCH 설계 §1.4).
      */
     private Mono<Set<DirectoryGroup>> expandWithReferencedGroups(Set<DirectoryGroup> groups) {
         Set<String> knownIds = new LinkedHashSet<>();
@@ -864,8 +943,8 @@ public class IncrementalSyncUseCase {
             return Mono.just(groups);
         }
         return Flux.fromIterable(missingIds)
-                .flatMap(state::findGroup, LOAD_CONCURRENCY)
-                .map(loaded -> new DirectoryGroup(loaded.id(), loaded.externalId(), loaded.displayName(), Set.of()))
+                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+                .map(header -> new DirectoryGroup(header.id(), header.externalId(), header.displayName(), Set.of()))
                 .collect(LinkedHashSet<DirectoryGroup>::new, Set::add)
                 .map(loaded -> {
                     Set<DirectoryGroup> merged = new LinkedHashSet<>(groups);
