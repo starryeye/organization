@@ -1,6 +1,5 @@
 package dev.starryeye.organization.scim;
 
-import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
@@ -24,30 +23,9 @@ public class ScimUserHandler {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .map(ScimMapper::toDirectoryUser)
-                .flatMap(this::rejectDuplicate)
-                .flatMap(user -> sync.upsertUser(user)
+                // 아이디·userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §3·§4)
+                .flatMap(user -> sync.createUser(user)
                         .flatMap(result -> respond(HttpStatus.CREATED, user.id(), result, projection))));
-    }
-
-    /**
-     * 아이디 중복뿐 아니라 {@code userName} 중복도 막는다.
-     *
-     * <p>{@code id} 는 생성 시점의 {@code userName} 에서 발급되고 그 뒤의 {@code userName}
-     * 변경을 따라가지 않는다(SCIM 의 정체성은 {@code id} 라서 의도된 동작이다). 그래서 이름이
-     * 바뀐 사람을 IdP 가 <b>새 {@code userName} 으로</b> 다시 POST 하면 그 아이디로는 아무도
-     * 찾지 못해 같은 사람의 레코드가 둘 생긴다 — 튜플도 두 벌이 되고, 한쪽을 비활성화해도
-     * 다른 쪽 권한이 그대로 남는다.
-     */
-    private Mono<DirectoryUser> rejectDuplicate(DirectoryUser user) {
-        return state.findUser(user.id())
-                .flatMap(existing -> Mono.<DirectoryUser>error(ScimException.uniqueness(
-                        "이미 존재하는 직원입니다: " + user.id())))
-                .switchIfEmpty(Mono.defer(() -> state.findUserIdsByUserName(user.userName())
-                        .next()
-                        .flatMap(duplicateId -> Mono.<DirectoryUser>error(ScimException.uniqueness(
-                                "이미 같은 userName 을 쓰는 직원이 있습니다: userName=%s, id=%s"
-                                        .formatted(user.userName(), duplicateId))))
-                        .switchIfEmpty(Mono.just(user))));
     }
 
     public Mono<ServerResponse> get(ServerRequest request) {
@@ -58,35 +36,36 @@ public class ScimUserHandler {
                         .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(user))))));
     }
 
+    /** PUT — 본문으로 통째로 교체한다. 직원 읽기·존재 확인·userName 중복 확인은 락 안에서 한다(SCIM 쓰기 락 설계 §3). */
     public Mono<ServerResponse> replace(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> state.findUser(id)
-                .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
-                .then(request.bodyToMono(ScimUser.class)
-                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
+        return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
+                .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .map(ScimMapper::toDirectoryUser)
                 // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 userName 이 달라도 리소스를 옮기지 않는다.
-                .map(user -> user.withId(id))
-                .flatMap(user -> sync.upsertUser(user)
-                        .flatMap(result -> respond(HttpStatus.OK, id, result, projection))));
+                .flatMap(user -> sync.changeUser(id, before -> user.withId(id))
+                        .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id))))
+                .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
     }
 
+    /**
+     * PATCH — 연산 적용은 락 안에서, 락을 잡은 뒤 읽은 직원에 한다(SCIM 쓰기 락 설계 §3). 락 밖에서 읽은 직원으로 계산하면
+     * 동시에 온 비활성화를 되돌리거나 방금 지운 직원을 되살린다.
+     */
     public Mono<ServerResponse> patch(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> state.findUser(id)
-                .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
-                .zipWith(request.bodyToMono(ScimPatchOp.class)
-                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
-                .map(both -> ScimPatchApplier.applyToUser(both.getT1(), both.getT2()))
-                .flatMap(user -> sync.upsertUser(user)
-                        .flatMap(result -> respond(HttpStatus.OK, id, result, projection))));
+        return projection(request).flatMap(projection -> request.bodyToMono(ScimPatchOp.class)
+                .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
+                .flatMap(patch -> sync.changeUser(id, before -> ScimPatchApplier.applyToUser(before, patch))
+                        .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id))))
+                .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
     }
 
     public Mono<ServerResponse> delete(ServerRequest request) {
         String id = request.pathVariable("id");
-        return state.findUser(id)
+        // 존재 확인은 락 안에서 한다 — 없으면 빈 결과다(SCIM 쓰기 락 설계 §3)
+        return sync.removeUser(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
-                .then(sync.removeUser(id))
                 .flatMap(result -> result.fullyApplied()
                         ? ServerResponse.noContent().build()
                         : Mono.error(ScimException.internal(

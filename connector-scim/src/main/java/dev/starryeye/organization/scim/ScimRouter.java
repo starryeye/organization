@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.scim.dto.ScimError;
 import lombok.extern.slf4j.Slf4j;
@@ -72,6 +73,10 @@ public final class ScimRouter {
         // IdP 가 영구 실패로 판단해 포기하거나 무한히 재시도한다.
         if (error instanceof LockUnavailableException lockUnavailable) {
             return write(HttpStatus.SERVICE_UNAVAILABLE, null, lockUnavailable.getMessage());
+        }
+        // 아이디·userName 이 이미 있다 — RFC 7644 §3.12 의 409 uniqueness. 판단은 락 안에서 했다(SCIM 쓰기 락 설계 §3·§4).
+        if (error instanceof DirectoryConflictException conflict) {
+            return write(HttpStatus.CONFLICT, "uniqueness", conflict.getMessage());
         }
         // 본문 파싱 실패 등 SCIM 이 모르는 예외는 400 으로 번역한다.
         if (error instanceof DecodingException || error instanceof ServerWebInputException) {

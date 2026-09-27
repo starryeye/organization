@@ -296,4 +296,59 @@ class ScimUserHandlerTest {
                 .jsonPath("$.name.familyName").isEqualTo("updatedFamilyName")
                 .jsonPath("$.name.givenName").isEqualTo("길동");
     }
+
+    @Test
+    @DisplayName("PATCH 로 다른 직원의 userName(대소문자만 다름)으로 바꾸면 409 uniqueness 이고 그대로다")
+    void PATCH_userName_충돌은_409다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveUser(new DirectoryUser("lee", "e2", "lee", "이영희", null, true)).block();
+
+        // when, then
+        client.patch().uri("/scim/v2/Users/lee").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","path":"userName","value":"KIM"}]}""")
+                .exchange()
+                .expectStatus().isEqualTo(409)
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("uniqueness")
+                .jsonPath("$.detail").isEqualTo("이미 같은 userName 을 쓰는 직원이 있습니다: userName=KIM, id=kim");
+        assertThat(state.users.get("lee").userName()).isEqualTo("lee");
+    }
+
+    @Test
+    @DisplayName("PUT 으로 다른 직원의 userName 으로 바꾸면 409 uniqueness 다")
+    void PUT_userName_충돌은_409다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", "e1", "kim", "김철수", null, true)).block();
+        state.saveUser(new DirectoryUser("lee", "e2", "lee", "이영희", null, true)).block();
+
+        // when, then
+        client.put().uri("/scim/v2/Users/lee").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "userName":"kim","displayName":"이영희"}""")
+                .exchange()
+                .expectStatus().isEqualTo(409)
+                .expectBody().jsonPath("$.scimType").isEqualTo("uniqueness");
+    }
+
+    @Test
+    @DisplayName("없는 직원에 PATCH·PUT·DELETE 하면 404 이고 아무것도 만들지 않는다")
+    void 없는_직원은_404다() {
+        // when, then
+        client.patch().uri("/scim/v2/Users/ghost").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","path":"displayName","value":"x"}]}""")
+                .exchange().expectStatus().isNotFound();
+        client.put().uri("/scim/v2/Users/ghost").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"ghost"}""")
+                .exchange().expectStatus().isNotFound();
+        client.delete().uri("/scim/v2/Users/ghost").exchange().expectStatus().isNotFound();
+        assertThat(state.users).doesNotContainKey("ghost");
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
 }

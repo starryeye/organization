@@ -391,6 +391,13 @@ class ScimGroupHandlerTest {
     }
 
     @Test
+    @DisplayName("없는 조직을 DELETE 하면 404 다")
+    void 없는_조직_DELETE는_404다() {
+        client.delete().uri("/scim/v2/Groups/NONE").exchange().expectStatus().isNotFound();
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
     @DisplayName("ServiceProviderConfig 는 지원하는 기능과 지원하지 않는 기능을 정직하게 선언한다")
     void 지원기능을_선언한다() {
         // given, when, then
