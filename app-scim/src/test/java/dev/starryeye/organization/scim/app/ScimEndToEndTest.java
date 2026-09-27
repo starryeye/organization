@@ -133,7 +133,7 @@ class ScimEndToEndTest {
                         {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
                          "Operations":[{"op":"remove","path":"members[value eq \\"kim\\"]"}]}
                         """)
-                .exchange().expectStatus().isOk();
+                .exchange().expectStatus().isNoContent();
 
         // then
         assertThat(check("user:kim", "member", "group:DEV002")).isFalse();

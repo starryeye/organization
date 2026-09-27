@@ -175,7 +175,12 @@ public final class Keys {
     }
 
     public static String memberSk(MemberRef ref) {
-        return MEMBER_PREFIX + ref.type().name() + "#" + ref.id();
+        return memberSkPrefix(ref.type()) + ref.id();
+    }
+
+    /** 한 종류 멤버 줄의 정렬키 접두. {@code begins_with} 로 그 종류만 읽는다. */
+    public static String memberSkPrefix(MemberType type) {
+        return MEMBER_PREFIX + type.name() + "#";
     }
 
     /** 정렬키가 {@link #memberSk} 로 만들어진 멤버십 아이템인지 판별한다. */

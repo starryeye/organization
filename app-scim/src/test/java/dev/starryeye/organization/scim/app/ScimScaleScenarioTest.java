@@ -182,7 +182,7 @@ class ScimScaleScenarioTest {
         assertThat(성립하는가(RelationTuple.member(신규, 팀))).isFalse();
 
         // when — 조직에 편입
-        보낸다(ScimRequestRenderer.멤버추가(팀, MemberRef.user(신규)), 200);
+        보낸다(ScimRequestRenderer.멤버추가(팀, MemberRef.user(신규)), 204);
         기대 = OrgChartEditor.편집한다(기대)
                 .직원을_넣는다(팀, 신규, "신입 " + 신규, 신규 + "@example.com")
                 .완성();
@@ -307,7 +307,7 @@ class ScimScaleScenarioTest {
                         비활성, null, 비활성, "비활성 직원", null, false)));
 
         // when
-        보낸다(ScimRequestRenderer.멤버추가(팀, MemberRef.user(비활성)), 200);
+        보낸다(ScimRequestRenderer.멤버추가(팀, MemberRef.user(비활성)), 204);
         기대 = OrgChartEditor.편집한다(기대).비활성_직원을_넣는다(팀, 비활성).완성();
 
         // then — "멤버지만 권한 없음". 이 상태가 음성 후보 집합의 존재 이유다
@@ -325,7 +325,7 @@ class ScimScaleScenarioTest {
         String 뺄사람 = 직속직원들(팀).stream().sorted().findFirst().orElseThrow();
 
         // when — 필터 있는 remove
-        보낸다(ScimRequestRenderer.멤버제거(팀, 뺄사람), 200);
+        보낸다(ScimRequestRenderer.멤버제거(팀, 뺄사람), 204);
         기대 = OrgChartEditor.편집한다(기대).겸직을_푼다(뺄사람, 팀).완성();
 
         // then — 그 한 명만
@@ -339,7 +339,7 @@ class ScimScaleScenarioTest {
         Set<String> 하위조직 = 기대.자식조직들(팀);
         assertThat(하위조직).as("하위 조직도 함께 사라지는지 보려면 자식이 있어야 한다").isNotEmpty();
 
-        보낸다(ScimRequestRenderer.멤버전체제거(팀), 200);
+        보낸다(ScimRequestRenderer.멤버전체제거(팀), 204);
         기대 = OrgChartEditor.편집한다(기대).멤버를_모두_비운다(팀).완성();
 
         // then — 12명짜리 팀이면 dm 12개, 그리고 child 간선도 함께 사라진다
@@ -362,8 +362,8 @@ class ScimScaleScenarioTest {
         var 옛조상들 = 기대.조상들(팀);
 
         // when — 부모 쪽 PATCH 두 번
-        보낸다(ScimRequestRenderer.멤버제거(옛실, 팀), 200);
-        보낸다(ScimRequestRenderer.멤버추가(새실, MemberRef.group(팀)), 200);
+        보낸다(ScimRequestRenderer.멤버제거(옛실, 팀), 204);
+        보낸다(ScimRequestRenderer.멤버추가(새실, MemberRef.group(팀)), 204);
         기대 = OrgChartEditor.편집한다(기대).조직을_옮긴다(팀, 옛실, 새실).완성();
 
         // then
@@ -413,7 +413,7 @@ class ScimScaleScenarioTest {
 
         // when
         long t0 = System.currentTimeMillis();
-        보낸다(ScimRequestRenderer.멤버전체교체(대형조직, 남길사람), 200);
+        보낸다(ScimRequestRenderer.멤버전체교체(대형조직, 남길사람), 204);
         long 소요 = System.currentTimeMillis() - t0;
         System.out.printf("=== S15. 대형 조직(%d명) 멤버 교체: %.1f초%n",
                 현재멤버.size(), 소요 / 1000.0);
@@ -482,7 +482,7 @@ class ScimScaleScenarioTest {
         assertThat(자손직원).as("순환이 걸린 가지에도 롤업 생존을 확인할 사람이 있어야 한다").isNotEmpty();
 
         // when
-        보낸다(ScimRequestRenderer.멤버추가(자손, MemberRef.group(조상)), 200);
+        보낸다(ScimRequestRenderer.멤버추가(자손, MemberRef.group(조상)), 204);
 
         // then — 이 경로(SCIM)의 순환 방지는 TupleMapper.removeCycles 가 아니라
         // IncrementalSyncUseCase.withoutCycleCreatingEdges 다. removeCycles 는 LDAP 전체

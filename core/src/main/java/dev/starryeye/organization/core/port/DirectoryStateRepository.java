@@ -8,6 +8,8 @@ import dev.starryeye.organization.core.model.MemberRef;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Set;
+
 /**
  * 조직·직원·멤버십의 <b>현재</b> 상태. 튜플이 아니라 도메인 상태를 담는다.
  */
@@ -58,6 +60,25 @@ public interface DirectoryStateRepository {
      * 권한을 남긴다(설계 `2026-09-16-strong-membership-lookup-design.md` §1).
      */
     Flux<String> findGroupIdsContaining(MemberRef ref);
+
+    /**
+     * 주어진 멤버 중 지금 이 조직의 멤버인 것. <b>읽는 양이 조직 크기가 아니라 후보 수를 따른다</b> — 조직 멤버 PATCH 가 멤버 한 명을
+     * 바꿀 때 조직 전체를 읽지 않으려고 쓴다(설계 `2026-09-26-group-member-patch-design.md` §6). 강한 일관성이다.
+     */
+    Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates);
+
+    /** 이 조직의 멤버 전부를 <b>키만</b> 읽는다. 전체 교체가 목표 목록과 비교하는 데 쓴다. 강한 일관성이다. */
+    Flux<MemberRef> findMemberRefs(String groupId);
+
+    /** 이 조직의 하위 조직 id. 직원 멤버는 읽지 않는다 — 순환 검사가 계층을 내려갈 때 쓴다. 조직이 없으면 비어 있다. */
+    Flux<String> findChildGroupIds(String groupId);
+
+    /**
+     * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code header} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
+     * 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저, META 는 이름이나 멤버가 바뀌었을 때만 {@code updatedAt} 을 찍는다. 부르는 쪽이
+     * {@code added} 가 지금 멤버가 아니고 {@code removed} 가 지금 멤버라는 것을 확인했다고 본다(락 안에서 {@link #findMembers} 로).
+     */
+    Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed);
 
     /** LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. */
     Mono<Void> replaceWith(DirectorySnapshot snapshot);

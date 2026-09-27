@@ -399,15 +399,15 @@ class IncrementalSyncUseCaseTest {
         state.saveGroup(조직("X", MemberRef.group("SHARED"))).block();
         state.saveGroup(조직("Y", MemberRef.group("SHARED"))).block();
         openFga를_상태와_맞춘다();
-        state.findGroupCalls.clear();
+        state.findChildGroupIdsCalls.clear();
 
         // when — 새 엣지 두 개(X, Y)가 각각 SHARED -> LEAF 를 훑는다
         var result = useCase.upsertGroup(조직("TOP", MemberRef.group("X"), MemberRef.group("Y"))).block();
 
         // then — 캐시가 없으면 SHARED/LEAF 를 엣지마다 한 번씩 두 번 읽는다
         assertThat(result.fullyApplied()).isTrue();
-        assertThat(state.findGroupCalls).filteredOn("SHARED"::equals).hasSize(1);
-        assertThat(state.findGroupCalls).filteredOn("LEAF"::equals).hasSize(1);
+        assertThat(state.findChildGroupIdsCalls).filteredOn("SHARED"::equals).hasSize(1);
+        assertThat(state.findChildGroupIdsCalls).filteredOn("LEAF"::equals).hasSize(1);
     }
 
     @Test

@@ -158,7 +158,7 @@ class ScimGroupHandlerTest {
     }
 
     @Test
-    @DisplayName("PATCH 로 멤버를 추가하면 튜플이 생성되고 200 이 돌아온다")
+    @DisplayName("PATCH 로 멤버를 추가하면 튜플이 생성되고 본문 없이 204 가 돌아온다")
     void PATCH로_멤버를_추가한다() {
         // given
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
@@ -173,12 +173,82 @@ class ScimGroupHandlerTest {
         client.patch().uri("/scim/v2/Groups/DEV002")
                 .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
                 .exchange()
-                .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.members[0].value").isEqualTo("kim");
+                .expectStatus().isNoContent()
+                .expectBody().isEmpty();
 
         assertThat(writer.appliedDeltas).hasSize(1);
         assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("attributes 가 있으면 PATCH 는 200 과 요청한 속성을 돌려준다 — RFC 7644 §3.5.2 의 MUST")
+    void PATCH_attributes가_있으면_200이다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of())).block();
+        String patch = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members",
+                                "value":[{"value":"kim","type":"User"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/DEV002?attributes=displayName")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
+                .expectBody()
+                .jsonPath("$.displayName").isEqualTo("백엔드팀")
+                .jsonPath("$.members").doesNotExist();
+
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("excludedAttributes 만 있으면 PATCH 는 지금처럼 본문 없이 204 다")
+    void PATCH_excludedAttributes만_있으면_204다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of())).block();
+        String patch = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members",
+                                "value":[{"value":"kim","type":"User"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/DEV002?excludedAttributes=members")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
+                .exchange()
+                .expectStatus().isNoContent()
+                .expectBody().isEmpty();
+
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("잘못된 attributes 는 쓰기 전에 400 이고 writer 는 아무것도 받지 않으며 멤버도 그대로다")
+    void PATCH_잘못된_attributes는_400이다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of())).block();
+        String patch = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members",
+                                "value":[{"value":"kim","type":"User"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/DEV002?attributes=nosuchattr")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidValue");
+
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(state.groups.get("DEV002").members()).isEmpty();
     }
 
     @Test
@@ -239,6 +309,85 @@ class ScimGroupHandlerTest {
                 .expectStatus().is5xxServerError()
                 .expectBody()
                 .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+    }
+
+    @Test
+    @DisplayName("없는 조직에 PATCH 하면 404 이고 아무것도 쓰지 않는다")
+    void 없는_조직_PATCH는_404다() {
+        // given
+        String patch = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members","value":[{"value":"kim","type":"User"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/NONE")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
+                .exchange()
+                .expectStatus().isNotFound();
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Entra 기본 모드의 멤버 빼기는 400 invalidValue 이고 멤버도 튜플도 그대로다")
+    void Entra_기본_모드_빼기는_400이다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of(MemberRef.user("kim")))).block();
+        String patch = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"Remove","path":"members","value":[{"value":"kim"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/DEV002")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidValue")
+                .jsonPath("$.detail").value(d -> assertThat((String) d).contains("aadOptscim062020"));
+
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("kim"));
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("PUT 은 전체 교체로 처리하고 200 과 리소스를 돌려준다")
+    void PUT은_전체_교체다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveUser(new DirectoryUser("lee", null, "lee", "이영희", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of(MemberRef.user("kim")))).block();
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                 "externalId":"DEV002","displayName":"플랫폼팀",
+                 "members":[{"value":"lee","type":"User"}]}
+                """;
+
+        // when, then
+        client.put().uri("/scim/v2/Groups/DEV002")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.displayName").isEqualTo("플랫폼팀")
+                .jsonPath("$.members[0].value").isEqualTo("lee");
+
+        assertThat(state.groups.get("DEV002").members()).containsExactly(MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("없는 조직에 PUT 하면 404 다")
+    void 없는_조직_PUT은_404다() {
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                 "externalId":"NONE","displayName":"없음","members":[]}
+                """;
+        client.put().uri("/scim/v2/Groups/NONE")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isNotFound();
     }
 
     @Test

@@ -157,4 +157,17 @@ class IncrementalSyncReadScopeTest {
                 .hasSize(대형조직_멤버수)
                 .contains(MemberRef.user("u0"), MemberRef.user("u1"), MemberRef.user("u299"));
     }
+
+    @Test
+    @DisplayName("하위 조직을 참조하는 조직을 만들어도 그 하위 조직의 파티션을 통째로 읽지 않는다 — 존재 확인도 순환 검사도")
+    void 참조한_하위_조직을_통째로_읽지_않는다() {
+        // when — 300명짜리 PLANT 를 하위 조직으로 둔 새 조직을 만든다
+        useCase.upsertGroup(new DirectoryGroup("NEW", "ou=new", "새 조직", Set.of(MemberRef.group(대형조직))))
+                .block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(state.findGroupCalls).as("존재는 헤더로, 하위 조직 id 는 하위 조직 줄로").doesNotContain(대형조직);
+        assertThat(state.findGroupHeaderCalls).contains(대형조직);
+        assertThat(state.findChildGroupIdsCalls).contains(대형조직);
+    }
 }

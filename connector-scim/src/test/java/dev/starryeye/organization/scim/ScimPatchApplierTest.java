@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
@@ -17,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import reactor.core.publisher.Mono;
 
@@ -45,6 +47,21 @@ class ScimPatchApplierTest {
         return Map.of("value", value, "type", type);
     }
 
+    /** 모호하지 않으면 부르지 않아야 한다. */
+    private static final Predicate<String> 부르면_안된다 = id -> {
+        throw new AssertionError("모호하지 않은데 종류를 물었다: " + id);
+    };
+
+    /** 조직 PATCH 를 변경으로 정리해 before 에 적용한 결과. 멤버십을 보는 판단(종류 모르는 빼기)은 {@code 조직이면} 이 한다. */
+    private static DirectoryGroup 적용한다(DirectoryGroup before, ScimPatchOp patch, MemberTypeResolver resolver,
+                                      Predicate<String> 조직이면) {
+        return ScimPatchApplier.toGroupChange(patch, resolver).block().applyTo(before, 조직이면);
+    }
+
+    private static DirectoryGroup 적용한다(DirectoryGroup before, ScimPatchOp patch, MemberTypeResolver resolver) {
+        return 적용한다(before, patch, resolver, 부르면_안된다);
+    }
+
     @Test
     @DisplayName("add members 는 기존 멤버를 유지한 채 새 멤버를 더한다")
     void 멤버를_추가한다() {
@@ -52,7 +69,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("lee"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("add", "members", List.of(멤버("kim", "User"))), USER_ONLY).block();
+        var after = 적용한다(before, 패치("add", "members", List.of(멤버("kim", "User"))), USER_ONLY);
 
         // then
         assertThat(after.members())
@@ -68,7 +85,7 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("add", "members", List.of(멤버("DEV003", "Group"))), USER_ONLY).block();
+        var after = 적용한다(before, 패치("add", "members", List.of(멤버("DEV003", "Group"))), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.group("DEV003"));
@@ -81,7 +98,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"), MemberRef.user("lee"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("remove", "members[value eq \"kim\"]", null), USER_ONLY).block();
+        var after = 적용한다(before, 패치("remove", "members[value eq \"kim\"]", null), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("lee"));
@@ -94,7 +111,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"), MemberRef.user("lee"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("remove", "members[value eq 'kim']", null), USER_ONLY).block();
+        var after = 적용한다(before, 패치("remove", "members[value eq 'kim']", null), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("lee"));
@@ -107,7 +124,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"), MemberRef.group("DEV003"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("remove", "members", null), USER_ONLY).block();
+        var after = 적용한다(before, 패치("remove", "members", null), USER_ONLY);
 
         // then
         assertThat(after.members()).isEmpty();
@@ -120,7 +137,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"), MemberRef.user("lee"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("replace", "members", List.of(멤버("park", "User"))), USER_ONLY).block();
+        var after = 적용한다(before, 패치("replace", "members", List.of(멤버("park", "User"))), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("park"));
@@ -133,7 +150,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("replace", "displayName", "플랫폼팀"), USER_ONLY).block();
+        var after = 적용한다(before, 패치("replace", "displayName", "플랫폼팀"), USER_ONLY);
 
         // then
         assertThat(after.displayName()).isEqualTo("플랫폼팀");
@@ -148,7 +165,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("replace", null, Map.of("displayName", "플랫폼팀")), USER_ONLY).block();
+        var after = 적용한다(before, 패치("replace", null, Map.of("displayName", "플랫폼팀")), USER_ONLY);
 
         // then
         assertThat(after.displayName()).isEqualTo("플랫폼팀");
@@ -166,7 +183,7 @@ class ScimPatchApplierTest {
                 new ScimOperation("replace", "displayName", "플랫폼팀")));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, patch, USER_ONLY).block();
+        var after = 적용한다(before, patch, USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("kim"));
@@ -195,7 +212,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"));
 
         // when, then
-        assertThatThrownBy(() -> ScimPatchApplier.applyToGroup(before, 패치("replace", "emails[type eq \"work\"].value", "x@example.com"), USER_ONLY).block())
+        assertThatThrownBy(() -> 적용한다(before, 패치("replace", "emails[type eq \"work\"].value", "x@example.com"), USER_ONLY))
                 .isInstanceOf(ScimException.class)
                 .hasMessageContaining("emails");
     }
@@ -207,7 +224,7 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when, then
-        assertThatThrownBy(() -> ScimPatchApplier.applyToGroup(before, 패치("frobnicate", "members", List.of()), USER_ONLY).block())
+        assertThatThrownBy(() -> 적용한다(before, 패치("frobnicate", "members", List.of()), USER_ONLY))
                 .isInstanceOf(ScimException.class)
                 .hasMessageContaining("frobnicate");
     }
@@ -219,7 +236,7 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before, 패치("add", "members", List.of(Map.of("value", "kim"))), USER_ONLY).block();
+        var after = 적용한다(before, 패치("add", "members", List.of(Map.of("value", "kim"))), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("kim"));
@@ -236,11 +253,12 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                패치("add", "members", List.of(Map.of("value", "DEV003"))), resolver).block();
+        var after = 적용한다(before,
+                패치("add", "members", List.of(Map.of("value", "DEV003"))), resolver);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.group("DEV003"));
+        assertThat(state.findGroupCalls).as("존재만 보면 되므로 조직 파티션을 통째로 읽지 않는다").isEmpty();
     }
 
     @Test
@@ -250,8 +268,8 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                패치("add", "members", List.of(멤버("kim chul:soo", "User"))), USER_ONLY).block();
+        var after = 적용한다(before,
+                패치("add", "members", List.of(멤버("kim chul:soo", "User"))), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("kim_chul_soo"));
@@ -264,27 +282,23 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim_chul_soo"), MemberRef.user("lee"));
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                패치("remove", "members[value eq \"kim chul:soo\"]", null), USER_ONLY).block();
+        var after = 적용한다(before,
+                패치("remove", "members[value eq \"kim chul:soo\"]", null), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("lee"));
     }
 
     @Test
-    @DisplayName("직원과 하위 조직이 같은 id 를 쓰면 필터 remove 가 한쪽만 지운다")
+    @DisplayName("직원과 하위 조직이 같은 id 를 쓰면 필터 remove 가 한쪽만 지운다 — 종류는 적용할 때 현재상태로 고른다")
     void 필터_remove는_종류를_구분한다() {
         // given — 조직코드와 직원 아이디는 서로 다른 네임스페이스라 겹칠 수 있다
-        var state = new FakeStateRepository();
-        state.saveGroup(new DirectoryGroup("X", "X", "엑스팀", Set.of())).block();
-        var resolver = new StateMemberTypeResolver(state);
         var before = 조직(MemberRef.user("X"), MemberRef.group("X"));
 
-        // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                패치("remove", "members[value eq \"X\"]", null), resolver).block();
+        // when — 현재상태에 조직 X 가 있다(유스케이스는 락 안에서 findGroupHeader 로 판정한다)
+        var after = 적용한다(before, 패치("remove", "members[value eq \"X\"]", null), USER_ONLY, id -> true);
 
-        // then — 현재상태에 조직 X 가 있으므로 하위 조직 쪽만 지운다
+        // then
         assertThat(after.members()).containsExactly(MemberRef.user("X"));
     }
 
@@ -295,7 +309,7 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("kim"));
 
         // when, then
-        assertThatThrownBy(() -> ScimPatchApplier.applyToGroup(before, 패치("remove", null, Map.of("displayName", "플랫폼팀")), USER_ONLY).block())
+        assertThatThrownBy(() -> 적용한다(before, 패치("remove", null, Map.of("displayName", "플랫폼팀")), USER_ONLY))
                 .isInstanceOf(ScimException.class)
                 .hasMessageContaining("replace");
     }
@@ -456,11 +470,11 @@ class ScimPatchApplierTest {
         var before = 조직(MemberRef.user("lee"), MemberRef.user("kim"));
 
         // when
-        var 추가 = ScimPatchApplier.applyToGroup(before,
-                패치("add", "Members", List.of(멤버("park", "User"))), USER_ONLY).block();
-        var 제거 = ScimPatchApplier.applyToGroup(before,
-                패치("remove", "MEMBERS[VALUE EQ \"lee\"]", null), USER_ONLY).block();
-        var 이름 = ScimPatchApplier.applyToGroup(before, 패치("replace", "DisplayName", "새 팀"), USER_ONLY).block();
+        var 추가 = 적용한다(before,
+                패치("add", "Members", List.of(멤버("park", "User"))), USER_ONLY);
+        var 제거 = 적용한다(before,
+                패치("remove", "MEMBERS[VALUE EQ \"lee\"]", null), USER_ONLY);
+        var 이름 = 적용한다(before, 패치("replace", "DisplayName", "새 팀"), USER_ONLY);
 
         // then
         assertThat(추가.members()).contains(MemberRef.user("park"));
@@ -560,8 +574,8 @@ class ScimPatchApplierTest {
         var before = 조직();
 
         // when
-        var after = ScimPatchApplier.applyToGroup(before,
-                패치("add", "members", List.of(Map.of("VALUE", "u1", "Type", "User"))), USER_ONLY).block();
+        var after = 적용한다(before,
+                패치("add", "members", List.of(Map.of("VALUE", "u1", "Type", "User"))), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("u1"));
@@ -580,5 +594,121 @@ class ScimPatchApplierTest {
                 패치("replace", "emails[type eq \"work\"]", Map.of("value", "a@x.com", "type", "work"))))
                 .isInstanceOfSatisfying(ScimException.class,
                         e -> assertThat(e.getScimType()).isEqualTo("noTarget"));
+    }
+
+    // ---------- 조직 멤버 PATCH (설계 §4·§7) ----------
+
+    @Test
+    @DisplayName("Entra 기본 모드의 멤버 빼기(값 붙은 remove members)는 400 invalidValue 로 거절하고 필터와 옵션을 안내한다")
+    void 값_붙은_remove는_거절한다() {
+        // given — MS 호환성 문서의 기본 모드 예시 그대로
+        var patch = new ScimPatchOp(List.of(ScimSchemas.PATCH_OP), List.of(
+                new ScimOperation("Remove", "members", List.of(Map.of("value", "u1091")))));
+
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.toGroupChange(patch, USER_ONLY).block())
+                .isInstanceOfSatisfying(ScimException.class, e -> {
+                    assertThat(e.getScimType()).isEqualTo("invalidValue");
+                    assertThat(e.getMessage()).isEqualTo(ScimPatchApplier.REMOVE_WITH_VALUE)
+                            .contains("members[value eq \"<id>\"]").contains("?aadOptscim062020");
+                });
+    }
+
+    @Test
+    @DisplayName("값이 빈 목록이어도 거절한다 — 아무도 안 빼는지 다 빼는지 뜻이 갈린다")
+    void 빈_목록_값도_거절한다() {
+        assertThatThrownBy(() -> ScimPatchApplier.toGroupChange(패치("remove", "members", List.of()), USER_ONLY).block())
+                .isInstanceOfSatisfying(ScimException.class,
+                        e -> assertThat(e.getScimType()).isEqualTo("invalidValue"));
+    }
+
+    @Test
+    @DisplayName("값이 null 이면 표준대로 전원 빼기다")
+    void 값이_null이면_전원_빼기다() {
+        // given — "value": null 은 DTO 에서 null 이라 값 없음과 같다(Keycloak 커뮤니티 플러그인이 조직을 비울 때 보낸다)
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(패치("remove", "members", null), USER_ONLY).block();
+
+        // then
+        assertThat(change.replacesMembers()).isTrue();
+        assertThat(change.base()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Entra 옵션 모드(aadOptscim062020)의 멤버 빼기는 id 빼기다")
+    void Entra_옵션_모드_빼기() {
+        // given — MS 호환성 문서의 옵션 모드 예시 그대로
+        var patch = 패치("remove", "members[value eq \"7f4bc1a3-285e-48ae-8202-5accb43efb0e\"]", null);
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+
+        // then
+        assertThat(change.replacesMembers()).isFalse();
+        assertThat(change.ops()).containsExactly(new GroupChange.RemoveId("7f4bc1a3-285e-48ae-8202-5accb43efb0e"));
+    }
+
+    @Test
+    @DisplayName("Okta 의 add·필터 remove·replace 는 증분 추가·id 빼기·전체 교체다")
+    void Okta_모양() {
+        // given — Okta SCIM 2.0 문서 예시 모양(add 에는 type 없이 display 가 온다)
+        var 추가 = 패치("add", "members", List.of(Map.of("value", "23a35c27", "display", "test.user@okta.local")));
+        var 빼기 = 패치("remove", "members[value eq \"89bb1940\"]", null);
+        var 교체 = 패치("replace", "members", List.of(Map.of("value", "23a35c27"), Map.of("value", "89bb1940")));
+
+        // when
+        var 추가변경 = ScimPatchApplier.toGroupChange(추가, USER_ONLY).block();
+        var 빼기변경 = ScimPatchApplier.toGroupChange(빼기, USER_ONLY).block();
+        var 교체변경 = ScimPatchApplier.toGroupChange(교체, USER_ONLY).block();
+
+        // then
+        assertThat(추가변경.ops()).containsExactly(new GroupChange.Add(MemberRef.user("23a35c27")));
+        assertThat(빼기변경.ops()).containsExactly(new GroupChange.RemoveId("89bb1940"));
+        assertThat(교체변경.base()).containsExactlyInAnyOrder(MemberRef.user("23a35c27"), MemberRef.user("89bb1940"));
+    }
+
+    @Test
+    @DisplayName("경로 없는 add 의 members 는 증분 추가다 — RFC 7644 §3.5.2.1")
+    void 경로_없는_add의_members는_증분_추가다() {
+        // given
+        var before = 조직(MemberRef.user("lee"));
+        var patch = 패치("add", null, Map.of("members", List.of(멤버("kim", "User"))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+        var after = 적용한다(before, patch, USER_ONLY);
+
+        // then
+        assertThat(change.replacesMembers()).isFalse();
+        assertThat(change.ops()).containsExactly(new GroupChange.Add(MemberRef.user("kim")));
+        assertThat(after.members()).containsExactlyInAnyOrder(MemberRef.user("lee"), MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("경로 없는 replace 의 members 는 지금처럼 전체 교체다")
+    void 경로_없는_replace의_members는_전체_교체다() {
+        // given
+        var before = 조직(MemberRef.user("lee"));
+        var patch = 패치("replace", null, Map.of("members", List.of(멤버("kim", "User"))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+        var after = 적용한다(before, patch, USER_ONLY);
+
+        // then
+        assertThat(change.replacesMembers()).isTrue();
+        assertThat(after.members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("PATCH 정리는 멤버십을 읽지 않는다 — 조직이 없어도 변경이 만들어진다")
+    void 정리는_멤버십을_읽지_않는다() {
+        // when
+        var change = ScimPatchApplier.toGroupChange(
+                패치("add", "members", List.of(멤버("kim", "User"))), USER_ONLY).block();
+
+        // then
+        assertThat(change).isEqualTo(GroupChange.delta().adding(java.util.Set.of(MemberRef.user("kim"))));
     }
 }

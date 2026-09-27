@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
@@ -12,13 +13,17 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
+import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -66,6 +71,11 @@ import java.util.stream.Collectors;
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
 
     private static final int QUERY_CONCURRENCY = 8;
+
+    /** BatchGetItem 한 번에 담을 수 있는 키 수(DynamoDB 한도). */
+    private static final int BATCH_GET_LIMIT = 100;
+    /** 미처리 키를 다시 읽기 전에 쉬는 시간. 처리량이 모자라 남은 키라 곧바로 다시 부르면 또 남는다. */
+    private static final Duration UNPROCESSED_RETRY_DELAY = Duration.ofMillis(50);
 
     private static final String EXTERNAL_ID = "externalId";
     private static final String USER_NAME = "userName";
@@ -302,11 +312,21 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** 직원과 같은 규칙으로 쓴다. 조직의 변경은 META 또는 멤버 구성의 변경이다(GSI 설계 §3). */
     @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
-        return findMeta(Keys.groupPk(group.id()))
+        return storedGroupOf(group.id()).flatMap(stored -> writeGroup(group, stored.orElse(null)));
+    }
+
+    /** 지금 멤버와 비교하지 않는다 — 부르는 쪽이 락 안에서 {@link #findMembers} 로 확인한 차이다(조직 멤버 PATCH 설계 §6). */
+    @Override
+    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return storedGroupOf(header.id())
+                .flatMap(stored -> writeMembership(header, stored.orElse(null), List.copyOf(added), List.copyOf(removed)));
+    }
+
+    private Mono<Optional<Stored<GroupHeader>>> storedGroupOf(String groupId) {
+        return findMeta(Keys.groupPk(groupId))
                 .map(this::storedGroup)
                 .map(Optional::of)
-                .defaultIfEmpty(Optional.empty())
-                .flatMap(stored -> writeGroup(group, stored.orElse(null)));
+                .defaultIfEmpty(Optional.empty());
     }
 
     private Mono<Void> writeGroup(DirectoryGroup group, Stored<GroupHeader> stored) {
@@ -317,8 +337,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .collectList()
                 .flatMap(existing -> {
                     Set<String> existingSks = Set.copyOf(existing);
-                    List<String> 떠난멤버 = existing.stream()
+                    List<MemberRef> 떠난멤버 = existing.stream()
                             .filter(sk -> !targetSks.contains(sk))
+                            .map(Keys::parseMemberSk)
                             .toList();
                     // 이미 있는 멤버는 건드리지 않는다. 다시 put 하면 addedAt 이 덮여
                     // "최초 합류" 가 아니라 "마지막 전체 동기화" 를 뜻하게 된다.
@@ -326,30 +347,100 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                     List<MemberRef> 새로온멤버 = group.members().stream()
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
-
-                    // 조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다.
-                    // header 를 그대로 비교하지 않고 라운드트립하는 이유는 writeUser 의 자바독과 같다 —
-                    // 빈 문자열 displayName 은 저장되지 않아 되읽으면 null 이 된다.
-                    boolean 바뀜 = stored == null || !stored.sameAs(toGroupHeader(header.id(), groupMeta(header)))
-                            || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
-                    Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
-
-                    // 소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5).
-                    // 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
-                    // "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면
-                    // 삭제가 그 조직을 못 찾아 권한이 남는다.
-                    return Flux.fromIterable(떠난멤버)
-                            .map(Keys::parseMemberSk)
-                            .flatMap(ref -> deleteItem(Keys.groupPk(group.id()), Keys.memberSk(ref))
-                                    .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(group.id()))),
-                                    QUERY_CONCURRENCY)
-                            .then(meta)
-                            .then(Flux.fromIterable(새로온멤버)
-                                    .flatMap(member -> putItem(belongsToItem(member, group.id()))
-                                            .then(putItem(memberItem(group.id(), member))),
-                                            QUERY_CONCURRENCY)
-                                    .then());
+                    return writeMembership(header, stored, 새로온멤버, 떠난멤버);
                 });
+    }
+
+    /**
+     * META 와 멤버 줄을 쓴다 — {@link #saveGroup} 과 {@link #saveGroupChange} 가 같은 규칙을 쓰도록 한 곳에 둔다.
+     *
+     * <p>조직의 변경은 META 의 변경 또는 멤버 구성의 변경이다 — SCIM 의 Group 은 members 를 담는다. header 를 그대로 비교하지 않고
+     * 라운드트립하는 이유는 writeUser 의 자바독과 같다 — 빈 문자열 displayName 은 저장되지 않아 되읽으면 null 이 된다.
+     *
+     * <p>소속 줄이 항상 멤버 줄보다 많거나 같게 유지한다(설계 §5). 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저 — 중간에 실패해도
+     * "소속 줄만 남는" 안전한 방향으로만 어긋난다. 반대로 어긋나면 삭제가 그 조직을 못 찾아 권한이 남는다.
+     */
+    private Mono<Void> writeMembership(GroupHeader header, Stored<GroupHeader> stored,
+                                       List<MemberRef> 새로온멤버, List<MemberRef> 떠난멤버) {
+        boolean 바뀜 = stored == null || !stored.sameAs(toGroupHeader(header.id(), groupMeta(header)))
+                || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
+        Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
+
+        return Flux.fromIterable(떠난멤버)
+                .flatMap(ref -> deleteItem(Keys.groupPk(header.id()), Keys.memberSk(ref))
+                        .then(deleteItem(Keys.memberPk(ref), Keys.belongsToSk(header.id()))),
+                        QUERY_CONCURRENCY)
+                .then(meta)
+                .then(Flux.fromIterable(새로온멤버)
+                        .flatMap(member -> putItem(belongsToItem(member, header.id()))
+                                .then(putItem(memberItem(header.id(), member))),
+                                QUERY_CONCURRENCY)
+                        .then());
+    }
+
+    /**
+     * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
+     * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 잠깐 쉬었다 다시 읽는다 — 빠뜨리면 멤버를 "없다" 로 본다.
+     */
+    @Override
+    public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
+        return Flux.fromIterable(candidates)
+                .buffer(BATCH_GET_LIMIT)
+                .concatMap(chunk -> batchGet(chunk.stream()
+                        .map(ref -> Map.of(
+                                Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                                Keys.SK, Attrs.s(Keys.memberSk(ref))))
+                        .toList()))
+                .map(item -> Keys.parseMemberSk(Attrs.str(item, Keys.SK)))
+                .collect(LinkedHashSet<MemberRef>::new, Set::add)
+                .map(found -> (Set<MemberRef>) found);
+    }
+
+    /** 멤버 줄만, <b>정렬키만</b> 읽는다. META 와 이 조직 자신의 소속 줄({@code BELONGS_TO#})은 접두가 달라 섞이지 않는다. */
+    @Override
+    public Flux<MemberRef> findMemberRefs(String groupId) {
+        return querySortKeys(Keys.groupPk(groupId), Keys.MEMBER_PREFIX).map(Keys::parseMemberSk);
+    }
+
+    /** 하위 조직 멤버 줄만 읽는다 — 순환 검사가 직원 줄까지 읽지 않게(조직 멤버 PATCH 설계 §1.4). */
+    @Override
+    public Flux<String> findChildGroupIds(String groupId) {
+        return querySortKeys(Keys.groupPk(groupId), Keys.memberSkPrefix(MemberType.GROUP))
+                .map(Keys::parseMemberSk)
+                .map(MemberRef::id);
+    }
+
+    private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
+        String table = properties.getTableName();
+        KeysAndAttributes 처음 = KeysAndAttributes.builder().keys(keys).consistentRead(true).build();
+        return Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
+                        .requestItems(Map.of(table, 처음))
+                        .build()))
+                .expand(response -> {
+                    KeysAndAttributes 남은것 = response.unprocessedKeys().get(table);
+                    if (남은것 == null || !남은것.hasKeys() || 남은것.keys().isEmpty()) {
+                        return Mono.empty();
+                    }
+                    KeysAndAttributes 다시 = 남은것.toBuilder().consistentRead(true).build();
+                    return Mono.delay(UNPROCESSED_RETRY_DELAY)
+                            .then(Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
+                                    .requestItems(Map.of(table, 다시))
+                                    .build())));
+                })
+                .concatMapIterable(response -> response.responses().getOrDefault(table, List.of()));
+    }
+
+    /** 파티션에서 정렬키가 {@code prefix} 로 시작하는 줄의 <b>정렬키만</b> 강한 일관성으로 읽는다. */
+    private Flux<String> querySortKeys(String pk, String prefix) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk), ":prefix", Attrs.s(prefix)))
+                .projectionExpression("#sk")
+                .consistentRead(true)
+                .build();
+        return Paginator.queryAll(client, request).map(item -> Attrs.str(item, Keys.SK));
     }
 
     /** 조직 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다. */
@@ -408,9 +499,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     private Flux<String> existingMemberSks(String groupId) {
-        return queryPartition(Keys.groupPk(groupId))
-                .map(item -> Attrs.str(item, Keys.SK))
-                .filter(Keys::isMemberSk);
+        return querySortKeys(Keys.groupPk(groupId), Keys.MEMBER_PREFIX);
     }
 
     private DirectoryGroup toGroup(String groupId, List<Map<String, AttributeValue>> items) {

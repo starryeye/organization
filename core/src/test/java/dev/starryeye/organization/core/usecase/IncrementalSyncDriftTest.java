@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import org.junit.jupiter.api.BeforeEach;
@@ -151,11 +152,11 @@ class IncrementalSyncDriftTest {
     }
 
     @Test
-    @DisplayName("락을 못 잡으면 네 변경 경로 모두 아무것도 쓰지 않고 실패한다")
+    @DisplayName("락을 못 잡으면 다섯 변경 경로 모두 아무것도 쓰지 않고 실패한다")
     void 락을_못_잡으면_쓰지_않는다() {
-        // given — 핸들러가 아니라 유스케이스에서 막으므로 네 경로가 빠짐없이 덮여야 한다
+        // given — 핸들러가 아니라 유스케이스에서 막으므로 다섯 경로가 빠짐없이 덮여야 한다
         // (IncrementalSyncUseCaseTest.재적재_중에는_변경이_거절된다 가 게이트 시절 못박던 것과
-        // 같은 성질이다. withLock 을 네 곳 중 하나에서라도 빼면 이 테스트가 잡는다 — 예를 들어
+        // 같은 성질이다. withLock 을 다섯 곳 중 하나에서라도 빼면 이 테스트가 잡는다 — 예를 들어
         // removeGroup 에서 withLock 을 지우고 removeGroupInternal 을 직접 부르게 하면
         // removeGroup 쪽 단언만 예외 없이 끝나 실패한다. 직접 확인함(아래 리포트 참고).
         lock.failAcquire = true;
@@ -172,6 +173,9 @@ class IncrementalSyncDriftTest {
         assertThatThrownBy(() -> useCase.removeUser("kim").block())
                 .isInstanceOf(LockUnavailableException.class);
         assertThatThrownBy(() -> useCase.removeGroup("DEV001").block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThatThrownBy(() -> useCase.changeGroup("DEV001",
+                GroupChange.delta().adding(Set.of(MemberRef.user("kim")))).block())
                 .isInstanceOf(LockUnavailableException.class);
 
         // 거절된 요청은 아무것도 건드리지 않는다
@@ -232,5 +236,96 @@ class IncrementalSyncDriftTest {
         assertThat(writer.written).isEmpty();
         assertThat(writer.deleted).isEmpty();
         assertThat(lock.released).as("실패해도 락은 반납된다").hasValue(1);
+    }
+
+    @Test
+    @DisplayName("조직 변경은 요청에 나온 멤버의 어긋남만 고친다 — 나오지 않은 멤버의 잘못 남은 튜플은 그대로다(조직 멤버 PATCH 설계 §11)")
+    void 조직_변경은_나온_멤버만_고친다() {
+        // given — kim 은 비활성인데 튜플이 남아 있다
+        state.users.put("kim", 직원("kim", false));
+        state.users.put("park", 직원("park", true));
+        state.users.put("lee", 직원("lee", true));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("kim"), MemberRef.user("park"))));
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV001"));
+        checker.allowed.add(RelationTuple.directMember("park", "DEV001"));
+
+        // when — lee 만 넣는다
+        useCase.changeGroup("DEV001", GroupChange.delta().adding(Set.of(MemberRef.user("lee")))).block();
+
+        // then — kim 은 요청에 없어 점검하지 않는다. 옛 방식(upsertGroup)은 여기서 kim 을 지웠다
+        assertThat(writer.deleted).doesNotContain(RelationTuple.directMember("kim", "DEV001"));
+        assertThat(writer.written).contains(RelationTuple.directMember("lee", "DEV001"));
+    }
+
+    @Test
+    @DisplayName("요청에 나온 멤버는 전후가 같아도 어긋남을 고친다 — IdP 의 재전송이 흔한 복구 경로다")
+    void 나온_멤버는_고친다() {
+        // given — kim 은 비활성인데 튜플이 남아 있다
+        state.users.put("kim", 직원("kim", false));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부",
+                Set.of(MemberRef.user("kim"))));
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV001"));
+
+        // when — 이미 멤버인 kim 을 다시 넣는다
+        useCase.changeGroup("DEV001", GroupChange.delta().adding(Set.of(MemberRef.user("kim")))).block();
+
+        // then
+        assertThat(writer.deleted).contains(RelationTuple.directMember("kim", "DEV001"));
+        assertThat(state.groups.get("DEV001").members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("변경은 락을 잡은 뒤의 상태에 적용된다 — 그 사이 다른 요청이 넣은 멤버를 지우지 않는다(설계 §1.3)")
+    void 사이에_들어온_멤버를_지우지_않는다() {
+        // given — lee 추가를 정리해 둔다. 정리는 저장소를 읽지 않는다
+        state.users.put("park", 직원("park", true));
+        state.users.put("lee", 직원("lee", true));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부", Set.of()));
+        var lee추가 = GroupChange.delta().adding(Set.of(MemberRef.user("lee")));
+        // 그 사이 다른 요청이 park 를 넣었다
+        useCase.changeGroup("DEV001", GroupChange.delta().adding(Set.of(MemberRef.user("park")))).block();
+
+        // when
+        useCase.changeGroup("DEV001", lee추가).block();
+
+        // then
+        assertThat(state.groups.get("DEV001").members())
+                .containsExactlyInAnyOrder(MemberRef.user("park"), MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("조직이 없으면 빈 결과이고 아무것도 쓰지 않는다")
+    void 없는_조직은_빈_결과다() {
+        // given
+        state.users.put("kim", 직원("kim", true));
+
+        // when
+        var result = useCase.changeGroup("NONE", GroupChange.delta().adding(Set.of(MemberRef.user("kim"))))
+                .blockOptional(Duration.ofSeconds(10));
+
+        // then
+        assertThat(result).isEmpty();
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(state.groups).doesNotContainKey("NONE");
+        assertThat(lock.released).as("빈 결과여도 락은 반납된다").hasValue(1);
+    }
+
+    @Test
+    @DisplayName("전체 교체 뒤의 id 빼기가 직원·하위 조직 둘 다에 맞으면 락 안에서 현재상태로 한쪽만 뺀다")
+    void 교체_뒤_모호한_빼기는_현재상태로_고른다() {
+        // given — 조직 X 가 현재상태에 있다
+        state.users.put("X", 직원("X", true));
+        state.groups.put("X", new DirectoryGroup("X", "cn=X", "엑스팀", Set.of()));
+        state.groups.put("DEV001", new DirectoryGroup("DEV001", "cn=DEV001", "개발본부", Set.of()));
+        var change = GroupChange.delta()
+                .replacing(Set.of(MemberRef.user("X"), MemberRef.group("X")))
+                .removingId("X");
+
+        // when
+        useCase.changeGroup("DEV001", change).block();
+
+        // then — 조직 X 가 있으므로 하위 조직 쪽을 뺀다
+        assertThat(state.groups.get("DEV001").members()).containsExactly(MemberRef.user("X"));
     }
 }

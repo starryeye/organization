@@ -107,8 +107,8 @@ class ScimLimitsAndRecoveryScaleTest {
         String 조직 = 고아.object().substring("group:".length());
         보낸다(ScimRequestRenderer.멤버추가(조직,
                 dev.starryeye.organization.core.model.MemberRef.user(
-                        기대.landmarks().L2직속직원())), 200);
-        보낸다(ScimRequestRenderer.멤버제거(조직, 기대.landmarks().L2직속직원()), 200);
+                        기대.landmarks().L2직속직원())), 204);
+        보낸다(ScimRequestRenderer.멤버제거(조직, 기대.landmarks().L2직속직원()), 204);
 
         // then — 그대로 남는다. 후보 집합이 멤버십에서 나오므로 아예 물어보지도 않는다
         assertThat(성립하는가(고아))
@@ -254,9 +254,9 @@ class ScimLimitsAndRecoveryScaleTest {
         assertThat(기대.직속조직들(직원)).as("전제: 이 직원은 그 팀 소속이 아니다").doesNotContain(팀);
 
         // when — 뒤집힌 순서로 도착한다: remove 가 먼저, add 가 나중
-        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 200);
+        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 204);
         보낸다(ScimRequestRenderer.멤버추가(팀,
-                dev.starryeye.organization.core.model.MemberRef.user(직원)), 200);
+                dev.starryeye.organization.core.model.MemberRef.user(직원)), 204);
 
         // then — IdP 가 마지막으로 원한 것은 "빠짐" 인데 실제로는 "들어감" 이다
         assertThat(성립하는가(RelationTuple.member(직원, 팀)))
@@ -280,7 +280,7 @@ class ScimLimitsAndRecoveryScaleTest {
                 .isFalse();
 
         // 원래대로 돌려놓는다 — 뒤 시나리오가 이 상태를 물려받지 않도록
-        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 200);
+        보낸다(ScimRequestRenderer.멤버제거(팀, 직원), 204);
         검증한다();
     }
 

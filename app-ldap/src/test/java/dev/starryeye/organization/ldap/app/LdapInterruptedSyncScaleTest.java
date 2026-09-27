@@ -42,6 +42,7 @@ import reactor.core.publisher.Mono;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -193,6 +194,14 @@ class LdapInterruptedSyncScaleTest {
         @Override public Mono<Void> deleteGroup(String groupId) { return 실제.deleteGroup(groupId); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) {
             return 실제.findGroupIdsContaining(ref);
+        }
+        @Override public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
+            return 실제.findMembers(groupId, candidates);
+        }
+        @Override public Flux<MemberRef> findMemberRefs(String groupId) { return 실제.findMemberRefs(groupId); }
+        @Override public Flux<String> findChildGroupIds(String groupId) { return 실제.findChildGroupIds(groupId); }
+        @Override public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+            return 실제.saveGroupChange(header, added, removed);
         }
         @Override public Mono<DirectorySnapshot> loadAll() { return 실제.loadAll(); }
     }
