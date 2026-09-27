@@ -7,10 +7,15 @@ import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import org.junit.jupiter.api.BeforeEach;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -21,9 +26,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -989,5 +997,176 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(counter.puts()).isZero();
+    }
+
+    // ---------- 조직 멤버 PATCH (설계 §6) ----------
+
+    @Test
+    @DisplayName("멤버 여부는 주어진 것 중 지금 멤버인 것만 돌려준다")
+    void 멤버_여부를_확인한다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"), MemberRef.group("TEAM"))).block();
+
+        // when
+        var found = repository.findMembers("DEV", Set.of(
+                MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.group("TEAM"), MemberRef.user("TEAM"))).block();
+
+        // then
+        assertThat(found).containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.group("TEAM"));
+    }
+
+    @Test
+    @DisplayName("멤버 여부는 100개를 넘으면 나눠 읽는다 — BatchGetItem 은 한 번에 100개까지다")
+    void 멤버_여부는_나눠_읽는다() {
+        // given — 멤버 250명, 후보는 그 250명과 비멤버 10명
+        Set<MemberRef> members = new LinkedHashSet<>();
+        IntStream.range(0, 250).forEach(i -> members.add(MemberRef.user("u%03d".formatted(i))));
+        repository.saveGroup(new DirectoryGroup("BIG", "cn=BIG", "큰조직", members)).block();
+        Set<MemberRef> candidates = new LinkedHashSet<>(members);
+        IntStream.range(0, 10).forEach(i -> candidates.add(MemberRef.user("x%03d".formatted(i))));
+
+        // when
+        var found = repository.findMembers("BIG", candidates).block();
+
+        // then
+        assertThat(found).containsExactlyInAnyOrderElementsOf(members);
+    }
+
+    @Test
+    @DisplayName("첫 BatchGetItem 이 키를 전부 미처리로 돌려줘도 다시 읽어 빠짐없이 돌려준다")
+    void 첫_배치가_미처리여도_다시_읽는다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"), MemberRef.user("park"))).block();
+        AtomicInteger 호출 = new AtomicInteger();
+        var 인색한 = new DynamoDbDirectoryStateRepository(첫_배치는_미처리(client, 호출), properties, clock);
+
+        // when
+        var found = 인색한.findMembers("DEV", Set.of(MemberRef.user("kim"), MemberRef.user("park"))).block();
+
+        // then
+        assertThat(found).containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("park"));
+        assertThat(호출.get()).isGreaterThanOrEqualTo(2);
+    }
+
+    /** 첫 BatchGetItem 에 아무것도 읽지 않고 키를 전부 미처리로 돌려준다 — 처리량이 모자랄 때 DynamoDB 가 하는 일이다. */
+    private static DynamoDbAsyncClient 첫_배치는_미처리(DynamoDbAsyncClient real, AtomicInteger 호출) {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(DynamoDbAsyncClient.class.getClassLoader(),
+                new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("batchGetItem") && args != null
+                            && args[0] instanceof BatchGetItemRequest request
+                            && 호출.getAndIncrement() == 0) {
+                        return CompletableFuture.completedFuture(BatchGetItemResponse.builder()
+                                .responses(Map.of())
+                                .unprocessedKeys(request.requestItems())
+                                .build());
+                    }
+                    try {
+                        return method.invoke(real, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    @Test
+    @DisplayName("멤버 키 전체는 멤버 줄만 — META 와 이 조직 자신의 소속 줄은 섞이지 않는다")
+    void 멤버_키_전체를_읽는다() {
+        // given — DEV 는 TOP 의 하위 조직이라 DEV 파티션에 BELONGS_TO#GROUP#TOP 줄이 있다
+        repository.saveGroup(조직("TOP", "본사", MemberRef.group("DEV"))).block();
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"), MemberRef.group("TEAM"))).block();
+
+        // when
+        var refs = repository.findMemberRefs("DEV").collectList().block();
+
+        // then
+        assertThat(refs).containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.group("TEAM"));
+    }
+
+    @Test
+    @DisplayName("하위 조직 id 는 하위 조직 멤버 줄만 읽는다")
+    void 하위_조직_id를_읽는다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부",
+                MemberRef.user("kim"), MemberRef.group("TEAM1"), MemberRef.group("TEAM2"))).block();
+
+        // when
+        var ids = repository.findChildGroupIds("DEV").collectList().block();
+
+        // then
+        assertThat(ids).containsExactlyInAnyOrder("TEAM1", "TEAM2");
+        assertThat(repository.findChildGroupIds("NONE").collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("멤버 변경 저장은 준 멤버 줄만 넣고 빼며 소속 줄도 함께 움직인다")
+    void 멤버_변경을_저장한다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"), MemberRef.user("park"))).block();
+
+        // when
+        repository.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발본부"),
+                Set.of(MemberRef.user("lee")), Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(repository.findGroup("DEV").block().members())
+                .containsExactlyInAnyOrder(MemberRef.user("park"), MemberRef.user("lee"));
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("lee")).collectList().block()).containsExactly("DEV");
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("kim")).collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("멤버 변경 저장은 다른 멤버 줄을 건드리지 않는다 — 한 명 넣으면 PutItem 은 소속 줄·멤버 줄·META 셋이다")
+    void 다른_멤버는_건드리지_않는다() {
+        // given
+        Set<MemberRef> members = new LinkedHashSet<>();
+        IntStream.range(0, 50).forEach(i -> members.add(MemberRef.user("u%02d".formatted(i))));
+        repository.saveGroup(new DirectoryGroup("DEV", "cn=DEV", "개발본부", members)).block();
+        String 처음합류 = addedAt("DEV", MemberRef.user("u00"));
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        세는.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발본부"), Set.of(MemberRef.user("new")), Set.of()).block();
+
+        // then
+        assertThat(counter.puts()).isEqualTo(3);
+        assertThat(addedAt("DEV", MemberRef.user("u00"))).isEqualTo(처음합류);
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("이름도 멤버도 그대로면 멤버 변경 저장은 아무것도 쓰지 않는다")
+    void 바뀐_것이_없으면_쓰지_않는다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"))).block();
+        String 처음 = updatedAt(Keys.groupPk("DEV"));
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        세는.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발본부"), Set.of(), Set.of()).block();
+
+        // then
+        assertThat(counter.puts()).isZero();
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo(처음);
+    }
+
+    @Test
+    @DisplayName("이름만 바꿔도 META 를 다시 쓰고 updatedAt 이 그 시각이 된다")
+    void 이름만_바꿔도_META를_쓴다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발본부", MemberRef.user("kim"))).block();
+        clock.앞으로(Duration.ofHours(2));
+
+        // when
+        repository.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "플랫폼본부"), Set.of(), Set.of()).block();
+
+        // then
+        assertThat(repository.findGroupHeader("DEV").block().displayName()).isEqualTo("플랫폼본부");
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T02:00:00Z");
+        assertThat(repository.findGroup("DEV").block().members()).containsExactly(MemberRef.user("kim"));
     }
 }

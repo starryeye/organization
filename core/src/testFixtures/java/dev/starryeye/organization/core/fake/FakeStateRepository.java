@@ -5,15 +5,18 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public class FakeStateRepository implements DirectoryStateRepository {
 
@@ -35,6 +38,15 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     /** {@link #findUser} 가 불린 순서대로의 직원 아이디. {@link #findGroupCalls} 와 같은 목적. */
     public final List<String> findUserCalls = new ArrayList<>();
+
+    /** {@link #findMembers} 가 받은 후보들. 무엇을 물었는지 단언하는 계측이다. */
+    public final List<Set<MemberRef>> findMembersCalls = new ArrayList<>();
+
+    /** {@link #findMemberRefs} 가 불린 순서대로의 조직 id. */
+    public final List<String> findMemberRefsCalls = new ArrayList<>();
+
+    /** {@link #findChildGroupIds} 가 불린 순서대로의 조직 id. */
+    public final List<String> findChildGroupIdsCalls = new ArrayList<>();
 
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
@@ -97,6 +109,49 @@ public class FakeStateRepository implements DirectoryStateRepository {
         return Flux.fromIterable(groups.values())
                 .filter(group -> group.members().contains(ref))
                 .map(DirectoryGroup::id);
+    }
+
+    @Override
+    public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
+        return Mono.fromCallable(() -> {
+            findMembersCalls.add(Set.copyOf(candidates));
+            Set<MemberRef> found = new LinkedHashSet<>();
+            candidates.stream().filter(membersOf(groupId)::contains).forEach(found::add);
+            return found;
+        });
+    }
+
+    @Override
+    public Flux<MemberRef> findMemberRefs(String groupId) {
+        return Flux.defer(() -> {
+            findMemberRefsCalls.add(groupId);
+            return Flux.fromIterable(membersOf(groupId));
+        });
+    }
+
+    @Override
+    public Flux<String> findChildGroupIds(String groupId) {
+        return Flux.defer(() -> {
+            findChildGroupIdsCalls.add(groupId);
+            return Flux.fromIterable(membersOf(groupId))
+                    .filter(ref -> ref.type() == MemberType.GROUP)
+                    .map(MemberRef::id);
+        });
+    }
+
+    @Override
+    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return Mono.fromRunnable(() -> {
+            Set<MemberRef> members = new LinkedHashSet<>(membersOf(header.id()));
+            members.removeAll(removed);
+            members.addAll(added);
+            groups.put(header.id(), new DirectoryGroup(header.id(), header.externalId(), header.displayName(), members));
+        });
+    }
+
+    private Set<MemberRef> membersOf(String groupId) {
+        DirectoryGroup group = groups.get(groupId);
+        return group == null ? Set.of() : group.members();
     }
 
     @Override
