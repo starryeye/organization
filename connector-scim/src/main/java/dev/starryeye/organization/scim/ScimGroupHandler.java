@@ -56,20 +56,25 @@ public class ScimGroupHandler {
     }
 
     /**
-     * 조직 PATCH — 성공하면 본문 없이 204 다(조직 멤버 PATCH 설계 §7). RFC 7644 §3.5.2 가 허용하고, Entra 는 멤버 전체를 담은
-     * 본문을 권하지 않는다. 응답을 만들려고 멤버를 읽지 않는다. 잘못된 attributes 는 지금처럼 쓰기 전에 400 이다.
+     * 조직 PATCH — {@code attributes} 쿼리 파라미터가 있으면 RFC 7644 §3.5.2 의 MUST 대로 200 과 투영한 리소스를,
+     * 없으면(excludedAttributes 만 있어도) 본문 없이 204 를 돌려준다(조직 멤버 PATCH 설계 §7, 최종 리뷰 F1). Entra 는 멤버
+     * 전체를 담은 본문을 권하지 않는다. attributes 가 없으면 응답을 만들려고 멤버를 읽지 않는다. 잘못된 attributes·
+     * excludedAttributes 는 지금처럼 쓰기 전에 400 이다. 부분 실패는 지금처럼 5xx(`respond` 참고).
      */
     public Mono<ServerResponse> patch(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request)
-                .then(request.bodyToMono(ScimPatchOp.class)
-                        .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다"))))
+        boolean withAttributes = request.queryParam("attributes").isPresent();
+        return projection(request).flatMap(projection -> request.bodyToMono(ScimPatchOp.class)
+                .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
                 .flatMap(patch -> ScimPatchApplier.toGroupChange(patch, memberTypes))
                 .flatMap(change -> sync.changeGroup(id, change)
                         .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id))))
-                .flatMap(result -> result.fullyApplied()
-                        ? ServerResponse.noContent().build()
-                        : Mono.error(ScimException.internal("일부 튜플 적용에 실패했습니다. 재시도해 주세요: " + id)));
+                .flatMap(result -> withAttributes
+                        ? respond(HttpStatus.OK, id, result, projection)
+                        : (result.fullyApplied()
+                                ? ServerResponse.noContent().build()
+                                : Mono.error(ScimException.internal(
+                                        "일부 튜플 적용에 실패했습니다. 재시도해 주세요: " + id)))));
     }
 
     public Mono<ServerResponse> delete(ServerRequest request) {
@@ -102,7 +107,7 @@ public class ScimGroupHandler {
 
     /**
      * members 가 응답에 없으면 조직 파티션(멤버 줄 전부)을 읽지 않는다 — Entra 가 늘 붙이는 조건이고,
-     * 쓰기 응답(create/replace)도 이 규칙을 따른다(S-1 설계 §4.5).
+     * 쓰기 응답(create/replace, attributes 가 있는 patch)도 이 규칙을 따른다(S-1 설계 §4.5).
      */
     private Mono<ScimGroup> byProjection(String id, ScimAttributeProjection projection) {
         return projection.includes("members")
