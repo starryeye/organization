@@ -669,6 +669,39 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("경로 없는 add 의 members 는 증분 추가다 — RFC 7644 §3.5.2.1")
+    void 경로_없는_add의_members는_증분_추가다() {
+        // given
+        var before = 조직(MemberRef.user("lee"));
+        var patch = 패치("add", null, Map.of("members", List.of(멤버("kim", "User"))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+        var after = 적용한다(before, patch, USER_ONLY);
+
+        // then
+        assertThat(change.replacesMembers()).isFalse();
+        assertThat(change.ops()).containsExactly(new GroupChange.Add(MemberRef.user("kim")));
+        assertThat(after.members()).containsExactlyInAnyOrder(MemberRef.user("lee"), MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("경로 없는 replace 의 members 는 지금처럼 전체 교체다")
+    void 경로_없는_replace의_members는_전체_교체다() {
+        // given
+        var before = 조직(MemberRef.user("lee"));
+        var patch = 패치("replace", null, Map.of("members", List.of(멤버("kim", "User"))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+        var after = 적용한다(before, patch, USER_ONLY);
+
+        // then
+        assertThat(change.replacesMembers()).isTrue();
+        assertThat(after.members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
     @DisplayName("PATCH 정리는 멤버십을 읽지 않는다 — 조직이 없어도 변경이 만들어진다")
     void 정리는_멤버십을_읽지_않는다() {
         // when

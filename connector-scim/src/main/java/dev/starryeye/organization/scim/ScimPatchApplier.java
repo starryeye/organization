@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -78,7 +79,7 @@ public final class ScimPatchApplier {
 
         if (path == null || path.isBlank()) {
             requireReplaceOrAdd(op, operation.op());
-            return mergeGroupAttributes(change, asAttributeMap(operation.value()), resolver);
+            return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), resolver);
         }
 
         Matcher filter = MEMBER_VALUE_FILTER.matcher(path.trim());
@@ -113,14 +114,20 @@ public final class ScimPatchApplier {
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
     }
 
-    private static Mono<GroupChange> mergeGroupAttributes(GroupChange change, Map<String, Object> attributes,
+    /**
+     * 경로 없는 add/replace 의 {@code members} — {@code op} 가 {@code add} 면 증분 추가, 아니면(=replace) 전체 교체다
+     * (RFC 7644 §3.5.2.1, 최종 리뷰 F2). {@code op} 는 이미 {@link #normalizeOp} 로 소문자다.
+     */
+    private static Mono<GroupChange> mergeGroupAttributes(GroupChange change, String op, Map<String, Object> attributes,
                                                           MemberTypeResolver resolver) {
         GroupChange renamed = has(attributes, "displayName")
                 ? change.renamed(asString(attribute(attributes, "displayName")))
                 : change;
-        return has(attributes, "members")
-                ? toMemberRefs(attribute(attributes, "members"), resolver).map(renamed::replacing)
-                : Mono.just(renamed);
+        if (!has(attributes, "members")) {
+            return Mono.just(renamed);
+        }
+        Function<Set<MemberRef>, GroupChange> apply = op.equals("add") ? renamed::adding : renamed::replacing;
+        return toMemberRefs(attribute(attributes, "members"), resolver).map(apply);
     }
 
     // ---------- 직원 ----------
