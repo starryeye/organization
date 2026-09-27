@@ -283,7 +283,8 @@ id 의 종류라 드물게 바뀐다).
 - 조직 POST·DELETE 의 `parentsOf` 가 상위 조직 파티션을 통째로 읽는다(상위 조직에 직원이 많으면 그만큼, 상위 조직의 직원마다
   `findUser` 까지 한다).
 - `removeUser` 가 소속 조직마다 `findGroup` 전체와 `saveGroup` 의 멤버 키 전체를 락 안에서 읽는다(10만 명 조직 소속 직원 한 명
-  삭제마다) — 직원 슬라이드에서 `saveGroupChange` 로 바꿀 수 있다. 아주 큰 변경(10만 명 조직 비우기 등)은 바뀌는 멤버 수만큼
-  `findUser`·차례 BatchCheck 를 하는데 리스는 OpenFGA 쓰기 직전에만 갱신한다 — 30초 TTL 을 넘기면 재시도해도 매번 실패할 수
-  있다. BatchGet 미처리 키 재시도에 상한·백오프가 없고 100개 묶음을 차례로 읽는다. → 해결: `2026-09-28-scim-write-lock-design.md`
+  삭제마다) — 직원 슬라이드에서 `saveGroupChange` 로 바꿀 수 있다. → 해결: `2026-09-28-scim-write-lock-design.md`
+  남은 것: 아주 큰 변경(10만 명 조직 비우기 등)은 바뀌는 멤버 수만큼 `findUser`·차례 BatchCheck 를 하는데 리스는 OpenFGA 쓰기
+  직전에만 갱신한다 — 30초 TTL 을 넘기면 재시도해도 매번 실패할 수 있다. BatchGet 미처리 키 재시도에 상한·백오프가 없고 100개
+  묶음을 차례로 읽는다.
 - 이 슬라이드 뒤 사용자 제안: 유명 SCIM·LDAP 오픈소스와 코드 비교, 전체 코드·요구사항 리뷰, IdP·IAM 공식 문서 비교 분석.
