@@ -129,7 +129,8 @@ C1 의 "최신 스냅샷이 7일 넘게 안 바뀌는" 경우는 변경 없는 �
 | C1 | 기준선을 못 읽으면(오류) 전체 동기화는 아무것도 쓰지 않고 FAILED, 재적재 `mode=snapshot` 도 멈춘다 | core |
 | C4 | §4 표의 다섯 줄 | connector-scim |
 | C8 | Check 캐시를 켠 OpenFGA 컨테이너(`OPENFGA_CHECK_QUERY_CACHE_ENABLED=true`)에서 "없음 확인 → 쓰기 → 곧바로 다시 확인"이 "있음"이다 | authz-openfga |
-| C5 | 접속은 받지만 응답하지 않는 가짜 LDAP 서버(로컬 `ServerSocket`)에서 읽기 타임아웃 1초면 `fetchAll` 이 몇 초 안에 실패로 끝난다 | connector-ldap |
+| C5 | 접속은 받지만 응답하지 않는 가짜 LDAP 서버(로컬 `ServerSocket`)에서 bind 응답 대기를 connect-timeout 1초가 끊고(timeout used: 1000 ms), 일시 장애로 보고 다시 읽는다 | connector-ldap |
+| C5 | 첫 페이지만 주고 둘째 페이지에서 멈추는 임베디드 LDAP 서버에서 검색 대기를 read-timeout 1초가 끊는다 — 페이징 커넥션(SingleContextSource)도 설정을 탄다 | connector-ldap |
 | C5 | 설정값이 컨텍스트 소스 환경에 실린다 | connector-ldap |
 
 머지 전 컨트롤러가 `./gradlew cleanTest test` 와 `./gradlew cleanScaleTest scaleTest` 를 한 번에 하나씩 돌려 §8 에 적는다.
