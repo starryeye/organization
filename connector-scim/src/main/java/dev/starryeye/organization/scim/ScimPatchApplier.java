@@ -31,9 +31,11 @@ import java.util.regex.Pattern;
  */
 public final class ScimPatchApplier {
 
-    /** {@code members[value eq "kim"]} 한 가지 패턴만 인식한다. 따옴표는 큰/작은 둘 다 받는다. */
-    private static final Pattern MEMBER_VALUE_FILTER = Pattern.compile(
-            "^members\\[\\s*value\\s+eq\\s+[\"'](?<value>[^\"']+)[\"']\\s*]$", Pattern.CASE_INSENSITIVE);
+    /**
+     * {@code members[...]}. 대괄호 안은 목록 조회와 같은 {@link ScimFilter} 가 읽는다 — RFC 8259 JSON 문자열(큰따옴표만 구분자, 이스케이프 풀기).
+     * 정규식으로 따옴표를 흉내 내면 값 안의 작은따옴표({@code o'brien})에서 끊긴다(점검 C4).
+     */
+    private static final Pattern MEMBER_FILTER = Pattern.compile("^members\\[(?<filter>.*)]$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private ScimPatchApplier() {
     }
@@ -82,13 +84,13 @@ public final class ScimPatchApplier {
             return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), resolver);
         }
 
-        Matcher filter = MEMBER_VALUE_FILTER.matcher(path.trim());
+        Matcher filter = MEMBER_FILTER.matcher(path.trim());
         if (filter.matches()) {
             if (!op.equals("remove")) {
                 throw ScimException.invalidPath(
                         "members 필터는 remove 에만 지원합니다: op=" + operation.op() + ", path=" + path);
             }
-            return Mono.just(change.removingId(IdNormalizer.normalize(filter.group("value"))));
+            return Mono.just(change.removingId(memberId(filter.group("filter"), path)));
         }
 
         if (path.trim().equalsIgnoreCase("members")) {
@@ -112,6 +114,23 @@ public final class ScimPatchApplier {
         }
 
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+    }
+
+    /**
+     * {@code members[value eq "<아이디>"]} 의 아이디. 한 항 {@code value eq "…"} 말고는 받지 않는다 — 문법 오류는 {@link ScimFilter} 가
+     * {@code invalidFilter} 로, 모양이 다르면 여기서 {@code invalidPath} 로 거절한다. 빈 값은 아이디가 될 수 없어 {@code invalidPath} 다
+     * ({@link IdNormalizer} 의 예외가 500 으로 새지 않게).
+     */
+    private static String memberId(String filter, String path) {
+        ScimFilter parsed = ScimFilter.parse(filter, ScimResourceType.GROUP);
+        if (parsed.terms().size() != 1) {
+            throw ScimException.invalidPath("members 필터는 value eq \"<아이디>\" 한 항만 지원합니다: " + path);
+        }
+        ScimFilter.Term term = parsed.terms().get(0);
+        if (!"value".equals(term.attribute()) || !(term.value() instanceof String value) || value.isBlank()) {
+            throw ScimException.invalidPath("members 필터는 value eq \"<아이디>\" 한 항만 지원합니다: " + path);
+        }
+        return IdNormalizer.normalize(value);
     }
 
     /**

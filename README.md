@@ -319,7 +319,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | 대상 | `path` | 지원 `op` |
 |---|---|---|
 | Group | `members` | `add` / `replace` / `remove` — `value` 가 없으면 전원 빼기(RFC 7644 §3.5.2.2), **`value` 가 있으면 400 `invalidValue`** |
-| Group | `members[value eq "..."]` | `remove` |
+| Group | `members[value eq "..."]` | `remove` — 값은 큰따옴표 JSON 문자열(이스케이프 풀림). 작은따옴표로 감싸면 400 `invalidFilter` |
 | Group | `displayName` | `replace` / `add` |
 | Group | (path 없음) | `replace` / `add` — `displayName` 은 바꾸고, `members` 는 `add` 면 추가·`replace` 면 교체(RFC 7644 §3.5.2.1·§3.5.2.3) |
 | User | `userName` | `replace` / `add`(null·빈 문자열·공백만이면 400 `invalidValue`) (`remove` 는 400 `mutability` — 필수 속성) |
