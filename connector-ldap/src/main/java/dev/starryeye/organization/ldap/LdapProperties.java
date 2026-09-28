@@ -26,11 +26,18 @@ public class LdapProperties {
      */
     private int maxRetries = 3;
 
-    /** 접속 타임아웃. 이보다 오래 걸리면 실패한다(JNDI {@code com.sun.jndi.ldap.connect.timeout}). */
+    /**
+     * 접속 타임아웃. 이보다 오래 걸리면 실패한다(JNDI {@code com.sun.jndi.ldap.connect.timeout}).
+     *
+     * <p>TCP 접속뿐 아니라 <b>인증(bind) 응답 대기</b>도 이 값이 잰다 — JNDI LDAP provider 는 bind 응답을
+     * {@link #readTimeout} 이 아니라 이 값으로 기다린다(JDK-8194264). {@code bindDn} 이 설정된 컨텍스트 생성은
+     * 곧 동기 bind 라, 인증 단계가 죽은 연결에 물리는 경우는 이 값이 끊는다.
+     */
     private Duration connectTimeout = Duration.ofSeconds(10);
 
     /**
-     * 응답 타임아웃. 요청 뒤 응답을 이보다 오래 못 받으면 실패한다(JNDI {@code com.sun.jndi.ldap.read.timeout}).
+     * 응답 타임아웃. <b>인증(bind) 이후</b>, 요청 뒤 응답을 이보다 오래 못 받으면 실패한다(JNDI
+     * {@code com.sun.jndi.ldap.read.timeout}) — 예를 들어 페이징 중 다음 페이지 응답을 기다리는 동안.
      *
      * <p>없으면 JNDI 는 응답이 올 때까지 기다린다 — 조용히 죽은 연결 하나에 회차가 끝나지 않아 실행 가드가 안 풀리고, 이후 매일 동기화가
      * 건너뛰어진다(점검 C5). AD 는 검색 하나를 최대 120초({@code MaxQueryDuration})까지 허용하므로, 서버가 정상적으로 오래 일하는 경우를
