@@ -10,6 +10,7 @@ import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.time.Clock;
+import java.util.Map;
 
 @Configuration
 @EnableConfigurationProperties(LdapProperties.class)
@@ -22,7 +23,18 @@ public class LdapConfig {
         contextSource.setBase(properties.getBaseDn());
         contextSource.setUserDn(properties.getBindDn());
         contextSource.setPassword(properties.getBindPassword());
+        contextSource.setBaseEnvironmentProperties(jndiTimeouts(properties));
         return contextSource;
+    }
+
+    /**
+     * JNDI LDAP 타임아웃(밀리초 문자열). 페이징·범위 검색용 {@code SingleContextSource}({@link LdapTemplates#한_커넥션에서})도
+     * 이 컨텍스트 소스에서 커넥션을 얻으므로 같은 값을 탄다.
+     */
+    static Map<String, Object> jndiTimeouts(LdapProperties properties) {
+        return Map.of(
+                "com.sun.jndi.ldap.connect.timeout", String.valueOf(properties.getConnectTimeout().toMillis()),
+                "com.sun.jndi.ldap.read.timeout", String.valueOf(properties.getReadTimeout().toMillis()));
     }
 
     @Bean

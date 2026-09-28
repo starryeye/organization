@@ -282,6 +282,11 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 DN, 멤버가 하나도 대조되지 않는 설정이 여기 속한다 — 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
 통신이 끊기는 것 같은 일시적 실패만 설정한 횟수(`ldap.max-retries`)만큼 다시 읽는다.
 
+**연결·응답에 타임아웃이 있다.** `ldap.connect-timeout`(기본 10초)과 `ldap.read-timeout`(기본 150초)이다. 응답이 오지 않는 연결에
+물리면 읽기 타임아웃으로 실패하고, 일시 장애로 보고 `ldap.max-retries` 만큼 처음부터 다시 읽는다 — 그래도 안 되면 그 회차는 FAILED 이고
+다음 회차는 정상으로 돈다. 읽기 기본값은 AD 가 검색 하나에 허용하는 최대 시간(120초, `MaxQueryDuration`)보다 길게 잡았다. 한 페이지
+응답이 이보다 오래 걸리는 디렉터리라면 늘린다.
+
 **이름은 표준 속성에서 읽는다** — `givenName`→이름, `sn`→성, `generationQualifier`→접미(Jr. 등), AD 의 `middleName`→중간
 이름. 속성이 없으면 빈칸이다. admin 직원 상세(`GET /admin/employees/{employeeId}`)의 `name` 에 나온다.
 
