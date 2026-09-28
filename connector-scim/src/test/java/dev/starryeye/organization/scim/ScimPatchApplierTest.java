@@ -119,6 +119,25 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("대괄호 안 공백은 한 칸만 받는다 — RFC 7644 ABNF 는 SP 하나만 정한다(가드)")
+    void 대괄호_안_공백은_한_칸만_받는다() {
+        // given
+        var before = 조직(MemberRef.user("kim"));
+
+        // when, then — 대괄호 안 앞뒤 공백, 토큰 사이 두 칸 공백 모두 거절한다
+        for (String path : List.of(
+                "members[ value eq \"kim\" ]",
+                "members[value  eq \"kim\"]")) {
+            assertThatThrownBy(() -> 적용한다(before, 패치("remove", path, null), USER_ONLY))
+                    .as(path)
+                    .isInstanceOfSatisfying(ScimException.class, e -> {
+                        assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(e.getScimType()).isEqualTo("invalidFilter");
+                    });
+        }
+    }
+
+    @Test
     @DisplayName("아이디에 작은따옴표가 든 멤버(o'brien)도 필터 remove 로 빠진다")
     void 작은따옴표가_든_아이디를_뺀다() {
         // given — 아이디는 userName 에서 오고 IdNormalizer 는 ' 를 남긴다

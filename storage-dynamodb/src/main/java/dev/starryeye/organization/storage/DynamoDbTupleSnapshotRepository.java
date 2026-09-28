@@ -208,11 +208,17 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 Attrs.integer(item, TUPLE_COUNT));
     }
 
+    /**
+     * 모든 스냅샷과 포인터를 지운다. <b>포인터를 먼저 지운다</b> — 부르는 쪽(재적재)은 이미 OpenFGA 를 비웠으므로 빈 기준선이 정답이다.
+     * 스냅샷을 지우다 실패해도 포인터가 없으니 다음 회차는 첫 적재로 돌고, 남은 스냅샷은 메타가 있어 보존 기간 뒤 정리된다.
+     * 포인터를 마지막에 지우면 반쯤 지워진 스냅샷을 가리킨 채 남아 매 회차가 기준선 깨짐으로 실패한다.
+     */
     @Override
     public Mono<Void> reset() {
-        return snapshotMetas()
+        return deleteItem(Keys.SNAPSHOT_POINTER, Keys.LATEST)
+                .thenMany(snapshotMetas())
                 .flatMap(meta -> deleteSnapshot(meta.id()), DELETE_CONCURRENCY)
-                .then(deleteItem(Keys.SNAPSHOT_POINTER, Keys.LATEST));
+                .then();
     }
 
     /**

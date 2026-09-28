@@ -424,4 +424,30 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(repository.purgeExpired().block()).isEqualTo(1);
         assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
+
+    @Test
+    @DisplayName("초기화(reset)가 중간에 실패해도 포인터가 먼저 지워져 다음 회차는 첫 적재로 돈다")
+    void 재적재_초기화가_중간에_실패해도_기준선_깨짐으로_남지_않는다() {
+        // given — 스냅샷 둘(각각 튜플 60개 이상 → 배치가 여러 번 나간다), 나중 것이 최신이다
+        repository.saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(86400), SyncSource.LDAP, 튜플들(60))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(65))).block();
+
+        AtomicInteger 배치_호출_수 = new AtomicInteger();
+        DynamoDbAsyncClient 두번째_배치만_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("batchWriteItem") && 배치_호출_수.incrementAndGet() == 2) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("batchWriteItem 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+        var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                두번째_배치만_실패하는_클라이언트, properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        assertThatThrownBy(() -> 실패하는_저장소.reset().block());
+
+        // then — 정상 저장소로 findLatest() 는 빈 결과다(기준선 깨짐 오류가 아니다). 포인터가 먼저 지워졌다는 뜻이다
+        assertThat(repository.findLatest().blockOptional()).isEmpty();
+    }
 }

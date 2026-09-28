@@ -41,8 +41,9 @@ public class SyncScheduler {
     }
 
     /**
-     * DynamoDB Local 은 TTL 자동 삭제를 하지 않으므로 명시적으로 정리한다.
-     * 실제 AWS 에서는 TTL 이 처리하고 이 잡은 0건을 반환한다.
+     * 스냅샷은 테이블 TTL 을 쓰지 않으므로(최신까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다) 이 정리가
+     * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
+     * 끝없이 쌓인다.
      */
     @Scheduled(cron = "${sync.purge-cron}")
     public void 만료스냅샷정리() {

@@ -79,6 +79,7 @@ C1 의 "최신 스냅샷이 7일 넘게 안 바뀌는" 경우는 변경 없는 �
 | `members[value eq "o'brien@corp.com"]` | 204, o'brien 을 뺀다(**지금은 400**) |
 | `members[value eq "a\"b"]` | 204, `a"b` 를 뺀다(지금은 400) |
 | `members[value eq 'kim']` | 400 `invalidFilter` — 큰따옴표만(결정) |
+| `members[ value eq "kim" ]`(대괄호 안 앞뒤 공백·두 칸 공백) | 400 `invalidFilter` — RFC 7644 ABNF 는 한 칸(SP)만 정한다. 목록 조회 필터와 같은 규칙(옛 정규식은 받았다) |
 | `members[value eq "kim" and …]`, `members[display eq "x"]`, 값이 문자열이 아님 | 400 `invalidPath` — 지원하지 않는 모양(지금과 같음) |
 
 - 뺀 값은 지금처럼 `IdNormalizer.normalize` 를 거쳐 아이디가 된다.
