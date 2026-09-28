@@ -239,8 +239,13 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 });
     }
 
+    /**
+     * 튜플 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다. 저장 순서(메타 → 튜플 → 포인터)를
+     * 그대로 뒤집은 순서다 — 메타를 먼저 지우면 튜플 배치 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     */
     private Mono<Void> deleteSnapshot(String snapshotId) {
         return queryPartition(Keys.snapshotPk(snapshotId))
+                .filter(item -> !Keys.META.equals(Attrs.str(item, Keys.SK)))
                 .map(item -> WriteRequest.builder()
                         .deleteRequest(DeleteRequest.builder()
                                 .key(Map.of(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)),
@@ -249,7 +254,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                         .build())
                 .buffer(BATCH_SIZE)
                 .concatMap(this::batchWrite)
-                .then();
+                .then(Mono.defer(() -> deleteItem(Keys.snapshotPk(snapshotId), Keys.META)));
     }
 
     // ---------- 공통 ----------

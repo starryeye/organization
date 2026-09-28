@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -390,5 +391,37 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(보낸_Query).filteredOn(request -> request.indexName() == null)
                 .isNotEmpty()
                 .allSatisfy(request -> assertThat(request.consistentRead()).isTrue());
+    }
+
+    @Test
+    @DisplayName("삭제 중 튜플 배치 하나가 실패해도 메타는 남아 다음 정리가 다시 찾는다")
+    void 삭제_중_실패해도_메타는_남는다() {
+        // given — 만료된 후보(튜플 60개 → 배치 3개)와, 정리 대상이 아닌 최신 스냅샷을 따로 둔다
+        repository.saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), SyncSource.LDAP, 튜플들(60))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
+
+        AtomicInteger 배치_호출_수 = new AtomicInteger();
+        DynamoDbAsyncClient 두번째_배치만_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("batchWriteItem") && 배치_호출_수.incrementAndGet() == 2) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("batchWriteItem 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+        var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                두번째_배치만_실패하는_클라이언트, properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        assertThatThrownBy(() -> 실패하는_저장소.purgeExpired().block());
+
+        // then — 메타는 목록에 남아 있어 다음 정리가 이 스냅샷을 다시 찾는다
+        assertThat(repository.listRecent(30).collectList().block())
+                .extracting(m -> m.id())
+                .contains("20260804T030000-LDAP");
+
+        // and — 정상 클라이언트로 다시 정리하면 남은 조각까지 마저 지운다
+        assertThat(repository.purgeExpired().block()).isEqualTo(1);
+        assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
 }
