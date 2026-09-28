@@ -476,3 +476,7 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 
 **OpenFGA 서버 v1.10.0 이상**이어야 한다. `on_duplicate` / `on_missing` 멱등 옵션이 그
 버전부터 제공되며, 이것이 없으면 재적재와 재실행이 배치 단위로 통째로 실패한다.
+
+**OpenFGA Check 캐시를 켜도 된다.** 이 서버가 부르는 Check·BatchCheck 는 `HIGHER_CONSISTENCY` 로 캐시를 우회한다 — 쓰기 전 기준선이
+캐시된 답이면 넣고 곧바로 뺀 멤버의 튜플이 안 지워지기 때문이다. 권한을 묻는 다른 앱의 Check 는 캐시를 그대로 쓴다.
+(`HIGHER_CONSISTENCY` 는 OpenFGA v1.5.7 부터 있다 — 위 v1.10.0 요구에 포함된다.)
