@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -190,5 +191,24 @@ class RebuildUseCaseTest {
         org.assertj.core.api.Assertions
                 .assertThatThrownBy(() -> RebuildMode.from("nope"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("snapshot 모드는 기준선 스냅샷이 깨져 있으면 아무것도 지우거나 쓰지 않고 FAILED 로 끝난다")
+    void snapshot_모드는_기준선이_깨지면_멈춘다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        snapshots.failFindLatest(new SnapshotIntegrityException(
+                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요"));
+
+        // when
+        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("mode=store");
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(snapshots.resetCount).hasValue(0);
+        assertThat(source.fetchCount).hasValue(0);
     }
 }

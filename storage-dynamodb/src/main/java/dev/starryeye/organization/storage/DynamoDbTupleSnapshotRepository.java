@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SnapshotMeta;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,8 +33,12 @@ import java.util.Set;
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
  *
- * <p>저장 순서는 튜플 → 메타 → 포인터다. 포인터를 마지막에 갱신해야
- * 중간에 죽어도 다음 동기화가 직전 스냅샷을 정상적으로 읽는다.
+ * <p>저장 순서는 메타 → 튜플 → 포인터다. 메타가 먼저라 튜플을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
+ * 포인터가 마지막이라 반쪽 스냅샷이 기준선이 되지 않는다.
+ *
+ * <p><b>스냅샷은 테이블 TTL({@link Keys#EXPIRES_AT})을 쓰지 않는다.</b> TTL 은 아이템마다 붙은 시각만 보고 지워 최신인지
+ * 모른다 — 최신(비교 기준)까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다(점검 C1). 보관 기한은 메타의
+ * {@code retainUntil} 에만 적고, {@link #purgeExpired()} 가 최신을 건너뛰며 지운다.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -50,6 +55,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String SOURCE = "source";
     private static final String TUPLE_COUNT = "tupleCount";
     private static final String SNAPSHOT_ID = "snapshotId";
+    private static final String RETAIN_UNTIL = "retainUntil";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -60,38 +66,37 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         return doSave(snapshot, clock.instant());
     }
 
-    /** 테스트에서 과거 시각의 스냅샷을 만들기 위한 변형. TTL 을 snapshot.createdAt 기준으로 잡는다. */
+    /** 테스트에서 과거 시각의 스냅샷을 만들기 위한 변형. 보관 기한을 snapshot.createdAt 기준으로 잡는다. */
     public Mono<Void> saveWithCreatedAt(TupleSnapshot snapshot) {
         return doSave(snapshot, snapshot.createdAt());
     }
 
-    private Mono<Void> doSave(TupleSnapshot snapshot, Instant ttlBase) {
-        long expiresAt = ttlBase.plus(Duration.ofDays(properties.getSnapshotRetentionDays())).getEpochSecond();
+    private Mono<Void> doSave(TupleSnapshot snapshot, Instant retentionBase) {
+        long retainUntil = retentionBase.plus(Duration.ofDays(properties.getSnapshotRetentionDays())).getEpochSecond();
 
-        return writeTuples(snapshot, expiresAt)
-                .then(writeMeta(snapshot, expiresAt))
+        return writeMeta(snapshot, retainUntil)
+                .then(writeTuples(snapshot))
                 .then(writePointer(snapshot.id()));
     }
 
-    private Mono<Void> writeTuples(TupleSnapshot snapshot, long expiresAt) {
+    private Mono<Void> writeTuples(TupleSnapshot snapshot) {
         return Flux.fromIterable(snapshot.tuples())
                 .map(tuple -> WriteRequest.builder()
-                        .putRequest(PutRequest.builder().item(tupleItem(snapshot.id(), tuple, expiresAt)).build())
+                        .putRequest(PutRequest.builder().item(tupleItem(snapshot.id(), tuple)).build())
                         .build())
                 .buffer(BATCH_SIZE)
                 .concatMap(this::batchWrite)
                 .then();
     }
 
-    private Map<String, AttributeValue> tupleItem(String snapshotId, RelationTuple tuple, long expiresAt) {
+    private Map<String, AttributeValue> tupleItem(String snapshotId, RelationTuple tuple) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)));
         item.put(Keys.SK, Attrs.s(Keys.tupleSk(tuple)));
-        item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
         return item;
     }
 
-    private Mono<Void> writeMeta(TupleSnapshot snapshot, long expiresAt) {
+    private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
@@ -100,7 +105,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
         item.put(SOURCE, Attrs.s(snapshot.source().name()));
         item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
-        item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
+        item.put(RETAIN_UNTIL, Attrs.n(retainUntil));
         return putItem(item);
     }
 
@@ -114,13 +119,20 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     @Override
     public Mono<TupleSnapshot> findLatest() {
+        return latestId().flatMap(id -> findById(id)
+                .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
+                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요".formatted(id)))));
+    }
+
+    /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없으면 빈 Mono. */
+    private Mono<String> latestId() {
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                        .consistentRead(true)
                         .build()))
                 .filter(response -> response.hasItem() && !response.item().isEmpty())
-                .map(response -> Attrs.str(response.item(), SNAPSHOT_ID))
-                .flatMap(this::findById);
+                .map(response -> Attrs.str(response.item(), SNAPSHOT_ID));
     }
 
     @Override
@@ -145,6 +157,12 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 tuples.add(Keys.parseTupleSk(sk));
             }
         }
+        int expected = Attrs.integer(meta, TUPLE_COUNT);
+        if (tuples.size() != expected) {
+            throw new SnapshotIntegrityException(
+                    "스냅샷 %s 를 온전히 읽지 못했습니다(메타 튜플 %d · 읽음 %d) — POST /admin/sync/rebuild?mode=store 로 복구하세요"
+                            .formatted(snapshotId, expected, tuples.size()));
+        }
         return new TupleSnapshot(
                 snapshotId,
                 Attrs.instant(meta, CREATED_AT),
@@ -161,7 +179,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     /**
      * GSI1 SNAPSHOT_INDEX 파티션을 createdAt 역순으로 훑어 <b>원본 아이템</b>을 돌려준다.
-     * 이 인덱스는 {@code ProjectionType.ALL} 이라 {@code expiresAt} 을 포함한 모든 속성이
+     * 이 인덱스는 {@code ProjectionType.ALL} 이라 {@code retainUntil} 을 포함한 모든 속성이
      * 이미 실려 온다 — 그것을 쓰는 곳은 다시 읽지 않아도 된다.
      */
     private Flux<Map<String, AttributeValue>> snapshotIndexItems() {
@@ -198,21 +216,25 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     /**
-     * 후보마다 {@code GetItem} 으로 {@code expiresAt} 을 다시 읽던 것을 걷어냈다.
-     * GSI 가 {@code ProjectionType.ALL} 이라 그 값은 이미 손에 있었다 — 스냅샷 N 개면
-     * 왕복이 N 번 더 붙었고, 그 왕복이 하는 일은 이미 가진 값을 또 가져오는 것뿐이었다.
+     * 보존 기한({@code retainUntil})이 지난 스냅샷을 지운다. <b>최신 포인터가 가리키는 스냅샷은 건너뛴다</b> — 기간과 상관없이
+     * 비교 기준이다(점검 C1). 포인터를 못 읽으면 "최신 없음"으로 보지 않고 정리 전체를 멈춘다.
+     *
+     * <p>후보마다 {@code GetItem} 으로 기한을 다시 읽지 않는다. GSI 가 {@code ProjectionType.ALL} 이라 그 값은 이미 손에 있다.
      */
     @Override
     public Mono<Integer> purgeExpired() {
         long now = clock.instant().getEpochSecond();
-        return snapshotIndexItems()
-                .filter(item -> Attrs.longValue(item, Keys.EXPIRES_AT) <= now)
-                .map(item -> Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)))
+        return latestId()
+                .defaultIfEmpty("")
+                .flatMapMany(latest -> snapshotIndexItems()
+                        .filter(item -> Attrs.longValue(item, RETAIN_UNTIL) <= now)
+                        .map(item -> Keys.parseSnapshotPk(Attrs.str(item, Keys.PK)))
+                        .filter(id -> !id.equals(latest)))
                 .flatMap(id -> deleteSnapshot(id).thenReturn(1), DELETE_CONCURRENCY)
                 .reduce(0, Integer::sum)
                 .doOnNext(count -> {
                     if (count > 0) {
-                        log.info("만료된 스냅샷 {}건을 정리했다", count);
+                        log.info("보존 기간이 지난 스냅샷 {}건을 정리했다", count);
                     }
                 });
     }
@@ -273,6 +295,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .keyConditionExpression("#pk = :pk")
                 .expressionAttributeNames(Map.of("#pk", Keys.PK))
                 .expressionAttributeValues(Map.of(":pk", Attrs.s(pk)))
+                .consistentRead(true)
                 .build();
         return Paginator.queryAll(client, request);
     }

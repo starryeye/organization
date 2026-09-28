@@ -15,19 +15,26 @@ import reactor.core.publisher.Mono;
  */
 public interface TupleSnapshotRepository {
 
-    /** 없으면 빈 Mono */
+    /**
+     * 포인터가 없으면 빈 Mono(처음 설치·재적재 직후). 포인터가 가리키는 스냅샷의 메타가 없거나 튜플 수가 메타와 다르면
+     * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다.
+     */
     Mono<TupleSnapshot> findLatest();
 
-    /** 튜플 → 메타 → 포인터 순으로 저장한다. 포인터를 마지막에 갱신해야 중간 실패가 안전하다. */
+    /** 메타 → 튜플 → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이 되지 않는다. */
     Mono<Void> save(TupleSnapshot snapshot);
 
     Flux<SnapshotMeta> listRecent(int days);
 
+    /** 메타가 없으면 빈 Mono. 튜플 수가 메타와 다르면 {@link SnapshotIntegrityException}. */
     Mono<TupleSnapshot> findById(String snapshotId);
 
     /** rebuild 전용. 모든 스냅샷과 포인터를 지운다. */
     Mono<Void> reset();
 
-    /** DynamoDB Local 은 TTL 자동 삭제를 하지 않으므로 명시적으로 정리한다. 삭제한 스냅샷 수를 반환한다. */
+    /**
+     * 보존 기간이 지난 스냅샷을 지운다. 최신 포인터가 가리키는 스냅샷은 기간과 상관없이 지우지 않는다 — 비교 기준이다.
+     * 스냅샷은 테이블 TTL 을 쓰지 않으므로 이 정리가 유일한 삭제 경로다. 삭제한 스냅샷 수를 반환한다.
+     */
     Mono<Integer> purgeExpired();
 }

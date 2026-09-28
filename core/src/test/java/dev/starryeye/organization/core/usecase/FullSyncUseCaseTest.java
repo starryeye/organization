@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -210,5 +211,24 @@ class FullSyncUseCaseTest {
         assertThat(snapshots.saved.get(1).tuples()).containsExactlyInAnyOrder(
                 RelationTuple.directMember("kim", "DEV002"),
                 RelationTuple.directMember("park", "DEV002"));
+    }
+
+    @Test
+    @DisplayName("기준선 스냅샷이 깨져 있으면 아무것도 쓰지 않고 FAILED 로 끝나며, 이유에 복구 방법이 남는다")
+    void 기준선이_깨지면_쓰지_않고_FAILED() {
+        // given
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        snapshots.failFindLatest(new SnapshotIntegrityException(
+                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요"));
+
+        // when
+        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("mode=store");
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(state.users).isEmpty();
     }
 }

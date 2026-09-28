@@ -3,18 +3,29 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
+import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
 
@@ -195,5 +206,189 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                 .extracting(m -> m.id())
                 .containsExactly("20260814T030000-LDAP");
         assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    /** 이 저장소가 쓴 한 스냅샷 파티션의 원본 아이템(강한 일관성). */
+    private List<Map<String, AttributeValue>> 파티션(String snapshotId) {
+        return client.query(QueryRequest.builder()
+                        .tableName(properties.getTableName())
+                        .keyConditionExpression("#pk = :pk")
+                        .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                        .expressionAttributeValues(Map.of(":pk", AttributeValue.fromS(Keys.snapshotPk(snapshotId))))
+                        .consistentRead(true)
+                        .build()).join().items();
+    }
+
+    private void 아이템을_지운다(String snapshotId, String sk) {
+        client.deleteItem(DeleteItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, AttributeValue.fromS(Keys.snapshotPk(snapshotId)), Keys.SK, AttributeValue.fromS(sk)))
+                .build()).join();
+    }
+
+    /** 지정한 호출만 실패시키고 나머지는 진짜 클라이언트로 보낸다. 보낸 Query 요청은 기록한다. */
+    private DynamoDbAsyncClient 가로채는_클라이언트(String 실패시킬_메서드, List<QueryRequest> 보낸_Query) {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("query") && args != null && args[0] instanceof QueryRequest request) {
+                        보낸_Query.add(request);
+                    }
+                    if (method.getName().equals(실패시킬_메서드)) {
+                        return CompletableFuture.failedFuture(new IllegalStateException(실패시킬_메서드 + " 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
+    @Test
+    @DisplayName("최신 스냅샷은 보존 기간이 지나도 정리하지 않는다 — 비교 기준이다")
+    void 최신은_보존_기간이_지나도_정리하지_않는다() {
+        // given — 8일 동안 변경 없음·가드 중단·실패만 있어 새 스냅샷이 안 쓰였다. 최신 = 8일 전 것(보존 7일)
+        var 최신 = new TupleSnapshot("20260806T030000-LDAP", 지금.minusSeconds(8 * 86400), SyncSource.LDAP, 튜플들(4));
+        repository.saveWithCreatedAt(최신).block();
+
+        // when
+        var purged = repository.purgeExpired().block();
+
+        // then
+        assertThat(purged).isZero();
+        assertThat(repository.findLatest().block().tuples()).hasSize(4);
+    }
+
+    @Test
+    @DisplayName("보존 기간이 지난 스냅샷 중 최신만 남기고 나머지는 정리한다")
+    void 지난_것_중_최신만_남긴다() {
+        // given — 10일 전 A, 8일 전 B(최신). 둘 다 보존 기간(7일)을 넘겼다
+        repository.saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), SyncSource.LDAP, 튜플들(2))).block();
+        repository.saveWithCreatedAt(new TupleSnapshot("20260806T030000-LDAP", 지금.minusSeconds(8 * 86400), SyncSource.LDAP, 튜플들(3))).block();
+
+        // when
+        var purged = repository.purgeExpired().block();
+
+        // then
+        assertThat(purged).isEqualTo(1);
+        assertThat(repository.findById("20260804T030000-LDAP").blockOptional()).isEmpty();
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260806T030000-LDAP");
+    }
+
+    @Test
+    @DisplayName("스냅샷 아이템에는 테이블 TTL(expiresAt)이 없다 — DynamoDB 가 최신을 알아서 지우지 못한다")
+    void 스냅샷_아이템에는_TTL이_없다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+
+        // when
+        var items = 파티션("20260814T030000-LDAP");
+
+        // then — 메타 1 + 튜플 3, 아무도 expiresAt 을 갖지 않고 메타만 보관 기한을 갖는다
+        assertThat(items).hasSize(4);
+        assertThat(items).allSatisfy(item -> assertThat(item).doesNotContainKey(Keys.EXPIRES_AT));
+        assertThat(items).filteredOn(item -> Keys.META.equals(item.get(Keys.SK).s()))
+                .singleElement()
+                .satisfies(meta -> assertThat(meta.get("retainUntil").n())
+                        .isEqualTo(String.valueOf(지금.plusSeconds(7 * 86400).getEpochSecond())));
+    }
+
+    @Test
+    @DisplayName("메타를 먼저 쓴다 — 튜플 쓰기가 실패해도 메타가 있어 정리 대상이고, 포인터는 직전 스냅샷 그대로다")
+    void 메타를_먼저_쓴다() {
+        // given — 직전 스냅샷 S1 이 최신이다. S2 를 저장하다 튜플 쓰기(BatchWriteItem)가 실패한다
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                가로채는_클라이언트("batchWriteItem", new ArrayList<>()), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        assertThatThrownBy(() -> 실패하는_저장소.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block());
+
+        // then — S2 의 메타는 목록에 있고(정리 작업이 찾는다), 포인터는 S1 이다
+        assertThat(repository.listRecent(30).collectList().block())
+                .extracting(m -> m.id())
+                .contains("20260814T030000-LDAP");
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260813T030000-LDAP");
+
+        // and — 보존 기간 뒤 정리하면 반쪽 S2 는 지워지고 최신 S1 은 남는다
+        var 여드레_뒤 = new DynamoDbTupleSnapshotRepository(client, properties,
+                Clock.fixed(지금.plusSeconds(8 * 86400), ZoneOffset.UTC));
+        assertThat(여드레_뒤.purgeExpired().block()).isEqualTo(1);
+        assertThat(파티션("20260814T030000-LDAP")).isEmpty();
+        assertThat(여드레_뒤.findLatest().block().id()).isEqualTo("20260813T030000-LDAP");
+    }
+
+    @Test
+    @DisplayName("포인터는 있는데 그 스냅샷의 메타가 없으면 빈 기준선이 아니라 오류다")
+    void 메타가_없으면_오류다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+        아이템을_지운다("20260814T030000-LDAP", Keys.META);
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("mode=store");
+    }
+
+    @Test
+    @DisplayName("읽은 튜플 수가 메타와 다르면 오류다 — 반쪽 기준선으로 삭제를 놓치지 않는다")
+    void 튜플_수가_다르면_오류다() {
+        // given — 튜플 4개 중 하나가 사라졌다
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+        String 튜플_키 = 파티션("20260814T030000-LDAP").stream()
+                .map(item -> item.get(Keys.SK).s())
+                .filter(sk -> !Keys.META.equals(sk))
+                .findFirst().orElseThrow();
+        아이템을_지운다("20260814T030000-LDAP", 튜플_키);
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타 튜플 4 · 읽음 3");
+    }
+
+    @Test
+    @DisplayName("튜플이 하나도 없는 스냅샷도 정상 기준선이다")
+    void 빈_스냅샷도_정상_기준선이다() {
+        // given — 조직도가 비어 튜플이 0개인 회차
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, Set.of())).block();
+
+        // when
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.id()).isEqualTo("20260814T030000-LDAP");
+        assertThat(latest.tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("포인터를 못 읽으면 정리는 아무것도 지우지 않고 실패한다 — 최신 없음으로 보고 최신까지 지우지 않는다")
+    void 포인터를_못_읽으면_정리하지_않는다() {
+        // given — 보존 기간이 지난 최신 하나
+        repository.saveWithCreatedAt(new TupleSnapshot("20260806T030000-LDAP", 지금.minusSeconds(8 * 86400), SyncSource.LDAP, 튜플들(2))).block();
+        var 포인터가_안_읽히는_저장소 = new DynamoDbTupleSnapshotRepository(
+                가로채는_클라이언트("getItem", new ArrayList<>()), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when, then
+        assertThatThrownBy(() -> 포인터가_안_읽히는_저장소.purgeExpired().block());
+        assertThat(파티션("20260806T030000-LDAP")).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("스냅샷 파티션은 강한 일관성으로 읽는다 — 저장 직후 읽어도 튜플 수가 모자라 보이지 않는다")
+    void 스냅샷_파티션은_강한_일관성으로_읽는다() {
+        // given
+        List<QueryRequest> 보낸_Query = new ArrayList<>();
+        var 기록하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                가로채는_클라이언트("없음", 보낸_Query), properties, Clock.fixed(지금, ZoneOffset.UTC));
+        기록하는_저장소.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+
+        // when
+        기록하는_저장소.findLatest().block();
+
+        // then — GSI 가 아닌(본 테이블) Query 는 전부 consistentRead
+        assertThat(보낸_Query).filteredOn(request -> request.indexName() == null)
+                .isNotEmpty()
+                .allSatisfy(request -> assertThat(request.consistentRead()).isTrue());
     }
 }
