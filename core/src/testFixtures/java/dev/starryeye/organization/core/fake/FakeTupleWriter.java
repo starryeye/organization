@@ -9,6 +9,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -24,6 +25,12 @@ public class FakeTupleWriter implements RelationTupleWriter {
     /** 지금까지 실제로 쓰인/지워진 튜플. appliedDeltas 로도 볼 수 있지만 단언이 읽기 어려워진다. */
     public final Set<RelationTuple> written = new LinkedHashSet<>();
     public final Set<RelationTuple> deleted = new LinkedHashSet<>();
+
+    /**
+     * 가짜 장부 — 쓰면 들어가고 지우면 빠진다. {@link FakeTupleScanner} 가 이것을 훑는다.
+     * 테스트가 직접 넣어 "이미 있던 권한"이나 "이 서버를 거치지 않고 들어온 찌꺼기"를 흉내 낸다.
+     */
+    public final Set<RelationTuple> stored = Collections.synchronizedSet(new LinkedHashSet<>());
 
     /** 쓰기 응답을 늦춘다. 긴 작업을 흉내내는 데 쓴다. */
     public Duration delay = Duration.ZERO;
@@ -64,6 +71,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
             } else {
                 written.add(tuple);
                 this.written.add(tuple);
+                stored.add(tuple);
             }
         }
         for (RelationTuple tuple : delta.toDelete()) {
@@ -72,6 +80,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
             } else {
                 deleted.add(tuple);
                 this.deleted.add(tuple);
+                stored.remove(tuple);
             }
         }
         Mono<TupleWriteResult> result = Mono.just(new TupleWriteResult(written, deleted, failures));
