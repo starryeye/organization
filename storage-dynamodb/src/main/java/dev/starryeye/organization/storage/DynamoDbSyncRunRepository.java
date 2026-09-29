@@ -106,6 +106,21 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
                 .take(limit);
     }
 
+    /**
+     * 이번 달과 지난달 파티션에서 번호로 찾는다. 기록은 보관 기간(기본 30일) 뒤 사라지므로 그보다 앞선 달에는 없다.
+     *
+     * <p>파티션 하나가 한 달치 기록(수십 건)이라 통째로 읽어도 싸다 — runId 로 찾는 인덱스를 따로 두지 않는다. 이번 달에서 찾으면
+     * {@code next()} 가 구독을 끊어 지난달은 읽지 않는다({@link #findRecent} 와 같은 이유).
+     */
+    @Override
+    public Mono<SyncRun> findById(String runId) {
+        YearMonth thisMonth = YearMonth.from(clock.instant().atZone(ZoneOffset.UTC));
+        return queryMonth(thisMonth)
+                .concatWith(queryMonth(thisMonth.minusMonths(1)))
+                .filter(run -> runId.equals(run.runId()))
+                .next();
+    }
+
     private Flux<SyncRun> queryMonth(YearMonth month) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())

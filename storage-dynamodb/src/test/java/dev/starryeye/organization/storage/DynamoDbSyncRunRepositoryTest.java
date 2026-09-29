@@ -110,4 +110,62 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(recent).isEmpty();
     }
+
+    @Test
+    @DisplayName("시작한 기록을 번호로 찾으면 RUNNING 이다")
+    void 시작한_기록을_번호로_찾는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL).block();
+
+        // when
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(found).isNotNull();
+        assertThat(found.runId()).isEqualTo(run.runId());
+        assertThat(found.status()).isEqualTo(SyncStatus.RUNNING);
+        assertThat(found.finishedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("끝낸 기록을 번호로 찾으면 끝난 상태와 사유가 보인다")
+    void 끝낸_기록을_번호로_찾는다() {
+        // given
+        var run = repository.start(SyncSource.SCIM, SyncTrigger.REBUILD).block();
+        repository.finish(run, SyncOutcome.failed("기한 초과 — 30분")).block();
+
+        // when
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(found.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(found.message()).isEqualTo("기한 초과 — 30분");
+        assertThat(found.finishedAt()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("지난달에 시작한 기록도 번호로 찾는다 — 달이 바뀐 직후에 결과를 보러 와도 404 가 아니다")
+    void 지난달_기록도_찾는다() {
+        // given — 7월 31일 밤에 시작한 기록
+        var 지난달_저장소 = new DynamoDbSyncRunRepository(client, properties,
+                Clock.fixed(Instant.parse("2026-07-31T23:59:00Z"), ZoneOffset.UTC));
+        var run = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.REBUILD).block();
+
+        // when — 8월 14일에 찾는다
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(found).isNotNull();
+        assertThat(found.runId()).isEqualTo(run.runId());
+    }
+
+    @Test
+    @DisplayName("없는 번호는 빈 결과다")
+    void 없는_번호는_빈_결과다() {
+        // given
+        repository.start(SyncSource.LDAP, SyncTrigger.MANUAL).block();
+
+        // when, then
+        assertThat(repository.findById("없는-번호").blockOptional()).isEmpty();
+    }
 }
