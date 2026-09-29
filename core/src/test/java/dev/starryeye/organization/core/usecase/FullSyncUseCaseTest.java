@@ -12,6 +12,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
@@ -20,8 +21,10 @@ import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -50,8 +53,9 @@ class FullSyncUseCaseTest {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
         runs = new FakeSyncRunRepository(고정시각);
-        useCase = new FullSyncUseCase(source, snapshots, state, writer, runs,
+        useCase = new FullSyncUseCase(source, snapshots, state, writer,
                 new DeletionGuard(DeletionGuardPolicy.defaults()),
+                new SyncJobs(runs, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
@@ -73,6 +77,13 @@ class FullSyncUseCaseTest {
                 .collect(Collectors.toSet());
     }
 
+    /** 동기화를 걸고 끝날 때까지 기다린다 — 동기화는 요청과 떼어 돈다(설계 2026-09-29 §4). */
+    private SyncRun 동기화한다(SyncTrigger trigger) {
+        SyncRun started = useCase.start(trigger, Mono::empty, run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
+    }
+
     @Test
     @DisplayName("최초 동기화는 읽어온 전체를 생성 대상으로 삼아 OpenFGA에 반영한다")
     void 최초_동기화는_전체를_생성한다() {
@@ -80,7 +91,7 @@ class FullSyncUseCaseTest {
         source.willReturn(조직도(Set.of("kim", "lee"), "DEV002"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -99,7 +110,7 @@ class FullSyncUseCaseTest {
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(snapshots.saved).hasSize(1);
@@ -119,7 +130,7 @@ class FullSyncUseCaseTest {
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -136,7 +147,7 @@ class FullSyncUseCaseTest {
         writer.failFor(tuple -> tuple.user().equals("user:lee"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.PARTIAL);
@@ -153,7 +164,7 @@ class FullSyncUseCaseTest {
         source.willReturn(DirectorySnapshot.empty());
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
@@ -170,7 +181,7 @@ class FullSyncUseCaseTest {
         source.willReturn(DirectorySnapshot.empty());
 
         // when
-        var run = useCase.execute(SyncTrigger.FORCED).block();
+        var run = 동기화한다(SyncTrigger.FORCED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -186,7 +197,7 @@ class FullSyncUseCaseTest {
         source.willFail(new IllegalStateException("LDAP 연결 실패"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
@@ -205,7 +216,7 @@ class FullSyncUseCaseTest {
         source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
 
         // when
-        useCase.execute(SyncTrigger.FORCED).block();
+        동기화한다(SyncTrigger.FORCED);
 
         // then
         assertThat(snapshots.saved.get(1).tuples()).containsExactlyInAnyOrder(
@@ -219,14 +230,14 @@ class FullSyncUseCaseTest {
         // given
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
         snapshots.failFindLatest(new SnapshotIntegrityException(
-                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요"));
+                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요"));
 
         // when
-        var run = useCase.execute(SyncTrigger.SCHEDULED).block();
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(run.message()).contains("mode=store");
+        assertThat(run.message()).contains("POST /admin/sync/rebuild");
         assertThat(writer.appliedDeltas).isEmpty();
         assertThat(snapshots.saved).isEmpty();
         assertThat(state.users).isEmpty();

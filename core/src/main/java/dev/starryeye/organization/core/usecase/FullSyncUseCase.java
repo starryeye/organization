@@ -14,7 +14,6 @@ import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
-import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
@@ -28,6 +27,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * LDAP 전체 동기화.
@@ -44,19 +45,16 @@ public class FullSyncUseCase {
     private final TupleSnapshotRepository snapshots;
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
-    private final SyncRunRepository runs;
     private final DeletionGuard guard;
+    private final SyncJobs jobs;
     private final Clock clock;
 
-    public Mono<SyncRun> execute(SyncTrigger trigger) {
-        return runs.start(SyncSource.LDAP, trigger)
-                .doOnNext(run -> log.info("[{}] 전체 동기화 시작: trigger={}", run.runId(), trigger))
-                .flatMap(run -> synchronize(trigger)
-                        .onErrorResume(error -> {
-                            log.error("[{}] 전체 동기화 실패", run.runId(), error);
-                            return Mono.just(SyncOutcome.failed(error.getMessage()));
-                        })
-                        .flatMap(outcome -> runs.finish(run, outcome)));
+    /**
+     * 실행 기록(RUNNING)을 열고 동기화를 요청과 떼어 띄운다(설계 2026-09-29 §4). 겹침 검사(실행 가드)는 호출자가 하고 그 반납 수단을
+     * 넘긴다 — 동기화가 어떻게 끝나든 한 번 불린다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
+     */
+    public Mono<SyncRun> start(SyncTrigger trigger, Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
+        return jobs.start(SyncSource.LDAP, trigger, Mono.defer(() -> synchronize(trigger)), release, onFinished);
     }
 
     private Mono<SyncOutcome> synchronize(SyncTrigger trigger) {
