@@ -6,7 +6,6 @@ import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
@@ -113,6 +112,19 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         // then — storeId 로 키를 잡으므로 격리 성질은 그대로다. 다른 store 는 다른 client 다
         assertThat(again).isSameAs(first);
         assertThat(other).isNotSameAs(first);
+    }
+
+    @Test
+    @DisplayName("인가 모델은 clientFor 가 주는 client 로 등록한다 — 모델 쓰기가 거듭 실패해도 시도마다 HTTP client 를 새로 만들지 않는다")
+    void 모델_등록은_storeId_별_client_를_쓴다() {
+        // given
+        StoreBootstrapper 부트스트래퍼 = new StoreBootstrapper(새_속성("shared-client-"));
+
+        // when
+        String 번호 = 부트스트래퍼.resolveStore().block(Duration.ofSeconds(10));
+
+        // then — Check 가 요청마다 준비 과정을 타므로, 모델 등록이 실패하는 동안 시도마다 client 가 하나씩 쌓이던 자리다
+        assertThat(부트스트래퍼.client()).isSameAs(부트스트래퍼.clientFor(번호));
     }
 
     @Test

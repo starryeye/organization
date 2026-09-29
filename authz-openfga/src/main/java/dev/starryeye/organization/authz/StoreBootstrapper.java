@@ -52,7 +52,7 @@ public class StoreBootstrapper {
     private final AtomicReference<OpenFgaClient> storelessClientRef = new AtomicReference<>();
     private final AtomicReference<String> storeIdRef = new AtomicReference<>();
 
-    /** {@link #clientFor(String)} 이 돌려주는 client 를 storeId 별로 재사용한다. {@code clientRef} 와는 별개의 캐시다. */
+    /** {@link #clientFor(String)} 이 돌려주는 client 를 storeId 별로 재사용한다. {@code clientRef} 는 모델 등록 뒤 여기의 것을 가리킨다. */
     private final ConcurrentMap<String, OpenFgaClient> readOnlyClients = new ConcurrentHashMap<>();
 
     /**
@@ -259,9 +259,12 @@ public class StoreBootstrapper {
     /**
      * 인가 모델을 쓴 <b>뒤에만</b> storeId 를 기억한다(점검 M6). 먼저 기억하면 모델 쓰기가 실패해도 캐시가 남아, 다음
      * {@link #resolveStore()} 가 캐시를 보고 다시 시도하지 않는다 — 이 프로세스는 재시작 전까지 모델 없는 store 에 쓰고 묻는다.
+     *
+     * <p>client 는 {@link #clientFor} 의 것을 쓴다. Check 도 요청마다 이 준비 과정을 타므로, 모델 쓰기가 계속 실패하는 동안 시도마다
+     * 새로 만들면 HTTP client 가 시도 수만큼 쌓인다.
      */
     private Mono<String> attachAndWriteModel(String storeId) {
-        return Mono.fromCallable(() -> newClient(storeId))
+        return Mono.fromCallable(() -> clientFor(storeId))
                 .flatMap(client -> Mono.fromFuture(() -> {
                             try {
                                 return client.writeAuthorizationModel(authorizationModel());

@@ -44,6 +44,32 @@ class InterruptedRunCleanupTest {
     }
 
     @Test
+    @DisplayName("기록 하나를 닫지 못해도 나머지는 닫는다 — 한 건의 실패가 뒤의 RUNNING 을 영원히 남기지 않는다")
+    void 하나를_못_닫아도_나머지는_닫는다() {
+        // given — 최신순으로 앞·고장·뒤를 읽는다. 가운데 기록만 닫기가 실패한다
+        var runs = new FakeSyncRunRepository(지금) {
+            @Override
+            public Mono<SyncRun> finish(SyncRun run, SyncOutcome outcome) {
+                return run.runId().equals("ldap-고장")
+                        ? Mono.error(new IllegalStateException("DynamoDB 일시 장애"))
+                        : super.finish(run, outcome);
+            }
+        };
+        runs.seed(SyncRun.started("ldap-뒤", SyncSource.LDAP, SyncTrigger.MANUAL, 지금.minusSeconds(90)));
+        runs.seed(SyncRun.started("ldap-고장", SyncSource.LDAP, SyncTrigger.MANUAL, 지금.minusSeconds(60)));
+        runs.seed(SyncRun.started("ldap-앞", SyncSource.LDAP, SyncTrigger.REBUILD, 지금.minusSeconds(30)));
+
+        // when
+        new InterruptedRunCleanup(runs).afterPropertiesSet();
+
+        // then
+        assertThat(runs.findById("ldap-앞").block().status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(runs.findById("ldap-고장").block().status()).isEqualTo(SyncStatus.RUNNING);
+        assertThat(runs.findById("ldap-뒤").block().status())
+                .as("앞의 실패로 멈추면 이 기록은 다음 재시작까지 RUNNING 으로 남는다").isEqualTo(SyncStatus.FAILED);
+    }
+
+    @Test
     @DisplayName("기록을 읽지 못해도 앱 시작을 막지 않는다")
     void 읽지_못해도_시작을_막지_않는다() {
         // given

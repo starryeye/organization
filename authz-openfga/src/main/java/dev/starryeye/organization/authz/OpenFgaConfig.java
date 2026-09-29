@@ -33,7 +33,7 @@ public class OpenFgaConfig {
 
     /** 재적재의 장부 훑기. Read API 를 쓰는 유일한 빈이다 — 판단·쓰기 경로에 주입하지 않는다. */
     @Bean
-    public RelationTupleScanner relationTupleScanner(StoreBootstrapper bootstrapper) {
-        return new OpenFgaRelationTupleScanner(bootstrapper);
+    public RelationTupleScanner relationTupleScanner(StoreBootstrapper bootstrapper, OpenFgaProperties properties) {
+        return new OpenFgaRelationTupleScanner(bootstrapper, properties);
     }
 }

@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.port.SyncRunRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.List;
@@ -39,7 +40,12 @@ public class InterruptedRunCleanup implements InitializingBean {
         try {
             List<SyncRun> 닫은것 = runs.findRecent(살펴볼_기록)
                     .filter(run -> run.source() == SyncSource.LDAP && run.status() == SyncStatus.RUNNING)
-                    .concatMap(run -> runs.finish(run, SyncOutcome.failed(사유)))
+                    // 한 건을 못 닫아도 나머지는 닫는다 — 여기서 멈추면 뒤의 기록이 다음 재시작까지 RUNNING 으로 남는다
+                    .concatMap(run -> runs.finish(run, SyncOutcome.failed(사유))
+                            .onErrorResume(error -> {
+                                log.warn("실행 기록 {} 를 닫지 못했다. 다음 기록으로 넘어간다", run.runId(), error);
+                                return Mono.empty();
+                            }))
                     .collectList()
                     .block(Duration.ofSeconds(30));
             if (닫은것 != null && !닫은것.isEmpty()) {

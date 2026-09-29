@@ -11,7 +11,9 @@ import dev.starryeye.organization.core.port.RelationTupleScanner;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -31,6 +33,7 @@ public class OpenFgaRelationTupleScanner implements RelationTupleScanner {
     static final int PAGE_SIZE = 100;
 
     private final StoreBootstrapper bootstrapper;
+    private final OpenFgaProperties properties;
 
     @Override
     public Flux<RelationTuple> scanAll() {
@@ -43,20 +46,25 @@ public class OpenFgaRelationTupleScanner implements RelationTupleScanner {
                 .map(tuple -> 줄로(tuple.getKey()));
     }
 
+    /**
+     * 한 페이지를 읽는다. 실패하면 그 페이지만 쓰기와 같은 정책으로 다시 읽는다 — 약 1,100번 중 한 번의 흔들림으로 재적재 전체가
+     * 실패하지 않게. 처음부터 다시 훑지 않는다(이미 흘려 보낸 줄이 두 번 나온다).
+     */
     private Mono<ClientReadResponse> 읽는다(String storeId, String continuationToken) {
         return Mono.fromFuture(() -> {
-            try {
-                ClientReadOptions options = new ClientReadOptions()
-                        .pageSize(PAGE_SIZE)
-                        .consistency(ConsistencyPreference.HIGHER_CONSISTENCY);
-                if (continuationToken != null) {
-                    options.continuationToken(continuationToken);
-                }
-                return bootstrapper.clientFor(storeId).read(new ClientReadRequest(), options);
-            } catch (Exception e) {
-                throw new IllegalStateException("OpenFGA read 호출 실패", e);
-            }
-        });
+                    try {
+                        ClientReadOptions options = new ClientReadOptions()
+                                .pageSize(PAGE_SIZE)
+                                .consistency(ConsistencyPreference.HIGHER_CONSISTENCY);
+                        if (continuationToken != null) {
+                            options.continuationToken(continuationToken);
+                        }
+                        return bootstrapper.clientFor(storeId).read(new ClientReadRequest(), options);
+                    } catch (Exception e) {
+                        throw new IllegalStateException("OpenFGA read 호출 실패", e);
+                    }
+                })
+                .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(200)));
     }
 
     private static boolean 다음이_있다(ClientReadResponse page) {

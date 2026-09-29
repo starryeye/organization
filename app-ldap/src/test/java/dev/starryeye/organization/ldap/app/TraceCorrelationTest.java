@@ -27,6 +27,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -111,8 +114,18 @@ class TraceCorrelationTest {
     void 로그를_가로챈다() {
         logger = (Logger) LoggerFactory.getLogger("dev.starryeye.organization");
         appender = new ListAppender<>();
+        // ListAppender 의 기본 목록은 ArrayList 이고 appender 자신의 잠금으로만 쓴다. 목록 자체로 잠그는 목록으로 바꿔야
+        // 아래 로그() 의 복사가 작업 스레드의 쓰기와 겹치지 않는다
+        appender.list = Collections.synchronizedList(new ArrayList<>());
         appender.start();
         logger.addAppender(appender);
+    }
+
+    /** 지금까지 찍힌 로그의 사본. 작업은 요청과 떼어 돌아(SyncJobs) 단언하는 동안에도 로그를 더할 수 있다. */
+    private List<ILoggingEvent> 로그() {
+        synchronized (appender.list) {
+            return new ArrayList<>(appender.list);
+        }
     }
 
     @AfterEach
@@ -130,7 +143,7 @@ class TraceCorrelationTest {
 
         // then — LDAP 읽기 완료 로그는 boundedElastic 스레드에서 찍힌다.
         // 이 줄에 traceId 가 있으면 블로킹 격리를 넘어 전파된 것이다.
-        var ldap로그 = appender.list.stream()
+        var ldap로그 = 로그().stream()
                 .filter(event -> event.getFormattedMessage().contains("LDAP 에서 직원"))
                 .findFirst();
         assertThat(ldap로그).as("LDAP 읽기 로그를 찾지 못하면 이 테스트는 아무것도 검증하지 못한다")
@@ -141,7 +154,7 @@ class TraceCorrelationTest {
                 .isNotBlank();
 
         // then — 요청 전체가 하나의 trace 로 묶인다
-        var traceIds = appender.list.stream()
+        var traceIds = 로그().stream()
                 .map(event -> event.getMDCPropertyMap().get("traceId"))
                 .distinct()
                 .toList();
@@ -156,7 +169,7 @@ class TraceCorrelationTest {
 
         // then
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            var 완료로그 = appender.list.stream()
+            var 완료로그 = 로그().stream()
                     .filter(event -> event.getFormattedMessage().contains("스케줄 동기화 완료"))
                     .findFirst();
             assertThat(완료로그).as("예약 동기화가 완료 로그를 남겨야 한다").isPresent();

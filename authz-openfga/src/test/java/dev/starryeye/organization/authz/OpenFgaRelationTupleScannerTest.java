@@ -1,5 +1,6 @@
 package dev.starryeye.organization.authz;
 
+import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
@@ -7,8 +8,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -25,7 +28,7 @@ class OpenFgaRelationTupleScannerTest extends OpenFgaTestSupport {
     @BeforeEach
     void 어댑터를_준비한다() {
         writer = new OpenFgaRelationTupleWriter(bootstrapper, properties);
-        scanner = new OpenFgaRelationTupleScanner(bootstrapper);
+        scanner = new OpenFgaRelationTupleScanner(bootstrapper, properties);
     }
 
     @Test
@@ -41,6 +44,36 @@ class OpenFgaRelationTupleScannerTest extends OpenFgaTestSupport {
         List<RelationTuple> 읽은것 = scanner.scanAll().collectList().block();
 
         // then — 개수까지 본다. 같은 줄을 두 번 읽어도 집합 비교만으로는 모른다
+        assertThat(읽은것).hasSize(250);
+        assertThat(Set.copyOf(읽은것)).isEqualTo(쓴것);
+    }
+
+    @Test
+    @DisplayName("페이지 하나를 읽다 한 번 실패해도 그 페이지만 다시 읽고 끝까지 간다 — 약 1,100번 중 한 번의 흔들림으로 재적재 전체가 실패하지 않는다")
+    void 페이지_읽기가_한번_실패해도_다시_읽는다() {
+        // given — 세 페이지 중 둘째 페이지를 처음 읽을 때만 실패한다
+        Set<RelationTuple> 쓴것 = IntStream.range(0, 250)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet());
+        writer.apply(TupleDelta.writeOnly(쓴것)).block();
+        AtomicInteger 읽기 = new AtomicInteger();
+        StoreBootstrapper 흔들리는_부트스트래퍼 = new StoreBootstrapper(properties) {
+            @Override
+            public OpenFgaClient clientFor(String storeId) {
+                if (읽기.incrementAndGet() == 2) {
+                    throw new IllegalStateException("일시적인 연결 끊김");
+                }
+                return super.clientFor(storeId);
+            }
+        };
+        흔들리는_부트스트래퍼.resolveStore().block();
+        읽기.set(0);
+
+        // when
+        List<RelationTuple> 읽은것 = new OpenFgaRelationTupleScanner(흔들리는_부트스트래퍼, properties)
+                .scanAll().collectList().block(Duration.ofSeconds(30));
+
+        // then — 개수까지 본다. 처음부터 다시 읽으면 첫 페이지가 두 번 나온다
         assertThat(읽은것).hasSize(250);
         assertThat(Set.copyOf(읽은것)).isEqualTo(쓴것);
     }
