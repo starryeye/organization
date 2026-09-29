@@ -30,6 +30,8 @@ ldap:
   bind-dn: cn=admin,dc=example,dc=com
   bind-password: adminpassword
   page-size: 500
+  connect-timeout: 10s
+  read-timeout: 150s
   strategy: group-of-names
   group-of-names:
     user-search-base: ou=people

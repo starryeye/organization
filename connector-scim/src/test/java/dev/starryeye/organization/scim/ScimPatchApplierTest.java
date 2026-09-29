@@ -105,16 +105,99 @@ class ScimPatchApplierTest {
     }
 
     @Test
-    @DisplayName("작은따옴표로 감싼 필터 값도 인식한다")
-    void 작은따옴표_필터도_인식한다() {
-        // given — IdP 에 따라 작은따옴표를 쓴다
+    @DisplayName("작은따옴표로 감싼 필터 값은 400 invalidFilter 다 — RFC 7644 는 큰따옴표 JSON 문자열만 정한다")
+    void 작은따옴표_필터는_거절한다() {
+        // given
         var before = 조직(MemberRef.user("kim"), MemberRef.user("lee"));
 
+        // when, then
+        assertThatThrownBy(() -> 적용한다(before, 패치("remove", "members[value eq 'kim']", null), USER_ONLY))
+                .isInstanceOfSatisfying(ScimException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getScimType()).isEqualTo("invalidFilter");
+                });
+    }
+
+    @Test
+    @DisplayName("대괄호 안 공백은 한 칸만 받는다 — RFC 7644 ABNF 는 SP 하나만 정한다(가드)")
+    void 대괄호_안_공백은_한_칸만_받는다() {
+        // given
+        var before = 조직(MemberRef.user("kim"));
+
+        // when, then — 대괄호 안 앞뒤 공백, 토큰 사이 두 칸 공백 모두 거절한다
+        for (String path : List.of(
+                "members[ value eq \"kim\" ]",
+                "members[value  eq \"kim\"]")) {
+            assertThatThrownBy(() -> 적용한다(before, 패치("remove", path, null), USER_ONLY))
+                    .as(path)
+                    .isInstanceOfSatisfying(ScimException.class, e -> {
+                        assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(e.getScimType()).isEqualTo("invalidFilter");
+                    });
+        }
+    }
+
+    @Test
+    @DisplayName("아이디에 작은따옴표가 든 멤버(o'brien)도 필터 remove 로 빠진다")
+    void 작은따옴표가_든_아이디를_뺀다() {
+        // given — 아이디는 userName 에서 오고 IdNormalizer 는 ' 를 남긴다
+        var before = 조직(MemberRef.user("o'brien@corp.com"), MemberRef.user("lee"));
+
         // when
-        var after = 적용한다(before, 패치("remove", "members[value eq 'kim']", null), USER_ONLY);
+        var after = 적용한다(before, 패치("remove", "members[value eq \"o'brien@corp.com\"]", null), USER_ONLY);
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("필터 값의 JSON 이스케이프를 푼다 — \\\" 는 큰따옴표 한 글자다")
+    void 이스케이프를_푼다() {
+        // given
+        var before = 조직(MemberRef.user("a\"b"), MemberRef.user("lee"));
+
+        // when
+        var after = 적용한다(before, 패치("remove", "members[value eq \"a\\\"b\"]", null), USER_ONLY);
+
+        // then
+        assertThat(after.members()).containsExactly(MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("속성 이름의 대소문자는 가리지 않고, 값 안의 ] 도 값이다")
+    void 대소문자와_값_안의_괄호() {
+        // given
+        var before = 조직(MemberRef.user("kim"), MemberRef.user("x]y"), MemberRef.user("lee"));
+
+        // when
+        var after = 적용한다(before, new ScimPatchOp(List.of(ScimSchemas.PATCH_OP), List.of(
+                new ScimOperation("remove", "Members[Value eq \"kim\"]", null),
+                new ScimOperation("remove", "members[value eq \"x]y\"]", null))), USER_ONLY);
+
+        // then
+        assertThat(after.members()).containsExactly(MemberRef.user("lee"));
+    }
+
+    @Test
+    @DisplayName("value eq \"…\" 한 항이 아니거나 값이 비면 400 invalidPath 다 — 500 으로 새지 않는다")
+    void 한_항이_아니면_거절한다() {
+        // given
+        var before = 조직(MemberRef.user("kim"));
+
+        // when, then
+        for (String path : List.of(
+                "members[value eq \"kim\" and value eq \"lee\"]",
+                "members[display eq \"kim\"]",
+                "members[value eq true]",
+                "members[value eq \"\"]",
+                "members[value eq \"   \"]")) {
+            assertThatThrownBy(() -> 적용한다(before, 패치("remove", path, null), USER_ONLY))
+                    .as(path)
+                    .isInstanceOfSatisfying(ScimException.class, e -> {
+                        assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(e.getScimType()).isEqualTo("invalidPath");
+                    });
+        }
     }
 
     @Test

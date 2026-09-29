@@ -46,6 +46,12 @@ OpenFGA에는 지금 어떤 튜플이 있는지 물어볼 수 있는 read API가
 현재상태는 "LDAP/SCIM에서 읽은 사실 그대로", 스냅샷은 "OpenFGA에 실제로 반영된 것"이다. 부분
 실패가 나면 둘이 갈린다.
 
+**최신 스냅샷은 기간과 상관없이 남는다.** 스냅샷은 `dynamodb.snapshot-retention-days`(기본 7일) 동안 보관하고, 매일 정리 작업이
+지난 것을 지운다 — 다만 **최신 포인터가 가리키는 스냅샷은 건너뛴다.** 새 스냅샷은 변경이 있고 끝까지 간 회차만 만들므로, 삭제 가드
+중단이나 LDAP 장애가 보존 기간보다 길게 이어져도 비교 기준이 사라지지 않는다. 스냅샷에는 테이블 TTL 을 쓰지 않는다.
+기준선을 온전히 읽지 못하면(포인터가 가리키는 스냅샷의 메타가 없거나 튜플 수가 다르면) 빈 기준선으로 넘어가지 않고 그 회차를
+FAILED 로 끝낸다 — `POST /admin/sync/rebuild?mode=store` 로 복구한다.
+
 ## 인가 모델
 
 ```
@@ -110,8 +116,8 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 
 **S-1(SCIM 목록·필터)도 키를 바꾼다** — GSI1 정렬키가 소문자가 되고(`userName`·조직명을 대소문자 없이 찾기 위해)
 `externalId` 로 찾는 GSI3 가 생기고, 테이블 TTL(`expiresAt`)이 켜진다. 이 TTL 은 책갈피 전용이 아니다 —
-페이지 책갈피뿐 아니라 이미 `expiresAt` 을 갖고 있던 튜플 스냅샷·동기화 실행 이력·쓰기 락 아이템도 함께
-만료시킨다. 기존 테이블은 다시 만들어야 한다.
+페이지 책갈피뿐 아니라 동기화 실행 이력·쓰기 락 아이템도 함께 만료시킨다(튜플 스냅샷은 TTL 을 쓰지 않는다 — 위 "스냅샷이 왜 있는가").
+기존 테이블은 다시 만들어야 한다.
 
 직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
 GSI2(파티션키 `GSI1PK`, 정렬키 `displayName`, 프로젝션 `INCLUDE` — `userName`·`active`), GSI3(파티션키
@@ -276,6 +282,13 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 DN, 멤버가 하나도 대조되지 않는 설정이 여기 속한다 — 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
 통신이 끊기는 것 같은 일시적 실패만 설정한 횟수(`ldap.max-retries`)만큼 다시 읽는다.
 
+**연결·응답에 타임아웃이 있다.** `ldap.connect-timeout`(기본 10초)과 `ldap.read-timeout`(기본 150초)이다. **인증(bind) 응답
+대기는 connect-timeout 이 끊는다** — bindDn 을 쓰는 컨텍스트 생성은 곧 동기 bind 라, JNDI LDAP provider 가 그 응답을
+read-timeout 이 아니라 connect-timeout 으로 재기 때문이다. **인증 이후 응답(예: 페이징 중 다음 페이지) 대기는 read-timeout
+이 끊는다.** 어느 쪽이든 죽은 연결에 물리면 타임아웃으로 실패하고, 일시 장애로 보고 `ldap.max-retries` 만큼 처음부터 다시
+읽는다 — 그래도 안 되면 그 회차는 FAILED 이고 다음 회차는 정상으로 돈다. 읽기 기본값은 AD 가 검색 하나에 허용하는 최대 시간
+(120초, `MaxQueryDuration`)보다 길게 잡았다. 한 페이지 응답이 이보다 오래 걸리는 디렉터리라면 늘린다.
+
 **이름은 표준 속성에서 읽는다** — `givenName`→이름, `sn`→성, `generationQualifier`→접미(Jr. 등), AD 의 `middleName`→중간
 이름. 속성이 없으면 빈칸이다. admin 직원 상세(`GET /admin/employees/{employeeId}`)의 `name` 에 나온다.
 
@@ -313,7 +326,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | 대상 | `path` | 지원 `op` |
 |---|---|---|
 | Group | `members` | `add` / `replace` / `remove` — `value` 가 없으면 전원 빼기(RFC 7644 §3.5.2.2), **`value` 가 있으면 400 `invalidValue`** |
-| Group | `members[value eq "..."]` | `remove` |
+| Group | `members[value eq "..."]` | `remove` — 값은 큰따옴표 JSON 문자열(이스케이프 풀림). 작은따옴표로 감싸면 400 `invalidFilter`. 토큰 사이 공백은 한 칸 |
 | Group | `displayName` | `replace` / `add` |
 | Group | (path 없음) | `replace` / `add` — `displayName` 은 바꾸고, `members` 는 `add` 면 추가·`replace` 면 교체(RFC 7644 §3.5.2.1·§3.5.2.3) |
 | User | `userName` | `replace` / `add`(null·빈 문자열·공백만이면 400 `invalidValue`) (`remove` 는 400 `mutability` — 필수 속성) |
@@ -470,3 +483,7 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 
 **OpenFGA 서버 v1.10.0 이상**이어야 한다. `on_duplicate` / `on_missing` 멱등 옵션이 그
 버전부터 제공되며, 이것이 없으면 재적재와 재실행이 배치 단위로 통째로 실패한다.
+
+**OpenFGA Check 캐시를 켜도 된다.** 이 서버가 부르는 Check·BatchCheck 는 `HIGHER_CONSISTENCY` 로 캐시를 우회한다 — 쓰기 전 기준선이
+캐시된 답이면 넣고 곧바로 뺀 멤버의 튜플이 안 지워지기 때문이다. 권한을 묻는 다른 앱의 Check 는 캐시를 그대로 쓴다.
+(`HIGHER_CONSISTENCY` 는 OpenFGA v1.5.7 부터 있다 — 위 v1.10.0 요구에 포함된다.)

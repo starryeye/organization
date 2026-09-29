@@ -5,6 +5,9 @@ import dev.openfga.sdk.api.client.model.ClientBatchCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientBatchCheckResponse;
 import dev.openfga.sdk.api.client.model.ClientBatchCheckSingleResponse;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.openfga.sdk.api.configuration.ClientBatchCheckOptions;
+import dev.openfga.sdk.api.configuration.ClientCheckOptions;
+import dev.openfga.sdk.api.model.ConsistencyPreference;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import lombok.RequiredArgsConstructor;
@@ -36,6 +39,13 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
      */
     private static final int BATCH_SIZE = 50;
 
+    /**
+     * 캐시가 아니라 지금 실제로 있는 것을 묻는다(점검 C8). 쓰기 경로는 Check 결과를 "지금 있는 것"으로 보고 무엇을 쓰고 지울지 정한다 —
+     * OpenFGA Check 캐시를 켜면 기본(MINIMIZE_LATENCY)은 캐시된 답을 줘, 넣고 곧바로 뺀 멤버의 튜플이 안 지워진다. 관리 조회·아카이빙도
+     * "실제"를 보여 주는 자리라 같은 규칙을 쓴다. 권한을 묻는 다른 앱은 계속 캐시를 쓸 수 있다.
+     */
+    private static final ConsistencyPreference 실제_값 = ConsistencyPreference.HIGHER_CONSISTENCY;
+
     private final StoreBootstrapper bootstrapper;
 
     @Override
@@ -46,9 +56,10 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                 .flatMap(storeId -> Mono.fromFuture(() -> {
                             try {
                                 return bootstrapper.clientFor(storeId).check(new ClientCheckRequest()
-                                        .user(tuple.user())
-                                        .relation(tuple.relation())
-                                        ._object(tuple.object()));
+                                                .user(tuple.user())
+                                                .relation(tuple.relation())
+                                                ._object(tuple.object()),
+                                        new ClientCheckOptions().consistency(실제_값));
                             } catch (Exception e) {
                                 throw new IllegalStateException("OpenFGA check 호출 실패", e);
                             }
@@ -99,7 +110,8 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
         return Mono.fromFuture(() -> {
                     try {
                         return bootstrapper.clientFor(storeId)
-                                .batchCheck(new ClientBatchCheckRequest().checks(items));
+                                .batchCheck(new ClientBatchCheckRequest().checks(items),
+                                        new ClientBatchCheckOptions().consistency(실제_값));
                     } catch (Exception e) {
                         throw new IllegalStateException("OpenFGA batchCheck 호출 실패", e);
                     }

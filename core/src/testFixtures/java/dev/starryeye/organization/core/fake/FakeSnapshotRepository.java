@@ -15,8 +15,18 @@ public class FakeSnapshotRepository implements TupleSnapshotRepository {
     public final List<TupleSnapshot> saved = new ArrayList<>();
     public final AtomicInteger resetCount = new AtomicInteger();
 
+    private RuntimeException findLatestError;
+
+    /** 기준선이 깨진 저장소를 흉내 낸다 — findLatest 가 이 오류로 끝난다. */
+    public void failFindLatest(RuntimeException error) {
+        this.findLatestError = error;
+    }
+
     @Override
     public Mono<TupleSnapshot> findLatest() {
+        if (findLatestError != null) {
+            return Mono.error(findLatestError);
+        }
         return saved.isEmpty() ? Mono.empty() : Mono.just(saved.get(saved.size() - 1));
     }
 
