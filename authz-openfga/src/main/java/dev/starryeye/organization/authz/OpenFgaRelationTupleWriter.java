@@ -11,6 +11,7 @@ import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleFailure;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
@@ -23,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
@@ -59,11 +61,14 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
     }
 
     /**
-     * 배치를 차례로 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 오류로 끝낸다(점검 C7, 설계 §5).
+     * 배치를 차례로 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
+     * 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 멈추기 전까지의 결과(멈추게 한 배치까지)에 보내지 않은 배치를 실패로 더한 것이다 —
+     * 호출자가 이미 나간 쓰기로 기록 규칙을 지킨다.
      *
      * <p>OpenFGA 가 느리거나 죽으면 배치마다 재시도를 거친 뒤 실패로 넘어가는데, 10만 명 재적재는 배치가 약 1,100개라 전부 그렇게 돌면
      * 수십 분 동안 락을 쥔다. 연달아 실패하는 것은 대개 한 배치가 아니라 OpenFGA 의 문제다. 드문 실패 한두 건은 지금처럼 결과의
-     * {@code failures} 로 넘겨 PARTIAL 이 되게 둔다. 배치가 셋보다 적은 쓰기(SCIM 요청 한 건)는 해당이 없다.
+     * {@code failures} 로 넘겨 PARTIAL 이 되게 둔다. 배치가 셋보다 적은 쓰기는 해당이 없다 — SCIM 요청 한 건은 대개 여기에 든다.
+     * 멤버가 200명 넘게 바뀌는 조직 PATCH·PUT 은 예외로, 멈추면 5xx 가 되고 IdP 재시도가 Check 기준선으로 수렴한다.
      *
      * <p>패키지 전용 — 멈추는 규칙을 OpenFGA 없이 단위 테스트로 고정한다.
      */
@@ -71,22 +76,28 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                                      Function<Batch, Mono<TupleWriteResult>> send) {
         return Mono.defer(() -> {
             AtomicInteger 연속_실패 = new AtomicInteger();
+            AtomicReference<TupleWriteResult> 지금까지 = new AtomicReference<>(TupleWriteResult.empty());
             return Flux.fromIterable(batches)
                     .index()
                     .concatMap(indexed -> send.apply(indexed.getT2()).flatMap(result -> {
+                        TupleWriteResult 누적 = 지금까지.accumulateAndGet(result, OpenFgaRelationTupleWriter::merge);
                         if (!result.hasFailure()) {
                             연속_실패.set(0);
-                            return Mono.just(result);
+                            return Mono.just(누적);
                         }
                         if (연속_실패.incrementAndGet() < 연속_실패_한도) {
-                            return Mono.just(result);
+                            return Mono.just(누적);
                         }
-                        long 남은_배치 = batches.size() - indexed.getT1() - 1;
-                        return Mono.<TupleWriteResult>error(new IllegalStateException(
+                        List<Batch> 남은_배치 = batches.subList(Math.toIntExact(indexed.getT1()) + 1, batches.size());
+                        TupleWriteResult partial = 남은_배치.stream()
+                                .map(batch -> batch.failed("연속 실패로 보내지 않음"))
+                                .reduce(누적, OpenFgaRelationTupleWriter::merge);
+                        return Mono.<TupleWriteResult>error(new TupleWriteAbortedException(
                                 "OpenFGA 쓰기 배치가 %d번 연달아 실패해 남은 %d개 배치를 보내지 않고 멈췄다 — 마지막 오류: %s"
-                                        .formatted(연속_실패_한도, 남은_배치, result.failures().get(0).reason())));
+                                        .formatted(연속_실패_한도, 남은_배치.size(), result.failures().get(0).reason()),
+                                partial));
                     }))
-                    .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+                    .last(TupleWriteResult.empty());
         });
     }
 

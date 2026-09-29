@@ -147,18 +147,15 @@ public class ScimRebuildUseCase {
 
     /**
      * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 의도한 것을 담으면 부분 실패 뒤 스냅샷이 장부보다 앞서게
-     * 되고, 그 기록을 믿는 다음 판단이 전부 어긋난다.
+     * 되고, 그 기록을 믿는 다음 판단이 전부 어긋난다. 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다(설계 §5).
      */
     private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation) {
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
                 SnapshotIds.generate(now, SyncSource.SCIM), now, SyncSource.SCIM, reconciliation.ledger());
-        TupleWriteResult result = reconciliation.result();
 
         return snapshots.save(snapshot)
-                .thenReturn(result.hasFailure()
-                        ? SyncOutcome.partial(result, snapshot.id())
-                        : SyncOutcome.succeeded(result, snapshot.id()));
+                .thenReturn(reconciliation.outcome(snapshot.id()));
     }
 
     // ---------- WIPE ----------
@@ -170,9 +167,10 @@ public class ScimRebuildUseCase {
         return TupleReconciler.reconcile(writer, scanner, Set.of()).flatMap(reconciliation -> {
             TupleWriteResult result = reconciliation.result();
             if (result.hasFailure()) {
+                String 멈춘_이유 = reconciliation.stopReason() == null ? "" : " — 멈춘 이유: " + reconciliation.stopReason();
                 return Mono.error(new IllegalStateException(
-                        "장부에서 %d줄을 지우지 못해 조직도를 지우지 않았다. 다시 실행하면 남은 줄부터 지운다"
-                                .formatted(result.failures().size())));
+                        "장부에서 %d줄을 지우지 못해 조직도를 지우지 않았다. 다시 실행하면 남은 줄부터 지운다%s"
+                                .formatted(result.failures().size(), 멈춘_이유)));
             }
             return state.replaceWith(DirectorySnapshot.empty())
                     .thenReturn(SyncOutcome.succeeded(result, null))

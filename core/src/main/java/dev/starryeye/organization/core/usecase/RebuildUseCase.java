@@ -6,7 +6,6 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
-import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
@@ -64,17 +63,17 @@ public class RebuildUseCase {
         });
     }
 
-    /** 스냅샷에는 장부에 실제로 있다고 볼 줄을 담는다(설계 §3.1 4단계). 그다음 현재상태를 LDAP 대로 바꾼다. */
+    /**
+     * 스냅샷에는 장부에 실제로 있다고 볼 줄을 담는다(설계 §3.1 4단계). 그다음 현재상태를 LDAP 대로 바꾼다. 지우기가 차단기로 멈췄어도
+     * 같다 — 기록 규칙을 지킨 뒤 FAILED 로 남긴다(설계 §5).
+     */
     private Mono<SyncOutcome> commit(DirectorySnapshot directory, TupleReconciler.Reconciliation reconciliation) {
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
                 SnapshotIds.generate(now, SyncSource.LDAP), now, SyncSource.LDAP, reconciliation.ledger());
-        TupleWriteResult result = reconciliation.result();
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory)))
-                .thenReturn(result.hasFailure()
-                        ? SyncOutcome.partial(result, snapshot.id())
-                        : SyncOutcome.succeeded(result, snapshot.id()));
+                .thenReturn(reconciliation.outcome(snapshot.id()));
     }
 }

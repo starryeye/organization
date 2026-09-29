@@ -225,6 +225,36 @@ class FullSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("쓰기가 연속 실패 차단기로 멈춰도 이미 나간 쓰기로 스냅샷과 현재상태를 남기고 FAILED 다 — 기준선이 장부를 따라간다")
+    void 차단기로_멈춰도_나간_쓰기를_기록한다() {
+        // given — 직전 kim, lee / 목표 kim, park, choi. lee 지우기와 park 쓰기는 나갔고 choi 는 실패한 채 멈춘다
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("kim", "DEV002"),
+                       RelationTuple.directMember("lee", "DEV002")))).block();
+        source.willReturn(조직도(Set.of("kim", "park", "choi"), "DEV002"));
+        writer.failFor(tuple -> tuple.user().equals("user:choi"));
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 멈췄다는 사실은 FAILED 로, 건수는 실제로 나간 것으로 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(run.writtenCount()).isEqualTo(1);
+        assertThat(run.deletedCount()).isEqualTo(1);
+        assertThat(run.failureCount()).isEqualTo(1);
+
+        // then — 새 스냅샷 = 직전 − 지운 것 + 쓴 것. 저장하지 않으면 다음 회차가 이미 지운 lee 를 "있다"고 믿는다
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(run.snapshotId()).isEqualTo(snapshots.saved.get(1).id());
+        assertThat(snapshots.saved.get(1).tuples()).containsExactlyInAnyOrder(
+                RelationTuple.directMember("kim", "DEV002"),
+                RelationTuple.directMember("park", "DEV002"));
+        assertThat(state.users).containsOnlyKeys("kim", "park", "choi");
+    }
+
+    @Test
     @DisplayName("기준선 스냅샷이 깨져 있으면 아무것도 쓰지 않고 FAILED 로 끝나며, 이유에 복구 방법이 남는다")
     void 기준선이_깨지면_쓰지_않고_FAILED() {
         // given

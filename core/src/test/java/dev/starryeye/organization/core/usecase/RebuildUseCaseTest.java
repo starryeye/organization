@@ -202,6 +202,46 @@ class RebuildUseCaseTest {
     }
 
     @Test
+    @DisplayName("지우기가 연속 실패 차단기로 멈추면 FAILED 지만 스냅샷은 남는다 — 쓴 줄과 지우지 못한 줄을 담는다")
+    void 지우기가_차단기로_멈춰도_스냅샷을_남긴다() {
+        // given — 찌꺼기 지우기가 실패한 채 멈춘다
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.failFor(찌꺼기::equals);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then — 찌꺼기는 장부에 아직 있으니 스냅샷에도 있어야 다음 동기화가 다시 지운다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(run.snapshotId()).isEqualTo(snapshots.saved.get(0).id());
+        assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김_백엔드, 찌꺼기);
+        assertThat(state.users).containsOnlyKeys("kim");
+    }
+
+    @Test
+    @DisplayName("쓰기가 연속 실패 차단기로 멈추면 장부를 훑지 않고 스냅샷도 만들지 않은 채 FAILED 다 — 지울 줄을 모른다")
+    void 쓰기가_차단기로_멈추면_훑지_않는다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.abortWhen(delta -> !delta.toWrite().isEmpty());
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then — 쓰기 단계에서 멈췄으니 3단계(훑어서 지우기)로 가지 않는다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(scanner.scanCount).hasValue(0);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(state.users).isEmpty();
+        assertThat(writer.stored).contains(찌꺼기);
+    }
+
+    @Test
     @DisplayName("RUNNING 기록을 곧바로 주고, 끝나면 반납 수단과 onFinished 를 한 번씩 부른다")
     void 기록을_곧바로_주고_끝나면_반납한다() {
         // given

@@ -129,14 +129,28 @@ class SyncJobsTest {
     }
 
     @Test
+    @DisplayName("메시지 없는 오류로 끝나도 이유를 비우지 않는다 — 오류 이름으로 FAILED 를 기록한다")
+    void 메시지_없는_오류는_이름으로_기록한다() {
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(건다(Mono.error(new IllegalStateException())).runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(끝난것.message()).isEqualTo("IllegalStateException");
+    }
+
+    @Test
     @DisplayName("서버가 내려가면 도는 작업을 멈추고 FAILED(서버 종료로 중단)로 기록한 뒤 반납한다")
     void 서버가_내려가면_멈춘다() {
-        // given — 일이 실제로 도는 중에 내려간다. RUNNING 을 받은 직후엔 아직 일을 구독하기 전일 수 있다
+        // given — 일이 실제로 도는 중에 내려간다. RUNNING 을 받은 직후엔 아직 일을 구독하기 전일 수 있다.
+        // 반납은 늦게 끝난다(락 반납은 DynamoDB 호출이다) — 종료가 기다리지 않으면 아래 단언이 반납·기록보다 먼저 돈다
         AtomicBoolean 시작됨 = new AtomicBoolean();
         AtomicBoolean 취소됨 = new AtomicBoolean();
-        SyncRun 열린것 = 건다(Mono.<SyncOutcome>never()
+        Supplier<Mono<Void>> 늦은_반납 = () -> Mono.delay(Duration.ofMillis(300))
+                .then(Mono.fromRunnable(반납::incrementAndGet));
+        SyncRun 열린것 = jobs.start(SyncSource.LDAP, SyncTrigger.MANUAL, Mono.<SyncOutcome>never()
                 .doOnSubscribe(subscription -> 시작됨.set(true))
-                .doOnCancel(() -> 취소됨.set(true)));
+                .doOnCancel(() -> 취소됨.set(true)), 늦은_반납).block();
         await().atMost(Duration.ofSeconds(5)).untilTrue(시작됨);
 
         // when — 종료는 기록·반납이 끝날 때까지 기다린 뒤 돌아온다
@@ -188,6 +202,55 @@ class SyncJobsTest {
         assertThatThrownBy(() -> 건다(작업)).hasMessageContaining("DynamoDB 장애");
         assertThat(시작됨).isFalse();
         assertThat(반납).as("반납한 뒤에 오류를 알린다").hasValue(1);
+    }
+
+    @Test
+    @DisplayName("실행 기록을 여는 호출이 곧바로 던져도 작업을 시작하지 않고, 한 번 반납한 뒤 그 오류로 끝난다")
+    void 기록_열기가_곧바로_던져도_반납한다() {
+        // given
+        jobs = 기록을_이렇게_여는(() -> {
+            throw new IllegalStateException("DynamoDB 클라이언트 고장");
+        });
+        AtomicBoolean 시작됨 = new AtomicBoolean();
+
+        // when, then — 반납하지 않으면 app-scim 은 하트비트가 락을 계속 갱신해 재시작 전까지 모든 SCIM 쓰기가 503 이다
+        assertThatThrownBy(() -> jobs.start(SyncSource.SCIM, SyncTrigger.REBUILD, 시작하면_표시한다(시작됨), 반납수단)
+                .block(Duration.ofSeconds(5)))
+                .hasMessageContaining("DynamoDB 클라이언트 고장");
+        assertThat(시작됨).isFalse();
+        assertThat(반납).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("실행 기록을 여는 호출이 빈 응답이어도 요청이 매달리지 않는다 — 한 번 반납한 뒤 오류로 끝난다")
+    void 기록_열기가_비어도_매달리지_않는다() {
+        // given
+        jobs = 기록을_이렇게_여는(Mono::empty);
+        AtomicBoolean 시작됨 = new AtomicBoolean();
+
+        // when, then — 기다림에 한도를 둔다. 매달리면 기한 초과로 실패한다
+        assertThatThrownBy(() -> jobs.start(SyncSource.SCIM, SyncTrigger.REBUILD, 시작하면_표시한다(시작됨), 반납수단)
+                .block(Duration.ofSeconds(5)))
+                .hasMessageContaining("실행 기록을 열지 못했다");
+        assertThat(시작됨).isFalse();
+        assertThat(반납).hasValue(1);
+    }
+
+    /** 실행 기록을 여는 자리만 바꾼 저장소로 돌린다. 나머지는 가짜 그대로다. */
+    private SyncJobs 기록을_이렇게_여는(Supplier<Mono<SyncRun>> 열기) {
+        return new SyncJobs(new FakeSyncRunRepository(지금) {
+            @Override
+            public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
+                return 열기.get();
+            }
+        }, Duration.ofMinutes(1));
+    }
+
+    private static Mono<SyncOutcome> 시작하면_표시한다(AtomicBoolean 시작됨) {
+        return Mono.fromCallable(() -> {
+            시작됨.set(true);
+            return SyncOutcome.noChange();
+        });
     }
 
     @Test

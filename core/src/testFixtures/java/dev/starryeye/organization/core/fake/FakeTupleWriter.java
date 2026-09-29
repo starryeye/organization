@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleFailure;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
@@ -35,6 +36,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
+    private Predicate<TupleDelta> abortWhen = delta -> false;
     private Runnable applyHook;
 
     /** {@link #apply} 가 불릴 때 함께 실행된다. 작업 도중의 상태(게이트 등)를 들여다보는 데 쓴다. */
@@ -44,6 +46,14 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     public void failFor(Predicate<RelationTuple> failWhen) {
         this.failWhen = failWhen;
+    }
+
+    /**
+     * 이 조건에 걸리는 델타는 평소처럼 적용한 뒤({@link #failFor} 도 따른다) 연속 실패 차단기에 멈춘 것처럼
+     * {@link TupleWriteAbortedException} 으로 끝낸다. 그 결과가 {@code partial} 이 된다.
+     */
+    public void abortWhen(Predicate<TupleDelta> abortWhen) {
+        this.abortWhen = abortWhen;
     }
 
     @Override
@@ -75,7 +85,10 @@ public class FakeTupleWriter implements RelationTupleWriter {
                 stored.remove(tuple);
             }
         }
-        Mono<TupleWriteResult> result = Mono.just(new TupleWriteResult(written, deleted, failures));
+        TupleWriteResult applied = new TupleWriteResult(written, deleted, failures);
+        Mono<TupleWriteResult> result = abortWhen.test(delta)
+                ? Mono.error(new TupleWriteAbortedException("테스트용 차단 — 연속 실패로 멈췄다", applied))
+                : Mono.just(applied);
         return delay.isZero() ? result : result.delayElement(delay);
     }
 }

@@ -15,6 +15,7 @@ import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
@@ -76,7 +77,11 @@ public class FullSyncUseCase {
                     }
                 }
                 return writer.apply(delta)
-                        .flatMap(result -> commit(directory, baseline, result));
+                        .flatMap(result -> commit(directory, baseline, result))
+                        .onErrorResume(TupleWriteAbortedException.class, stopped ->
+                                saveSnapshotAndState(directory, baseline, stopped.partial())
+                                        .map(snapshotId -> SyncOutcome.stopped(
+                                                stopped.partial(), snapshotId, stopped.getMessage())));
             });
         });
     }
@@ -87,13 +92,25 @@ public class FullSyncUseCase {
                 .defaultIfEmpty(Set.of());
     }
 
-    /**
-     * 튜플 스냅샷과 현재상태는 <b>기준이 다르다</b>.
-     * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
-     */
     private Mono<SyncOutcome> commit(DirectorySnapshot directory,
                                      Set<RelationTuple> baseline,
                                      TupleWriteResult result) {
+        return saveSnapshotAndState(directory, baseline, result)
+                .map(snapshotId -> result.hasFailure()
+                        ? SyncOutcome.partial(result, snapshotId)
+                        : SyncOutcome.succeeded(result, snapshotId));
+    }
+
+    /**
+     * 튜플 스냅샷과 현재상태는 <b>기준이 다르다</b>.
+     * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
+     *
+     * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
+     * 저장한 스냅샷 아이디를 준다.
+     */
+    private Mono<String> saveSnapshotAndState(DirectorySnapshot directory,
+                                              Set<RelationTuple> baseline,
+                                              TupleWriteResult result) {
         Set<RelationTuple> committed = new HashSet<>(baseline);
         committed.removeAll(result.deleted());
         committed.addAll(result.written());
@@ -107,8 +124,6 @@ public class FullSyncUseCase {
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory)))
-                .thenReturn(result.hasFailure()
-                        ? SyncOutcome.partial(result, snapshot.id())
-                        : SyncOutcome.succeeded(result, snapshot.id()));
+                .thenReturn(snapshot.id());
     }
 }

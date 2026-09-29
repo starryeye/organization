@@ -249,6 +249,44 @@ class ScimRebuildUseCaseTest {
         assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김_백엔드, 백엔드_개발본부, 찌꺼기);
     }
 
+    @Test
+    @DisplayName("tuples 모드에서 지우기가 연속 실패 차단기로 멈추면 FAILED 지만 스냅샷은 남는다 — 쓴 줄과 지우지 못한 줄을 담는다")
+    void 지우기가_차단기로_멈춰도_스냅샷을_남긴다() {
+        // given — 찌꺼기 지우기가 실패한 채 멈춘다
+        조직도를_심는다();
+        writer.stored.add(찌꺼기);
+        writer.failFor(찌꺼기::equals);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(run.snapshotId()).isEqualTo(snapshots.saved.get(0).id());
+        assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김_백엔드, 백엔드_개발본부, 찌꺼기);
+    }
+
+    @Test
+    @DisplayName("tuples 모드에서 쓰기가 연속 실패 차단기로 멈추면 장부를 훑지 않고 스냅샷도 만들지 않은 채 FAILED 다")
+    void 쓰기가_차단기로_멈추면_훑지_않는다() {
+        // given
+        조직도를_심는다();
+        writer.stored.add(찌꺼기);
+        writer.abortWhen(delta -> !delta.toWrite().isEmpty());
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — 장부를 훑기 전이라 무엇을 지울지 모른다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(scanner.scanCount).hasValue(0);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(lock.released).hasValue(1);
+    }
+
     // ---------- wipe 모드 ----------
 
     @Test
@@ -297,6 +335,25 @@ class ScimRebuildUseCaseTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(run.message()).contains("지우지 못해");
+        assertThat(state.users).containsOnlyKeys("kim", "lee");
+        assertThat(state.groups).containsOnlyKeys("DEV002", "DEV001");
+    }
+
+    @Test
+    @DisplayName("wipe 모드는 지우기가 연속 실패 차단기로 멈추면 조직도를 건드리지 않고, 멈춘 이유를 함께 남긴다")
+    void wipe_모드는_차단기로_멈추면_조직도를_지킨다() {
+        // given
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 찌꺼기));
+        writer.failFor(찌꺼기::equals);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("지우지 못해").contains("연속 실패로 멈췄다");
         assertThat(state.users).containsOnlyKeys("kim", "lee");
         assertThat(state.groups).containsOnlyKeys("DEV002", "DEV001");
     }

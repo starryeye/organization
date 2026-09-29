@@ -33,8 +33,9 @@ import java.util.function.Supplier;
  *   <li>요청의 Reactor Context 를 이어받는다 — 작업 로그가 요청과 같은 traceId 로 묶인다.</li>
  * </ol>
  *
- * <p><b>멈춤은 되돌리기가 아니다.</b> 이미 나간 쓰기는 무르지 않는다. 멈췄다는 사실을 FAILED 로 남길 뿐이고, 새 스냅샷을 만들지 않으므로
- * 직전 스냅샷이 다음 회차의 기준으로 남는다 — OpenFGA 쓰기·지우기가 멱등이라 다음 회차나 재적재가 다시 맞춘다.
+ * <p><b>멈춤은 되돌리기가 아니다.</b> 이미 나간 쓰기는 무르지 않는다. 기한·종료로 멈추면 멈췄다는 사실을 FAILED 로 남길 뿐이고, 이미 나간
+ * 쓰기를 모을 곳이 없어 새 스냅샷을 만들지 않는다 — 직전 스냅샷이 다음 회차의 기준으로 남는다. 그 사이 조직도가 바뀌면 기준선이 장부와
+ * 어긋날 수 있어 재적재로 맞춘다(설계 §11). 연속 실패 차단기로 멈춘 쓰기는 다르다 — 유스케이스가 나간 것으로 기록 규칙을 지킨다(§5).
  */
 @Slf4j
 public class SyncJobs {
@@ -74,10 +75,15 @@ public class SyncJobs {
             Mono<Void> 끝남신호 = 끝남.asMono();
             도는_작업.add(끝남신호);
 
-            runs.start(source, trigger)
-                    .onErrorResume(error -> 반납한다(release)
-                            .then(Mono.fromRunnable(() -> 열림.tryEmitError(error)))
-                            .then(Mono.<SyncRun>empty()))
+            // 여는 호출이 곧바로 던지거나 빈 응답이어도 반납하고 오류로 알린다 — 아니면 요청이 매달리고 락·가드가 풀리지 않는다
+            Mono.defer(() -> runs.start(source, trigger))
+                    .switchIfEmpty(Mono.error(() -> new IllegalStateException("실행 기록을 열지 못했다 — 빈 응답")))
+                    .onErrorResume(error -> {
+                        log.error("실행 기록을 열지 못했다: source={} trigger={}", source, trigger, error);
+                        return 반납한다(release)
+                                .then(Mono.fromRunnable(() -> 열림.tryEmitError(error)))
+                                .then(Mono.<SyncRun>empty());
+                    })
                     .flatMap(run -> {
                         log.info("[{}] 작업 시작: source={} trigger={}", run.runId(), source, trigger);
                         열림.tryEmitValue(run);
@@ -125,8 +131,10 @@ public class SyncJobs {
                 .timeout(timeout, Mono.error(() -> new IllegalStateException("기한 초과 — " + 사람말로(timeout))))
                 .switchIfEmpty(Mono.error(() -> new IllegalStateException("작업이 결과 없이 끝났다")))
                 .onErrorResume(error -> {
-                    log.error("[{}] 작업 실패: {}", run.runId(), error.getMessage(), error);
-                    return Mono.just(SyncOutcome.failed(error.getMessage()));
+                    // 메시지 없는 오류도 있다 — 이유를 비워 두면 기록만 보고는 무엇이 터졌는지 모른다
+                    String 사유 = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+                    log.error("[{}] 작업 실패: {}", run.runId(), 사유, error);
+                    return Mono.just(SyncOutcome.failed(사유));
                 })
                 .flatMap(outcome -> 반납한다(release).thenReturn(outcome))
                 .flatMap(outcome -> runs.finish(run, outcome))

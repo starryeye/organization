@@ -3,6 +3,7 @@ package dev.starryeye.organization.authz;
 import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Batch;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
@@ -28,21 +29,27 @@ class OpenFgaRelationTupleWriterBreakerTest {
     }
 
     @Test
-    @DisplayName("배치가 3번 연달아 실패하면 남은 배치를 보내지 않고 오류로 끝난다")
+    @DisplayName("배치가 3번 연달아 실패하면 남은 배치를 보내지 않고 멈추며, 그때까지 나간 것과 보내지 않은 것을 함께 넘긴다")
     void 세번_연달아_실패하면_멈춘다() {
-        // given
+        // given — 첫 배치는 나가고, 그 뒤로 OpenFGA 가 죽는다
         List<Batch> 보낸것 = new ArrayList<>();
-        Function<Batch, Mono<TupleWriteResult>> 늘_실패 = batch -> {
+        Function<Batch, Mono<TupleWriteResult>> 첫_배치만_성공 = batch -> {
             보낸것.add(batch);
-            return Mono.just(batch.failed("연결 거부"));
+            return Mono.just(보낸것.size() == 1 ? batch.succeeded() : batch.failed("연결 거부"));
         };
 
-        // when, then
-        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치들(10), 늘_실패).block())
-                .hasMessageContaining("3번 연달아")
-                .hasMessageContaining("남은 7개")
-                .hasMessageContaining("연결 거부");
-        assertThat(보낸것).hasSize(3);
+        // when, then — 호출자는 partial 로 기록 규칙을 지킨다. 나간 첫 배치를 모른 척하면 기준선이 장부와 어긋난다
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치들(10), 첫_배치만_성공).block())
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("3번 연달아")
+                            .hasMessageContaining("남은 6개")
+                            .hasMessageContaining("연결 거부");
+                    assertThat(멈춤.partial().written()).hasSize(1);
+                    assertThat(멈춤.partial().failures()).as("실패한 3개 + 보내지 않은 6개").hasSize(9)
+                            .filteredOn(failure -> failure.reason().equals("연속 실패로 보내지 않음"))
+                            .hasSize(6);
+                });
+        assertThat(보낸것).hasSize(4);
     }
 
     @Test
@@ -66,7 +73,7 @@ class OpenFgaRelationTupleWriterBreakerTest {
     }
 
     @Test
-    @DisplayName("배치가 셋보다 적으면 모두 실패해도 오류가 아니라 결과의 실패로 남는다 — SCIM 요청 한 건")
+    @DisplayName("배치가 셋보다 적으면 모두 실패해도 오류가 아니라 결과의 실패로 남는다 — SCIM 요청 한 건은 대개 여기에 든다")
     void 배치가_적으면_차단기와_무관하다() {
         // when
         TupleWriteResult 결과 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(
