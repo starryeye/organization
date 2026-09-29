@@ -14,13 +14,11 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
 public class FakeTupleWriter implements RelationTupleWriter {
 
     public final List<TupleDelta> appliedDeltas = new ArrayList<>();
-    public final AtomicInteger resetStoreCount = new AtomicInteger();
 
     /** 지금까지 실제로 쓰인/지워진 튜플. appliedDeltas 로도 볼 수 있지만 단언이 읽기 어려워진다. */
     public final Set<RelationTuple> written = new LinkedHashSet<>();
@@ -37,13 +35,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
-    private RuntimeException resetStoreError;
     private Runnable applyHook;
-
-    /** 설정하면 {@link #resetStore()} 가 이 예외로 실패한다. 초기화 실패 경로를 보는 데 쓴다. */
-    public void failResetStore(RuntimeException error) {
-        this.resetStoreError = error;
-    }
 
     /** {@link #apply} 가 불릴 때 함께 실행된다. 작업 도중의 상태(게이트 등)를 들여다보는 데 쓴다. */
     public void onApply(Runnable hook) {
@@ -85,16 +77,5 @@ public class FakeTupleWriter implements RelationTupleWriter {
         }
         Mono<TupleWriteResult> result = Mono.just(new TupleWriteResult(written, deleted, failures));
         return delay.isZero() ? result : result.delayElement(delay);
-    }
-
-    @Override
-    public Mono<Void> resetStore() {
-        return Mono.defer(() -> {
-            if (resetStoreError != null) {
-                return Mono.error(resetStoreError);
-            }
-            resetStoreCount.incrementAndGet();
-            return Mono.empty();
-        });
     }
 }

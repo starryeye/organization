@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * 델타를 OpenFGA 에 반영한다. 쓰기 전용 어댑터라 조회는 하지 않는다 — 인가 판정이
@@ -38,6 +40,12 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
     private final StoreBootstrapper bootstrapper;
     private final OpenFgaProperties properties;
 
+    /**
+     * 이만큼 연달아 실패하면(배치마다 재시도한 뒤에도) 남은 배치를 보내지 않는다(점검 C7). 설정으로 두지 않는다 — 운영에서 바꿀
+     * 이유가 보이면 그때 올린다.
+     */
+    static final int 연속_실패_한도 = 3;
+
     @Override
     public Mono<TupleWriteResult> apply(TupleDelta delta) {
         if (delta.isEmpty()) {
@@ -47,14 +55,39 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         List<Batch> batches = batchesFor(delta);
 
         return bootstrapper.resolveStore()
-                .thenMany(Flux.fromIterable(batches).concatMap(this::applyBatch))
-                .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+                .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch));
     }
 
-    @Override
-    public Mono<Void> resetStore() {
-        log.warn("OpenFGA store 를 재생성한다. 재생성이 끝날 때까지 모든 인가 질의가 실패한다");
-        return bootstrapper.recreateStore().then();
+    /**
+     * 배치를 차례로 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 오류로 끝낸다(점검 C7, 설계 §5).
+     *
+     * <p>OpenFGA 가 느리거나 죽으면 배치마다 재시도를 거친 뒤 실패로 넘어가는데, 10만 명 재적재는 배치가 약 1,100개라 전부 그렇게 돌면
+     * 수십 분 동안 락을 쥔다. 연달아 실패하는 것은 대개 한 배치가 아니라 OpenFGA 의 문제다. 드문 실패 한두 건은 지금처럼 결과의
+     * {@code failures} 로 넘겨 PARTIAL 이 되게 둔다. 배치가 셋보다 적은 쓰기(SCIM 요청 한 건)는 해당이 없다.
+     *
+     * <p>패키지 전용 — 멈추는 규칙을 OpenFGA 없이 단위 테스트로 고정한다.
+     */
+    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
+                                                     Function<Batch, Mono<TupleWriteResult>> send) {
+        return Mono.defer(() -> {
+            AtomicInteger 연속_실패 = new AtomicInteger();
+            return Flux.fromIterable(batches)
+                    .index()
+                    .concatMap(indexed -> send.apply(indexed.getT2()).flatMap(result -> {
+                        if (!result.hasFailure()) {
+                            연속_실패.set(0);
+                            return Mono.just(result);
+                        }
+                        if (연속_실패.incrementAndGet() < 연속_실패_한도) {
+                            return Mono.just(result);
+                        }
+                        long 남은_배치 = batches.size() - indexed.getT1() - 1;
+                        return Mono.<TupleWriteResult>error(new IllegalStateException(
+                                "OpenFGA 쓰기 배치가 %d번 연달아 실패해 남은 %d개 배치를 보내지 않고 멈췄다 — 마지막 오류: %s"
+                                        .formatted(연속_실패_한도, 남은_배치, result.failures().get(0).reason())));
+                    }))
+                    .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+        });
     }
 
     /**
