@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.core.fixture.Containers;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientWriteRequest;
@@ -14,10 +15,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.util.List;
 
@@ -38,18 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ScimDriftHealingEndToEndTest {
 
     @Container
-    static final GenericContainer<?> OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+    static final GenericContainer<?> OPENFGA = Containers.openFga();
 
     @Container
-    static final GenericContainer<?> DYNAMODB = new GenericContainer<>(
-            DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-            .withExposedPorts(8000)
-            .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+    static final GenericContainer<?> DYNAMODB = Containers.dynamoDb();
 
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {

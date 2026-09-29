@@ -479,6 +479,15 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 이유 그 자체다. `app-ldap`의 `AdminQuerySmokeTest`는 같은 공유 모듈이 app-ldap 컨텍스트에서도
 자동설정으로 잡히는지만 확인한다.
 
+**포트가 겹쳐도 엉뚱한 곳과 통신하지 않는다.** macOS 에서는 같은 포트 번호를 "127.0.0.1 전용" 리스너(IntelliJ 등
+개발 도구가 여럿 연다)와 "모든 주소" 리스너가 함께 쓸 수 있고, `localhost` 로 가는 연결은 전용 쪽이 받는다. 그래서
+테스트가 가끔 IntelliJ 의 404 나 엉뚱한 프로그램의 응답(DynamoDB 가 HTTP 999)을 받고 실패했다. 두 가지로 막는다.
+테스트 서버는 `127.0.0.1` 에만 연다(`application-test.yml` 의 `server.address`) — 운영체제가 이미 쓰이는 번호를 주지 않는다.
+컨테이너는 한 정의(core testFixtures 의 `Containers`)만 쓰고, 그 서비스만 주는 응답(OpenFGA `SERVING`, DynamoDB
+`MissingAuthenticationToken`)을 확인한 뒤에 시작된 것으로 본다 — Docker Desktop 은 호스트 포트를 VM 안에서 골라 macOS
+쪽 사용 여부를 모르므로, 가짜가 답하면 컨테이너를 새로 띄워 새 포트를 받는다(최대 3번). 새 컨테이너 정의를 만들지 말고
+`Containers.openFga()`·`Containers.dynamoDb()` 를 쓴다.
+
 ## 요구 버전
 
 **OpenFGA 서버 v1.10.0 이상**이어야 한다. `on_duplicate` / `on_missing` 멱등 옵션이 그
