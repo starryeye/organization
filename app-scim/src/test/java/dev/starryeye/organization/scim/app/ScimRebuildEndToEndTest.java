@@ -1,8 +1,14 @@
 package dev.starryeye.organization.scim.app;
 
-import dev.starryeye.organization.core.fixture.Containers;
+import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
+import dev.starryeye.organization.authz.OpenFgaProperties;
 import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.core.fixture.Containers;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -10,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -19,13 +26,18 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Duration;
 import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * SCIM 재적재가 실제 인프라 위에서 동작하는지 확인한다.
  *
- * <p>이 스위트의 핵심은 {@link #튜플_재적재가_어긋남을_복구한다()} 다. 조회 API 가 어긋남을
- * 드러내는 것까지는 이전 사이클에서 확인했고, 여기서는 <b>그걸 실제로 고칠 수 있는지</b>를 본다.
+ * <p>이 스위트의 핵심은 {@link #튜플_재적재가_어긋남을_고치고_번호는_그대로다()} 다. 조회 API 가 어긋남을 드러내는 것까지는 이전
+ * 사이클에서 확인했고, 여기서는 <b>그걸 실제로 고칠 수 있는지</b>, 그리고 고치는 동안 장부 번호가 바뀌지 않는지를 본다.
+ *
+ * <p>재적재는 202 로 곧바로 답하고 따로 돈다 — 결과는 {@link SyncJobClient} 로 기다려 본다(설계 2026-09-29 §4).
  *
  * <p>순서에 의존한다({@link Order}) — 앞 테스트가 만든 조직도 위에서 뒤 테스트가 어긋남을
  * 만들고 복구하고, 마지막에 전부 비운다.
@@ -55,6 +67,8 @@ class ScimRebuildEndToEndTest {
 
     @Autowired WebTestClient client;
     @Autowired StoreBootstrapper bootstrapper;
+    @Autowired OpenFgaProperties openFgaProperties;
+    @Autowired MutationLock lock;
 
     private void 조직도를_만든다() {
         client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
@@ -70,15 +84,32 @@ class ScimRebuildEndToEndTest {
                 .exchange().expectStatus().isCreated();
     }
 
+    private boolean check(String user, String relation, String object) {
+        try {
+            return bootstrapper.client().check(new ClientCheckRequest()
+                    ._object(object).relation(relation).user(user)).get().getAllowed();
+        } catch (Exception e) {
+            throw new IllegalStateException("Check 호출 실패", e);
+        }
+    }
+
+    /** 이름으로 새로 찾은 장부 번호 — 이 앱이 캐시한 번호가 아니라 OpenFGA store 목록에서 찾는다. 같은 이름이 둘이면 오류다. */
+    private String 장부_번호() {
+        return new StoreBootstrapper(openFgaProperties).findExistingStore().block(Duration.ofSeconds(10));
+    }
+
     @Test
     @Order(1)
-    @DisplayName("튜플 재적재가 직접 지운 튜플을 복구한다")
-    void 튜플_재적재가_어긋남을_복구한다() throws Exception {
-        // given — 조직도를 만든 뒤 OpenFGA 에서 튜플만 직접 지워 어긋나게 만든다
+    @DisplayName("튜플 재적재가 직접 지운 튜플을 되살리고 직접 심은 찌꺼기를 지우며, 장부 번호는 그대로다")
+    void 튜플_재적재가_어긋남을_고치고_번호는_그대로다() throws Exception {
+        // given — 조직도를 만든 뒤 OpenFGA 에서 튜플 하나를 직접 지우고, 누구도 기록하지 않은 줄을 직접 심는다
         조직도를_만든다();
+        String 재적재_전_번호 = 장부_번호();
         bootstrapper.client().deleteTuples(List.of(
                 new ClientTupleKeyWithoutCondition()
                         .user("user:gd.hong").relation("direct_member")._object("group:DEV002"))).get();
+        bootstrapper.client().writeTuples(List.of(
+                new ClientTupleKey().user("user:ghost").relation("direct_member")._object("group:DEV002"))).get();
 
         client.get().uri("/admin/employees/gd.hong")
                 .exchange().expectStatus().isOk()
@@ -87,9 +118,7 @@ class ScimRebuildEndToEndTest {
                 .jsonPath("$.paths[0].openFgaCheck").isEqualTo(false);
 
         // when
-        client.post().uri("/admin/sync/rebuild?mode=tuples")
-                .exchange().expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild?mode=tuples")
                 .jsonPath("$.trigger").isEqualTo("REBUILD")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
 
@@ -99,6 +128,10 @@ class ScimRebuildEndToEndTest {
                 .expectBody()
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
                 .jsonPath("$.paths[0].openFgaCheck").isEqualTo(true);
+        // 찌꺼기는 지워졌다 — 장부를 훑어 조직도가 요구하지 않는 줄을 지운다(설계 §3.1)
+        assertThat(check("user:ghost", "member", "group:DEV002")).isFalse();
+        // 장부 번호는 그대로다 — 다른 앱이 번호를 적어 둬도 된다(설계 §7)
+        assertThat(장부_번호()).isEqualTo(재적재_전_번호);
     }
 
     @Test
@@ -128,6 +161,37 @@ class ScimRebuildEndToEndTest {
 
     @Test
     @Order(4)
+    @DisplayName("없는 실행 기록 번호는 404 다")
+    void 없는_기록은_404다() {
+        // when, then
+        client.get().uri("/admin/sync/runs/missing-run")
+                .exchange().expectStatus().isNotFound();
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("다른 작업이 락을 쥐고 있으면 재적재는 곧바로 409 이고 기록을 남기지 않는다")
+    void 다른_작업이_락을_쥐면_409다() {
+        // given — 다른 인스턴스의 SCIM 쓰기가 락을 쥔 순간
+        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block(Duration.ofSeconds(10));
+
+        try {
+            // when, then
+            client.post().uri("/admin/sync/rebuild?mode=tuples")
+                    .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
+        } finally {
+            lock.release(lease).block(Duration.ofSeconds(10));
+        }
+
+        // then — 거절은 기록을 열지 않는다
+        client.get().uri("/admin/sync/runs?limit=20")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.length()").isEqualTo(1);
+    }
+
+    @Test
+    @Order(6)
     @DisplayName("wipe 는 confirm 이 테이블명과 다르면 400 이고 아무것도 지우지 않는다")
     void confirm이_틀리면_400이다() {
         // when, then — 불리언 플래그였다면 손가락이 미끄러져 조직도가 날아갔을 자리다
@@ -142,7 +206,7 @@ class ScimRebuildEndToEndTest {
     }
 
     @Test
-    @Order(5)
+    @Order(7)
     @DisplayName("알 수 없는 mode 는 400 이다")
     void 알수없는_모드는_400이다() {
         // when, then
@@ -151,15 +215,16 @@ class ScimRebuildEndToEndTest {
     }
 
     @Test
-    @Order(6)
-    @DisplayName("wipe 는 조직도를 전부 비우고 감사 이력은 남긴다")
+    @Order(8)
+    @DisplayName("wipe 는 장부와 조직도를 전부 비우고 감사 이력은 남긴다")
     void wipe가_조직도를_비운다() {
         // when — 테이블명을 그대로 적어야만 실행된다
-        client.post().uri("/admin/sync/rebuild?mode=wipe&confirm=" + TABLE_NAME)
-                .exchange().expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild?mode=wipe&confirm=" + TABLE_NAME)
                 .jsonPath("$.trigger").isEqualTo("RESET")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
+
+        // then — 장부가 비었다
+        assertThat(check("user:gd.hong", "member", "group:DEV002")).isFalse();
 
         // then — 직원도 조직도 사라졌다
         client.get().uri("/admin/employees/gd.hong")
@@ -179,7 +244,7 @@ class ScimRebuildEndToEndTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     @DisplayName("wipe 뒤에도 SCIM 쓰기는 열려 있다 — IdP 재푸시를 받아야 하기 때문이다")
     void wipe_뒤에_쓰기가_열려있다() {
         // when — IdP 가 재프로비저닝으로 다시 밀어넣는 상황이다
@@ -189,7 +254,7 @@ class ScimRebuildEndToEndTest {
                          "userName":"cs.kim","displayName":"김철수","active":true}""")
                 .exchange().expectStatus().isCreated();
 
-        // then — 게이트가 샜다면 여기서 503 이 났을 것이다
+        // then — 락이 반납되지 않았다면 여기서 503 이 났을 것이다
         client.get().uri("/admin/employees/cs.kim")
                 .exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.displayName").isEqualTo("김철수");

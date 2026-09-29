@@ -1,9 +1,16 @@
+apply plugin: 'java-test-fixtures'
+
 dependencies {
     api project(':core')
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     implementation 'io.micrometer:micrometer-core'
 
     testImplementation testFixtures(project(':core'))
+
+    // 두 앱의 테스트가 "202 로 건 작업이 끝날 때까지 기다린다"를 같은 도우미로 쓴다
+    testFixturesApi 'org.springframework:spring-test'
+    testFixturesImplementation 'org.springframework.boot:spring-boot-starter-webflux'
+    testFixturesImplementation 'org.awaitility:awaitility'
 }
 
 // app-ldap 등 부트 애플리케이션은 org.springframework.boot 플러그인이 -parameters 를 자동으로

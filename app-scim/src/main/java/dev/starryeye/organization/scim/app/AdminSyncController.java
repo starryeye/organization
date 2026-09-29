@@ -10,9 +10,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
@@ -38,10 +40,14 @@ public class AdminSyncController {
     private final DynamoDbProperties dynamoDb;
 
     /**
+     * 재적재를 건다. 락을 잡았으면 곧바로 202 와 실행 기록(RUNNING)을 준다 — 재적재는 요청과 떼어 돌고(설계 2026-09-29 §4),
+     * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다.
+     *
      * @param mode    {@code tuples}(기본) 또는 {@code wipe}
      * @param confirm {@code wipe} 일 때만 필요하다. DynamoDB 테이블명을 그대로 적어야 한다
      */
     @PostMapping("/rebuild")
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "tuples") String mode,
                                          @RequestParam(required = false) String confirm) {
         ScimRebuildMode rebuildMode;
@@ -58,7 +64,7 @@ public class AdminSyncController {
             log.warn("SCIM 튜플 재적재 요청");
         }
 
-        return rebuild.execute(rebuildMode)
+        return rebuild.start(rebuildMode)
                 .map(SyncRunResponse::from)
                 // 다른 인스턴스가 SCIM 쓰기나 재적재로 락을 쥐고 있어 이번 재적재가 시작하지
                 // 못한 경우는 409 다 — 관리자가 잠시 뒤 다시 시도하면 된다.
@@ -83,5 +89,14 @@ public class AdminSyncController {
     public Flux<SyncRunResponse> runs(@RequestParam(defaultValue = "20") int limit) {
         int clamped = Math.max(MIN_RUNS_LIMIT, Math.min(limit, MAX_RUNS_LIMIT));
         return runs.findRecent(clamped).map(SyncRunResponse::from);
+    }
+
+    /** 실행 기록 하나. 202 로 건 작업의 결과를 여기서 본다. 없으면 404 — 잘못된 번호이거나 보관 기간(30일)이 지났다. */
+    @GetMapping("/runs/{runId}")
+    public Mono<SyncRunResponse> run(@PathVariable String runId) {
+        return runs.findById(runId)
+                .map(SyncRunResponse::from)
+                .switchIfEmpty(Mono.error(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "실행 기록이 없습니다: " + runId)));
     }
 }

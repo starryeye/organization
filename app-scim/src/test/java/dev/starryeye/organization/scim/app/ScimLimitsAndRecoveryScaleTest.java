@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim.app;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.OpenFgaProbe;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
@@ -173,10 +174,7 @@ class ScimLimitsAndRecoveryScaleTest {
 
         // when
         long t0 = System.currentTimeMillis();
-        client.mutate().responseTimeout(Duration.ofMinutes(20)).build()
-                .post().uri("/admin/sync/rebuild?mode=tuples").exchange()
-                .expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild?mode=tuples")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
         System.out.printf("=== S18. mode=tuples 재적재: %.1f초%n",
@@ -185,8 +183,8 @@ class ScimLimitsAndRecoveryScaleTest {
         // then — 어긋남이 메워지고
         assertThat(성립하는가(지웠던것)).as("재적재가 빠진 튜플을 다시 쓰지 않았다").isTrue();
 
-        // 고아 튜플은 사라진다. 재적재는 이전 스냅샷을 지우고 다시 쓰므로,
-        // 멤버십에서 유도되지 않는 것은 남을 자리가 없다.
+        // 고아 튜플은 사라진다. 재적재는 장부를 훑어 멤버십에서 유도되지 않는 줄을 지우므로
+        // 남을 자리가 없다.
         assertThat(성립하는가(고아))
                 .as("재적재로도 안 지워지면 설계 §5.4 의 복구 수단이 없는 것이다")
                 .isFalse();
@@ -210,7 +208,7 @@ class ScimLimitsAndRecoveryScaleTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("재적재 이력이 없다: " + runs));
         assertThat(재적재.get("source").asText()).isEqualTo("SCIM");
-        // 재적재는 store 를 비우고 상태가 요구하는 튜플을 전부 다시 쓴다 — 픽스처에서 유도한다
+        // 재적재는 상태가 요구하는 튜플을 전부 쓴다(이미 있는 줄도 센다) — 픽스처에서 유도한다
         assertThat(재적재.get("writtenCount").asInt())
                 .isEqualTo(ChartExpectation.of(기대).있어야할튜플().size());
 
