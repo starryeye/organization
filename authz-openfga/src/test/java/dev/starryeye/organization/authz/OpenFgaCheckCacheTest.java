@@ -1,15 +1,14 @@
 package dev.starryeye.organization.authz;
 
+import dev.starryeye.organization.core.fixture.Containers;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.util.Set;
 import java.util.UUID;
@@ -25,14 +24,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OpenFgaCheckCacheTest {
 
     @Container
-    static final GenericContainer<?> CACHED_OPENFGA = new GenericContainer<>(
-            DockerImageName.parse("openfga/openfga:v1.10.2"))
-            .withCommand("run")
-            .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
+    static final GenericContainer<?> CACHED_OPENFGA = Containers.openFga()
             .withEnv("OPENFGA_CHECK_QUERY_CACHE_ENABLED", "true")
-            .withEnv("OPENFGA_CHECK_QUERY_CACHE_TTL", "60s")
-            .withExposedPorts(8080)
-            .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+            .withEnv("OPENFGA_CHECK_QUERY_CACHE_TTL", "60s");
 
     private StoreBootstrapper bootstrapper;
     private OpenFgaRelationTupleWriter writer;

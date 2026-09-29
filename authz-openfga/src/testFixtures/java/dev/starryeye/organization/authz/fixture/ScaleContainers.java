@@ -1,14 +1,14 @@
 package dev.starryeye.organization.authz.fixture;
 
+import dev.starryeye.organization.core.fixture.Containers;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.utility.DockerImageName;
 
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
 /**
- * 규모 테스트가 띄우는 컨테이너. 열두 클래스가 똑같은 정의를 한 벌씩 들고 있었다.
+ * 규모 테스트가 띄우는 컨테이너. 정의는 모든 테스트가 쓰는 {@link Containers} 하나다 — 여기서는 규모 테스트가 쓰는 이름과
+ * 주소 등록만 둔다.
  *
  * <p><b>인스턴스는 호출마다 새로 만든다 — 클래스끼리 공유하지 않는다.</b> DynamoDB 테이블
  * 이름과 OpenFGA store 이름이 고정이라, 공유하면 한 클래스가 남긴 상태가 다음 클래스의
@@ -20,17 +20,11 @@ public final class ScaleContainers {
     }
 
     public static GenericContainer<?> openFga() {
-        return new GenericContainer<>(DockerImageName.parse("openfga/openfga:v1.10.2"))
-                .withCommand("run")
-                .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
-                .withExposedPorts(8080)
-                .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200));
+        return Containers.openFga();
     }
 
     public static GenericContainer<?> dynamoDb() {
-        return new GenericContainer<>(DockerImageName.parse("amazon/dynamodb-local:2.5.3"))
-                .withExposedPorts(8000)
-                .withCommand("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb");
+        return Containers.dynamoDb();
     }
 
     /**
