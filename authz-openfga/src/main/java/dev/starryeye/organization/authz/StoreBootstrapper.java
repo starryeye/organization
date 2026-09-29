@@ -13,6 +13,7 @@ import reactor.core.publisher.Mono;
 
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -23,11 +24,20 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>앱의 어느 곳도 storeId 나 modelId 를 알지 못한다. 설정에는 store-name 만 있고,
  * write 호출에는 authorization_model_id 를 넘기지 않아 서버가 최신 모델을 쓴다.
+ *
+ * <p><b>store 번호는 한 번 만들면 바뀌지 않는다(설계 2026-09-29 §2).</b> 재적재도 store 를 지우고 다시 만들지 않는다 — 장부 안에서
+ * 청소한다. 이 클래스가 store 를 지우는 경우는 하나뿐이다: 동시에 처음 뜬 인스턴스끼리 같은 이름 store 를 둘 만들었을 때 늦게 만든
+ * 쪽이 자기 것을 지운다({@link #convergeAfterCreate}).
  */
 @Slf4j
 public class StoreBootstrapper {
 
     private static final String MODEL_RESOURCE = "authorization-model.json";
+
+    /** 같은 이름 store 가 여럿일 때 이기는 쪽: 가장 먼저 만들어진 것, 같으면 id 사전순. */
+    private static final Comparator<Store> 먼저_만든_순 = Comparator
+            .comparing(Store::getCreatedAt, Comparator.nullsLast(Comparator.naturalOrder()))
+            .thenComparing(Store::getId);
 
     private final OpenFgaProperties properties;
     private final AtomicReference<OpenFgaClient> clientRef = new AtomicReference<>();
@@ -35,25 +45,19 @@ public class StoreBootstrapper {
     /**
      * storeId 가 없는 클라이언트. store 를 찾거나 만들 때만 쓴다.
      *
-     * <p>전에는 부를 때마다 새로 만들었다. {@code findStoreIdByName} 은 재귀 페이징이라
-     * <b>페이지마다</b> 하나씩 생겼고, 첫 부트스트랩 한 번에 여러 개가 만들어졌다.
-     * 이 클라이언트는 어떤 store 에도 묶여 있지 않아 상태가 없으므로 재사용해도 안전하고,
-     * {@code recreateStore()} 가 무효화할 이유도 없다 —
-     * 무효화 대상은 storeId 에 묶인 {@code clientRef} 쪽이다.
+     * <p>전에는 부를 때마다 새로 만들었다. store 목록 조회는 재귀 페이징이라 <b>페이지마다</b> 하나씩 생겼고,
+     * 첫 부트스트랩 한 번에 여러 개가 만들어졌다. 이 클라이언트는 어떤 store 에도 묶여 있지 않아 상태가 없으므로
+     * 재사용해도 안전하다.
      */
     private final AtomicReference<OpenFgaClient> storelessClientRef = new AtomicReference<>();
     private final AtomicReference<String> storeIdRef = new AtomicReference<>();
 
-    /**
-     * {@link #clientFor(String)} 이 돌려주는 읽기 전용 client 를 storeId 별로 재사용한다.
-     * {@code clientRef} 와는 완전히 별개의 캐시이며 {@code recreateStore()} 가 건드리지 않는다.
-     */
+    /** {@link #clientFor(String)} 이 돌려주는 client 를 storeId 별로 재사용한다. {@code clientRef} 와는 별개의 캐시다. */
     private final ConcurrentMap<String, OpenFgaClient> readOnlyClients = new ConcurrentHashMap<>();
 
     /**
      * 진행 중인 해석을 공유하기 위한 in-flight Mono. resolveStore() 를 동시에 여러 곳에서
-     * 호출해도 실제 findStoreIdByName → createStore → attachAndWriteModel 파이프라인은
-     * 한 번만 구성/구독되고, 모든 호출자가 같은 결과를 공유한다.
+     * 호출해도 실제 찾기 → 만들기 → 수렴 → 모델 등록 파이프라인은 한 번만 구성/구독되고, 모든 호출자가 같은 결과를 공유한다.
      *
      * <p>성공하면 storeIdRef 가 채워져 이후 호출은 이 필드를 아예 거치지 않는다(빠른 경로).
      * 실패하면 doFinally 에서 이 필드를 비워, 다음 호출이 캐시된 에러를 영원히 받는 대신
@@ -65,7 +69,10 @@ public class StoreBootstrapper {
         this.properties = properties;
     }
 
-    /** 이미 해석했으면 캐시된 storeId 를 준다. 없으면 찾고, 그래도 없으면 만든다. */
+    /**
+     * 이미 해석했으면 캐시된 storeId 를 준다. 없으면 찾고, 그래도 없으면 만든다. 쓰기·Check·장부 훑기가 모두 이것을 탄다 —
+     * 시작 때 OpenFGA 가 안 닿았어도 첫 요청 때 닿으면 그때 준비된다(점검 M6).
+     */
     public Mono<String> resolveStore() {
         String cached = storeIdRef.get();
         if (cached != null) {
@@ -75,16 +82,13 @@ public class StoreBootstrapper {
     }
 
     /**
-     * 헬스체크 전용 read-only 조회. 캐시된 storeId 가 있으면 그것을 쓰고, 없으면
-     * {@link #findStoreIdByName()} 으로 store 존재 여부만 확인한다 — {@link #resolveStore()}
-     * 와 달리 store 를 만들거나 인가 모델을 쓰지 않는다.
+     * 헬스체크 전용 read-only 조회. 캐시된 storeId 가 있으면 그것을 쓰고, 없으면 이름으로 store 존재 여부만 확인한다 —
+     * {@link #resolveStore()} 와 달리 store 를 만들거나 인가 모델을 쓰지 않는다.
      *
      * <p>헬스 프로브는 관찰만 해야지 인프라를 만들면 안 된다. 인증 없는
      * {@code GET /actuator/health} 는 k8s 프로브·로드밸런서·오타난 {@code openfga.store-name}
-     * 설정 등 무엇이든 호출할 수 있는데, 이 경로가 {@link #resolveStore()} 를 타면 예열이
-     * 아직 안 됐거나 실패한 cold 인스턴스에서 store 를 만들고 인가 모델을 써버린다 —
-     * 오타난 이름은 빈 store 를 새로 만든 채 조용히 UP 을 보고하게 된다. store 가 없으면
-     * {@link Mono#empty()} 를 그대로 돌려주고, DOWN 으로의 번역은 호출자(헬스 인디케이터)
+     * 설정 등 무엇이든 호출할 수 있는데, 이 경로가 {@link #resolveStore()} 를 타면 오타난 이름으로 빈 store 를 새로 만든 채
+     * 조용히 UP 을 보고하게 된다. store 가 없으면 {@link Mono#empty()} 를 그대로 돌려주고, DOWN 으로의 번역은 호출자(헬스 인디케이터)
      * 몫이다.
      */
     public Mono<String> findExistingStore() {
@@ -99,6 +103,8 @@ public class StoreBootstrapper {
      * 진행 중인 해석이 있으면 그것을 공유하고, 없으면 하나만 새로 만들어 등록한다.
      * compareAndSet 으로 등록 경쟁의 승자만 실제 파이프라인을 구독하게 하고,
      * 패자는 승자가 등록한 Mono 를 그대로 반환해 같은 storeId 를 받는다.
+     *
+     * <p>이것은 <b>한 프로세스 안</b>의 동시 호출을 하나로 묶는다. 프로세스(인스턴스)끼리의 경주는 {@link #convergeAfterCreate} 가 푼다.
      */
     private Mono<String> sharedResolution() {
         Mono<String> existing = resolutionRef.get();
@@ -107,7 +113,7 @@ public class StoreBootstrapper {
         }
 
         Mono<String> created = findStoreIdByName()
-                .switchIfEmpty(Mono.defer(this::createStore))
+                .switchIfEmpty(Mono.defer(() -> createStore().flatMap(this::convergeAfterCreate)))
                 .flatMap(this::attachAndWriteModel)
                 .doFinally(signal -> resolutionRef.set(null))
                 .cache();
@@ -119,59 +125,25 @@ public class StoreBootstrapper {
     }
 
     /**
-     * rebuild(store 모드) 전용. store 를 지우고 같은 이름으로 다시 만든다.
+     * 방금 store 를 만든 뒤 같은 이름 목록을 다시 본다(점검 M17). 빈 OpenFGA 에 인스턴스 둘이 동시에 뜨면 둘 다 "없다"를 보고 각자
+     * 만든다 — OpenFGA 는 이름 유일성을 강제하지 않는다. 그래서 만든 쪽마다 목록을 다시 보고, 모두가 <b>가장 먼저 만들어진 것</b>
+     * (createdAt, 같으면 id 사전순)을 쓴다. 그것이 내 것이 아니면 방금 만든 내 store 를 지운다. 남이 만든 store 는 지우지 않는다 —
+     * 그쪽도 같은 규칙으로 스스로 물러난다. 동시에 떠도 결국 하나로 모인다.
      *
-     * <p>store 를 지우는 순간부터 새로 다 만들어질 때까지는 storeIdRef 와 clientRef 가
-     * 모두 비어 있는 창이 생긴다. 이 메서드가 등장하기 전에는 그 창으로 동시에 들어온
-     * {@link #resolveStore()} 호출이 "아직 해석 안 됐다"고 오판해 <b>자기 것대로 또
-     * store 를 하나 더 만들어버렸다</b> — OpenFGA 가 이름 유일성을 강제하지 않기 때문에
-     * 조용히 같은 이름의 store 가 두 개가 된다.
+     * <p>목록이 생성 직후 바로 보인다는 전제다 — 같은 OpenFGA 서버라 성립한다고 본다(설계 §11).
      *
-     * <p>{@link #sharedResolution()} 이 최초 동시 호출을 다루는 것과 같은 메커니즘
-     * ({@code resolutionRef} 에 진행 중인 Mono 를 게시해 뒤따르는 호출이 합류하게 하는 것)
-     * 을 파괴 작업이 시작되기 <b>전에</b> 적용한다. 그러면 storeIdRef 가 null 이 되는
-     * 순간과 겹치는 {@code resolveStore()} 호출도 {@code resolutionRef} 에서 이 재구성
-     * Mono 를 그대로 보고 합류하지, 자기 것을 새로 만들지 않는다.
-     *
-     * <p><b>"현재 store 찾기" 단계는 반드시 {@link #findStoreIdByName()} 을 직접 써야
-     * 한다 — {@link #resolveStore()} 를 타면 안 된다.</b> cold 상태(storeIdRef 가
-     * 아직 null 인, 배포 직후 아무도 resolveStore() 를 먼저 부르지 않은 상태)에서
-     * resolveStore() 를 부르면 {@link #sharedResolution()} 으로 넘어가는데, 그 시점엔
-     * 이미 이 메서드가 자기 자신(recreation)을 resolutionRef 에 게시해 둔 뒤다.
-     * sharedResolution() 은 "진행 중인 해석이 있다"며 그 게시물을 그대로 돌려주므로
-     * recreation 은 자기 자신의 완료를 기다리는 자기 참조가 되어 영원히 끝나지 않는다.
-     * findStoreIdByName() 은 resolutionRef 를 전혀 건드리지 않으므로 이 순환이 없다.
-     * store 가 아직 없으면(cold) 빈 Mono 를 내며, 그 경우 삭제 단계를 건너뛴다.
-     *
-     * <p>{@code resolutionRef} 게시는 {@link #sharedResolution()} 과 대칭으로
-     * compareAndSet 을 쓴다. 동시에 들어온 두 번째 recreateStore() 호출은 자기 것을
-     * 새로 시작하는 대신 먼저 게시된 재구성에 합류한다 — 이 메서드는 호출자가 직렬화를
-     * 보장한다는 가정(현재는 {@code SyncExecutionGuard})에만 기대지 않는다.
-     *
-     * <p>실패해도 {@code doFinally} 가 {@code resolutionRef} 를 비워 다음 시도가 캐시된
-     * 에러 대신 새로 재구성을 시도할 수 있다 — {@link #sharedResolution()} 과 동일한
-     * "실패는 영구히 캐시되지 않는다" 성질을 유지한다.
+     * <p>패키지 전용 — 경주의 한 순간(남이 먼저 만든 뒤 내가 만든 상태)을 테스트가 직접 만들어 본다.
      */
-    public Mono<String> recreateStore() {
-        Mono<String> recreation = findStoreIdByName()
-                .flatMap(this::deleteStoreById)
-                .then(Mono.fromRunnable(() -> {
-                    storeIdRef.set(null);
-                    clientRef.set(null);
-                }))
-                .then(Mono.defer(this::createStore))
-                .flatMap(this::attachAndWriteModel)
-                .doFinally(signal -> resolutionRef.set(null))
-                .cache();
-
-        // 파괴 작업(store 삭제 → 캐시 무효화)이 시작되기 전에 먼저 게시해야 한다.
-        // 그래야 그 창으로 겹쳐 들어오는 resolveStore() 가 이 Mono 에 합류한다.
-        // compareAndSet 은 동시에 들어온 두 번째 recreateStore() 호출도 같은 방식으로
-        // 합류시킨다.
-        if (resolutionRef.compareAndSet(null, recreation)) {
-            return recreation;
-        }
-        return resolutionRef.get();
+    Mono<String> convergeAfterCreate(String createdId) {
+        return listStoresNamed().flatMap(stores -> {
+            Store winner = stores.stream().min(먼저_만든_순).orElse(null);
+            if (winner == null || winner.getId().equals(createdId)) {
+                return Mono.just(createdId);
+            }
+            log.warn("같은 이름 store '{}' 를 다른 인스턴스가 먼저 만들었다. 내가 만든 {} 를 지우고 {} 를 쓴다",
+                    properties.getStoreName(), createdId, winner.getId());
+            return deleteStoreById(createdId).thenReturn(winner.getId());
+        });
     }
 
     /** storeId 로 직접 client 를 만들어 지운다. clientRef 캐시 상태에 기대지 않는다. */
@@ -196,37 +168,33 @@ public class StoreBootstrapper {
     }
 
     /**
-     * storeId 에 묶인 읽기 전용 client 를 준다. {@code clientRef}/{@code storeIdRef} 캐시를
-     * 읽지도 쓰지도 않는다.
+     * storeId 에 묶인 client 를 준다. {@code clientRef}/{@code storeIdRef} 캐시를 읽지도 쓰지도 않는다.
      *
-     * <p>{@link #findExistingStore()} 는 store 존재만 확인하고 storeId 를 돌려줄 뿐,
-     * {@code clientRef} 를 채우지 않는다({@link #client()} 는 {@code resolveStore()}/
-     * {@code recreateStore()} 가 인가 모델까지 써야만 채워지는 캐시에 기댄다). 그래서
-     * "store 는 있지만 이 프로세스가 아직 resolveStore() 를 부른 적 없는" 상태에서
-     * {@code findExistingStore()} 뒤에 {@code client()} 를 쓰면 실제로는 store 가 있는데도
-     * "아직 해석되지 않았다" 로 잘못 실패한다.
+     * <p>{@link #findExistingStore()} 는 store 존재만 확인하고 storeId 를 돌려줄 뿐 {@code clientRef} 를 채우지 않는다 — 그래서 보기만
+     * 하는 쪽은 {@link #client()} 대신 이것을 쓴다. Check·장부 훑기도 {@link #resolveStore()} 가 준 storeId 로 이것을 쓴다.
      *
-     * <p>이 메서드는 {@code clientRef}/{@code storeIdRef} 를 전혀 건드리지 않으므로
-     * {@code recreateStore()} 가 진행하는 "캐시 비우기 → 새 client 로 교체" 와 절대 경합하지
-     * 않는다 — 읽기 전용 조회가 그 캐시를 갱신하거나, 캐시 교체 도중의 값을 관찰해 오래된
-     * client 를 붙들 수 있는 경로 자체가 없다.
-     *
-     * <p><b>storeId 별로 client 를 재사용한다.</b> 전에는 호출마다 새로 만들었는데, 그 근거로
-     * 든 {@link #findStoreIdByName()} · {@link #deleteStoreById(String)} 은 동기화나 재적재당
-     * 한 번 도는 경로다. 이쪽은 <b>응답 한 줄당 한 번</b> 돈다 — 경로 200개짜리 직원 상세
-     * 하나가 인증 없는 GET 한 번에 커넥션 풀과 셀렉터 스레드를 200벌 만든다.
-     *
-     * <p>캐시를 storeId 로 키잡는 것이 위의 격리 성질을 그대로 지킨다. {@code recreateStore()}
-     * 는 새 store 를 새 id 로 만들므로 그 뒤의 조회는 다른 키를 찾고, 이전 id 에 붙어 있던
-     * client 를 실수로 물려받을 수 없다. 엔트리는 이 프로세스가 본 서로 다른 storeId 마다
-     * 하나이며 — 즉 재적재 횟수만큼 — 사실상 손에 꼽는다.
+     * <p><b>storeId 별로 client 를 재사용한다.</b> 전에는 호출마다 새로 만들었는데, Check 는 <b>응답 한 줄당 한 번</b> 돈다 — 경로
+     * 200개짜리 직원 상세 하나가 인증 없는 GET 한 번에 커넥션 풀과 셀렉터 스레드를 200벌 만든다. store 번호는 바뀌지 않으므로
+     * 엔트리는 사실상 하나다.
      */
     public OpenFgaClient clientFor(String storeId) {
         return readOnlyClients.computeIfAbsent(storeId, this::newClient);
     }
 
+    private Mono<String> findStoreIdByName() {
+        return listStoresNamed().flatMap(this::resolveUniqueMatch);
+    }
+
+    /** 이 이름의 store 전부. */
+    private Mono<List<Store>> listStoresNamed() {
+        return listAllStores(null, new ArrayList<>())
+                .map(all -> all.stream()
+                        .filter(store -> properties.getStoreName().equals(store.getName()))
+                        .toList());
+    }
+
     /**
-     * store 목록을 continuation token 이 소진될 때까지 전부 순회한 뒤에 이름을 찾는다.
+     * store 목록을 continuation token 이 소진될 때까지 전부 순회한다.
      *
      * <p>{@code listStores()} 는 한 페이지(OpenFGA 기본 50개)만 반환한다. 공유 OpenFGA
      * 서버에 store 가 그보다 많으면, 첫 페이지에 없다고 곧장 {@code createStore} 로
@@ -235,11 +203,7 @@ public class StoreBootstrapper {
      * store 가 만들어진다. 이후 이 앱은 새로 만든 빈 store 에 튜플을 쓰고, 기존 소비자는
      * 여전히 첫 번째 store 를 조회하는 완전한 인가 실패로 이어진다.
      */
-    private Mono<String> findStoreIdByName() {
-        return findStoreIdByName(null, new ArrayList<>());
-    }
-
-    private Mono<String> findStoreIdByName(String continuationToken, List<Store> accumulated) {
+    private Mono<List<Store>> listAllStores(String continuationToken, List<Store> accumulated) {
         return Mono.fromCallable(this::storelessClient)
                 .flatMap(client -> Mono.fromFuture(() -> {
                     try {
@@ -256,23 +220,17 @@ public class StoreBootstrapper {
                     accumulated.addAll(response.getStores());
                     String next = response.getContinuationToken();
                     if (next != null && !next.isBlank()) {
-                        return findStoreIdByName(next, accumulated);
+                        return listAllStores(next, accumulated);
                     }
-                    return resolveUniqueMatch(accumulated);
+                    return Mono.just(accumulated);
                 });
     }
 
     /**
-     * 페이지를 전부 모은 뒤에야 판단한다. 같은 이름의 store 가 둘 이상이면 임의로 하나를
-     * 골라 쓰는 대신 에러로 멈춘다 — 이미 이 문제(경쟁으로 인한 중복 store 생성)를 한 번
-     * 겪었다는 신호이므로, 아무거나 골라 쓰면 상황을 더 악화시킬 뿐이다. 사람이 개입해
-     * 정리해야 한다.
+     * 찾기 단계에서 같은 이름의 store 가 둘 이상이면 임의로 하나를 골라 쓰는 대신 에러로 멈춘다 — 오래전부터 둘이었다는 뜻이고,
+     * 어느 쪽에 진짜 데이터가 있는지 모른다. 사람이 개입해 정리해야 한다. (방금 만든 뒤의 중복은 {@link #convergeAfterCreate} 가 푼다.)
      */
-    private Mono<String> resolveUniqueMatch(List<Store> allStores) {
-        List<Store> matches = allStores.stream()
-                .filter(store -> properties.getStoreName().equals(store.getName()))
-                .toList();
-
+    private Mono<String> resolveUniqueMatch(List<Store> matches) {
         if (matches.size() > 1) {
             return Mono.error(new IllegalStateException(
                     "OpenFGA 에 이름이 '%s' 인 store 가 %d개 있다. 이름 유일성이 깨진 상태이므로 "
@@ -298,25 +256,29 @@ public class StoreBootstrapper {
                 .map(response -> response.getId());
     }
 
+    /**
+     * 인가 모델을 쓴 <b>뒤에만</b> storeId 를 기억한다(점검 M6). 먼저 기억하면 모델 쓰기가 실패해도 캐시가 남아, 다음
+     * {@link #resolveStore()} 가 캐시를 보고 다시 시도하지 않는다 — 이 프로세스는 재시작 전까지 모델 없는 store 에 쓰고 묻는다.
+     */
     private Mono<String> attachAndWriteModel(String storeId) {
-        return Mono.fromCallable(() -> {
-                    OpenFgaClient client = newClient(storeId);
-                    clientRef.set(client);
-                    storeIdRef.set(storeId);
-                    return client;
-                })
+        return Mono.fromCallable(() -> newClient(storeId))
                 .flatMap(client -> Mono.fromFuture(() -> {
-                    try {
-                        return client.writeAuthorizationModel(readModel());
-                    } catch (Exception e) {
-                        throw new IllegalStateException("인가 모델 등록 실패", e);
-                    }
-                }))
-                .doOnNext(response -> log.info("OpenFGA 인가 모델을 등록했다"))
+                            try {
+                                return client.writeAuthorizationModel(authorizationModel());
+                            } catch (Exception e) {
+                                throw new IllegalStateException("인가 모델 등록 실패", e);
+                            }
+                        })
+                        .doOnNext(response -> {
+                            log.info("OpenFGA 인가 모델을 등록했다");
+                            clientRef.set(client);
+                            storeIdRef.set(storeId);
+                        }))
                 .thenReturn(storeId);
     }
 
-    private WriteAuthorizationModelRequest readModel() {
+    /** 등록할 인가 모델. 패키지 전용 — 모델 등록이 실패하는 경로를 테스트가 흉내 낸다. */
+    WriteAuthorizationModelRequest authorizationModel() {
         try (InputStream in = new ClassPathResource(MODEL_RESOURCE).getInputStream()) {
             return new ObjectMapper().readValue(in, WriteAuthorizationModelRequest.class);
         } catch (Exception e) {
