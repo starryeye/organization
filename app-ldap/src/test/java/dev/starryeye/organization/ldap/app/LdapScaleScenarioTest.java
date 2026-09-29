@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.fixture.ChartExpectation;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartEditor;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.authz.fixture.ScaleVerification;
@@ -36,7 +37,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -448,10 +448,7 @@ class LdapScaleScenarioTest {
     }
 
     private WebTestClient.BodyContentSpec 동기화한다() {
-        return client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
-                .post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody();
+        return SyncJobClient.끝까지(client, "/admin/sync/full");
     }
 
     /**

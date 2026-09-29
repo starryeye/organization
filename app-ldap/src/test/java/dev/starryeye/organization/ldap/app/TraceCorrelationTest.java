@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.core.fixture.Containers;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
@@ -123,8 +124,9 @@ class TraceCorrelationTest {
     @Test
     @DisplayName("LDAP 읽기가 boundedElastic 으로 넘어가도 같은 traceId 가 이어진다")
     void 블로킹_격리를_넘어_traceId가_이어진다() {
-        // when — 전체 동기화는 LDAP 읽기(boundedElastic) → 튜플 변환 → OpenFGA/DynamoDB 쓰기까지 탄다
-        client.post().uri("/admin/sync/full").exchange().expectStatus().isOk();
+        // when — 전체 동기화는 LDAP 읽기(boundedElastic) → 튜플 변환 → OpenFGA/DynamoDB 쓰기까지 탄다.
+        // 본체는 요청과 떼어 돌지만(SyncJobs) 요청의 컨텍스트를 이어받으므로 같은 traceId 여야 한다
+        SyncJobClient.끝까지(client, "/admin/sync/full").jsonPath("$.status").isEqualTo("SUCCEEDED");
 
         // then — LDAP 읽기 완료 로그는 boundedElastic 스레드에서 찍힌다.
         // 이 줄에 traceId 가 있으면 블로킹 격리를 넘어 전파된 것이다.

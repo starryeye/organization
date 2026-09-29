@@ -18,6 +18,7 @@ dependencies {
     // OpenFGA 를 우리 어댑터를 거치지 않고 직접 두드리는 교차 검증용
     testImplementation testFixtures(project(':authz-openfga'))
     testImplementation testFixtures(project(':connector-ldap'))
+    testImplementation testFixtures(project(':admin-api'))
     testImplementation libs.testcontainers.junit
     testImplementation libs.unboundid.ldapsdk
     testImplementation libs.openfga.sdk

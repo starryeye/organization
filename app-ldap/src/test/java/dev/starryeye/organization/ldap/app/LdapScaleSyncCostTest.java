@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -82,11 +83,7 @@ class LdapScaleSyncCostTest {
     void 전체동기화_실비를_잰다() {
         // when
         long t0 = System.currentTimeMillis();
-        client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
-                .post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+        SyncJobClient.끝까지(client, "/admin/sync/full").jsonPath("$.status").isEqualTo("SUCCEEDED");
         long 싱크 = System.currentTimeMillis() - t0;
 
         long t1 = System.currentTimeMillis();

@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.authz.fixture.ScaleVerification;
@@ -156,10 +157,7 @@ class LdapInterruptedSyncScaleTest {
     // ---------- 거들기 ----------
 
     private WebTestClient.BodyContentSpec 동기화한다() {
-        return client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
-                .post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody();
+        return SyncJobClient.끝까지(client, "/admin/sync/full");
     }
 
     private void 검증한다() {
