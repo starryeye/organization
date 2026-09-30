@@ -40,6 +40,7 @@ public class FakeMutationLock implements MutationLock {
     public boolean failRelease = false;
 
     private final AtomicReference<String> heldToken = new AtomicReference<>();
+    private final AtomicReference<LockPurpose> heldPurpose = new AtomicReference<>();
 
     /** 지금 누군가 쥐고 있는가. 판단 읽기가 락 안에서 일어나는지 보는 테스트가 쓴다. */
     public boolean isHeld() {
@@ -56,6 +57,7 @@ public class FakeMutationLock implements MutationLock {
             if (!heldToken.compareAndSet(null, token)) {
                 return Mono.error(new LockUnavailableException("이미 다른 쪽이 쥐고 있다(테스트)"));
             }
+            heldPurpose.set(purpose);
             acquired.incrementAndGet();
             return Mono.just(new LockLease(token, Instant.now().plusSeconds(30)));
         });
@@ -68,6 +70,7 @@ public class FakeMutationLock implements MutationLock {
                 return Mono.error(new IllegalStateException("반납 실패(테스트)"));
             }
             if (heldToken.compareAndSet(lease.token(), null)) {
+                heldPurpose.set(null);
                 released.incrementAndGet();
             }
             return Mono.empty();
@@ -87,5 +90,10 @@ public class FakeMutationLock implements MutationLock {
             renewed.incrementAndGet();
             return Mono.just(new LockLease(lease.token(), Instant.now().plusSeconds(30)));
         });
+    }
+
+    @Override
+    public Mono<LockPurpose> peek() {
+        return Mono.defer(() -> heldToken.get() == null ? Mono.empty() : Mono.justOrEmpty(heldPurpose.get()));
     }
 }

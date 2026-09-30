@@ -131,4 +131,51 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
         assertThatThrownBy(() -> 인스턴스1.renew(낡은리스).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
+
+    @Test
+    @DisplayName("아무도 쥐지 않았으면 들여다봐도 빈 값이다")
+    void 비었으면_들여다봐도_빈_값이다() {
+        // when, then
+        assertThat(인스턴스1.peek().blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("쥔 목적을 들여다본다 — 들여다보기는 락을 잡지 않는다")
+    void 쥔_목적을_들여다본다() {
+        // given
+        var lease = 인스턴스1.acquire(LockPurpose.REBUILD).block();
+
+        // when
+        var 쥔_목적 = 인스턴스2.peek().block();
+
+        // then — 들여다본 쪽은 여전히 잡을 수 없고, 반납하면 빈 값이다
+        assertThat(쥔_목적).isEqualTo(LockPurpose.REBUILD);
+        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+                .isInstanceOf(LockUnavailableException.class);
+        인스턴스1.release(lease).block();
+        assertThat(인스턴스2.peek().blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("만료된 락은 쥔 것으로 보지 않는다 — 죽은 인스턴스가 남긴 줄 때문에 아카이빙이 영영 건너뛰어지지 않게")
+    void 만료된_락은_쥔_것이_아니다() {
+        // given
+        인스턴스1.acquire(LockPurpose.REBUILD).block();
+
+        // when — TTL(30초)을 넘긴다
+        clock.앞으로(Duration.ofSeconds(31));
+
+        // then
+        assertThat(인스턴스2.peek().blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("app-ldap 동기화 목적(SYNC)으로도 잡는다")
+    void 동기화_목적으로_잡는다() {
+        // when
+        인스턴스1.acquire(LockPurpose.SYNC).block();
+
+        // then
+        assertThat(인스턴스2.peek().block()).isEqualTo(LockPurpose.SYNC);
+    }
 }
