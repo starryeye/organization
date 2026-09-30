@@ -16,7 +16,7 @@ import reactor.core.publisher.Mono;
 public interface TupleSnapshotRepository {
 
     /**
-     * 포인터가 없으면 빈 Mono(처음 설치·재적재 직후). 포인터가 가리키는 스냅샷의 메타가 없거나 튜플 수가 메타와 다르면
+     * 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono(처음 설치). 포인터가 가리키는 스냅샷의 메타가 없거나 튜플 수가 메타와 다르면
      * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다.
      */
     Mono<TupleSnapshot> findLatest();

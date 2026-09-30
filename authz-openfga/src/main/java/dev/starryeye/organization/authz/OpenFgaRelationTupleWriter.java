@@ -166,6 +166,12 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                 .concatMap(half -> 쪼개며_보낸다(half, send, 거절인가))
                                 .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
                     }
+                    if (거절인가.test(error)) {
+                        // 한 줄까지 좁혔는데도 거절됐다 — 이 줄만의 문제이지 OpenFGA 가 죽은 게 아니므로 스택 트레이스 없이 남긴다
+                        log.warn("OpenFGA 가 한 줄을 거절했다 — 실패로 남긴다: {} ({})",
+                                batch.tuples().get(0), rootMessage(error));
+                        return Mono.just(batch.failed(rootMessage(error)));
+                    }
                     log.error("배치 {}건 적용 실패", batch.tuples().size(), error);
                     return Mono.just(batch.failed(rootMessage(error)));
                 });

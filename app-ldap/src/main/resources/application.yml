@@ -19,7 +19,7 @@ spring:
 sync:
   cron: "0 0 3 * * *"
   purge-cron: "0 0 4 * * *"
-  # 동기화·재적재 한 번의 전체 기한. 넘으면 남은 일을 멈추고 FAILED("기한 초과 — 30분")로 기록한 뒤 가드를 푼다
+  # 동기화·재적재 한 번의 전체 기한. 넘으면 남은 일을 멈추고 FAILED("기한 초과 — 30분")로 기록한 뒤 작업 락을 푼다
   job-timeout: 30m
   deletion-guard:
     enabled: true

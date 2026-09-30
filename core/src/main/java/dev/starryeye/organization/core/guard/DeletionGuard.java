@@ -9,7 +9,8 @@ import java.util.Set;
  * LDAP 전체 동기화가 잘못된 결과(필터 오류로 0건 응답, 부분 응답)를 가져왔을 때
  * 전직원 권한이 한 번에 날아가는 것을 막는다.
  *
- * <p>SCIM 의 의도된 단건 삭제와 rebuild 의 의도된 전체 삭제에는 적용하지 않는다.
+ * <p>LDAP 의 스냅샷 비교, 멈춘 뒤 훑어 맞추기, 재적재에 적용한다(설계 2026-09-30 §4.3) — {@code FORCED}·{@code force} 로만
+ * 건너뛴다. SCIM 의 의도된 단건 삭제에는 적용하지 않는다.
  */
 public class DeletionGuard {
 
