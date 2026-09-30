@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,12 +21,11 @@ import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * app-ldap 관리 API. 동기화·재적재는 겹치지 않으면 곧바로 202 와 실행 기록(RUNNING)을 주고 따로 돈다(설계 2026-09-29 §4) —
- * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다.
+ * app-ldap 관리 API. 동기화·재적재는 작업 락을 잡으면 곧바로 202 와 실행 기록(RUNNING)을 주고 따로 돈다(설계 2026-09-29 §4) —
+ * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다. 락은 클러스터 전체에서 하나라 다른 인스턴스가 쥐고 있으면 409 다(설계 2026-09-30 §3).
  */
 @Slf4j
 @RestController
@@ -40,7 +40,6 @@ public class AdminSyncController {
     private final FullSyncUseCase fullSync;
     private final RebuildUseCase rebuild;
     private final SyncRunRepository runs;
-    private final SyncExecutionGuard executionGuard;
     private final SyncMetrics metrics;
 
     /**
@@ -51,23 +50,24 @@ public class AdminSyncController {
     public Mono<SyncRunResponse> full(@RequestParam(defaultValue = "false") boolean force) {
         SyncTrigger trigger = force ? SyncTrigger.FORCED : SyncTrigger.MANUAL;
         log.info("수동 전체 동기화 요청: trigger={}", trigger);
-        return guarded(release -> fullSync.start(trigger, release, metrics::record));
+        return 걸되_겹치면_409(() -> fullSync.start(trigger, metrics::record));
     }
 
     /**
-     * 전체 재적재를 건다. 모드는 하나다(설계 §3.3) — LDAP 을 다시 읽어 있어야 할 줄을 쓰고, 장부를 훑어 없어야 할 줄을 지운다.
-     * 옛 {@code mode} 파라미터가 오면 400 으로 알린다 — 조용히 무시하면 {@code mode=store} 로 "깨끗이 비우기"를 기대한 사람이
-     * 다른 일을 받는다.
+     * 전체 재적재를 건다. 모드는 하나다 — LDAP 을 다시 읽어 있어야 할 줄을 쓰고, 장부를 훑어 없어야 할 줄을 지운다. 지울 줄이 훑은 장부의
+     * 임계치를 넘으면(LDAP 이 설정 실수로 0명을 돌려주는 경우 등) 지우지 않고 ABORTED 다 — 사람이 확인한 뒤 {@code force=true} 로 넘긴다.
+     * 옛 {@code mode} 파라미터가 오면 400 으로 알린다.
      */
     @PostMapping("/rebuild")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public Mono<SyncRunResponse> rebuild(@RequestParam(required = false) String mode) {
+    public Mono<SyncRunResponse> rebuild(@RequestParam(required = false) String mode,
+                                         @RequestParam(defaultValue = "false") boolean force) {
         if (mode != null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "재적재 모드는 하나로 합쳐졌습니다 — mode 없이 POST /admin/sync/rebuild 를 호출하세요 (받은 mode: " + mode + ")");
         }
-        log.warn("전체 재적재 요청");
-        return guarded(release -> rebuild.start(release, metrics::record));
+        log.warn("전체 재적재 요청: force={}", force);
+        return 걸되_겹치면_409(() -> rebuild.start(force, metrics::record));
     }
 
     @GetMapping("/runs")
@@ -85,20 +85,11 @@ public class AdminSyncController {
                         HttpStatus.NOT_FOUND, "실행 기록이 없습니다: " + runId)));
     }
 
-    /**
-     * 겹치지 않게 가드를 잡고 작업을 건다. 못 잡으면 409. 잡았으면 반납 수단을 작업에 넘긴다 — 작업이 어떻게 끝나든 SyncJobs 가
-     * 한 번 부른다. 걸기 전에 실패하면(기록을 열지 못함, 동기 예외) 여기서도 부르지만 {@link SyncExecutionGuard#releaseOnce} 라 한 번만
-     * 푼다. 가드 잡기와 걸기가 같은 구독 안에서 일어나, 그 사이에 요청이 끊겨 가드만 잡힌 채 남는 틈이 없다.
-     */
-    private Mono<SyncRunResponse> guarded(Function<Supplier<Mono<Void>>, Mono<SyncRun>> start) {
-        return Mono.defer(() -> {
-            if (!executionGuard.tryAcquire()) {
-                return Mono.<SyncRun>error(new ResponseStatusException(
-                        HttpStatus.CONFLICT, "동기화가 이미 진행 중입니다"));
-            }
-            Supplier<Mono<Void>> release = executionGuard.releaseOnce();
-            return Mono.defer(() -> start.apply(release))
-                    .onErrorResume(error -> release.get().then(Mono.<SyncRun>error(error)));
-        }).map(SyncRunResponse::from);
+    /** 작업 락을 못 잡았다는 것은 다른 인스턴스가 동기화·재적재 중이라는 뜻이다 — 곧바로 409, 관리자가 잠시 뒤 다시 건다. */
+    private static Mono<SyncRunResponse> 걸되_겹치면_409(Supplier<Mono<SyncRun>> start) {
+        return Mono.defer(start)
+                .map(SyncRunResponse::from)
+                .onErrorMap(LockUnavailableException.class, busy ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, "다른 동기화·재적재가 진행 중입니다", busy));
     }
 }

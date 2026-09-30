@@ -15,6 +15,8 @@ import dev.starryeye.organization.authz.OpenFgaProperties;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import org.junit.jupiter.api.DisplayName;
@@ -24,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -129,6 +132,7 @@ class LdapSyncEndToEndTest {
     @Autowired DirectoryStateRepository state;
     @Autowired SyncRunRepository runs;
     @Autowired OpenFgaProperties openFgaProperties;
+    @Autowired MutationLock lock;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -331,6 +335,52 @@ class LdapSyncEndToEndTest {
         var 상태 = state.loadAll().block(Duration.ofSeconds(30));
         assertThat(상태).isNotNull();
         assertThat(상태.users().get("park").active()).isFalse();
+    }
+
+    // ---------- 클러스터 락·기준선 의심 (설계 2026-09-30) ----------
+
+    @Test
+    @Order(11)
+    @DisplayName("다른 인스턴스가 작업 락을 쥐고 있으면 수동 동기화·재적재는 곧바로 409 다")
+    void 다른_인스턴스가_락을_쥐면_409다() {
+        // given — 다른 인스턴스의 정기 동기화가 락을 쥔 순간
+        LockLease lease = lock.acquire(MutationLock.LockPurpose.SYNC).block(Duration.ofSeconds(10));
+
+        try {
+            // when, then
+            client.post().uri("/admin/sync/full").exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
+            client.post().uri("/admin/sync/rebuild").exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
+        } finally {
+            lock.release(lease).block(Duration.ofSeconds(10));
+        }
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("지난 회차가 기록 전에 멈췄으면 다음 동기화는 장부를 훑어 맞춘다 — 스냅샷에 없던 줄도 지운다(점검 M2)")
+    void 기록_중_표시가_남으면_훑어_맞춘다() {
+        // given — 지난 회차가 쓰기 시작한 뒤 멈췄다. 그 사이 장부에 스냅샷이 모르는 줄이 생겼다
+        잔여튜플을_심는다("user:ghost", "direct_member", "group:DEV001");
+        snapshots.markWriting().block(Duration.ofSeconds(10));
+
+        // when
+        SyncJobClient.끝까지(client, "/admin/sync/full")
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.message").value(message -> assertThat((String) message).contains("기준선 의심"));
+
+        // then
+        assertThat(check("user:ghost", "member", "group:DEV001")).isFalse();
+        assertThat(snapshots.isWriting().block(Duration.ofSeconds(10))).isFalse();
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("재적재에 force=true 를 줄 수 있다 — 가드에 걸린 뒤 사람이 넘기는 통로")
+    void 재적재에_force를_줄_수_있다() {
+        // when, then
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild?force=true")
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.trigger").isEqualTo("REBUILD");
     }
 
     private void 동기화한다() {
