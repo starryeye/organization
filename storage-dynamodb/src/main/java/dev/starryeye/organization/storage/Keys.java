@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -258,5 +259,10 @@ public final class Keys {
 
     public static String syncRunSk(Instant startedAt, String runId) {
         return sortableTimestamp(startedAt) + "#" + runId;
+    }
+
+    /** 하루 1회 작업 표지(설계 2026-09-30 §5.1). 날짜는 yyyy-MM-dd. */
+    public static String dailyJobPk(String job, LocalDate day) {
+        return "DAILY#" + job + "#" + day;
     }
 }

@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.DailyJobClaims;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.MutationLock;
@@ -90,5 +91,10 @@ public class DynamoDbConfig {
                                                          DynamoDbProperties properties,
                                                          Clock clock) {
         return new DynamoDbPageBookmarkRepository(client, properties, clock);
+    }
+
+    @Bean
+    public DailyJobClaims dailyJobClaims(DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        return new DynamoDbDailyJobClaims(client, properties, clock);
     }
 }
