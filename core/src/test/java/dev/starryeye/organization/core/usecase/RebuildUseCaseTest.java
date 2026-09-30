@@ -114,7 +114,6 @@ class RebuildUseCaseTest {
         assertThat(snapshots.saved).hasSize(1);
         assertThat(snapshots.saved.get(0).source()).isEqualTo(SyncSource.LDAP);
         assertThat(snapshots.saved.get(0).tuples()).containsExactly(김_백엔드);
-        assertThat(snapshots.resetCount).hasValue(0);
         assertThat(state.users).containsOnlyKeys("kim");
         assertThat(state.groups).containsOnlyKeys("DEV002");
     }

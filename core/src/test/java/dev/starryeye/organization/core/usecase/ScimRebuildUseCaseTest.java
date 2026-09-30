@@ -386,7 +386,6 @@ class ScimRebuildUseCaseTest {
 
         // then — 사고 뒤에 무슨 일이 있었는지 볼 유일한 기록이라 남긴다
         assertThat(run.trigger()).isEqualTo(SyncTrigger.RESET);
-        assertThat(snapshots.resetCount).hasValue(0);
         assertThat(snapshots.saved).hasSize(지우기_전_스냅샷);
         assertThat(runs.finished).hasSize(2);
     }

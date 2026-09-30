@@ -8,7 +8,7 @@ import reactor.core.publisher.Mono;
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
  *
- * <p>OpenFGA 의 <b>열거</b> API(Read/ListObjects)를 쓰지 않으므로 이것이 OpenFGA 상태를
+ * <p>평소 동기화는 OpenFGA 의 열거 API(Read/ListObjects)를 쓰지 않으므로 이것이 OpenFGA 상태를
  * 대신하는 유일한 기록이다. {@code Check} 는 허용되지만 점 조회라 열거를 대체하지 못한다 —
  * "kim 이 개발본부의 member 인가"에는 답해도 "지금 어떤 튜플들이 있나"에는 답하지 못하므로,
  * diff 의 기준선은 여전히 이 기록에서 와야 한다.
@@ -29,8 +29,14 @@ public interface TupleSnapshotRepository {
     /** 메타가 없으면 빈 Mono. 튜플 수가 메타와 다르면 {@link SnapshotIntegrityException}. */
     Mono<TupleSnapshot> findById(String snapshotId);
 
-    /** rebuild 전용. 모든 스냅샷과 포인터를 지운다. */
-    Mono<Void> reset();
+    /**
+     * "기록 중" 표시를 남긴다 — LDAP 이 OpenFGA 에 쓰기 <b>직전</b>에 부른다(설계 2026-09-30 §4.1). 다음 {@link #save} 가 포인터를 새로 쓰면서
+     * 표시가 사라진다. 그래서 표시가 남아 있다는 것은 "쓰기 시작했는데 기록을 끝내지 못했다"는 뜻이다. 포인터가 없어도(첫 설치) 표시만 남긴다.
+     */
+    Mono<Void> markWriting();
+
+    /** "기록 중" 표시가 남아 있는가 — 지난 회차가 쓰기 시작한 뒤 기록 전에 멈췄다. 강한 일관성으로 읽는다. */
+    Mono<Boolean> isWriting();
 
     /**
      * 보존 기간이 지난 스냅샷을 지운다. 최신 포인터가 가리키는 스냅샷은 기간과 상관없이 지우지 않는다 — 비교 기준이다.

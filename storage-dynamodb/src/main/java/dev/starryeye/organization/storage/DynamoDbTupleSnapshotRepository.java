@@ -19,6 +19,7 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.time.Clock;
@@ -56,6 +57,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String TUPLE_COUNT = "tupleCount";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String RETAIN_UNTIL = "retainUntil";
+    private static final String WRITING_SINCE = "writingSince";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -109,6 +111,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         return putItem(item);
     }
 
+    /** 줄을 통째로 새로 써 "기록 중" 칸도 지운다(설계 2026-09-30 §4.1). */
     private Mono<Void> writePointer(String snapshotId) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER));
@@ -124,15 +127,39 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                         "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id)))));
     }
 
-    /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없으면 빈 Mono. */
+    /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono. */
     private Mono<String> latestId() {
+        return 포인터().flatMap(item -> Mono.justOrEmpty(Attrs.str(item, SNAPSHOT_ID)));
+    }
+
+    private Mono<Map<String, AttributeValue>> 포인터() {
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
                         .consistentRead(true)
                         .build()))
                 .filter(response -> response.hasItem() && !response.item().isEmpty())
-                .map(response -> Attrs.str(response.item(), SNAPSHOT_ID));
+                .map(response -> response.item());
+    }
+
+    /** 포인터 줄에 칸 하나를 붙인다(UpdateItem) — 스냅샷 번호는 그대로 둔다. 포인터가 없으면 칸만 있는 줄이 생긴다. */
+    @Override
+    public Mono<Void> markWriting() {
+        return Mono.fromFuture(() -> client.updateItem(UpdateItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                        .updateExpression("SET #writingSince = :now")
+                        .expressionAttributeNames(Map.of("#writingSince", WRITING_SINCE))
+                        .expressionAttributeValues(Map.of(":now", Attrs.s(clock.instant().toString())))
+                        .build()))
+                .then();
+    }
+
+    @Override
+    public Mono<Boolean> isWriting() {
+        return 포인터()
+                .map(item -> item.containsKey(WRITING_SINCE))
+                .defaultIfEmpty(false);
     }
 
     @Override
@@ -206,19 +233,6 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 Attrs.instant(item, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(item, SOURCE)),
                 Attrs.integer(item, TUPLE_COUNT));
-    }
-
-    /**
-     * 모든 스냅샷과 포인터를 지운다. <b>포인터를 먼저 지운다</b> — 부르는 쪽(재적재)은 이미 OpenFGA 를 비웠으므로 빈 기준선이 정답이다.
-     * 스냅샷을 지우다 실패해도 포인터가 없으니 다음 회차는 첫 적재로 돌고, 남은 스냅샷은 메타가 있어 보존 기간 뒤 정리된다.
-     * 포인터를 마지막에 지우면 반쯤 지워진 스냅샷을 가리킨 채 남아 매 회차가 기준선 깨짐으로 실패한다.
-     */
-    @Override
-    public Mono<Void> reset() {
-        return deleteItem(Keys.SNAPSHOT_POINTER, Keys.LATEST)
-                .thenMany(snapshotMetas())
-                .flatMap(meta -> deleteSnapshot(meta.id()), DELETE_CONCURRENCY)
-                .then();
     }
 
     /**
