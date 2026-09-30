@@ -11,6 +11,7 @@ import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.util.context.Context;
@@ -417,5 +418,32 @@ class SyncJobsTest {
         assertThat(죽은것.message()).isEqualTo("비정상 종료로 중단");
         assertThat(runs.findById("도는-아카이빙").block().status()).isEqualTo(SyncStatus.RUNNING);
         assertThat(runs.findById("다른-앱").block().status()).isEqualTo(SyncStatus.RUNNING);
+    }
+
+    @Test
+    @DisplayName("막 끝난 기록이 오래된 목록에 RUNNING 으로 보여도 덮어쓰지 않는다 — 반납과 기록 사이의 틈")
+    void 막_끝난_기록은_덮어쓰지_않는다() {
+        // given — 저장된 기록은 이미 SUCCEEDED 인데, findRecent 가(최종 일관성 때문에) 그 앞에 낡은 RUNNING 사본을 얹어 준다
+        SyncRun 앞_작업_RUNNING = SyncRun.started("앞-작업", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(60));
+        FakeSyncRunRepository 낡은_목록_저장소 = new FakeSyncRunRepository(지금) {
+            @Override
+            public Flux<SyncRun> findRecent(int limit) {
+                return Flux.concat(Mono.just(앞_작업_RUNNING), super.findRecent(limit));
+            }
+        };
+        낡은_목록_저장소.seed(앞_작업_RUNNING);
+        낡은_목록_저장소.finish(앞_작업_RUNNING, SyncOutcome.noChange()).block();
+        SyncJobs 잡스 = new SyncJobs(낡은_목록_저장소, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
+
+        // when
+        SyncRun 끝난것 = 낡은_목록_저장소.awaitFinished(잡스.startLocked(SyncSource.LDAP, SyncTrigger.MANUAL,
+                MutationLock.LockPurpose.SYNC, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(낡은_목록_저장소.findById("앞-작업").block().status())
+                .as("반납과 기록 사이의 틈에 낡은 RUNNING 사본을 보고 방금 끝난 결과를 덮어쓰면 안 된다")
+                .isEqualTo(SyncStatus.SUCCEEDED);
     }
 }

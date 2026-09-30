@@ -209,6 +209,11 @@ public class SyncJobs {
     /**
      * 같은 앱의 락 작업 기록 중 RUNNING 으로 남은 것을 닫는다(설계 2026-09-30 §3.3). 락을 쥐었으니 그것들은 죽은 작업이다. 락을 잡지 않는
      * 아카이빙과 방금 연 자기 기록은 건드리지 않는다. 찾거나 닫다 실패해도 작업은 계속한다 — 기록 정리는 부가 일이다.
+     *
+     * <p>{@link SyncRunRepository#abandon} 은 저장된 기록이 <b>아직 RUNNING 일 때만</b> 닫는다. 앞 작업이 락을 반납한 뒤·자기
+     * 기록을 쓰기 전의 틈에 여기까지 왔으면, 방금 SUCCEEDED 로 끝난 기록이 이 목록에는 아직 RUNNING 으로 보일 수 있다(읽기는 최종
+     * 일관성) — 조건이 없으면 그 결과·집계값을 지울 뻔한다. {@code abandon} 이 빈 Mono 를 주면 이미 끝나 있었다는 뜻이니 경고할 일이
+     * 아니다.
      */
     private Mono<Void> 남은_기록을_닫는다(SyncSource source, String 지금_기록) {
         return runs.findRecent(살펴볼_기록)
@@ -216,8 +221,14 @@ public class SyncJobs {
                         && run.status() == SyncStatus.RUNNING
                         && run.trigger() != SyncTrigger.ARCHIVE
                         && !run.runId().equals(지금_기록))
-                .concatMap(run -> runs.finish(run, SyncOutcome.failed(비정상_종료_사유))
-                        .doOnNext(closed -> log.warn("[{}] 끝나지 못한 채 남은 실행 기록을 닫았다: {}", closed.runId(), 비정상_종료_사유))
+                .concatMap(run -> runs.abandon(run, 비정상_종료_사유)
+                        .doOnSuccess(closed -> {
+                            if (closed != null) {
+                                log.warn("[{}] 끝나지 못한 채 남은 실행 기록을 닫았다: {}", closed.runId(), 비정상_종료_사유);
+                            } else {
+                                log.debug("[{}] 닫으려 했으나 이미 끝나 있었다 — 반납과 기록 사이의 틈", run.runId());
+                            }
+                        })
                         .onErrorResume(error -> {
                             log.warn("[{}] 끝나지 못한 실행 기록을 닫지 못했다", run.runId(), error);
                             return Mono.empty();
