@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeSnapshotSource;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
@@ -55,7 +56,7 @@ class FullSyncUseCaseTest {
         runs = new FakeSyncRunRepository(고정시각);
         useCase = new FullSyncUseCase(source, snapshots, state, writer,
                 new DeletionGuard(DeletionGuardPolicy.defaults()),
-                new SyncJobs(runs, Duration.ofMinutes(1)),
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 

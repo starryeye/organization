@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeSnapshotSource;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
@@ -63,7 +64,8 @@ class RebuildUseCaseTest {
         runs = new FakeSyncRunRepository(고정시각);
         반납 = new AtomicInteger();
         useCase = new RebuildUseCase(source, snapshots, state, writer, scanner,
-                new SyncJobs(runs, Duration.ofMinutes(1)), Clock.fixed(고정시각, ZoneOffset.UTC));
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
+                Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
     private static DirectorySnapshot 조직도(String userId, String groupCode) {

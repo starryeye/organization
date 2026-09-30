@@ -55,8 +55,8 @@ class ScimRebuildUseCaseTest {
         snapshots = new FakeSnapshotRepository();
         runs = new FakeSyncRunRepository(NOW);
         lock = new FakeMutationLock();
-        useCase = new ScimRebuildUseCase(state, writer, scanner, snapshots, lock,
-                Duration.ofSeconds(10), LockObserver.NOOP, new SyncJobs(runs, Duration.ofMinutes(1)),
+        useCase = new ScimRebuildUseCase(state, writer, scanner, snapshots,
+                new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 

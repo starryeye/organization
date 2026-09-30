@@ -1,11 +1,13 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -32,14 +34,16 @@ class SyncJobsTest {
     private static final Instant 지금 = Instant.parse("2026-09-29T03:00:00Z");
 
     private FakeSyncRunRepository runs;
+    private FakeMutationLock lock;
     private SyncJobs jobs;
     private AtomicInteger 반납;
     private Supplier<Mono<Void>> 반납수단;
 
     @BeforeEach
     void 준비한다() {
+        lock = new FakeMutationLock();
         runs = new FakeSyncRunRepository(지금);
-        jobs = new SyncJobs(runs, Duration.ofMinutes(1));
+        jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
         반납 = new AtomicInteger();
         반납수단 = () -> Mono.fromRunnable(반납::incrementAndGet);
     }
@@ -114,7 +118,7 @@ class SyncJobsTest {
     @DisplayName("기한을 넘기면 남은 일을 멈추고 FAILED(기한 초과)로 기록한 뒤 반납한다")
     void 기한을_넘기면_멈춘다() {
         // given — 끝나지 않는 작업. OpenFGA 가 죽은 채로 배치마다 재시도하는 재적재다
-        jobs = new SyncJobs(runs, Duration.ofMillis(200));
+        jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMillis(200));
         AtomicBoolean 취소됨 = new AtomicBoolean();
         Mono<SyncOutcome> 끝나지_않는_작업 = Mono.<SyncOutcome>never().doOnCancel(() -> 취소됨.set(true));
 
@@ -243,7 +247,7 @@ class SyncJobsTest {
             public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
                 return 열기.get();
             }
-        }, Duration.ofMinutes(1));
+        }, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
     }
 
     private static Mono<SyncOutcome> 시작하면_표시한다(AtomicBoolean 시작됨) {
@@ -302,5 +306,116 @@ class SyncJobsTest {
 
         // then
         assertThat(본값.get()).isEqualTo("요청의-trace");
+    }
+
+    // ---------- 락을 잡고 띄우기 (설계 2026-09-30 §3) ----------
+
+    private SyncRun 락을_잡고_건다(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work) {
+        return jobs.startLocked(source, trigger, MutationLock.LockPurpose.SYNC, work, run -> {
+        }).block();
+    }
+
+    @Test
+    @DisplayName("락을 잡고 작업을 띄우며, 끝나면 반납한다 — 도는 동안에는 그 목적으로 쥐고 있다")
+    void 락을_잡고_띄우고_반납한다() {
+        // given
+        AtomicReference<MutationLock.LockPurpose> 도는_동안 = new AtomicReference<>();
+        Mono<SyncOutcome> 작업 = lock.peek().map(purpose -> {
+            도는_동안.set(purpose);
+            return SyncOutcome.noChange();
+        });
+
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(락을_잡고_건다(SyncSource.LDAP, SyncTrigger.MANUAL, 작업).runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(도는_동안.get()).isEqualTo(MutationLock.LockPurpose.SYNC);
+        assertThat(lock.acquired).hasValue(1);
+        assertThat(lock.released).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("다른 인스턴스가 락을 쥐고 있으면 곧바로 LockUnavailableException 이고, 기록을 열지도 일을 시작하지도 않는다")
+    void 락을_못_잡으면_시작하지_않는다() {
+        // given
+        lock.failAcquire = true;
+        AtomicBoolean 시작됨 = new AtomicBoolean();
+
+        // when, then
+        assertThatThrownBy(() -> 락을_잡고_건다(SyncSource.LDAP, SyncTrigger.SCHEDULED, 시작하면_표시한다(시작됨)))
+                .isInstanceOf(LockUnavailableException.class);
+        assertThat(시작됨).isFalse();
+        assertThat(runs.findRecent(10).collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("두 인스턴스가 같은 락으로 동시에 걸면 한쪽만 돈다 — 같은 초에 도는 정기 동기화")
+    void 두_인스턴스는_한_번에_하나만_돈다() {
+        // given — 같은 락(같은 테이블)을 쓰는 두 인스턴스
+        SyncJobs 가 = jobs;
+        SyncJobs 나 = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
+        Sinks.One<SyncOutcome> 가의_작업 = Sinks.one();
+
+        // when
+        SyncRun 가의_기록 = 가.startLocked(SyncSource.LDAP, SyncTrigger.SCHEDULED, MutationLock.LockPurpose.SYNC,
+                가의_작업.asMono(), run -> {
+                }).block();
+
+        // then — 가가 도는 동안 나는 못 건다
+        assertThatThrownBy(() -> 나.startLocked(SyncSource.LDAP, SyncTrigger.SCHEDULED, MutationLock.LockPurpose.SYNC,
+                Mono.just(SyncOutcome.noChange()), run -> {
+                }).block())
+                .isInstanceOf(LockUnavailableException.class);
+
+        // when — 가가 끝나면
+        가의_작업.tryEmitValue(SyncOutcome.noChange());
+        runs.awaitFinished(가의_기록.runId());
+
+        // then — 나도 걸 수 있다
+        SyncRun 나의_기록 = 나.startLocked(SyncSource.LDAP, SyncTrigger.MANUAL, MutationLock.LockPurpose.SYNC,
+                Mono.just(SyncOutcome.noChange()), run -> {
+                }).block();
+        assertThat(runs.awaitFinished(나의_기록.runId()).status()).isEqualTo(SyncStatus.SUCCEEDED);
+    }
+
+    @Test
+    @DisplayName("작업 도중 리스를 잃으면(남이 가져갔으면) 멈추고 FAILED 로 기록한다")
+    void 리스를_잃으면_멈춘다() {
+        // given
+        jobs = new SyncJobs(runs, lock, Duration.ofMillis(50), LockObserver.NOOP, Duration.ofMinutes(1));
+        lock.failRenew = true;
+        AtomicBoolean 취소됨 = new AtomicBoolean();
+
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(락을_잡고_건다(SyncSource.LDAP, SyncTrigger.MANUAL,
+                Mono.<SyncOutcome>never().doOnCancel(() -> 취소됨.set(true))).runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(끝난것.message()).contains("리스");
+        assertThat(취소됨).as("남이 가져간 뒤에도 계속 쓰면 두 인스턴스가 겹친다").isTrue();
+    }
+
+    @Test
+    @DisplayName("락을 잡은 작업은 시작할 때 같은 앱의 끝나지 못한 락 작업 기록을 '비정상 종료로 중단'으로 닫는다 — 아카이빙 기록과 자기 기록은 두고")
+    void 끝나지_못한_기록을_닫는다() {
+        // given — 죽은 인스턴스가 남긴 SCIM 재적재 기록, 도는 중인 아카이빙, 다른 앱(LDAP)의 기록
+        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300)));
+        runs.seed(SyncRun.started("도는-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(60)));
+        runs.seed(SyncRun.started("다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(600)));
+
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then
+        assertThat(끝난것.status()).as("자기 기록은 닫지 않는다").isEqualTo(SyncStatus.SUCCEEDED);
+        SyncRun 죽은것 = runs.findById("죽은-재적재").block();
+        assertThat(죽은것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(죽은것.message()).isEqualTo("비정상 종료로 중단");
+        assertThat(runs.findById("도는-아카이빙").block().status()).isEqualTo(SyncStatus.RUNNING);
+        assertThat(runs.findById("다른-앱").block().status()).isEqualTo(SyncStatus.RUNNING);
     }
 }

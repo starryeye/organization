@@ -45,10 +45,7 @@ class ScimRebuildLockTest {
                 writer,
                 new FakeTupleScanner(writer),
                 new FakeSnapshotRepository(),
-                lock,
-                Duration.ofSeconds(10),
-                LockObserver.NOOP,
-                new SyncJobs(runs, Duration.ofMinutes(1)),
+                new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
