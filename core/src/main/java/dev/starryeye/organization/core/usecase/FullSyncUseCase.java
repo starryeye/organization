@@ -13,6 +13,8 @@ import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
@@ -20,7 +22,6 @@ import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.core.tuple.TupleMappingResult;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
@@ -29,18 +30,21 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 /**
  * LDAP 전체 동기화.
  *
  * <p>핵심은 <b>OpenFGA 에 먼저 쓰고, 실제 성공한 튜플만 새 스냅샷으로 커밋</b>하는 것이다.
  * 실패한 튜플은 새 스냅샷에 들어가지 않으므로 다음 동기화의 diff 가 자동으로 다시 잡는다.
- * 재시도 큐도 상태머신도 필요 없는 이유가 이것이다.
+ *
+ * <p><b>기록 중 표시(설계 2026-09-30 §4).</b> OpenFGA 에 쓰기 직전 스냅샷 포인터에 "기록 중"을 남기고, 스냅샷 저장이 그것을 지운다. 표시가 남아
+ * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
+ * 그 사이 되돌려진 사람의 권한이 영원히 남거나 빠지는 일(점검 M2)이 이것으로 막힌다.
  */
 @Slf4j
-@RequiredArgsConstructor
 public class FullSyncUseCase {
+
+    static final String 기준선_의심 = "기준선 의심(지난 회차가 기록 전에 멈춤) — 장부를 훑어 맞춤";
 
     private final DirectorySnapshotSource source;
     private final TupleSnapshotRepository snapshots;
@@ -49,13 +53,28 @@ public class FullSyncUseCase {
     private final DeletionGuard guard;
     private final SyncJobs jobs;
     private final Clock clock;
+    private final LedgerAlignment alignment;
+
+    public FullSyncUseCase(DirectorySnapshotSource source, TupleSnapshotRepository snapshots,
+                           DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
+                           DeletionGuard guard, SyncJobs jobs, Clock clock) {
+        this.source = source;
+        this.snapshots = snapshots;
+        this.state = state;
+        this.writer = writer;
+        this.guard = guard;
+        this.jobs = jobs;
+        this.clock = clock;
+        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock);
+    }
 
     /**
-     * 실행 기록(RUNNING)을 열고 동기화를 요청과 떼어 띄운다(설계 2026-09-29 §4). 겹침 검사(실행 가드)는 호출자가 하고 그 반납 수단을
-     * 넘긴다 — 동기화가 어떻게 끝나든 한 번 불린다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
+     * 작업 락(SYNC)을 잡고 실행 기록(RUNNING)을 연 뒤 동기화를 요청과 떼어 띄운다(설계 2026-09-30 §3). 못 잡으면
+     * {@link LockUnavailableException} — 다른 인스턴스가 동기화·재적재 중이다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
      */
-    public Mono<SyncRun> start(SyncTrigger trigger, Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
-        return jobs.start(SyncSource.LDAP, trigger, Mono.defer(() -> synchronize(trigger)), release, onFinished);
+    public Mono<SyncRun> start(SyncTrigger trigger, Consumer<SyncRun> onFinished) {
+        return jobs.startLocked(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC,
+                Mono.defer(() -> synchronize(trigger)), onFinished);
     }
 
     private Mono<SyncOutcome> synchronize(SyncTrigger trigger) {
@@ -63,26 +82,41 @@ public class FullSyncUseCase {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
-            return baseline().flatMap(baseline -> {
-                TupleDelta delta = TupleDiff.between(baseline, mapping.tuples());
-                if (delta.isEmpty()) {
-                    log.info("변경 없음. OpenFGA 를 호출하지 않는다");
-                    return state.replaceWith(directory).thenReturn(SyncOutcome.noChange());
+            return snapshots.isWriting().flatMap(writing -> writing
+                    ? 훑어_맞춘다(directory, mapping.tuples(), trigger)
+                    : 비교해_맞춘다(directory, mapping.tuples(), trigger));
+        });
+    }
+
+    /** 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. {@code FORCED} 면 삭제 가드를 건너뛴다. */
+    private Mono<SyncOutcome> 훑어_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired, SyncTrigger trigger) {
+        log.warn(기준선_의심);
+        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED)
+                .map(outcome -> outcome.withNote(기준선_의심));
+    }
+
+    private Mono<SyncOutcome> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired, SyncTrigger trigger) {
+        return baseline().flatMap(baseline -> {
+            TupleDelta delta = TupleDiff.between(baseline, desired);
+            if (delta.isEmpty()) {
+                log.info("변경 없음. OpenFGA 를 호출하지 않는다");
+                return state.replaceWith(directory).thenReturn(SyncOutcome.noChange());
+            }
+            if (trigger != SyncTrigger.FORCED) {
+                GuardDecision decision = guard.evaluate(delta, baseline);
+                if (decision.aborted()) {
+                    log.warn("삭제 가드 발동: {}", decision.message());
+                    return Mono.just(SyncOutcome.aborted(decision.message()));
                 }
-                if (trigger != SyncTrigger.FORCED) {
-                    GuardDecision decision = guard.evaluate(delta, baseline);
-                    if (decision.aborted()) {
-                        log.warn("삭제 가드 발동: {}", decision.message());
-                        return Mono.just(SyncOutcome.aborted(decision.message()));
-                    }
-                }
-                return writer.apply(delta)
-                        .flatMap(result -> commit(directory, baseline, result))
-                        .onErrorResume(TupleWriteAbortedException.class, stopped ->
-                                saveSnapshotAndState(directory, baseline, stopped.partial())
-                                        .map(snapshotId -> SyncOutcome.stopped(
-                                                stopped.partial(), snapshotId, stopped.getMessage())));
-            });
+            }
+            // 표시가 쓰기보다 먼저다 — 표시를 남기지 못하면 쓰지 않는다(설계 2026-09-30 §11)
+            return snapshots.markWriting()
+                    .then(Mono.defer(() -> writer.apply(delta)))
+                    .flatMap(result -> commit(directory, baseline, result))
+                    .onErrorResume(TupleWriteAbortedException.class, stopped ->
+                            saveSnapshotAndState(directory, baseline, stopped.partial())
+                                    .map(snapshotId -> SyncOutcome.stopped(
+                                            stopped.partial(), snapshotId, stopped.getMessage())));
         });
     }
 
@@ -106,7 +140,7 @@ public class FullSyncUseCase {
      * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
      *
      * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
-     * 저장한 스냅샷 아이디를 준다.
+     * 스냅샷 저장이 "기록 중" 표시를 지운다. 저장한 스냅샷 아이디를 준다.
      */
     private Mono<String> saveSnapshotAndState(DirectorySnapshot directory,
                                               Set<RelationTuple> baseline,

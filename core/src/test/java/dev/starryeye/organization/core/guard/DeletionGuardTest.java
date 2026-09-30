@@ -142,4 +142,22 @@ class DeletionGuardTest {
         // then — 기준선 크기를 0 으로 보고 minBaseline 미만이라 가드를 적용하지 않는다
         assertThat(decision.aborted()).isFalse();
     }
+
+    @Test
+    @DisplayName("지울 수와 기준 수로도 판정한다 — 장부를 훑어 맞출 때는 기준이 훑은 장부다")
+    void 수로_판정한다() {
+        // given
+        var guard = new DeletionGuard(DeletionGuardPolicy.defaults());
+
+        // when
+        var 넘음 = guard.evaluate(10, 20, "훑은 장부");
+        var 안넘음 = guard.evaluate(2, 20, "훑은 장부");
+        var 기준이_작음 = guard.evaluate(5, 9, "훑은 장부");
+
+        // then
+        assertThat(넘음.aborted()).isTrue();
+        assertThat(넘음.message()).contains("훑은 장부 20건").contains("임계치");
+        assertThat(안넘음.aborted()).isFalse();
+        assertThat(기준이_작음.aborted()).as("최소 기준(10) 미만이면 판정하지 않는다").isFalse();
+    }
 }

@@ -21,6 +21,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -76,13 +77,21 @@ public class ScimRebuildUseCase {
 
     // ---------- TUPLES ----------
 
+    /** 조직도가 비었는데 장부에 지울 줄이 있으면 지우지 않는다(설계 2026-09-30 §4.3) — 조직도를 잃은 채로 돌면 장부 전체가 지워진다. */
+    static final String 빈_조직도 = "조직도가 비어 있다 — 장부를 비우려면 mode=wipe";
+
+    private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
+            desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
+
     private Mono<SyncOutcome> reloadTuples() {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
-            return TupleReconciler.reconcile(writer, scanner, mapping.tuples())
-                    .flatMap(this::commitTuples);
+            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
+                    .flatMap(reconciliation -> reconciliation.held()
+                            ? Mono.just(SyncOutcome.failed(reconciliation.heldReason()))
+                            : commitTuples(reconciliation));
         });
     }
 

@@ -20,22 +20,29 @@ public class DeletionGuard {
     }
 
     public GuardDecision evaluate(TupleDelta delta, Set<RelationTuple> baseline) {
+        return evaluate(delta.toDelete().size(), baseline == null ? 0 : baseline.size(), "기준 스냅샷");
+    }
+
+    /**
+     * 지울 수와 기준 수로 판정한다 — 장부를 훑어 맞출 때는 기준이 스냅샷이 아니라 훑은 장부다(설계 2026-09-30 §4.3).
+     *
+     * @param baselineLabel 메시지에 쓸 기준의 이름("기준 스냅샷", "훑은 장부")
+     */
+    public GuardDecision evaluate(int deleteCount, int baselineCount, String baselineLabel) {
         if (!policy.enabled()) {
             return GuardDecision.proceed();
         }
-        int baselineSize = baseline == null ? 0 : baseline.size();
-        if (baselineSize < policy.minBaseline()) {
+        if (baselineCount < policy.minBaseline()) {
             return GuardDecision.proceed();
         }
 
-        int deleteCount = delta.toDelete().size();
-        double ratio = (double) deleteCount / baselineSize;
+        double ratio = (double) deleteCount / baselineCount;
         if (ratio <= policy.thresholdRatio()) {
             return GuardDecision.proceed();
         }
 
         return GuardDecision.abort(
-                "삭제 대상 %d건(기준 스냅샷 %d건의 %.1f%%)이 임계치 %.1f%%를 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요"
-                        .formatted(deleteCount, baselineSize, ratio * 100, policy.thresholdRatio() * 100));
+                "삭제 대상 %d건(%s %d건의 %.1f%%)이 임계치 %.1f%%를 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요"
+                        .formatted(deleteCount, baselineLabel, baselineCount, ratio * 100, policy.thresholdRatio() * 100));
     }
 }

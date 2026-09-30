@@ -204,8 +204,8 @@ class ScimRebuildUseCaseTest {
     }
 
     @Test
-    @DisplayName("조직도가 비어 있으면 장부를 비우고 정상 종료한다")
-    void 빈_조직도면_장부를_비운다() {
+    @DisplayName("조직도가 비었는데 장부에 줄이 있으면 지우지 않고 FAILED 다 — 조직도를 잃은 채로 돌면 장부 전체가 지워진다")
+    void 빈_조직도면_장부를_지우지_않는다() {
         // given
         writer.stored.add(찌꺼기);
 
@@ -213,8 +213,20 @@ class ScimRebuildUseCaseTest {
         var run = 재적재한다(ScimRebuildMode.TUPLES);
 
         // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).isEqualTo("조직도가 비어 있다 — 장부를 비우려면 mode=wipe");
+        assertThat(writer.stored).containsExactly(찌꺼기);
+        assertThat(snapshots.saved).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직도도 장부도 비어 있으면 할 일 없이 정상 종료한다")
+    void 둘_다_비었으면_정상_종료한다() {
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
-        assertThat(writer.stored).isEmpty();
         assertThat(snapshots.saved.get(0).tuples()).isEmpty();
     }
 
