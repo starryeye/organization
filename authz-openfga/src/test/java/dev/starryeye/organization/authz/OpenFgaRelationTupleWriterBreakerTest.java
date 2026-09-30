@@ -2,6 +2,7 @@ package dev.starryeye.organization.authz;
 
 import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Batch;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.TupleFailure;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import org.junit.jupiter.api.DisplayName;
@@ -10,6 +11,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.IntStream;
@@ -81,5 +83,32 @@ class OpenFgaRelationTupleWriterBreakerTest {
 
         // then
         assertThat(결과.failures()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("쪼개서 일부라도 살린 배치는 연속 실패로 세지 않는다 — 나쁜 줄이 여기저기 있어도 끝까지 보낸다")
+    void 일부라도_살린_배치는_세지_않는다() {
+        // given — 한 줄도 못 살린 배치와 일부 살린 배치가 번갈아 온다. 옛 규칙("실패가 하나라도 있으면 셈")이면 세 번째에서 멈춘다
+        List<Batch> 배치 = IntStream.range(0, 6)
+                .mapToObj(i -> Batch.writes(List.of(
+                        RelationTuple.directMember("a" + i, "DEV002"), RelationTuple.directMember("b" + i, "DEV002"))))
+                .toList();
+        AtomicInteger 차례 = new AtomicInteger();
+        List<Batch> 보낸것 = new ArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> {
+            보낸것.add(batch);
+            if (차례.getAndIncrement() % 2 == 0) {
+                return Mono.just(batch.failed("일시 오류"));
+            }
+            return Mono.just(new TupleWriteResult(Set.of(batch.tuples().get(0)), Set.of(),
+                    List.of(new TupleFailure(batch.tuples().get(1), "거절"))));
+        };
+
+        // when
+        TupleWriteResult 결과 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send).block();
+
+        // then
+        assertThat(보낸것).hasSize(6);
+        assertThat(결과.written()).hasSize(3);
     }
 }
