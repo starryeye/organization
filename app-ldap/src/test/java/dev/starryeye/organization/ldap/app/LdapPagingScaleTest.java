@@ -4,6 +4,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -88,10 +89,7 @@ class LdapPagingScaleTest {
     @DisplayName("L14. 페이징 없이 상한에 걸리면 조용히 잘리지 않고 실패한다")
     void L14_잘린_목록으로_진행하지_않는다() {
         // when
-        client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
-                .post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/full")
                 .jsonPath("$.status").isEqualTo("FAILED")
                 // 사유까지 본다 — 다른 이유로 실패해도 통과하는 테스트는 이 방어선을 안 지킨다
                 .jsonPath("$.message").value(message ->

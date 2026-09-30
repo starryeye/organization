@@ -10,6 +10,8 @@ import com.unboundid.ldif.LDIFReader;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.openfga.sdk.api.client.model.ClientTupleKey;
 import dev.openfga.sdk.api.client.model.ClientWriteRequest;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
+import dev.starryeye.organization.authz.OpenFgaProperties;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -126,6 +128,7 @@ class LdapSyncEndToEndTest {
     @Autowired TupleSnapshotRepository snapshots;
     @Autowired DirectoryStateRepository state;
     @Autowired SyncRunRepository runs;
+    @Autowired OpenFgaProperties openFgaProperties;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -136,14 +139,17 @@ class LdapSyncEndToEndTest {
         }
     }
 
+    /** 이름으로 새로 찾은 장부 번호 — 이 앱이 캐시한 번호가 아니라 OpenFGA store 목록에서 찾는다. 같은 이름이 둘이면 오류다. */
+    private String 장부_번호() {
+        return new StoreBootstrapper(openFgaProperties).findExistingStore().block(Duration.ofSeconds(10));
+    }
+
     @Test
     @Order(1)
     @DisplayName("수동 동기화 한 번으로 LDAP 조직도가 OpenFGA 튜플과 DynamoDB 에 모두 반영된다")
     void 전_구간이_한_번에_이어진다() {
         // given, when
-        client.post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/full")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
 
         // then — OpenFGA 에 롤업이 성립한다
@@ -167,9 +173,7 @@ class LdapSyncEndToEndTest {
     @DisplayName("변경이 없는 상태에서 다시 동기화하면 아무것도 쓰지 않는다")
     void 재실행하면_변경_없음으로_끝난다() {
         // given, when, then
-        client.post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody()
+        SyncJobClient.끝까지(client, "/admin/sync/full")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.writtenCount").isEqualTo(0)
                 .jsonPath("$.deletedCount").isEqualTo(0)
@@ -178,18 +182,21 @@ class LdapSyncEndToEndTest {
 
     @Test
     @Order(3)
-    @DisplayName("snapshot 모드 재적재 후에도 롤업이 그대로 성립한다")
-    void snapshot_모드_재적재가_동작한다() {
-        // given, when
-        client.post().uri("/admin/sync/rebuild?mode=snapshot").exchange()
-                .expectStatus().isOk()
-                .expectBody()
+    @DisplayName("재적재 후에도 롤업이 그대로 성립하고, 장부 번호는 바뀌지 않는다")
+    void 재적재가_동작하고_번호는_그대로다() {
+        // given
+        String 재적재_전_번호 = 장부_번호();
+
+        // when
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
 
         // then
         assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
         assertThat(snapshots.findLatest().block().tuples()).hasSize(3);
+        // 옛 store 모드는 장부를 지우고 다시 만들어 번호가 바뀌었다(점검 C2)
+        assertThat(장부_번호()).isEqualTo(재적재_전_번호);
     }
 
     /** 스냅샷에 없는 튜플을 OpenFGA 에 직접 심는다. 동기화 경로를 거치지 않으므로 상태에도 없다. */
@@ -205,51 +212,32 @@ class LdapSyncEndToEndTest {
 
     @Test
     @Order(4)
-    @DisplayName("snapshot 모드 재적재는 스냅샷에 없던 잔여 튜플을 지우지 못한다 — 알려진 한계 (설계 §14.2)")
-    void snapshot_모드는_잔여_튜플을_남긴다() {
-        // given — 어긋남을 흉내낸다. 예컨대 과거의 부분 실패로 남은 튜플,
-        // 혹은 사람이 손으로 넣은 튜플이 이런 모습이다.
+    @DisplayName("재적재는 스냅샷에 없던 찌꺼기 줄을 지우고, 있어야 할 권한은 남긴다")
+    void 재적재가_찌꺼기를_지운다() {
+        // given — 어긋남을 흉내낸다. 과거의 부분 실패로 남은 줄, 혹은 사람이 손으로 넣은 줄이 이런 모습이다
         잔여튜플을_심는다("user:ghost", "direct_member", "group:DEV001");
         assertThat(check("user:ghost", "member", "group:DEV001")).isTrue();
 
-        // when — 스냅샷 기준 재적재
-        client.post().uri("/admin/sync/rebuild?mode=snapshot").exchange()
-                .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+        // when
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild")
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.deletedCount").isEqualTo(1);
 
-        // then — 여전히 남아 있다. snapshot 모드는 "스냅샷이 요구하는 것을 다시 쓴다" 이지
-        // "스냅샷에 없는 것을 지운다" 가 아니다. 스냅샷에 애초에 없는 튜플은
-        // 지울 대상으로 인식되지 않는다 — 고치려는 바로 그 상황에서 듣지 않는 이유다.
-        assertThat(check("user:ghost", "member", "group:DEV001"))
-                .as("설계 §14.2 가 명시적 검증을 요구한 한계. 이것이 false 가 되면 한계가 해소된 것이니 문서를 고칠 것")
-                .isTrue();
-        // 정상 튜플은 그대로다
+        // then — 옛 snapshot 모드는 스냅샷에 없는 줄을 지우지 못했다(설계 §14.2 의 한계가 풀렸다)
+        assertThat(check("user:ghost", "member", "group:DEV001")).isFalse();
         assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+        // 개수까지 본다. Check 만 보면 "필요한 것이 있다" 는 알아도 "필요 없는 것이 없다" 는 모른다.
+        // 조직도가 요구하는 튜플은 정확히 3개다(kim→DEV002, park→DEV001, DEV002→DEV001)
+        assertThat(snapshots.findLatest().block().tuples()).hasSize(3);
     }
 
     @Test
     @Order(5)
-    @DisplayName("store 모드 재적재는 store 를 비우고 다시 채운다")
-    void store_모드_재적재가_동작한다() {
-        // given, when
-        client.post().uri("/admin/sync/rebuild?mode=store").exchange()
-                .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.status").isEqualTo("SUCCEEDED");
-
-        // then
-        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
-        // snapshot 모드가 못 지운 잔여 튜플은 store 모드가 쓸어낸다.
-        // 어긋남을 실제로 고치려면 이쪽이어야 한다는 뜻이다.
-        assertThat(check("user:ghost", "member", "group:DEV001")).isFalse();
-
-        // and — 개수까지 확인한다. Check 만 보면 "필요한 것이 있다" 는 알 수 있어도
-        // "필요 없는 것이 없다" 는 모른다. 조직도가 요구하는 튜플은 정확히 3개다
-        // (kim→DEV002, park→DEV001, DEV002→DEV001).
-        assertThat(snapshots.findLatest().block().tuples())
-                .as("재적재 뒤 스냅샷은 조직도가 요구하는 것만 담아야 한다")
-                .hasSize(3);
+    @DisplayName("재적재에 mode 를 주면 400 이다 — 모드는 하나로 합쳐졌다")
+    void 재적재_모드는_하나다() {
+        // when, then
+        client.post().uri("/admin/sync/rebuild?mode=store").exchange().expectStatus().isBadRequest();
+        client.post().uri("/admin/sync/rebuild?mode=snapshot").exchange().expectStatus().isBadRequest();
     }
 
     @Test
@@ -346,9 +334,6 @@ class LdapSyncEndToEndTest {
     }
 
     private void 동기화한다() {
-        client.post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.status").isEqualTo("SUCCEEDED");
+        SyncJobClient.끝까지(client, "/admin/sync/full").jsonPath("$.status").isEqualTo("SUCCEEDED");
     }
 }

@@ -48,6 +48,13 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** {@link #findChildGroupIds} 가 불린 순서대로의 조직 id. */
     public final List<String> findChildGroupIdsCalls = new ArrayList<>();
 
+    private RuntimeException loadAllFailure;
+
+    /** 설정하면 {@link #loadAll} 이 이 예외로 실패한다. 재적재가 읽기에 실패하는 경로를 보는 데 쓴다. */
+    public void failLoadAll(RuntimeException failure) {
+        this.loadAllFailure = failure;
+    }
+
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
         return Mono.fromRunnable(() -> findUserCalls.add(userId))
@@ -165,6 +172,8 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<DirectorySnapshot> loadAll() {
-        return Mono.just(new DirectorySnapshot(users, groups));
+        return Mono.defer(() -> loadAllFailure != null
+                ? Mono.error(loadAllFailure)
+                : Mono.just(new DirectorySnapshot(users, groups)));
     }
 }

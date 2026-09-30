@@ -15,4 +15,12 @@ public interface SyncRunRepository {
     Mono<SyncRun> finish(SyncRun run, SyncOutcome outcome);
 
     Flux<SyncRun> findRecent(int limit);
+
+    /**
+     * 실행 기록 하나. 없으면 빈 Mono.
+     *
+     * <p>관리 API {@code GET /admin/sync/runs/{runId}} 가 쓴다 — 재적재·수동 동기화는 202 로 곧바로 답하고, 결과는 이것으로 본다
+     * (설계 2026-09-29 §4). 보관 기간({@code syncrun-retention-days})이 지난 기록은 없다.
+     */
+    Mono<SyncRun> findById(String runId);
 }

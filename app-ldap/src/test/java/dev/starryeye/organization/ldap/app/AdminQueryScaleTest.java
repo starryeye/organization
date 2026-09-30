@@ -5,6 +5,7 @@ import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.OrgChart;
@@ -101,10 +102,7 @@ class AdminQueryScaleTest {
         if (동기화됨) {
             return;
         }
-        client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
-                .post().uri("/admin/sync/full").exchange()
-                .expectStatus().isOk()
-                .expectBody().jsonPath("$.status").isEqualTo("SUCCEEDED");
+        SyncJobClient.끝까지(client, "/admin/sync/full").jsonPath("$.status").isEqualTo("SUCCEEDED");
 
         ScaleVerification.하네스로_검증한다(state, checker, 기대);
         동기화됨 = true;

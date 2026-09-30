@@ -14,8 +14,8 @@ import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
-import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
@@ -28,6 +28,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * LDAP 전체 동기화.
@@ -44,19 +46,16 @@ public class FullSyncUseCase {
     private final TupleSnapshotRepository snapshots;
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
-    private final SyncRunRepository runs;
     private final DeletionGuard guard;
+    private final SyncJobs jobs;
     private final Clock clock;
 
-    public Mono<SyncRun> execute(SyncTrigger trigger) {
-        return runs.start(SyncSource.LDAP, trigger)
-                .doOnNext(run -> log.info("[{}] 전체 동기화 시작: trigger={}", run.runId(), trigger))
-                .flatMap(run -> synchronize(trigger)
-                        .onErrorResume(error -> {
-                            log.error("[{}] 전체 동기화 실패", run.runId(), error);
-                            return Mono.just(SyncOutcome.failed(error.getMessage()));
-                        })
-                        .flatMap(outcome -> runs.finish(run, outcome)));
+    /**
+     * 실행 기록(RUNNING)을 열고 동기화를 요청과 떼어 띄운다(설계 2026-09-29 §4). 겹침 검사(실행 가드)는 호출자가 하고 그 반납 수단을
+     * 넘긴다 — 동기화가 어떻게 끝나든 한 번 불린다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
+     */
+    public Mono<SyncRun> start(SyncTrigger trigger, Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
+        return jobs.start(SyncSource.LDAP, trigger, Mono.defer(() -> synchronize(trigger)), release, onFinished);
     }
 
     private Mono<SyncOutcome> synchronize(SyncTrigger trigger) {
@@ -78,7 +77,11 @@ public class FullSyncUseCase {
                     }
                 }
                 return writer.apply(delta)
-                        .flatMap(result -> commit(directory, baseline, result));
+                        .flatMap(result -> commit(directory, baseline, result))
+                        .onErrorResume(TupleWriteAbortedException.class, stopped ->
+                                saveSnapshotAndState(directory, baseline, stopped.partial())
+                                        .map(snapshotId -> SyncOutcome.stopped(
+                                                stopped.partial(), snapshotId, stopped.getMessage())));
             });
         });
     }
@@ -89,13 +92,25 @@ public class FullSyncUseCase {
                 .defaultIfEmpty(Set.of());
     }
 
-    /**
-     * 튜플 스냅샷과 현재상태는 <b>기준이 다르다</b>.
-     * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
-     */
     private Mono<SyncOutcome> commit(DirectorySnapshot directory,
                                      Set<RelationTuple> baseline,
                                      TupleWriteResult result) {
+        return saveSnapshotAndState(directory, baseline, result)
+                .map(snapshotId -> result.hasFailure()
+                        ? SyncOutcome.partial(result, snapshotId)
+                        : SyncOutcome.succeeded(result, snapshotId));
+    }
+
+    /**
+     * 튜플 스냅샷과 현재상태는 <b>기준이 다르다</b>.
+     * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
+     *
+     * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
+     * 저장한 스냅샷 아이디를 준다.
+     */
+    private Mono<String> saveSnapshotAndState(DirectorySnapshot directory,
+                                              Set<RelationTuple> baseline,
+                                              TupleWriteResult result) {
         Set<RelationTuple> committed = new HashSet<>(baseline);
         committed.removeAll(result.deleted());
         committed.addAll(result.written());
@@ -109,8 +124,6 @@ public class FullSyncUseCase {
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory)))
-                .thenReturn(result.hasFailure()
-                        ? SyncOutcome.partial(result, snapshot.id())
-                        : SyncOutcome.succeeded(result, snapshot.id()));
+                .thenReturn(snapshot.id());
     }
 }

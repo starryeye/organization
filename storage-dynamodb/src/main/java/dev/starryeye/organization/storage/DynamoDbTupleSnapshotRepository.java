@@ -121,7 +121,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     public Mono<TupleSnapshot> findLatest() {
         return latestId().flatMap(id -> findById(id)
                 .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
-                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요".formatted(id)))));
+                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id)))));
     }
 
     /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없으면 빈 Mono. */
@@ -160,7 +160,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         int expected = Attrs.integer(meta, TUPLE_COUNT);
         if (tuples.size() != expected) {
             throw new SnapshotIntegrityException(
-                    "스냅샷 %s 를 온전히 읽지 못했습니다(메타 튜플 %d · 읽음 %d) — POST /admin/sync/rebuild?mode=store 로 복구하세요"
+                    "스냅샷 %s 를 온전히 읽지 못했습니다(메타 튜플 %d · 읽음 %d) — POST /admin/sync/rebuild 로 복구하세요"
                             .formatted(snapshotId, expected, tuples.size()));
         }
         return new TupleSnapshot(

@@ -4,38 +4,53 @@ import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeSnapshotSource;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
+import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
-import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
+/**
+ * app-ldap 재적재 — 장부를 버리지 않고 안에서 청소한다 (설계 2026-09-29 §3). 옛 snapshot·store 두 모드를 하나로 합쳤다.
+ */
 class RebuildUseCaseTest {
 
     private static final Instant 고정시각 = Instant.parse("2026-08-14T03:00:00Z");
+    private static final RelationTuple 김_백엔드 = RelationTuple.directMember("kim", "DEV002");
+    private static final RelationTuple 찌꺼기 = RelationTuple.directMember("ghost", "DEV002");
 
     private FakeSnapshotSource source;
     private FakeSnapshotRepository snapshots;
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private FakeTupleScanner scanner;
     private FakeSyncRunRepository runs;
+    private AtomicInteger 반납;
     private RebuildUseCase useCase;
 
     @BeforeEach
@@ -44,9 +59,11 @@ class RebuildUseCaseTest {
         snapshots = new FakeSnapshotRepository();
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
+        scanner = new FakeTupleScanner(writer);
         runs = new FakeSyncRunRepository(고정시각);
-        useCase = new RebuildUseCase(source, snapshots, state, writer, runs,
-                Clock.fixed(고정시각, ZoneOffset.UTC));
+        반납 = new AtomicInteger();
+        useCase = new RebuildUseCase(source, snapshots, state, writer, scanner,
+                new SyncJobs(runs, Duration.ofMinutes(1)), Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
     private static DirectorySnapshot 조직도(String userId, String groupCode) {
@@ -56,159 +73,189 @@ class RebuildUseCaseTest {
                         Set.of(MemberRef.user(userId)))));
     }
 
-    @Test
-    @DisplayName("snapshot 모드는 직전 스냅샷으로 먼저 전부 삭제한 뒤에 스냅샷을 버린다")
-    void snapshot_모드는_먼저_지우고_나중에_버린다() {
-        // given — 직전 스냅샷에 lee 소속이 남아 있다
-        var 낡은튜플 = RelationTuple.directMember("lee", "DEV002");
-        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(낡은튜플))).block();
-        source.willReturn(조직도("kim", "DEV002"));
-
-        // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
-
-        // then — 첫 델타가 삭제, 그 다음이 생성이어야 한다
-        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
-        assertThat(writer.appliedDeltas).hasSize(2);
-        assertThat(writer.appliedDeltas.get(0).toDelete()).containsExactly(낡은튜플);
-        assertThat(writer.appliedDeltas.get(1).toWrite())
-                .containsExactly(RelationTuple.directMember("kim", "DEV002"));
-        assertThat(snapshots.resetCount.get()).isEqualTo(1);
+    /** 재적재를 걸고 끝날 때까지 기다린다 — 재적재는 요청과 떼어 돈다(설계 §4). */
+    private SyncRun 재적재한다() {
+        SyncRun started = useCase.start(() -> Mono.fromRunnable(반납::incrementAndGet), run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
     }
 
     @Test
-    @DisplayName("snapshot 모드가 끝나면 새 스냅샷과 현재상태가 최신으로 남는다")
-    void snapshot_모드_후_상태가_최신이다() {
-        // given
-        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
-                Set.of(RelationTuple.directMember("lee", "DEV002")))).block();
+    @DisplayName("LDAP 을 읽어 있어야 할 줄을 쓰고, 장부를 훑어 없어야 할 줄만 지운다 — 스냅샷에 없던 찌꺼기도")
+    void 장부_안에서_청소한다() {
+        // given — 장부에 kim 의 권한과, 어느 스냅샷에도 없는 찌꺼기가 있다
         source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.addAll(Set.of(김_백엔드, 찌꺼기));
 
         // when
-        useCase.execute(RebuildMode.SNAPSHOT).block();
+        SyncRun run = 재적재한다();
+
+        // then — 옛 snapshot 모드는 스냅샷에 없는 줄을 지우지 못했다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
+        assertThat(writer.stored).containsExactly(김_백엔드);
+        assertThat(writer.deleted).containsExactly(찌꺼기);
+        assertThat(run.deletedCount()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("끝나면 새 스냅샷과 현재상태가 LDAP 대로 남고, 스냅샷을 비우지 않는다")
+    void 스냅샷과_현재상태가_남는다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+
+        // when
+        재적재한다();
 
         // then
-        var latest = snapshots.findLatest().block();
-        assertThat(latest.tuples()).containsExactly(RelationTuple.directMember("kim", "DEV002"));
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.saved.get(0).source()).isEqualTo(SyncSource.LDAP);
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(김_백엔드);
+        assertThat(snapshots.resetCount).hasValue(0);
+        assertThat(state.users).containsOnlyKeys("kim");
+        assertThat(state.groups).containsOnlyKeys("DEV002");
+    }
+
+    @Test
+    @DisplayName("장부를 비우는 순간이 없다 — 쓰고 지우는 내내 기존 권한이 장부에 있다")
+    void 장부를_비우지_않는다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.addAll(Set.of(김_백엔드, 찌꺼기));
+        List<Boolean> 쓸때마다_있었나 = new CopyOnWriteArrayList<>();
+        writer.onApply(() -> 쓸때마다_있었나.add(writer.stored.contains(김_백엔드)));
+
+        // when
+        재적재한다();
+
+        // then — 옛 store 모드는 장부를 지우고 다시 만들어, 그동안 모든 권한 질의가 false 였다
+        assertThat(쓸때마다_있었나).isNotEmpty().doesNotContain(false);
+        assertThat(writer.stored).contains(김_백엔드);
+    }
+
+    @Test
+    @DisplayName("LDAP 읽기가 실패하면 장부에 아무것도 쓰거나 지우지 않고 FAILED 다 — 비운 뒤 읽기 실패로 전사 권한 0 이 되지 않는다")
+    void 읽기가_실패하면_장부를_건드리지_않는다() {
+        // given
+        source.willFail(new IllegalStateException("LDAP 연결 실패"));
+        writer.stored.addAll(Set.of(김_백엔드, 찌꺼기));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("LDAP 연결 실패");
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(scanner.scanCount).hasValue(0);
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 찌꺼기);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(state.users).isEmpty();
+    }
+
+    @Test
+    @DisplayName("기준선 스냅샷이 깨져 있어도 재적재는 스냅샷을 읽지 않고 끝난다 — 깨진 기준선을 고치는 수단이다")
+    void 깨진_기준선에서도_끝난다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        snapshots.failFindLatest(new SnapshotIntegrityException(
+                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요"));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(김_백엔드);
+    }
+
+    @Test
+    @DisplayName("지우지 못한 줄은 새 스냅샷에 남는다 — 다음 동기화가 그 줄을 다시 지운다")
+    void 지우지_못한_줄은_스냅샷에_남는다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.failFor(찌꺼기::equals);
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.PARTIAL);
+        assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김_백엔드, 찌꺼기);
+    }
+
+    @Test
+    @DisplayName("쓰지 못한 줄은 새 스냅샷에서 빠진다 — 다음 동기화가 그 줄을 다시 쓴다")
+    void 쓰지_못한_줄은_스냅샷에서_빠진다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.failFor(김_백엔드::equals);
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.PARTIAL);
+        assertThat(snapshots.saved.get(0).tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지우기가 연속 실패 차단기로 멈추면 FAILED 지만 스냅샷은 남는다 — 쓴 줄과 지우지 못한 줄을 담는다")
+    void 지우기가_차단기로_멈춰도_스냅샷을_남긴다() {
+        // given — 찌꺼기 지우기가 실패한 채 멈춘다
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.failFor(찌꺼기::equals);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then — 찌꺼기는 장부에 아직 있으니 스냅샷에도 있어야 다음 동기화가 다시 지운다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(run.snapshotId()).isEqualTo(snapshots.saved.get(0).id());
+        assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김_백엔드, 찌꺼기);
         assertThat(state.users).containsOnlyKeys("kim");
     }
 
     @Test
-    @DisplayName("직전 스냅샷이 없으면 삭제 단계를 건너뛰고 전체를 새로 적재한다")
-    void 직전_스냅샷이_없으면_삭제를_건너뛴다() {
+    @DisplayName("쓰기가 연속 실패 차단기로 멈추면 장부를 훑지 않고 스냅샷도 만들지 않은 채 FAILED 다 — 지울 줄을 모른다")
+    void 쓰기가_차단기로_멈추면_훑지_않는다() {
         // given
         source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.abortWhen(delta -> !delta.toWrite().isEmpty());
 
         // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+        SyncRun run = 재적재한다();
 
-        // then
-        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
-        assertThat(writer.appliedDeltas).hasSize(1);
-        assertThat(writer.appliedDeltas.get(0).toWrite()).hasSize(1);
-        assertThat(snapshots.resetCount.get()).isEqualTo(1);
-    }
-
-    @Test
-    @DisplayName("삭제 단계가 하나라도 실패하면 스냅샷을 버리지 않고 FAILED 로 끝낸다")
-    void 삭제가_실패하면_스냅샷을_버리지_않는다() {
-        // given
-        var 낡은튜플 = RelationTuple.directMember("lee", "DEV002");
-        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(낡은튜플))).block();
-        source.willReturn(조직도("kim", "DEV002"));
-        writer.failFor(tuple -> tuple.equals(낡은튜플));
-
-        // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
-
-        // then
+        // then — 쓰기 단계에서 멈췄으니 3단계(훑어서 지우기)로 가지 않는다
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(snapshots.resetCount.get()).isZero();
-        assertThat(snapshots.findLatest().block()).isNotNull();
+        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(scanner.scanCount).hasValue(0);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(state.users).isEmpty();
+        assertThat(writer.stored).contains(찌꺼기);
     }
 
     @Test
-    @DisplayName("두 튜플 중 하나만 삭제에 실패하면 실패한 튜플만 남은 스냅샷이 저장된다")
-    void 삭제가_부분_실패하면_실패한_튜플만_남은_스냅샷을_저장한다() {
-        // given — 직전 스냅샷에 두 튜플이 있고, 그중 하나만 삭제에 실패한다
-        var 삭제성공튜플 = RelationTuple.directMember("lee", "DEV002");
-        var 삭제실패튜플 = RelationTuple.directMember("park", "DEV003");
-        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
-                Set.of(삭제성공튜플, 삭제실패튜플))).block();
-        source.willReturn(조직도("kim", "DEV002"));
-        writer.failFor(tuple -> tuple.equals(삭제실패튜플));
-
-        // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
-
-        // then — 스냅샷은 통째로 보존되는 게 아니라, 삭제 실패한 튜플만 남은 스냅샷으로 갱신된다
-        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(snapshots.resetCount.get()).isZero();
-        var 남은스냅샷 = snapshots.findLatest().block();
-        assertThat(남은스냅샷).isNotNull();
-        assertThat(남은스냅샷.tuples()).containsExactly(삭제실패튜플);
-    }
-
-    @Test
-    @DisplayName("store 모드는 store 를 재생성하고 스냅샷을 버린 뒤 전체를 적재한다")
-    void store_모드는_store를_재생성한다() {
-        // given
-        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
-                Set.of(RelationTuple.directMember("lee", "DEV002")))).block();
-        source.willReturn(조직도("kim", "DEV002"));
-
-        // when
-        var run = useCase.execute(RebuildMode.STORE).block();
-
-        // then
-        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
-        assertThat(writer.resetStoreCount.get()).isEqualTo(1);
-        assertThat(snapshots.resetCount.get()).isEqualTo(1);
-        assertThat(writer.appliedDeltas).hasSize(1);
-        assertThat(writer.appliedDeltas.get(0).toDelete()).isEmpty();
-    }
-
-    @Test
-    @DisplayName("재적재는 REBUILD 트리거로 이력에 기록된다")
-    void 재적재는_REBUILD_트리거로_기록된다() {
+    @DisplayName("RUNNING 기록을 곧바로 주고, 끝나면 반납 수단과 onFinished 를 한 번씩 부른다")
+    void 기록을_곧바로_주고_끝나면_반납한다() {
         // given
         source.willReturn(조직도("kim", "DEV002"));
+        AtomicReference<SyncRun> 끝남 = new AtomicReference<>();
 
         // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
+        SyncRun started = useCase.start(() -> Mono.fromRunnable(반납::incrementAndGet), 끝남::set).block();
 
         // then
-        assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
-        assertThat(runs.finished).hasSize(1);
-    }
-
-    @Test
-    @DisplayName("mode 문자열을 대소문자 구분 없이 해석하고 알 수 없는 값은 거절한다")
-    void mode_문자열을_해석한다() {
-        // given, when, then
-        assertThat(RebuildMode.from("snapshot")).isEqualTo(RebuildMode.SNAPSHOT);
-        assertThat(RebuildMode.from("STORE")).isEqualTo(RebuildMode.STORE);
-        org.assertj.core.api.Assertions
-                .assertThatThrownBy(() -> RebuildMode.from("nope"))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
-    @DisplayName("snapshot 모드는 기준선 스냅샷이 깨져 있으면 아무것도 지우거나 쓰지 않고 FAILED 로 끝난다")
-    void snapshot_모드는_기준선이_깨지면_멈춘다() {
-        // given
-        source.willReturn(조직도("kim", "DEV002"));
-        snapshots.failFindLatest(new SnapshotIntegrityException(
-                "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild?mode=store 로 복구하세요"));
-
-        // when
-        var run = useCase.execute(RebuildMode.SNAPSHOT).block();
-
-        // then
-        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(run.message()).contains("mode=store");
-        assertThat(writer.appliedDeltas).isEmpty();
-        assertThat(snapshots.resetCount).hasValue(0);
-        assertThat(source.fetchCount).hasValue(0);
+        assertThat(started.status()).isEqualTo(SyncStatus.RUNNING);
+        assertThat(started.trigger()).isEqualTo(SyncTrigger.REBUILD);
+        SyncRun finished = runs.awaitFinished(started.runId());
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(끝남.get()).isEqualTo(finished));
+        assertThat(반납).hasValue(1);
     }
 }

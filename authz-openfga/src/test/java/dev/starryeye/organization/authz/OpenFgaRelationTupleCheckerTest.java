@@ -7,10 +7,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.catchThrowable;
 
 class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
 
@@ -88,9 +86,8 @@ class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
         writer.apply(TupleDelta.writeOnly(Set.of(
                 RelationTuple.directMember("kim", "DEV002")))).block();
 
-        // 이 프로세스 안에서 resolveStore()/recreateStore() 를 한 번도 부른 적 없는
-        // 새 StoreBootstrapper — clientRef 가 비어 있는 상태에서 findExistingStore() 만으로
-        // Check 가 성립해야 한다
+        // 이 프로세스 안에서 resolveStore() 를 한 번도 부른 적 없는 새 StoreBootstrapper —
+        // Check 가 스스로 준비 과정을 타 이미 있는 store 를 찾아 쓴다
         StoreBootstrapper 새_부트스트래퍼 = new StoreBootstrapper(properties);
         OpenFgaRelationTupleChecker 새_체커 = new OpenFgaRelationTupleChecker(새_부트스트래퍼);
 
@@ -103,22 +100,17 @@ class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
     }
 
     @Test
-    @DisplayName("store 가 아예 없으면 Check 는 에러로 끝난다")
-    void store가_없으면_에러로_끝난다() {
-        // given — 이 컨테이너에 존재한 적 없는 store 이름
-        OpenFgaProperties 없는_store_속성 = new OpenFgaProperties();
-        없는_store_속성.setApiUrl(properties.getApiUrl());
-        없는_store_속성.setStoreName("missing-" + UUID.randomUUID());
-        없는_store_속성.setWriteBatchSize(100);
-        없는_store_속성.setMaxRetries(3);
-        StoreBootstrapper 없는_store_부트스트래퍼 = new StoreBootstrapper(없는_store_속성);
-        OpenFgaRelationTupleChecker 없는_store_체커 = new OpenFgaRelationTupleChecker(없는_store_부트스트래퍼);
+    @DisplayName("store 가 아직 없으면 Check 가 준비 과정을 타 store 를 만들고 판정한다 — 시작 때 OpenFGA 가 안 닿았던 인스턴스도 재시작 없이 낫는다")
+    void store가_없으면_Check가_만든다() {
+        // given — 이 컨테이너에 존재한 적 없는 store 이름. 시작 때 준비하지 못한 인스턴스다
+        OpenFgaProperties 속성 = 새_속성("missing-");
+        OpenFgaRelationTupleChecker 체커 = new OpenFgaRelationTupleChecker(new StoreBootstrapper(속성));
 
         // when
-        Throwable thrown = catchThrowable(() -> 없는_store_체커.check(
-                new RelationTuple("user:kim", "member", "group:DEV002")).block());
+        Boolean allowed = 체커.check(new RelationTuple("user:kim", "member", "group:DEV002")).block();
 
-        // then
-        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        // then — 오류가 아니라 판정이다. 빈 장부라 false 다
+        assertThat(allowed).isFalse();
+        assertThat(countStoresNamed(속성.getStoreName())).isEqualTo(1);
     }
 }

@@ -327,7 +327,7 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThatThrownBy(() -> repository.findLatest().block())
                 .isInstanceOf(SnapshotIntegrityException.class)
                 .hasMessageContaining("20260814T030000-LDAP")
-                .hasMessageContaining("mode=store");
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
     }
 
     @Test

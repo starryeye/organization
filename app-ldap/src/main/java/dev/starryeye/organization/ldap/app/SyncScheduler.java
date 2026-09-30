@@ -12,6 +12,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
+import java.util.function.Supplier;
+
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -29,15 +31,18 @@ public class SyncScheduler {
             log.warn("이전 동기화가 아직 진행 중이라 이번 스케줄을 건너뛴다");
             return;
         }
+        Supplier<Mono<Void>> release = executionGuard.releaseOnce();
         관측하며실행("sync.ldap.full",
-                Mono.defer(() -> fullSync.execute(SyncTrigger.SCHEDULED))
-                        .doOnNext(run -> {
+                Mono.defer(() -> fullSync.start(SyncTrigger.SCHEDULED, release, run -> {
                             metrics.record(run);
                             log.info("스케줄 동기화 완료: status={} written={} deleted={} failed={}",
                                     run.status(), run.writtenCount(), run.deletedCount(), run.failureCount());
-                        })
-                        .doOnError(error -> log.error("스케줄 동기화가 예기치 않게 실패했다", error))
-                        .doFinally(signal -> executionGuard.release()));
+                        }))
+                        // 걸고 나서의 반납은 작업(SyncJobs)이 한다. 여기서는 걸지 못한 경우만 푼다
+                        .onErrorResume(error -> {
+                            log.error("스케줄 동기화를 걸지 못했다", error);
+                            return release.get().then(Mono.empty());
+                        }));
     }
 
     /**
@@ -67,6 +72,9 @@ public class SyncScheduler {
      * <p><b>로깅이 왜 전부 {@code work} 안에 있어야 하는가.</b> {@code contextWrite} 는
      * <em>위쪽</em>(먼저 선언된 연산자)에만 적용된다. 아래에 있는 {@code subscribe} 콜백은
      * 원래 컨텍스트를 보므로 거기서 로그를 찍으면 traceId 가 다시 빈칸이 된다.
+     *
+     * <p><b>동기화 본체는 따로 돈다.</b> {@code work} 는 동기화를 거는 데서 끝나고 관측도 그때 닫힌다. 본체는 {@code SyncJobs} 가
+     * 이 Reactor Context 를 이어받아 돌리므로 본체 로그에도 같은 traceId 가 붙는다.
      */
     private void 관측하며실행(String name, Mono<?> work) {
         Observation observation = Observation.createNotStarted(name, observations).start();

@@ -137,19 +137,4 @@ class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
         assertThat(check("user:park", "member", "group:DEV002")).isTrue();
         assertThat(check("user:lee", "member", "group:DEV002")).isFalse();
     }
-
-    @Test
-    @DisplayName("store 를 재생성하면 기존 튜플이 모두 사라진다")
-    void store_재생성은_전부_비운다() {
-        // given
-        writer.apply(TupleDelta.writeOnly(Set.of(
-                RelationTuple.directMember("kim", "DEV002")))).block();
-        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
-
-        // when
-        writer.resetStore().block();
-
-        // then
-        assertThat(check("user:kim", "member", "group:DEV002")).isFalse();
-    }
 }
