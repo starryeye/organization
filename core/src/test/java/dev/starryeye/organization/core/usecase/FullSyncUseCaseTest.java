@@ -256,6 +256,7 @@ class FullSyncUseCaseTest {
                 RelationTuple.directMember("kim", "DEV002"),
                 RelationTuple.directMember("park", "DEV002"));
         assertThat(state.users).containsOnlyKeys("kim", "park", "choi");
+        assertThat(snapshots.writing).as("스냅샷을 남겼으니 표시가 사라진다").isFalse();
     }
 
     @Test
@@ -416,6 +417,51 @@ class FullSyncUseCaseTest {
         assertThat(run.message()).contains("기준선 의심").contains("임계치");
         assertThat(writer.stored).hasSize(20);
         assertThat(snapshots.writing).isTrue();
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기가 스냅샷 저장 실패로 멈추면 메시지에 기준선 의심 사유가 남는다")
+    void 훑어_맞추기가_저장_실패로_멈추면_기준선_의심이_메시지에_남는다() {
+        // given
+        snapshots.writing.set(true);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        snapshots.failSave(new IllegalStateException("스냅샷 저장 실패"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 실패 사유만 남기면 지난 회차가 기록 전에 멈췄다는 사정이 사라진다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("기준선 의심").contains("스냅샷 저장 실패");
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기에서 이미 있던 줄의 쓰기가 실패해도 스냅샷에 남는다")
+    void 훑어_맞추기에서_이미_있던_줄의_쓰기가_실패해도_스냅샷에_남는다() {
+        // given — 장부에 kim, park 이 이미 있고 park 의 다시 쓰기가 실패한다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.stored.addAll(Set.of(김, 박));
+        snapshots.writing.set(true);
+        source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
+        writer.failFor(tuple -> tuple.equals(박));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 박의 다시 쓰기는 실패했지만 장부에는 있었으니 스냅샷에 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.PARTIAL);
+        assertThat(snapshots.saved.get(snapshots.saved.size() - 1).tuples()).containsExactlyInAnyOrder(김, 박);
+        assertThat(snapshots.writing).isFalse();
+
+        // when — 다음 동기화에서 박이 더는 LDAP 에 없다
+        writer.failFor(tuple -> false);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 박의 줄이 이번에 지워진다
+        assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactly(김);
     }
 
     @Test

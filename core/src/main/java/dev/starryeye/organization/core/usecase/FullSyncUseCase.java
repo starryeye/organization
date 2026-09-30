@@ -88,11 +88,20 @@ public class FullSyncUseCase {
         });
     }
 
-    /** 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. {@code FORCED} 면 삭제 가드를 건너뛴다. */
+    /**
+     * 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. {@code FORCED} 면 삭제 가드를 건너뛴다.
+     *
+     * <p>청소 자체가 오류로 끝나도(쓰기 단계 차단기, 스냅샷 저장 실패, "기록 중" 표시를 남기지 못함) 기록 메시지에 "기준선 의심" 사정을
+     * 남긴다 — 그러지 않으면 FAILED 사유만 보고는 지난 회차가 기록 전에 멈췄다는 맥락이 사라진다. 취소는 {@code onErrorMap} 이
+     * 보지 못하므로 여기서 감싸지 않는다.
+     */
     private Mono<SyncOutcome> 훑어_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired, SyncTrigger trigger) {
         log.warn(기준선_의심);
         return alignment.align(directory, desired, trigger == SyncTrigger.FORCED)
-                .map(outcome -> outcome.withNote(기준선_의심));
+                .map(outcome -> outcome.withNote(기준선_의심))
+                .onErrorMap(error -> new IllegalStateException(
+                        기준선_의심 + " / " + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()),
+                        error));
     }
 
     private Mono<SyncOutcome> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired, SyncTrigger trigger) {

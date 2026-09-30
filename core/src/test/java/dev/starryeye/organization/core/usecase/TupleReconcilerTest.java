@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.TupleFailure;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -50,5 +51,26 @@ class TupleReconcilerTest {
         assertThat(reconciliation.heldReason()).isEqualTo("멈춤(테스트)");
         assertThat(writer.stored).containsExactlyInAnyOrder(김, 찌꺼기);
         assertThat(writer.deleted).isEmpty();
+    }
+
+    @Test
+    @DisplayName("이미 있던 줄의 다시 쓰기가 실패해도 장부에 남는다")
+    void 이미_있던_줄의_다시_쓰기가_실패해도_장부에_남는다() {
+        // given — 김은 이미 장부에 있고, 이는 장부에 없다. 둘 다 다시 쓰기가 실패한다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+        writer.stored.add(김);
+        writer.failFor(tuple -> tuple.equals(김) || tuple.equals(이));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김, 이)).block();
+
+        // then — 장부에 있던 김은 다시 쓰기가 실패해도 스냅샷에 남는다. 장부에 없던 이는 남지 않는다
+        assertThat(reconciliation.ledger()).containsExactly(김);
+        assertThat(reconciliation.result().failures())
+                .extracting(TupleFailure::tuple)
+                .containsExactlyInAnyOrder(김, 이);
     }
 }

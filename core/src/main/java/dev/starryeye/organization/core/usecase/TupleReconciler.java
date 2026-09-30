@@ -18,7 +18,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 /**
  * 장부(OpenFGA store)를 있어야 할 줄 D 에 맞춘다 — 재적재의 2~3단계 (설계 2026-09-29 §3.1).
@@ -64,9 +63,10 @@ final class TupleReconciler {
                                 return Mono.just(Reconciliation.held(written, hold.get()));
                             }
                             return 지운다(writer, scan.stale())
-                                    .map(deleted -> Reconciliation.of(written, deleted))
+                                    .map(deleted -> Reconciliation.of(written, deleted, scan.present()))
                                     .onErrorResume(TupleWriteAbortedException.class,
-                                            stopped -> Mono.just(Reconciliation.stopped(written, stopped)));
+                                            stopped -> Mono.just(
+                                                    Reconciliation.stopped(written, stopped, scan.present())));
                         })));
     }
 
@@ -82,22 +82,33 @@ final class TupleReconciler {
                 : writer.apply(TupleDelta.deleteOnly(stale));
     }
 
+    /**
+     * 장부를 흘려 보내며 한 번에 {@code stale}(D 에 없는 줄)과 {@code present}(D 에 있는, 장부가 실제로 담고 있는 줄)로 가른다.
+     * 장부 전체를 모으지 않는다 — 드는 것은 {@code present}(≤ |D|)와 {@code stale}뿐이다.
+     */
     private static Mono<Scan> 훑는다(RelationTupleScanner scanner, Set<RelationTuple> desired) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             AtomicLong 읽은_줄 = new AtomicLong();
+            Set<RelationTuple> stale = new HashSet<>();
+            Set<RelationTuple> present = new HashSet<>();
             return scanner.scanAll()
-                    .doOnNext(tuple -> 읽은_줄.incrementAndGet())
-                    .filter(tuple -> !desired.contains(tuple))
-                    .collect(Collectors.toSet())
-                    .map(stale -> new Scan(stale, 읽은_줄.get()))
+                    .doOnNext(tuple -> {
+                        읽은_줄.incrementAndGet();
+                        if (desired.contains(tuple)) {
+                            present.add(tuple);
+                        } else {
+                            stale.add(tuple);
+                        }
+                    })
+                    .then(Mono.fromSupplier(() -> new Scan(stale, present, 읽은_줄.get())))
                     .doOnNext(scan -> log.info("장부 훑기: {}줄을 읽어 있어야 할 줄에 없는 {}줄을 찾았다 ({}ms)",
                             scan.scanned(), scan.stale().size(), Duration.ofNanos(System.nanoTime() - 시작).toMillis()));
         });
     }
 
-    /** 훑은 결과 — 지울 후보와 읽은 줄 수(삭제 가드의 기준). */
-    private record Scan(Set<RelationTuple> stale, long scanned) {
+    /** 훑은 결과 — 지울 후보(stale), 장부에 있다고 확인된 D 의 줄(present, 새 스냅샷의 재료), 읽은 줄 수(삭제 가드의 기준). */
+    private record Scan(Set<RelationTuple> stale, Set<RelationTuple> present, long scanned) {
     }
 
     /**
@@ -111,16 +122,19 @@ final class TupleReconciler {
     record Reconciliation(TupleWriteResult result, Set<RelationTuple> ledger, String stopReason, String heldReason) {
 
         /**
-         * 스냅샷에 담을 줄 = 쓰기에 성공한 줄 ∪ 지우기에 실패한 줄. 지우지 못한 찌꺼기를 넣어야 다음 LDAP 동기화가 그 줄을
-         * "있는데 없어야 할 줄"로 보고 다시 지운다. 쓰기에 실패한 줄은 뺀다 — 다음 동기화가 다시 쓴다.
+         * 스냅샷에 담을 줄 = 훑을 때 장부에 있던 있어야 할 줄(present) ∪ 지우기에 실패한 줄. 스캔은 쓰기 단계 뒤에 돌므로, 다시 쓰기가
+         * 실패한 줄이라도 전부터 장부에 있었다면(present 에 있다면) 여전히 담는다 — 빼면 그 사람이 나중에 조직도에서 빠져도 지울 기준이
+         * 없어 권한이 영원히 남는다(점검 M2). 애초에 장부에 없었는데 쓰기까지 실패한 줄은 present 에 없으니 자연히 빠진다 — 다음
+         * 동기화가 다시 쓴다.
          */
-        static Reconciliation of(TupleWriteResult written, TupleWriteResult deleted) {
-            return 합친다(written, deleted, null);
+        static Reconciliation of(TupleWriteResult written, TupleWriteResult deleted, Set<RelationTuple> present) {
+            return 합친다(written, deleted, present, null);
         }
 
         /** 지우기가 차단기로 멈췄다. 보내지 않은 지우기는 {@code partial} 에 실패로 들어 있어 {@code ledger} 에 남는다. */
-        static Reconciliation stopped(TupleWriteResult written, TupleWriteAbortedException stopped) {
-            return 합친다(written, stopped.partial(), stopped.getMessage());
+        static Reconciliation stopped(TupleWriteResult written, TupleWriteAbortedException stopped,
+                                      Set<RelationTuple> present) {
+            return 합친다(written, stopped.partial(), present, stopped.getMessage());
         }
 
         /** 지우기 전에 멈췄다 — 지운 것이 없다. 호출자는 스냅샷을 남기지 않고 사유로 끝낸다. */
@@ -142,8 +156,9 @@ final class TupleReconciler {
                     : SyncOutcome.succeeded(result, snapshotId);
         }
 
-        private static Reconciliation 합친다(TupleWriteResult written, TupleWriteResult deleted, String stopReason) {
-            Set<RelationTuple> ledger = new HashSet<>(written.written());
+        private static Reconciliation 합친다(TupleWriteResult written, TupleWriteResult deleted,
+                                          Set<RelationTuple> present, String stopReason) {
+            Set<RelationTuple> ledger = new HashSet<>(present);
             deleted.failures().forEach(failure -> ledger.add(failure.tuple()));
 
             List<TupleFailure> failures = new ArrayList<>(written.failures());
