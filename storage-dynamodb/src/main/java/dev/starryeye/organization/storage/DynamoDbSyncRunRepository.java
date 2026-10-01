@@ -11,6 +11,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
@@ -59,7 +60,27 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         return save(finished).thenReturn(finished);
     }
 
+    /**
+     * 저장된 기록이 <b>아직 RUNNING 일 때만</b> 닫는다(설계 2026-09-30 §3.3). 락을 잡은 다음 작업이 죽은 기록을 정리할 때 쓴다.
+     *
+     * <p>조건이 없으면, 앞 작업이 락을 반납한 뒤·자기 기록을 쓰기 전의 틈에 다음 작업이 락을 잡고 이 기록을 볼 수 있다 — 그 순간엔
+     * 방금 끝난 기록도 아직 RUNNING 으로 보인다(읽기는 최종 일관성인 {@link #findRecent} 다). 조건을 걸면 어느 쪽 쓰기가 먼저 닿든
+     * 결과는 맞다: 이 닫기가 먼저 닿으면 앞 작업의 조건 없는 {@link #finish} 가 그 위에 실제 결과를 덮어쓰고, {@link #finish} 가
+     * 먼저 닿으면 이 조건이 깨져({@link ConditionalCheckFailedException}) 빈 Mono 로 끝난다 — 닫기는 아무 일도 하지 않는다.
+     */
+    @Override
+    public Mono<SyncRun> abandon(SyncRun run, String reason) {
+        SyncRun closed = run.finished(SyncOutcome.failed(reason), clock.instant());
+        return save(closed, "#status = :running", Map.of(":running", Attrs.s(SyncStatus.RUNNING.name())))
+                .thenReturn(closed)
+                .onErrorResume(ConditionalCheckFailedException.class, error -> Mono.empty());
+    }
+
     private Mono<Void> save(SyncRun run) {
+        return save(run, null, Map.of());
+    }
+
+    private Mono<Void> save(SyncRun run, String conditionExpression, Map<String, AttributeValue> conditionValues) {
         long expiresAt = run.startedAt()
                 .plus(Duration.ofDays(properties.getSyncrunRetentionDays()))
                 .getEpochSecond();
@@ -82,10 +103,16 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         Attrs.putIfPresent(item, SNAPSHOT_ID, run.snapshotId());
         Attrs.putIfPresent(item, MESSAGE, run.message());
 
-        return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
+        PutItemRequest.Builder request = PutItemRequest.builder()
                 .tableName(properties.getTableName())
-                .item(item)
-                .build())).then();
+                .item(item);
+        if (conditionExpression != null) {
+            request.conditionExpression(conditionExpression)
+                    .expressionAttributeNames(Map.of("#status", STATUS))
+                    .expressionAttributeValues(conditionValues);
+        }
+
+        return Mono.fromFuture(() -> client.putItem(request.build())).then();
     }
 
     /**

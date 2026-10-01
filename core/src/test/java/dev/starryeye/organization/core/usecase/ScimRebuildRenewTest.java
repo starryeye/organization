@@ -42,8 +42,9 @@ class ScimRebuildRenewTest {
     private static ScimRebuildUseCase 재적재(FakeTupleWriter writer, FakeSyncRunRepository runs,
                                           FakeMutationLock lock, Duration 갱신주기) {
         return new ScimRebuildUseCase(한명짜리_조직도(), writer, new FakeTupleScanner(writer),
-                new FakeSnapshotRepository(), lock, 갱신주기, LockObserver.NOOP,
-                new SyncJobs(runs, Duration.ofMinutes(1)), Clock.fixed(NOW, ZoneOffset.UTC));
+                new FakeSnapshotRepository(),
+                new SyncJobs(runs, lock, 갱신주기, LockObserver.NOOP, Duration.ofMinutes(1)),
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private static SyncRun 끝까지(ScimRebuildUseCase useCase, FakeSyncRunRepository runs) {

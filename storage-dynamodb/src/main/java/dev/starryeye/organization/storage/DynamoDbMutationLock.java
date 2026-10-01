@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
@@ -116,5 +117,22 @@ public class DynamoDbMutationLock implements MutationLock {
                     .onErrorMap(ConditionalCheckFailedException.class, error ->
                             new LockUnavailableException("변경 락 리스를 잃었습니다"));
         });
+    }
+
+    /**
+     * 강한 일관성으로 읽는다 — 방금 잡힌 락을 못 보면 재적재 도중에 아카이빙이 돈다. 만료된 줄은 테이블 TTL 이 지울 때까지 남아 있으므로
+     * {@code expiresAt} 을 직접 본다(획득 조건과 같은 기준: 만료 시각이 지금보다 앞이면 빈 락).
+     */
+    @Override
+    public Mono<LockPurpose> peek() {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.LOCK_PK), Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(response -> response.hasItem() && !response.item().isEmpty())
+                .map(response -> response.item())
+                .filter(item -> Attrs.longValue(item, Keys.EXPIRES_AT) >= clock.instant().getEpochSecond())
+                .map(item -> LockPurpose.valueOf(Attrs.str(item, PURPOSE)));
     }
 }

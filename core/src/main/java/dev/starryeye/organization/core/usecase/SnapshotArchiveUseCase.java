@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
@@ -47,9 +48,37 @@ public class SnapshotArchiveUseCase {
     private final RelationTupleChecker checker;
     private final TupleSnapshotRepository snapshots;
     private final SyncRunRepository runs;
+    private final MutationLock lock;
     private final Clock clock;
 
+    static final String 재적재_중 = "재적재 중이라 건너뜀";
+
+    /**
+     * 재적재가 작업 락을 쥐고 있으면 오늘은 건너뛴다(설계 2026-09-30 §5.2) — 재적재의 쓰기와 지우기 사이에 잠깐 어긋난 장부를 "실제"로 찍으면
+     * 거짓 어긋남 경고가 감사 기록에 남는다. 락은 들여다보기만 한다 — 잡으면 몇 분 동안 SCIM 쓰기가 전부 503 이다.
+     */
     public Mono<SyncRun> execute() {
+        return 재적재_중인가().flatMap(rebuilding -> rebuilding ? 건너뛴다() : 아카이빙한다());
+    }
+
+    /** 들여다보지 못하면 재적재가 아니라고 보고 진행한다 — 아카이빙을 통째로 잃는 것보다 낫다. */
+    private Mono<Boolean> 재적재_중인가() {
+        return lock.peek()
+                .map(purpose -> purpose == MutationLock.LockPurpose.REBUILD)
+                .defaultIfEmpty(false)
+                .onErrorResume(error -> {
+                    log.warn("변경 락을 들여다보지 못했다 — 재적재가 아니라고 보고 아카이빙한다", error);
+                    return Mono.just(false);
+                });
+    }
+
+    private Mono<SyncRun> 건너뛴다() {
+        log.warn("재적재 중이라 오늘 아카이빙을 건너뛴다");
+        return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
+                .flatMap(run -> runs.finish(run, SyncOutcome.aborted(재적재_중)));
+    }
+
+    private Mono<SyncRun> 아카이빙한다() {
         return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
                 .doOnNext(run -> log.info("[{}] 스냅샷 아카이빙 시작", run.runId()))
                 .flatMap(run -> Mono.defer(this::archive)

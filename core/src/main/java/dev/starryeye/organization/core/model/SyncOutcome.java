@@ -40,4 +40,10 @@ public record SyncOutcome(
     public static SyncOutcome failed(String message) {
         return new SyncOutcome(SyncStatus.FAILED, 0, 0, 0, null, message);
     }
+
+    /** 이 결론 앞에 한마디를 붙인다 — "기준선 의심"처럼 회차의 사정을 기록에 남길 때(설계 2026-09-30 §4.2). */
+    public SyncOutcome withNote(String note) {
+        String combined = message == null ? note : note + " / " + message;
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined);
+    }
 }

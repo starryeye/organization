@@ -23,7 +23,10 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * SCIM 요청 → 도메인 → 튜플 → OpenFGA/DynamoDB 전 구간을 실제 컨테이너 위에서 확인한다.
@@ -57,6 +60,7 @@ class ScimEndToEndTest {
     @Autowired TupleSnapshotRepository snapshots;
     @Autowired SnapshotArchiveUseCase archive;
     @Autowired SyncRunRepository runs;
+    @Autowired ArchiveScheduler scheduler;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -267,5 +271,28 @@ class ScimEndToEndTest {
         // then — 미뤄 뒀던 child 엣지가 이때 만들어져야 롤업이 성립한다. 최소 스냅샷이
         // 상위 조직을 못 보면 이 엣지는 영영 생기지 않고, 아무도 그것을 고쳐 주지 않는다
         assertThat(check("user:choi", "member", "group:QA001")).isTrue();
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("예약 아카이빙은 하루 한 번만 돈다 — 여러 대가 같은 시각에 불러도 기록과 스냅샷은 하나다(점검 M15)")
+    void 예약_아카이빙은_하루_한_번이다() {
+        // given
+        long 전 = 아카이빙_기록_수();
+
+        // when — 두 인스턴스의 스케줄러가 같은 날 부른 것과 같다(표지 저장소가 같은 테이블이다)
+        scheduler.스냅샷아카이빙();
+        scheduler.스냅샷아카이빙();
+
+        // then — 하나는 돌고, 하나는 건너뛴다
+        await().atMost(Duration.ofSeconds(30)).until(() -> 아카이빙_기록_수() == 전 + 1);
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(아카이빙_기록_수()).isEqualTo(전 + 1));
+    }
+
+    private long 아카이빙_기록_수() {
+        return runs.findRecent(100).collectList().block(Duration.ofSeconds(10)).stream()
+                .filter(run -> run.trigger() == dev.starryeye.organization.core.model.SyncTrigger.ARCHIVE)
+                .count();
     }
 }

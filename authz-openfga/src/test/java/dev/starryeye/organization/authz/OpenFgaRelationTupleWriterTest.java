@@ -1,17 +1,22 @@
 package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
+import dev.openfga.sdk.api.client.model.ClientTupleKey;
+import dev.openfga.sdk.api.client.model.ClientWriteRequest;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
 
@@ -136,5 +141,36 @@ class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
         assertThat(result.deleted()).containsExactly(기존);
         assertThat(check("user:park", "member", "group:DEV002")).isTrue();
         assertThat(check("user:lee", "member", "group:DEV002")).isFalse();
+    }
+
+    @Test
+    @DisplayName("없는 타입의 줄 하나가 섞인 배치는 나머지를 반영하고 그 줄만 실패로 남긴다(점검 M16)")
+    void 나쁜_줄_하나는_나머지를_끌고_가지_않는다() {
+        // given — 정상 5줄과 모델에 없는 타입의 줄 하나를 한 배치로 보낸다
+        Set<RelationTuple> 정상 = IntStream.range(0, 5)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet());
+        RelationTuple 나쁜_줄 = new RelationTuple("user:bad", "direct_member", "nosuchtype:x");
+        Set<RelationTuple> 보낼것 = new HashSet<>(정상);
+        보낼것.add(나쁜_줄);
+
+        // when
+        var 결과 = writer.apply(TupleDelta.writeOnly(보낼것)).block();
+
+        // then
+        assertThat(결과.written()).containsExactlyInAnyOrderElementsOf(정상);
+        assertThat(결과.failures()).extracting(failure -> failure.tuple()).containsExactly(나쁜_줄);
+        assertThat(check("user:user0", "member", "group:DEV002")).isTrue();
+    }
+
+    @Test
+    @DisplayName("실제 OpenFGA 의 400 을 거절로 알아본다")
+    void 실제_400을_거절로_알아본다() {
+        // when
+        Throwable thrown = catchThrowable(() -> bootstrapper.client().write(new ClientWriteRequest().writes(List.of(
+                new ClientTupleKey().user("user:bad").relation("direct_member")._object("nosuchtype:x")))).get());
+
+        // then
+        assertThat(OpenFgaErrors.거절인가(thrown)).isTrue();
     }
 }

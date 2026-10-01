@@ -173,21 +173,6 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("리셋하면 모든 스냅샷과 최신 포인터가 사라진다")
-    void 리셋하면_전부_사라진다() {
-        // given
-        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
-        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
-
-        // when
-        repository.reset().block();
-
-        // then
-        assertThat(repository.findLatest().block()).isNull();
-        assertThat(repository.listRecent(30).collectList().block()).isEmpty();
-    }
-
-    @Test
     @DisplayName("보존 기간이 지난 스냅샷만 정리되고 최근 것은 남는다")
     void 만료된_스냅샷만_정리된다() {
         // given — 보존 7일. 10일 전 것은 만료, 오늘 것은 유효
@@ -425,29 +410,53 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
 
-    @Test
-    @DisplayName("초기화(reset)가 중간에 실패해도 포인터가 먼저 지워져 다음 회차는 첫 적재로 돈다")
-    void 재적재_초기화가_중간에_실패해도_기준선_깨짐으로_남지_않는다() {
-        // given — 스냅샷 둘(각각 튜플 60개 이상 → 배치가 여러 번 나간다), 나중 것이 최신이다
-        repository.saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(86400), SyncSource.LDAP, 튜플들(60))).block();
-        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(65))).block();
+    // ---------- 기록 중 표시 (설계 2026-09-30 §4.1) ----------
 
-        AtomicInteger 배치_호출_수 = new AtomicInteger();
-        DynamoDbAsyncClient 두번째_배치만_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
-                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
-                (proxy, method, args) -> {
-                    if (method.getName().equals("batchWriteItem") && 배치_호출_수.incrementAndGet() == 2) {
-                        return CompletableFuture.failedFuture(new IllegalStateException("batchWriteItem 실패(테스트)"));
-                    }
-                    return method.invoke(client, args);
-                });
-        var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
-                두번째_배치만_실패하는_클라이언트, properties, Clock.fixed(지금, ZoneOffset.UTC));
+    @Test
+    @DisplayName("아무 일도 없었으면 기록 중이 아니다")
+    void 처음엔_기록_중이_아니다() {
+        // when, then
+        assertThat(repository.isWriting().block()).isFalse();
+    }
+
+    @Test
+    @DisplayName("기록 중 표시를 남기면 isWriting 이 참이고, 기준선은 그대로다")
+    void 기록_중_표시를_남긴다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
 
         // when
-        assertThatThrownBy(() -> 실패하는_저장소.reset().block());
+        repository.markWriting().block();
 
-        // then — 정상 저장소로 findLatest() 는 빈 결과다(기준선 깨짐 오류가 아니다). 포인터가 먼저 지워졌다는 뜻이다
+        // then
+        assertThat(repository.isWriting().block()).isTrue();
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    @Test
+    @DisplayName("스냅샷을 저장하면 기록 중 표시가 사라진다 — 포인터를 통째로 새로 쓴다")
+    void 저장하면_표시가_사라진다() {
+        // given
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        repository.markWriting().block();
+
+        // when
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+
+        // then
+        assertThat(repository.isWriting().block()).isFalse();
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    @Test
+    @DisplayName("포인터가 없어도 표시만 남길 수 있고, 그때 기준선은 '없음'이며 정리도 아무것도 지우지 않는다")
+    void 첫_설치에서도_표시를_남긴다() {
+        // when
+        repository.markWriting().block();
+
+        // then
+        assertThat(repository.isWriting().block()).isTrue();
         assertThat(repository.findLatest().blockOptional()).isEmpty();
+        assertThat(repository.purgeExpired().block()).isZero();
     }
 }

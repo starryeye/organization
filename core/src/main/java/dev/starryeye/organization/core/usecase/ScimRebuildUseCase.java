@@ -8,7 +8,6 @@ import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
-import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
@@ -18,14 +17,11 @@ import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.core.tuple.TupleMappingResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import reactor.core.Disposable;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.Sinks;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -41,8 +37,8 @@ import java.util.Set;
  * <p><b>{@code WIPE} 는 장부를 비운 뒤에만 조직도를 지운다.</b> 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고 FAILED 다 —
  * 조직도가 남아 있어야 다시 실행할 수 있다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만 살아남는다.
  *
- * <p><b>요청과 떼어 돈다(설계 §4).</b> {@link #start} 는 락을 잡고 실행 기록을 연 뒤 곧바로 돌아온다. 나머지는 {@link SyncJobs} 가
- * 돌리고, 끝나면 락을 반납한 뒤 결과를 기록한다.
+ * <p><b>요청과 떼어 돈다(설계 2026-09-29 §4, 2026-09-30 §3).</b> {@link #start} 는 {@link SyncJobs#startLocked} 로 작업 락을 잡고 실행 기록을 연 뒤
+ * 곧바로 돌아온다. 재적재가 도는 동안 리스를 갱신하고, 리스를 잃으면 멈춰 FAILED 로 남긴다. 끝나면 락을 반납한 뒤 결과를 기록한다.
  *
  * <p><b>감사 이력은 지우지 않는다.</b> {@code WIPE} 도 스냅샷과 실행 이력은 남긴다. 사고 뒤에 "무슨 일이 있었나"를 볼 유일한 기록인데
  * 그것까지 지우면 조사할 수단이 사라진다.
@@ -55,78 +51,24 @@ public class ScimRebuildUseCase {
     private final RelationTupleWriter writer;
     private final RelationTupleScanner scanner;
     private final TupleSnapshotRepository snapshots;
-    private final MutationLock lock;
-    private final Duration renewInterval;
-    private final LockObserver lockObserver;
     private final SyncJobs jobs;
     private final Clock clock;
 
     /**
-     * 락을 잡고 실행 기록(RUNNING)을 연 뒤 돌려준다. 재적재는 요청과 떼어 돈다 — 결과는 실행 기록으로 본다.
-     * 못 잡으면 {@link LockUnavailableException} 이고 아무것도 시작하지 않는다.
+     * 작업 락(REBUILD)을 잡고 실행 기록(RUNNING)을 연 뒤 돌려준다. 재적재는 요청과 떼어 돈다 — 결과는 실행 기록으로 본다. 락 잡기·갱신·리스를
+     * 잃으면 멈추기·반납은 {@link SyncJobs#startLocked} 가 한다. 못 잡으면 {@link LockUnavailableException} 이고 아무것도 시작하지 않는다.
      *
      * <p>{@code WIPE} 의 확인값 검증은 호출자(컨트롤러)의 몫이다. 여기까지 왔다는 것은 이미 확인됐다는 뜻이므로 값 자체는 받지 않는다.
      */
     public Mono<SyncRun> start(ScimRebuildMode mode) {
         log.warn("SCIM 재적재 요청: mode={}", mode);
-
-        long 시작 = System.nanoTime();
-        return lock.acquire(MutationLock.LockPurpose.REBUILD)
-                // 재적재는 획득을 재시도하지 않는다(원장 R3) — 못 잡았다는 것이 곧 경합이다.
-                .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
-                .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
-                .flatMap(lease -> {
-                    Sinks.One<Throwable> 리스상실 = Sinks.one();
-                    Disposable heartbeat = 리스를_갱신한다(lease, 리스상실);
-                    return jobs.start(SyncSource.SCIM, triggerFor(mode),
-                            리스를_잃으면_중단하고(Mono.defer(() -> rebuild(mode)), 리스상실),
-                            () -> {
-                                heartbeat.dispose();
-                                return lock.release(lease);
-                            });
+        return jobs.startLocked(SyncSource.SCIM, triggerFor(mode), MutationLock.LockPurpose.REBUILD,
+                Mono.defer(() -> rebuild(mode)), run -> {
                 });
-    }
-
-    /**
-     * 리스를 잃으면 재적재를 <b>취소</b>하고 그 예외로 끝낸다 (설계 §6, "재적재가 리스를 잃음 → 재적재 중단, FAILED 기록").
-     *
-     * <p>{@link Mono#firstWithSignal} 은 둘 중 먼저 신호를 내는 쪽을 택하고 진 쪽을 취소한다.
-     * 재적재가 먼저 끝나면 상실 신호는 취소되고, 상실이 먼저 오면 재적재가 취소된다.
-     *
-     * <p><b>중단이 되돌리기는 아니다.</b> 이미 나간 쓰기·지우기를 무를 방법은 없다. 여기서 하는 일은 <b>보고</b>다 — {@code SyncRun} 은
-     * 운영자가 가진 유일한 신호이고, 반쯤 맞춘 장부 위로 남의 쓰기가 들어왔을지 모르는 실행을 SUCCEEDED 로 남기면
-     * "{@code mode=tuples} 를 한 번 더 돌려야 한다" 와 "할 일 없다" 가 구별되지 않는다.
-     */
-    private Mono<SyncOutcome> 리스를_잃으면_중단하고(Mono<SyncOutcome> rebuild, Sinks.One<Throwable> 리스상실) {
-        return Mono.firstWithSignal(rebuild, 리스상실.asMono().flatMap(Mono::error));
-    }
-
-    private static Duration 경과(long 시작나노) {
-        return Duration.ofNanos(System.nanoTime() - 시작나노);
     }
 
     private static SyncTrigger triggerFor(ScimRebuildMode mode) {
         return mode == ScimRebuildMode.WIPE ? SyncTrigger.RESET : SyncTrigger.REBUILD;
-    }
-
-    /**
-     * 재적재가 도는 동안 리스를 계속 미룬다 (설계 §4.4).
-     *
-     * <p>TTL 은 30초인데 재적재는 몇 분 걸린다. 갱신하지 않으면 도중에 리스를 잃고, 그 순간 다른 인스턴스의 쓰기가
-     * <b>반쯤 맞춘 장부</b> 위로 들어온다 — 장부 훑기가 그 정당한 줄을 "있어야 할 줄에 없는 줄"로 지울 수도 있다.
-     *
-     * <p>갱신이 실패하면 이미 리스를 잃은 것이다. 그 사실을 {@code 리스상실} 로 흘려보내 {@link #리스를_잃으면_중단하고} 가
-     * 재적재를 취소하고 FAILED 로 기록하게 한다. {@code concatMap} 이 에러를 그대로 전파하므로 이 구독도 함께 끝나 하트비트가 멈춘다.
-     */
-    private Disposable 리스를_갱신한다(LockLease lease, Sinks.One<Throwable> 리스상실) {
-        return Flux.interval(renewInterval, renewInterval)
-                .concatMap(tick -> lock.renew(lease))
-                .subscribe(renewed -> {
-                }, error -> {
-                    log.error("재적재 도중 변경 락 리스를 잃었다. 재적재를 중단하고 FAILED 로 기록한다", error);
-                    lockObserver.leaseLost("재적재 도중 리스 상실");
-                    리스상실.tryEmitValue(error);
-                });
     }
 
     private Mono<SyncOutcome> rebuild(ScimRebuildMode mode) {
@@ -135,13 +77,21 @@ public class ScimRebuildUseCase {
 
     // ---------- TUPLES ----------
 
+    /** 조직도가 비었는데 장부에 지울 줄이 있으면 지우지 않는다(설계 2026-09-30 §4.3) — 조직도를 잃은 채로 돌면 장부 전체가 지워진다. */
+    static final String 빈_조직도 = "조직도가 비어 있다 — 장부를 비우려면 mode=wipe";
+
+    private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
+            desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
+
     private Mono<SyncOutcome> reloadTuples() {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
-            return TupleReconciler.reconcile(writer, scanner, mapping.tuples())
-                    .flatMap(this::commitTuples);
+            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
+                    .flatMap(reconciliation -> reconciliation.held()
+                            ? Mono.just(SyncOutcome.failed(reconciliation.heldReason()))
+                            : commitTuples(reconciliation));
         });
     }
 

@@ -16,9 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -26,6 +24,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * 델타를 OpenFGA 에 반영한다. 쓰기 전용 어댑터라 조회는 하지 않는다 — 인가 판정이
@@ -71,6 +70,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      * 멤버가 200명 넘게 바뀌는 조직 PATCH·PUT 은 예외로, 멈추면 5xx 가 되고 IdP 재시도가 Check 기준선으로 수렴한다.
      *
      * <p>패키지 전용 — 멈추는 규칙을 OpenFGA 없이 단위 테스트로 고정한다.
+     *
+     * <p><b>세는 것은 "한 줄도 못 살린 묶음"뿐이다(설계 2026-09-30 §6.3).</b> 거절된 묶음은 쪼개 보내므로 일부라도 반영됐으면 OpenFGA 가 죽은 것이
+     * 아니다 — 셈을 처음부터 다시 한다. 인가 모델이 통째로 없어 모든 줄이 거절되면 세 묶음 뒤에 멈춘다.
      */
     static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
                                                      Function<Batch, Mono<TupleWriteResult>> send) {
@@ -81,7 +83,7 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                     .index()
                     .concatMap(indexed -> send.apply(indexed.getT2()).flatMap(result -> {
                         TupleWriteResult 누적 = 지금까지.accumulateAndGet(result, OpenFgaRelationTupleWriter::merge);
-                        if (!result.hasFailure()) {
+                        if (!한_줄도_못_살렸다(result)) {
                             연속_실패.set(0);
                             return Mono.just(누적);
                         }
@@ -99,6 +101,11 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                     }))
                     .last(TupleWriteResult.empty());
         });
+    }
+
+    /** 묶음에서 한 줄도 반영되지 못했다 — 일시 오류로 다 실패했거나, 쪼개도 전부 거절됐다. OpenFGA 가 죽었다는 신호다. */
+    private static boolean 한_줄도_못_살렸다(TupleWriteResult result) {
+        return result.hasFailure() && result.written().isEmpty() && result.deleted().isEmpty();
     }
 
     /**
@@ -124,6 +131,11 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
     }
 
     private Mono<TupleWriteResult> applyBatch(Batch batch) {
+        return 쪼개며_보낸다(batch, this::보낸다, OpenFgaErrors::거절인가);
+    }
+
+    /** 한 배치를 보낸다. 일시 오류만 다시 시도한다 — 거절(400)은 다시 보내도 같다. */
+    private Mono<Void> 보낸다(Batch batch) {
         return Mono.fromFuture(() -> {
                     try {
                         return bootstrapper.client().write(toRequest(batch), writeOptions());
@@ -131,9 +143,35 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                         throw new IllegalStateException("OpenFGA write 호출 실패", e);
                     }
                 })
-                .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(200)))
+                .retryWhen(OpenFgaErrors.일시_오류만_다시(properties.getMaxRetries()))
+                .then();
+    }
+
+    /**
+     * 배치를 보내고, OpenFGA 가 거절하면(400) 반으로 나눠 다시 보낸다 — 한 줄까지 좁혀도 거절되면 그 줄만 실패로 남긴다(점검 M16,
+     * 설계 2026-09-30 §6.2). 요청 하나가 원자적이라 줄 하나가 걸리면 같은 배치 100줄이 함께 실패했고, 다시 돌려도 같은 99명이 빠졌다.
+     * 일시 오류(재시도 뒤에도 실패)는 쪼개지 않는다 — 쪼개도 같이 실패한다.
+     *
+     * <p>패키지 전용 — 쪼개는 규칙을 OpenFGA 없이 단위 테스트로 고정한다.
+     */
+    static Mono<TupleWriteResult> 쪼개며_보낸다(Batch batch, Function<Batch, Mono<Void>> send,
+                                            Predicate<Throwable> 거절인가) {
+        return send.apply(batch)
                 .thenReturn(batch.succeeded())
                 .onErrorResume(error -> {
+                    if (거절인가.test(error) && batch.tuples().size() > 1) {
+                        log.warn("OpenFGA 가 배치 {}건을 거절했다 — 반으로 나눠 다시 보낸다: {}",
+                                batch.tuples().size(), rootMessage(error));
+                        return Flux.fromIterable(batch.halves())
+                                .concatMap(half -> 쪼개며_보낸다(half, send, 거절인가))
+                                .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+                    }
+                    if (거절인가.test(error)) {
+                        // 한 줄까지 좁혔는데도 거절됐다 — 이 줄만의 문제이지 OpenFGA 가 죽은 게 아니므로 스택 트레이스 없이 남긴다
+                        log.warn("OpenFGA 가 한 줄을 거절했다 — 실패로 남긴다: {} ({})",
+                                batch.tuples().get(0), rootMessage(error));
+                        return Mono.just(batch.failed(rootMessage(error)));
+                    }
                     log.error("배치 {}건 적용 실패", batch.tuples().size(), error);
                     return Mono.just(batch.failed(rootMessage(error)));
                 });
@@ -204,6 +242,13 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         TupleWriteResult failed(String reason) {
             return new TupleWriteResult(Set.of(), Set.of(),
                     tuples.stream().map(tuple -> new TupleFailure(tuple, reason)).toList());
+        }
+
+        /** 반으로 나눈다 — 거절된 배치에서 나쁜 줄을 찾아 좁힐 때 쓴다(설계 2026-09-30 §6.2). */
+        List<Batch> halves() {
+            int mid = tuples.size() / 2;
+            return List.of(new Batch(tuples.subList(0, mid), delete),
+                    new Batch(tuples.subList(mid, tuples.size()), delete));
         }
     }
 }

@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -92,8 +93,11 @@ public final class Keys {
      */
     public static final String EXPIRES_AT = "expiresAt";
 
-    /** 전역 변경 락. 파티션 하나에 아이템 하나다 (설계 §4.2). */
-    public static final String LOCK_PK = "LOCK#SCIM_WRITE";
+    /**
+     * 전역 변경·작업 락. 파티션 하나에 아이템 하나다 (설계 §4.2). 앱마다 테이블이 달라 app-scim 은 SCIM 쓰기·재적재, app-ldap 은 동기화·재적재를
+     * 이 한 줄로 줄 세운다(설계 2026-09-30 §3.1).
+     */
+    public static final String LOCK_PK = "LOCK#MUTATION";
 
     private static final String TUPLE_SEPARATOR = "|";
 
@@ -255,5 +259,10 @@ public final class Keys {
 
     public static String syncRunSk(Instant startedAt, String runId) {
         return sortableTimestamp(startedAt) + "#" + runId;
+    }
+
+    /** 하루 1회 작업 표지(설계 2026-09-30 §5.1). 날짜는 yyyy-MM-dd. */
+    public static String dailyJobPk(String job, LocalDate day) {
+        return "DAILY#" + job + "#" + day;
     }
 }

@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeTupleChecker;
@@ -11,6 +12,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -30,6 +32,7 @@ class SnapshotArchiveUseCaseTest {
     private FakeTupleChecker checker;
     private FakeSnapshotRepository snapshots;
     private FakeSyncRunRepository runs;
+    private FakeMutationLock lock;
     private SnapshotArchiveUseCase useCase;
 
     @BeforeEach
@@ -38,7 +41,8 @@ class SnapshotArchiveUseCaseTest {
         checker = new FakeTupleChecker();
         snapshots = new FakeSnapshotRepository();
         runs = new FakeSyncRunRepository(고정시각);
-        useCase = new SnapshotArchiveUseCase(state, checker, snapshots, runs,
+        lock = new FakeMutationLock();
+        useCase = new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock,
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
@@ -120,5 +124,33 @@ class SnapshotArchiveUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(snapshots.saved).hasSize(1);
         assertThat(snapshots.saved.get(0).tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("재적재가 락을 쥐고 있으면 오늘 아카이빙을 건너뛰고 ABORTED 로 남긴다 — 잠깐 어긋난 장부를 '실제'로 찍지 않게")
+    void 재적재_중이면_건너뛴다() {
+        // given
+        lock.acquire(MutationLock.LockPurpose.REBUILD).block();
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).isEqualTo("재적재 중이라 건너뜀");
+        assertThat(snapshots.saved).isEmpty();
+    }
+
+    @Test
+    @DisplayName("SCIM 쓰기가 잠깐 쥔 락은 건너뛸 이유가 아니다")
+    void 쓰기_락은_건너뛰지_않는다() {
+        // given
+        lock.acquire(MutationLock.LockPurpose.WRITE).block();
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
     }
 }

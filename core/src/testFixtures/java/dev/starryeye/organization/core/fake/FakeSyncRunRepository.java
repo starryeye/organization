@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.fake;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import reactor.core.publisher.Flux;
@@ -81,6 +82,27 @@ public class FakeSyncRunRepository implements SyncRunRepository {
     @Override
     public Mono<SyncRun> findById(String runId) {
         return Mono.fromSupplier(() -> 기록.get(runId));
+    }
+
+    /**
+     * 저장된 기록이 아직 RUNNING 일 때만 닫는다. 검사와 쓰기를 {@code 기록} 맵 위에서 함께 묶어, 그 사이 다른 스레드의
+     * {@link #finish} 와 겹치지 않게 한다 — 실제 저장소의 조건부 쓰기를 흉내 낸다.
+     */
+    @Override
+    public Mono<SyncRun> abandon(SyncRun run, String reason) {
+        return Mono.fromCallable(() -> {
+            synchronized (기록) {
+                SyncRun stored = 기록.get(run.runId());
+                if (stored == null || stored.status() != SyncStatus.RUNNING) {
+                    return null;
+                }
+                SyncRun closed = stored.finished(SyncOutcome.failed(reason), now);
+                기록.put(closed.runId(), closed);
+                finished.add(closed);
+                끝남신호(closed.runId()).tryEmitValue(closed);
+                return closed;
+            }
+        });
     }
 
     /**

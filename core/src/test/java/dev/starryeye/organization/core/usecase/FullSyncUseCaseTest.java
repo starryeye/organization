@@ -1,9 +1,11 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeSnapshotSource;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
+import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
@@ -21,7 +23,6 @@ import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -30,6 +31,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -43,6 +45,7 @@ class FullSyncUseCaseTest {
     private FakeSnapshotRepository snapshots;
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private FakeTupleScanner scanner;
     private FakeSyncRunRepository runs;
     private FullSyncUseCase useCase;
 
@@ -53,9 +56,10 @@ class FullSyncUseCaseTest {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
         runs = new FakeSyncRunRepository(고정시각);
-        useCase = new FullSyncUseCase(source, snapshots, state, writer,
+        scanner = new FakeTupleScanner(writer);
+        useCase = new FullSyncUseCase(source, snapshots, state, writer, scanner,
                 new DeletionGuard(DeletionGuardPolicy.defaults()),
-                new SyncJobs(runs, Duration.ofMinutes(1)),
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
 
@@ -79,7 +83,7 @@ class FullSyncUseCaseTest {
 
     /** 동기화를 걸고 끝날 때까지 기다린다 — 동기화는 요청과 떼어 돈다(설계 2026-09-29 §4). */
     private SyncRun 동기화한다(SyncTrigger trigger) {
-        SyncRun started = useCase.start(trigger, Mono::empty, run -> {
+        SyncRun started = useCase.start(trigger, run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -252,6 +256,7 @@ class FullSyncUseCaseTest {
                 RelationTuple.directMember("kim", "DEV002"),
                 RelationTuple.directMember("park", "DEV002"));
         assertThat(state.users).containsOnlyKeys("kim", "park", "choi");
+        assertThat(snapshots.writing).as("스냅샷을 남겼으니 표시가 사라진다").isFalse();
     }
 
     @Test
@@ -271,5 +276,208 @@ class FullSyncUseCaseTest {
         assertThat(writer.appliedDeltas).isEmpty();
         assertThat(snapshots.saved).isEmpty();
         assertThat(state.users).isEmpty();
+    }
+
+    // ---------- 기록 중 표시와 훑어 맞추기 (설계 2026-09-30 §4) ----------
+
+    @Test
+    @DisplayName("OpenFGA 에 쓰기 직전에 '기록 중' 표시를 남기고, 스냅샷을 저장하면 표시가 사라진다")
+    void 쓰기_직전에_표시를_남기고_저장하면_사라진다() {
+        // given
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        AtomicBoolean 쓸때_표시 = new AtomicBoolean();
+        writer.onApply(() -> 쓸때_표시.set(snapshots.writing.get()));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(쓸때_표시).as("표시가 쓰기보다 먼저다").isTrue();
+        assertThat(snapshots.writing).isFalse();
+    }
+
+    @Test
+    @DisplayName("스냅샷 저장이 실패하면 '기록 중' 표시가 남는다 — 다음 회차가 이것을 보고 장부를 훑어 맞춘다")
+    void 저장이_실패하면_표시가_남는다() {
+        // given
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        snapshots.failSave(new IllegalStateException("스냅샷 저장 실패(스로틀)"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.writing).isTrue();
+    }
+
+    @Test
+    @DisplayName("쓰는 도중 멈추면(기한·서버 종료·오류) '기록 중' 표시가 남는다 — 표시를 지우는 것은 스냅샷 저장뿐이다")
+    void 쓰는_도중_멈추면_표시가_남는다() {
+        // given — 기한·종료는 작업을 취소하고, 오류는 작업을 끝낸다. 어느 쪽이든 스냅샷 저장에 닿지 않는다
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.onApply(() -> {
+            throw new IllegalStateException("쓰는 도중 멈춤(흉내)");
+        });
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(snapshots.writing).isTrue();
+    }
+
+    @Test
+    @DisplayName("변경이 없으면 '기록 중' 표시를 남기지 않는다")
+    void 변경이_없으면_표시하지_않는다() {
+        // given
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("kim", "DEV002")))).block();
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(snapshots.writing).isFalse();
+    }
+
+    @Test
+    @DisplayName("'기록 중' 표시를 남기지 못하면 OpenFGA 에 쓰지 않고 FAILED 다 — 표시 없이 쓰기 시작하는 일은 없다")
+    void 표시를_못_남기면_쓰지_않는다() {
+        // given
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        snapshots.failMarkWriting(new IllegalStateException("포인터 쓰기 실패"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지난 회차가 기록 전에 멈췄으면 장부를 훑어 맞춘다 — 되돌려진 입사자의 권한이 남지 않는다(점검 M2)")
+    void 멈춘_뒤_첫_동기화는_훑어_맞춘다_남는_쪽() {
+        // given — 월요일 기준선엔 park 이 없다. 화요일 회차가 park 의 권한을 쓰고 스냅샷 저장 전에 멈췄다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        snapshots.save(new TupleSnapshot("월요일", 고정시각, SyncSource.LDAP, Set.of(김))).block();
+        writer.stored.addAll(Set.of(김, 박));
+        snapshots.writing.set(true);
+        // 수요일 park 입사 취소 — 목요일 LDAP 에는 kim 만 있다
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 기준선(월요일)과 비교하면 지울 게 없지만, 장부를 훑어 park 을 찾아 지운다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.message()).contains("기준선 의심");
+        assertThat(writer.stored).containsExactly(김);
+        assertThat(snapshots.writing).isFalse();
+        assertThat(snapshots.saved.get(snapshots.saved.size() - 1).tuples()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("지운 뒤 멈췄다가 되살아난 직원도 권한을 되찾는다(점검 M2 의 빠지는 쪽)")
+    void 멈춘_뒤_첫_동기화는_훑어_맞춘다_빠지는_쪽() {
+        // given — 월요일 기준선엔 kim 이 있다. 화요일 회차가 kim 의 권한을 지우고 스냅샷 저장 전에 멈췄다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        snapshots.save(new TupleSnapshot("월요일", 고정시각, SyncSource.LDAP, Set.of(김))).block();
+        snapshots.writing.set(true);
+        // 오후에 kim 이 되살아났다
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 기준선과 비교하면 쓸 게 없지만, 훑어 맞추기는 있어야 할 줄을 전부 쓴다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기도 삭제 가드를 지킨다 — 지울 줄이 장부의 30% 를 넘으면 지우지 않고 ABORTED, 표시는 남는다")
+    void 훑어_맞추기도_가드를_지킨다() {
+        // given — 장부에 20줄, LDAP 에는 그중 10명만 남았다(50% 를 지워야 한다)
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        snapshots.writing.set(true);
+        source.willReturn(조직도(IntStream.range(0, 10).mapToObj(i -> "user" + i).collect(Collectors.toSet()), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).contains("기준선 의심").contains("임계치");
+        assertThat(writer.stored).hasSize(20);
+        assertThat(snapshots.writing).isTrue();
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기가 스냅샷 저장 실패로 멈추면 메시지에 기준선 의심 사유가 남는다")
+    void 훑어_맞추기가_저장_실패로_멈추면_기준선_의심이_메시지에_남는다() {
+        // given
+        snapshots.writing.set(true);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        snapshots.failSave(new IllegalStateException("스냅샷 저장 실패"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 실패 사유만 남기면 지난 회차가 기록 전에 멈췄다는 사정이 사라진다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).contains("기준선 의심").contains("스냅샷 저장 실패");
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기에서 이미 있던 줄의 쓰기가 실패해도 스냅샷에 남는다")
+    void 훑어_맞추기에서_이미_있던_줄의_쓰기가_실패해도_스냅샷에_남는다() {
+        // given — 장부에 kim, park 이 이미 있고 park 의 다시 쓰기가 실패한다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.stored.addAll(Set.of(김, 박));
+        snapshots.writing.set(true);
+        source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
+        writer.failFor(tuple -> tuple.equals(박));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 박의 다시 쓰기는 실패했지만 장부에는 있었으니 스냅샷에 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.PARTIAL);
+        assertThat(snapshots.saved.get(snapshots.saved.size() - 1).tuples()).containsExactlyInAnyOrder(김, 박);
+        assertThat(snapshots.writing).isFalse();
+
+        // when — 다음 동기화에서 박이 더는 LDAP 에 없다
+        writer.failFor(tuple -> false);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 박의 줄이 이번에 지워진다
+        assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("force=true(FORCED) 면 훑어 맞추기의 가드를 건너뛰고 지운다")
+    void 강제면_훑어_맞추기가_지운다() {
+        // given
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        snapshots.writing.set(true);
+        source.willReturn(조직도(IntStream.range(0, 10).mapToObj(i -> "user" + i).collect(Collectors.toSet()), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.FORCED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).hasSize(10);
+        assertThat(snapshots.writing).isFalse();
     }
 }

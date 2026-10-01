@@ -120,6 +120,11 @@ class IncrementalSyncLockObservabilityTest {
             public Mono<LockLease> renew(LockLease lease) {
                 return Mono.just(lease);
             }
+
+            @Override
+            public Mono<LockPurpose> peek() {
+                return Mono.empty();
+            }
         };
         state.users.put("kim", 직원("kim", true));
 
@@ -151,6 +156,11 @@ class IncrementalSyncLockObservabilityTest {
             @Override
             public Mono<LockLease> renew(LockLease lease) {
                 return Mono.just(lease);
+            }
+
+            @Override
+            public Mono<LockPurpose> peek() {
+                return Mono.empty();
             }
         };
 

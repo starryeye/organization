@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * LDAP 연결·읽기 타임아웃(점검 C5) — JNDI 환경 값 변환과, bind 응답이 없을 때 connect-timeout 이 끊는 경로.
- * 타임아웃이 없으면 JNDI 는 응답이 올 때까지 기다린다 — 죽은 연결 하나에 회차가 끝나지 않아 실행 가드가 안 풀리고
+ * 타임아웃이 없으면 JNDI 는 응답이 올 때까지 기다린다 — 죽은 연결 하나에 회차가 끝나지 않아 작업 락이 안 풀리고
  * 이후 매일 동기화가 건너뛰어진다.
  *
  * <p>페이징 도중(bind 이후) 응답이 끊겨 read-timeout 이 끊는 경로는 {@link LdapReadTimeoutDuringPagingTest} 가 고정한다.

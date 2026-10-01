@@ -3,9 +3,14 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.LockLease;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
@@ -15,6 +20,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -24,51 +30,103 @@ import java.util.function.Supplier;
  * 중간에 멈췄고, 실행 기록은 영원히 RUNNING 으로, 락은 풀린 채 남았다. 이제 작업은 자기 구독으로 돌고, 요청은 실행 기록(RUNNING)만
  * 받아 간다.
  *
+ * <p><b>작업 락(설계 2026-09-30 §3).</b> {@link #startLocked} 가 앱의 작업 락을 잡고, 작업 동안 리스를 갱신하고, 리스를 잃으면(=남이 가져갔으면)
+ * 작업을 멈추고, 끝나면 반납한다. 여러 인스턴스가 같은 초에 걸어도 한 번에 하나만 돈다. SCIM 재적재·LDAP 동기화·LDAP 재적재가 모두 이것을 탄다.
+ *
  * <p>한 작업이 지키는 규칙:
  * <ol>
  *   <li>실행 기록을 연 뒤에만 일을 시작한다. 기록을 열지 못하면 반납하고 그 오류로 끝난다.</li>
- *   <li>일은 서버 종료·기한({@code timeout})과 경주한다. 먼저 온 쪽이 이기고 진 쪽은 취소된다 — 종료면 FAILED("서버 종료로 중단"),
- *       기한이면 FAILED("기한 초과 — N분"). 종료가 이미 시작됐으면 일을 시작하지도 않는다.</li>
+ *   <li>일을 시작하기 전에, 같은 앱의 락 작업 기록 중 RUNNING 으로 남은 것을 "비정상 종료로 중단"으로 닫는다 — 락을 쥐었으니 그것들은
+ *       죽은 작업이다(강제 종료·정전·다른 인스턴스의 비정상 종료). 락을 잡지 않는 아카이빙({@code ARCHIVE}) 기록과 자기 기록은 건드리지 않는다.</li>
+ *   <li>일은 서버 종료·기한({@code timeout})·리스 상실과 경주한다. 먼저 온 쪽이 이기고 진 쪽은 취소된다. 종료가 이미 시작됐으면 일을
+ *       시작하지도 않는다.</li>
  *   <li>어떻게 끝나든 <b>먼저 반납하고 그다음 기록한다.</b> 기록에서 "끝남"을 본 운영자가 곧바로 다시 걸면 받아져야 한다.</li>
  *   <li>요청의 Reactor Context 를 이어받는다 — 작업 로그가 요청과 같은 traceId 로 묶인다.</li>
  * </ol>
  *
- * <p><b>멈춤은 되돌리기가 아니다.</b> 이미 나간 쓰기는 무르지 않는다. 기한·종료로 멈추면 멈췄다는 사실을 FAILED 로 남길 뿐이고, 이미 나간
- * 쓰기를 모을 곳이 없어 새 스냅샷을 만들지 않는다 — 직전 스냅샷이 다음 회차의 기준으로 남는다. 그 사이 조직도가 바뀌면 기준선이 장부와
- * 어긋날 수 있어 재적재로 맞춘다(설계 §11). 연속 실패 차단기로 멈춘 쓰기는 다르다 — 유스케이스가 나간 것으로 기록 규칙을 지킨다(§5).
+ * <p><b>멈춤은 되돌리기가 아니다.</b> 이미 나간 쓰기는 무르지 않는다. 멈췄다는 사실을 FAILED 로 남기고, 기록 규칙은 각 작업이 지킨다
+ * (LDAP 은 "기록 중" 표시로 다음 회차가 맞춘다 — 설계 2026-09-30 §4).
  */
 @Slf4j
 public class SyncJobs {
 
     static final String 종료_사유 = "서버 종료로 중단";
+    static final String 비정상_종료_사유 = "비정상 종료로 중단";
 
     /** 종료 때 작업이 반납·기록을 마치기를 기다리는 한도. 그 뒤에는 DynamoDB 클라이언트가 닫힌다. */
     private static final Duration 종료_대기 = Duration.ofSeconds(10);
 
+    /** 끝나지 못한 기록을 찾을 때 볼 최근 기록 수. 죽은 작업의 기록은 가장 최근 것들 사이에 있다. */
+    private static final int 살펴볼_기록 = 100;
+
     private final SyncRunRepository runs;
+    private final MutationLock lock;
+    private final Duration renewInterval;
+    private final LockObserver lockObserver;
     private final Duration timeout;
     private final Sinks.Empty<Void> 종료 = Sinks.empty();
     private final Set<Mono<Void>> 도는_작업 = ConcurrentHashMap.newKeySet();
 
-    public SyncJobs(SyncRunRepository runs, Duration timeout) {
+    public SyncJobs(SyncRunRepository runs, MutationLock lock, Duration renewInterval,
+                    LockObserver lockObserver, Duration timeout) {
         this.runs = runs;
+        this.lock = lock;
+        this.renewInterval = renewInterval;
+        this.lockObserver = lockObserver;
         this.timeout = timeout;
     }
 
-    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger,
-                               Mono<SyncOutcome> work, Supplier<Mono<Void>> release) {
+    /**
+     * 앱의 작업 락을 잡고, 실행 기록을 열고, 작업을 요청과 떼어 띄운 뒤 연 기록(RUNNING)을 준다(설계 2026-09-30 §3.2).
+     * 못 잡으면 {@link LockUnavailableException} — 재시도하지 않는다. 못 잡았다는 것이 곧 다른 작업이 돈다는 뜻이다.
+     *
+     * @param onFinished 끝난 기록으로 부른다(지표·로그). 기록에 실패하면 부르지 않는다
+     */
+    public Mono<SyncRun> startLocked(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
+                                     Mono<SyncOutcome> work, Consumer<SyncRun> onFinished) {
+        return Mono.defer(() -> {
+            long 시작 = System.nanoTime();
+            return lock.acquire(purpose)
+                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
+                    .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
+                    .flatMap(lease -> {
+                        Sinks.One<Throwable> 리스상실 = Sinks.one();
+                        Disposable heartbeat = 리스를_갱신한다(lease, 리스상실);
+                        return start(source, trigger,
+                                Mono.firstWithSignal(work, 리스상실.asMono().flatMap(Mono::error)),
+                                run -> 남은_기록을_닫는다(source, run.runId()),
+                                () -> {
+                                    heartbeat.dispose();
+                                    return lock.release(lease);
+                                },
+                                onFinished);
+                    });
+        });
+    }
+
+    /** 패키지 전용 기본 단위 — 겹침 검사는 호출자가 하고 그 반납 수단을 넘긴다. 바깥은 {@link #startLocked} 를 쓴다. */
+    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger,
+                        Mono<SyncOutcome> work, Supplier<Mono<Void>> release) {
         return start(source, trigger, work, release, run -> {
         });
+    }
+
+    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
+                        Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
+        return start(source, trigger, work, run -> Mono.empty(), release, onFinished);
     }
 
     /**
      * 실행 기록을 열고 {@code work} 를 요청과 떼어 띄운 뒤, 연 기록(RUNNING)을 준다. 구독할 때마다 작업 하나가 뜬다.
      *
+     * @param 먼저       기록을 연 뒤·일을 시작하기 전에 할 일. 실패하면 일을 하지 않고 FAILED 로 끝나므로 오류를 스스로
+     *                   삼켜야 한다(남은_기록을_닫는다 가 그렇다)
      * @param release    겹침 검사(락·가드)를 푸는 수단. 작업이 어떻게 끝나든 정확히 한 번 부른다
      * @param onFinished 끝난 기록으로 부른다(지표·로그). 기록에 실패하면 부르지 않는다
      */
-    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
-                               Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
+    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
+                        Function<SyncRun, Mono<Void>> 먼저, Supplier<Mono<Void>> release,
+                        Consumer<SyncRun> onFinished) {
         return Mono.deferContextual(context -> {
             Sinks.One<SyncRun> 열림 = Sinks.one();
             Sinks.Empty<Void> 끝남 = Sinks.empty();
@@ -87,7 +145,7 @@ public class SyncJobs {
                     .flatMap(run -> {
                         log.info("[{}] 작업 시작: source={} trigger={}", run.runId(), source, trigger);
                         열림.tryEmitValue(run);
-                        return 끝까지_돌린다(run, work, release);
+                        return 끝까지_돌린다(run, work, 먼저, release);
                     })
                     .doOnNext(onFinished)
                     .doFinally(signal -> {
@@ -125,9 +183,11 @@ public class SyncJobs {
     /**
      * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다.
      */
-    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<SyncOutcome> work, Supplier<Mono<Void>> release) {
+    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<SyncOutcome> work,
+                                    Function<SyncRun, Mono<Void>> 먼저, Supplier<Mono<Void>> release) {
         Mono<SyncOutcome> 종료되면 = 종료.asMono().then(Mono.error(() -> new IllegalStateException(종료_사유)));
-        return Mono.firstWithSignal(종료되면, work)
+        Mono<SyncOutcome> 일 = Mono.defer(() -> 먼저.apply(run)).then(work);
+        return Mono.firstWithSignal(종료되면, 일)
                 .timeout(timeout, Mono.error(() -> new IllegalStateException("기한 초과 — " + 사람말로(timeout))))
                 .switchIfEmpty(Mono.error(() -> new IllegalStateException("작업이 결과 없이 끝났다")))
                 .onErrorResume(error -> {
@@ -147,6 +207,55 @@ public class SyncJobs {
                 });
     }
 
+    /**
+     * 같은 앱의 락 작업 기록 중 RUNNING 으로 남은 것을 닫는다(설계 2026-09-30 §3.3). 락을 쥐었으니 그것들은 죽은 작업이다. 락을 잡지 않는
+     * 아카이빙과 방금 연 자기 기록은 건드리지 않는다. 찾거나 닫다 실패해도 작업은 계속한다 — 기록 정리는 부가 일이다.
+     *
+     * <p>{@link SyncRunRepository#abandon} 은 저장된 기록이 <b>아직 RUNNING 일 때만</b> 닫는다. 앞 작업이 락을 반납한 뒤·자기
+     * 기록을 쓰기 전의 틈에 여기까지 왔으면, 방금 SUCCEEDED 로 끝난 기록이 이 목록에는 아직 RUNNING 으로 보일 수 있다(읽기는 최종
+     * 일관성) — 조건이 없으면 그 결과·집계값을 지울 뻔한다. {@code abandon} 이 빈 Mono 를 주면 이미 끝나 있었다는 뜻이니 경고할 일이
+     * 아니다.
+     */
+    private Mono<Void> 남은_기록을_닫는다(SyncSource source, String 지금_기록) {
+        return runs.findRecent(살펴볼_기록)
+                .filter(run -> run.source() == source
+                        && run.status() == SyncStatus.RUNNING
+                        && run.trigger() != SyncTrigger.ARCHIVE
+                        && !run.runId().equals(지금_기록))
+                .concatMap(run -> runs.abandon(run, 비정상_종료_사유)
+                        .doOnSuccess(closed -> {
+                            if (closed != null) {
+                                log.warn("[{}] 끝나지 못한 채 남은 실행 기록을 닫았다: {}", closed.runId(), 비정상_종료_사유);
+                            } else {
+                                log.debug("[{}] 닫으려 했으나 이미 끝나 있었다 — 반납과 기록 사이의 틈", run.runId());
+                            }
+                        })
+                        .onErrorResume(error -> {
+                            log.warn("[{}] 끝나지 못한 실행 기록을 닫지 못했다", run.runId(), error);
+                            return Mono.empty();
+                        }))
+                .then()
+                .onErrorResume(error -> {
+                    log.warn("끝나지 못한 실행 기록을 찾지 못했다 — 작업은 계속한다", error);
+                    return Mono.empty();
+                });
+    }
+
+    /**
+     * 작업이 도는 동안 리스를 계속 미룬다(설계 §4.4). TTL 은 30초인데 작업은 몇 분 걸린다. 갱신이 실패하면 이미 리스를 잃은 것이다 —
+     * 그 사실을 {@code 리스상실} 로 흘려 작업을 취소하고 FAILED 로 기록하게 한다. {@code concatMap} 이 에러를 전파하므로 이 구독도 함께 끝난다.
+     */
+    private Disposable 리스를_갱신한다(LockLease lease, Sinks.One<Throwable> 리스상실) {
+        return Flux.interval(renewInterval, renewInterval)
+                .concatMap(tick -> lock.renew(lease))
+                .subscribe(renewed -> {
+                }, error -> {
+                    log.error("작업 도중 락 리스를 잃었다. 작업을 멈추고 FAILED 로 기록한다", error);
+                    lockObserver.leaseLost("작업 도중 리스 상실");
+                    리스상실.tryEmitValue(error);
+                });
+    }
+
     /** 반납 실패는 작업을 실패시키지 않는다 — 일은 이미 끝났다. 남기기만 한다. */
     private static Mono<Void> 반납한다(Supplier<Mono<Void>> release) {
         return Mono.defer(release)
@@ -154,6 +263,10 @@ public class SyncJobs {
                     log.warn("작업을 끝내며 락·가드를 반납하지 못했다", error);
                     return Mono.empty();
                 });
+    }
+
+    private static Duration 경과(long 시작나노) {
+        return Duration.ofNanos(System.nanoTime() - 시작나노);
     }
 
     private static String 사람말로(Duration duration) {

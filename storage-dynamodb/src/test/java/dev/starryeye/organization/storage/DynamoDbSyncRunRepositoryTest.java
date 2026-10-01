@@ -168,4 +168,41 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         // when, then
         assertThat(repository.findById("없는-번호").blockOptional()).isEmpty();
     }
+
+    @Test
+    @DisplayName("아직 RUNNING 인 기록은 abandon 으로 사유와 함께 FAILED 로 닫힌다")
+    void 아직_RUNNING인_기록은_abandon으로_닫힌다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+
+        // when
+        var closed = repository.abandon(run, "비정상 종료로 중단").block();
+
+        // then — 반환값도, 다시 읽은 값도 닫혀 있어야 한다
+        assertThat(closed.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(closed.message()).isEqualTo("비정상 종료로 중단");
+        var found = repository.findById(run.runId()).block();
+        assertThat(found.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(found.message()).isEqualTo("비정상 종료로 중단");
+    }
+
+    @Test
+    @DisplayName("이미 끝난 기록은 abandon 이 손대지 않는다 — 조건이 깨져 빈 결과이고 저장된 결과는 그대로다")
+    void 이미_끝난_기록은_abandon이_손대지_않는다() {
+        // given — 앞 작업이 이미 SUCCEEDED 로 끝냈다
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var outcome = new SyncOutcome(SyncStatus.SUCCEEDED, 12, 3, 0, "20260814T030000-LDAP", null);
+        repository.finish(run, outcome).block();
+
+        // when — 반납과 기록 사이의 틈에 낡은 RUNNING 사본을 쥔 다음 작업이 닫으려 든다
+        var result = repository.abandon(run, "비정상 종료로 중단").blockOptional();
+
+        // then — 조건이 깨져 아무것도 바뀌지 않는다
+        assertThat(result).isEmpty();
+        var found = repository.findById(run.runId()).block();
+        assertThat(found.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(found.writtenCount()).isEqualTo(12);
+        assertThat(found.deletedCount()).isEqualTo(3);
+        assertThat(found.snapshotId()).isEqualTo("20260814T030000-LDAP");
+    }
 }
