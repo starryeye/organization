@@ -7,10 +7,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,6 +77,36 @@ class LeaseKeeperTest {
                 .hasMessageContaining("리스");
         assertThat(취소됨).isTrue();
         assertThat(상실).containsExactly("테스트 도중 리스 상실");
+    }
+
+    @Test
+    @DisplayName("갱신이 답하지 않으면 — 반쯤 열린 연결 등 — 주기 두 번 안에 하던 일을 멈추고 '리스를 잃었다'로 끝난다")
+    void 갱신이_응답하지_않으면_주기_안에_멈춘다() {
+        // given
+        FakeMutationLock 답없는_락 = new FakeMutationLock() {
+            @Override
+            public Mono<LockLease> renew(LockLease lease) {
+                renewAttempted.incrementAndGet();
+                return Mono.never();
+            }
+        };
+        LockLease lease = 답없는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        AtomicBoolean 취소됨 = new AtomicBoolean();
+        LeaseKeeper keeper = new LeaseKeeper(답없는_락, Duration.ofSeconds(10), observer);
+
+        // when, then — 첫 갱신은 10초에 나가고, 그 갱신이 10초 동안 답하지 않으면 시간 초과로 잃은 것으로 본다
+        StepVerifier.withVirtualTime(() -> keeper.keep(lease, Mono.<String>never().doOnCancel(() -> 취소됨.set(true)),
+                        "테스트 도중 리스 상실"))
+                .expectSubscription()
+                .thenAwait(Duration.ofSeconds(20))
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(LockUnavailableException.class)
+                        .hasMessage("작업 도중 락 리스를 잃었습니다")
+                        .hasCauseInstanceOf(TimeoutException.class))
+                .verify(Duration.ofSeconds(5));
+        assertThat(취소됨).isTrue();
+        assertThat(상실).containsExactly("테스트 도중 리스 상실");
+        assertThat(답없는_락.renewAttempted.get()).isEqualTo(1);
     }
 
     @Test
