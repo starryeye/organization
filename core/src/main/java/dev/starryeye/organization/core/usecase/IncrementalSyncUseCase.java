@@ -100,7 +100,7 @@ import java.util.stream.Collectors;
  * 그 반대인) 상태가 되고, 다음 동기화의 diff는 "이미 같다"고 판단해 이 불일치를 영원히
  * 다시 잡지 못한다 — 재시도가 diff 할 "이전" 자체가 이미 목표값으로 오염됐기 때문이다.
  * 그래서 모든 커밋은 반드시 {@code TupleWriteResult} 를 보고 실제로 반영된 만큼만 상태에
- * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}, {@link #reconcileRemovedMember}).
+ * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -216,7 +216,7 @@ public class IncrementalSyncUseCase {
                                 return Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
                             };
 
-                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), lease, commit);
+                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, commit);
                         }));
     }
 
@@ -329,7 +329,7 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroup(reconciled));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), lease, commit);
+                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, commit);
                 }));
     }
 
@@ -355,6 +355,8 @@ public class IncrementalSyncUseCase {
      *
      * <p>증분은 요청에 나온 멤버를 전후가 같아도 그림에 남긴다 — 그 멤버의 어긋남은 지금처럼 고친다. 요청에 나오지 않은 멤버는
      * 점검하지 않는다(설계 §11). 전체 교체는 목록이 전원을 가리키므로 바뀌는 멤버만 싣는다.
+     *
+     * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock(lease -> changeGroupInternal(groupId, change, lease));
@@ -364,8 +366,15 @@ public class IncrementalSyncUseCase {
         return state.findGroupHeader(groupId)
                 .flatMap(header -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
                     GroupHeader 바뀐헤더 = change.applyTo(header);
+                    Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
                     DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
+                    // 그림에는 빠지는 멤버를 싣지 않는다 — 그 멤버의 직원을 읽지도, 그 줄을 Check 하지도 않는다(설계 2026-10-02 §4.2)
+                    DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
+                            차집합(전후.전(), 빠질것));
                     DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
+                    Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
+                            .map(member -> tupleFor(member, groupId))
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
@@ -374,8 +383,8 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroupChange(바뀐헤더, 넣을것, 뺄것));
                     };
 
-                    return diffAndApply(snapshotOfGroups(Set.of(전)), snapshotOfGroups(Set.of(후)),
-                            RelationTuple.groupRef(groupId), lease, commit);
+                    return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
+                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit);
                 }));
     }
 
@@ -443,7 +452,7 @@ public class IncrementalSyncUseCase {
                     Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
-                        // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(reconcileRemovedMember 와 같은 판단).
+                        // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(아래 멤버십을_지운다).
                         // 나머지는 그 직원의 멤버 줄·소속 줄만 지운다 — 조직 멤버 목록 전체를 읽고 쓰지 않는다(설계 §5).
                         Mono<Void> saveGroups = Flux.fromIterable(headers)
                                 .filter(header -> 멤버십을_지운다(tupleFor(이직원, header.id()), beforeTuples, result))
@@ -455,7 +464,7 @@ public class IncrementalSyncUseCase {
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.userRef(userId), lease, commit);
+                    return diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, commit);
                 }));
     }
 
@@ -465,14 +474,11 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 삭제. 상위 조직에서의 child 튜플까지 함께 지운다.
+     * 조직 삭제 (설계 2026-10-02 §4.1). 삭제 뒤의 모습은 "이 조직을 언급하는 줄이 하나도 없음"으로 정해져 있어 계산(직원 읽기·Check·diff)을 하지 않는다.
+     * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
      *
-     * <p>상위 조직 쪽 삭제가 실패한 것은 그 상위 조직의 멤버 목록을 원래대로 유지하고
-     * ({@link #reconcileRemovedMember}), 이 조직 자신의 멤버 튜플 삭제가 실패한 것은
-     * 이 조직 자신의 멤버 목록에서 그 멤버를 남긴다({@link #reconcileGroupMembers} 를
-     * "멤버 없는 목표"로 재사용). 하나라도 실패하면 이 조직 레코드 자체는 지우지 않는다.
-     *
-     * <p>대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
+     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 5xx 이고
+     * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
         return withLock(lease -> removeGroupInternal(groupId, lease));
@@ -480,33 +486,36 @@ public class IncrementalSyncUseCase {
 
     private Mono<IncrementalSyncResult> removeGroupInternal(String groupId, LockLease lease) {
         return state.findGroup(groupId)
-                .flatMap(group -> parentsOf(groupId).flatMap(parents -> {
-                    Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);
-                    beforeGroups.add(group);
-                    Mono<DirectorySnapshot> before = snapshotOfGroups(beforeGroups);
+                .flatMap(group -> state.findGroupIdsContaining(MemberRef.group(groupId))
+                        .collect(LinkedHashSet<String>::new, Set::add)
+                        .flatMap(parentIds -> 반영하고_커밋한다(
+                                TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease,
+                                result -> 조직_삭제를_커밋한다(group, parentIds, result))));
+    }
 
-                    Set<DirectoryGroup> afterParents = removeMemberFrom(parents, MemberRef.group(groupId));
-                    Mono<DirectorySnapshot> after = snapshotOfGroups(afterParents);
+    /** 조직이 사라지면 없어야 할 줄 — 직원→조직, 하위 조직→조직, 조직→상위 조직. 비활성 직원의 줄도 넣는다 — 있으면 지워야 하고 없으면 무시된다. */
+    private static Set<RelationTuple> 조직을_언급하는_튜플(DirectoryGroup group, Set<String> parentIds) {
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        group.members().forEach(member -> tuples.add(tupleFor(member, group.id())));
+        parentIds.forEach(parent -> tuples.add(RelationTuple.child(group.id(), parent)));
+        return tuples;
+    }
 
-                    Commit commit = (result, beforeTuples, afterTuples) -> {
-                        Set<DirectoryGroup> reconciledParents = reconcileRemovedMember(
-                                parents, afterParents, MemberRef.group(groupId), beforeTuples, result);
-                        Mono<Void> saveParents = Flux.fromIterable(reconciledParents)
-                                .flatMap(state::saveGroup, LOAD_CONCURRENCY)
-                                .then();
-
-                        if (result.hasFailure()) {
-                            DirectoryGroup emptyLike = new DirectoryGroup(
-                                    group.id(), group.externalId(), group.displayName(), Set.of());
-                            DirectoryGroup reconciledGroup = reconcileGroupMembers(
-                                    group, emptyLike, beforeTuples, afterTuples, result);
-                            return saveParents.then(Mono.defer(() -> state.saveGroup(reconciledGroup)));
-                        }
-                        return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId, group.members())));
-                    };
-
-                    return diffAndApply(before, after, RelationTuple.groupRef(groupId), lease, commit);
-                }));
+    private Mono<Void> 조직_삭제를_커밋한다(DirectoryGroup group, Set<String> parentIds, TupleWriteResult result) {
+        if (!result.hasFailure()) {
+            return state.deleteGroup(group.id(), group.members());
+        }
+        MemberRef 이조직 = MemberRef.group(group.id());
+        Set<MemberRef> 지운멤버 = group.members().stream()
+                .filter(member -> result.deleted().contains(tupleFor(member, group.id())))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        GroupHeader header = new GroupHeader(group.id(), group.externalId(), group.displayName());
+        Mono<Void> 상위에서_뺀다 = Flux.fromIterable(parentIds)
+                .filter(parent -> result.deleted().contains(RelationTuple.child(group.id(), parent)))
+                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+                .flatMap(parent -> state.saveGroupChange(parent, Set.of(), Set.of(이조직)), LOAD_CONCURRENCY)
+                .then();
+        return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, Set.of(), 지운멤버)));
     }
 
     // ---------- 공통 ----------
@@ -620,10 +629,13 @@ public class IncrementalSyncUseCase {
      * 단 하나의 예외가 <b>레코드의 존재 자체</b>다 — 그것은 부모의 child 엣지가 성립하는
      * 조건이므로 튜플 식별자에 해당한다. 그래서 {@link #upsertGroup} 은 새 조직에 한해,
      * {@link #removeUser}/{@link #removeGroup} 은 삭제에 한해 실패 시 존재 여부를 건드리지 않는다.
+     *
+     * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
                                                       String focus,
+                                                      Set<RelationTuple> 확인없이_지울것,
                                                       LockLease lease,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
@@ -651,9 +663,20 @@ public class IncrementalSyncUseCase {
                 }
 
                 Set<RelationTuple> 원하는것 = mentioning(tuplesOf(afterSnapshot), focus);
-                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after ->
-                        반영하고_커밋한다(TupleDiff.between(actual, after), lease,
-                                result -> commit.apply(result, actual, after)));
+                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after -> {
+                    TupleDelta 계산 = TupleDiff.between(actual, after);
+                    if (확인없이_지울것.isEmpty()) {
+                        return 반영하고_커밋한다(계산, lease, result -> commit.apply(result, actual, after));
+                    }
+                    // 빠지는 멤버의 줄은 Check 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2). 커밋의 재조정은 그 줄이 있었다고 본다 —
+                    // 지우기가 실패한 멤버만 남는다.
+                    Set<RelationTuple> 지울것 = new LinkedHashSet<>(계산.toDelete());
+                    지울것.addAll(확인없이_지울것);
+                    Set<RelationTuple> 있다고_볼것 = new LinkedHashSet<>(actual);
+                    있다고_볼것.addAll(확인없이_지울것);
+                    return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease,
+                            result -> commit.apply(result, 있다고_볼것, after));
+                });
             });
         });
     }
@@ -900,31 +923,6 @@ public class IncrementalSyncUseCase {
         return new DirectoryGroup(requested.id(), requested.externalId(), requested.displayName(), persisted);
     }
 
-    /**
-     * {@code ref}(직원 또는 하위 조직)를 {@code originalGroups} 각각에서 빼려던 결과를,
-     * 실제로 삭제 튜플이 반영된 조직만 골라 되돌린다. 삭제가 실패한 조직은
-     * {@code originalGroups} 의 원래 멤버 목록을 그대로 유지해, 다음 동기화가 diff 할
-     * "이전"을 보존하고 재시도가 가능하게 한다.
-     */
-    private static Set<DirectoryGroup> reconcileRemovedMember(Set<DirectoryGroup> originalGroups,
-                                                               Set<DirectoryGroup> withoutGroups,
-                                                               MemberRef ref,
-                                                               Set<RelationTuple> beforeTuples,
-                                                               TupleWriteResult result) {
-        Map<String, DirectoryGroup> originalById = byId(originalGroups);
-        Set<DirectoryGroup> reconciled = new LinkedHashSet<>();
-        for (DirectoryGroup candidate : withoutGroups) {
-            RelationTuple tuple = tupleFor(ref, candidate.id());
-            boolean existedBefore = beforeTuples.contains(tuple);
-            if (existedBefore && !result.deleted().contains(tuple)) {
-                reconciled.add(originalById.get(candidate.id())); // 삭제 실패 -> 원래 멤버 목록 유지
-            } else {
-                reconciled.add(candidate); // 삭제 성공, 또는 애초에 튜플이 없었음
-            }
-        }
-        return reconciled;
-    }
-
     private static RelationTuple tupleFor(MemberRef member, String groupId) {
         return member.type() == MemberType.USER
                 ? RelationTuple.directMember(member.id(), groupId)
@@ -1057,16 +1055,6 @@ public class IncrementalSyncUseCase {
                         ? Mono.just(overrideById.get(id))
                         : state.findUser(id), LOAD_CONCURRENCY)
                 .collect(LinkedHashMap<String, DirectoryUser>::new, (map, user) -> map.put(user.id(), user));
-    }
-
-    private static Set<DirectoryGroup> removeMemberFrom(Set<DirectoryGroup> groups, MemberRef ref) {
-        Set<DirectoryGroup> result = new LinkedHashSet<>();
-        for (DirectoryGroup group : groups) {
-            Set<MemberRef> members = new LinkedHashSet<>(group.members());
-            members.remove(ref);
-            result.add(new DirectoryGroup(group.id(), group.externalId(), group.displayName(), members));
-        }
-        return result;
     }
 
     private static Map<String, DirectoryGroup> byId(Set<DirectoryGroup> groups) {
