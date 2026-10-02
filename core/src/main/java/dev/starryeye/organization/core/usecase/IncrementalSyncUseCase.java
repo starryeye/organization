@@ -536,7 +536,8 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>요청과 떼어 돈다(점검 S3).</b> 락 잡기부터 반납까지를 요청의 구독과 따로 돌린다. IdP 가 연결을 끊어도 커밋까지 마치고
      * 반납한다 — 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다. 락을 잡는 도중에
-     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId)는 이어받는다.
+     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId)는 이어받는다. 요청이 떠난 뒤의 실패·부분 반영은 받을 곳이 없으므로
+     * 경고 로그로 남긴다 — 요청이 남아 있으면 응답과 {@code ScimRouter} 가 알리므로 남기지 않는다.
      *
      * <p><b>리스를 지킨다.</b> 쥔 동안 {@link LeaseKeeper} 가 리스를 갱신하고, 잃으면 멈춰 503 이다. OpenFGA 쓰기 직전·DynamoDB 커밋 직전에
      * 다시 확인한다({@link #반영하고_커밋한다}). <b>반납한 뒤 응답한다</b> — IdP 의 다음 요청이 이 요청의 락에 막히지 않는다.
@@ -553,10 +554,23 @@ public class IncrementalSyncUseCase {
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
             Sinks.One<IncrementalSyncResult> 결과 = Sinks.one();
+            AtomicBoolean 요청이_떠났다 = new AtomicBoolean();
+            // 알리기 전에 본다 — 값을 받은 뒤에 오는 취소는 떠난 것이 아니다.
             잡고_돌린다(work)
                     .contextWrite(context)
-                    .subscribe(결과::tryEmitValue, 결과::tryEmitError, 결과::tryEmitEmpty);
-            return 결과.asMono();
+                    .subscribe(value -> {
+                        if (요청이_떠났다.get() && !value.fullyApplied()) {
+                            log.warn("요청이 떠난 뒤 SCIM 쓰기가 부분 반영으로 끝났다 — 실패한 튜플 {}개. IdP 는 이 결과를 받지 못했다",
+                                    value.writeResult().failures().size());
+                        }
+                        결과.tryEmitValue(value);
+                    }, error -> {
+                        if (요청이_떠났다.get()) {
+                            log.warn("요청이 떠난 뒤 SCIM 쓰기가 실패했다 — IdP 는 이 결과를 받지 못했다", error);
+                        }
+                        결과.tryEmitError(error);
+                    }, 결과::tryEmitEmpty);
+            return 결과.asMono().doOnCancel(() -> 요청이_떠났다.set(true));
         });
     }
 
