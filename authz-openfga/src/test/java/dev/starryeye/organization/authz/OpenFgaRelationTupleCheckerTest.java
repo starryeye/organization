@@ -7,6 +7,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -112,5 +114,23 @@ class OpenFgaRelationTupleCheckerTest extends OpenFgaTestSupport {
         // then — 오류가 아니라 판정이다. 빈 장부라 false 다
         assertThat(allowed).isFalse();
         assertThat(countStoresNamed(속성.getStoreName())).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("묶음을 동시에 물어도 답은 하나씩 물을 때와 같다")
+    void 동시에_물어도_답이_같다() {
+        // given — 120줄을 쓰고, 그 120줄과 없는 80줄을 함께 묻는다(묶음 넷)
+        Set<RelationTuple> 있는것 = IntStream.range(0, 120)
+                .mapToObj(i -> RelationTuple.directMember("u" + i, "DEV002"))
+                .collect(Collectors.toSet());
+        writer.apply(TupleDelta.writeOnly(있는것)).block();
+        Set<RelationTuple> 물을것 = new java.util.HashSet<>(있는것);
+        IntStream.range(0, 80).forEach(i -> 물을것.add(RelationTuple.directMember("none" + i, "DEV002")));
+
+        // when
+        var 답 = new OpenFgaRelationTupleChecker(bootstrapper, 4).existing(물을것).block();
+
+        // then
+        assertThat(답).containsExactlyInAnyOrderElementsOf(있는것);
     }
 }

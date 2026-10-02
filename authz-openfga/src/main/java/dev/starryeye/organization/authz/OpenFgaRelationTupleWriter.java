@@ -16,6 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.function.Tuples;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -56,13 +57,17 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         List<Batch> batches = batchesFor(delta);
 
         return bootstrapper.resolveStore()
-                .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch));
+                .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch, properties.getRequestConcurrency()));
     }
 
     /**
-     * 배치를 차례로 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
+     * 같은 종류(지우기·쓰기) 안에서 {@code 동시}개까지 동시에 보내고, 결과는 보낸 순서대로 센다(설계 2026-10-02 §4.3). 지우기 묶음을
+     * 다 보낸 뒤 쓰기 묶음을 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
      * 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 멈추기 전까지의 결과(멈추게 한 배치까지)에 보내지 않은 배치를 실패로 더한 것이다 —
      * 호출자가 이미 나간 쓰기로 기록 규칙을 지킨다.
+     *
+     * <p>멈추면 이미 나간 묶음(최대 동시 수 − 1)은 결과를 기다리지 않고 "보내지 않음"으로 센다 — 실제로 반영됐더라도 쓰기·지우기가
+     * 멱등이라 다음 회차(LDAP)·다음 같은 대상 쓰기(SCIM)가 같은 결과로 맞춘다.
      *
      * <p>OpenFGA 가 느리거나 죽으면 배치마다 재시도를 거친 뒤 실패로 넘어가는데, 10만 명 재적재는 배치가 약 1,100개라 전부 그렇게 돌면
      * 수십 분 동안 락을 쥔다. 연달아 실패하는 것은 대개 한 배치가 아니라 OpenFGA 의 문제다. 드문 실패 한두 건은 지금처럼 결과의
@@ -76,12 +81,24 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      */
     static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
                                                      Function<Batch, Mono<TupleWriteResult>> send) {
+        return 보내되_연속_실패면_멈춘다(batches, send, 1);
+    }
+
+    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
+                                                     Function<Batch, Mono<TupleWriteResult>> send, int 동시) {
+        int 동시_수 = Math.max(1, 동시);
         return Mono.defer(() -> {
             AtomicInteger 연속_실패 = new AtomicInteger();
             AtomicReference<TupleWriteResult> 지금까지 = new AtomicReference<>(TupleWriteResult.empty());
             return Flux.fromIterable(batches)
                     .index()
-                    .concatMap(indexed -> send.apply(indexed.getT2()).flatMap(result -> {
+                    // 지우기 묶음을 다 보낸 뒤 쓰기 묶음을 보낸다(batchesFor 순서) — 같은 종류 안에서만 동시에 보낸다
+                    .windowUntilChanged(indexed -> indexed.getT2().delete())
+                    .concatMap(같은_종류 -> 같은_종류.flatMapSequential(
+                            indexed -> send.apply(indexed.getT2()).map(result -> Tuples.of(indexed.getT1(), result)),
+                            동시_수))
+                    .concatMap(indexed -> {
+                        TupleWriteResult result = indexed.getT2();
                         TupleWriteResult 누적 = 지금까지.accumulateAndGet(result, OpenFgaRelationTupleWriter::merge);
                         if (!한_줄도_못_살렸다(result)) {
                             연속_실패.set(0);
@@ -98,7 +115,7 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                 "OpenFGA 쓰기 배치가 %d번 연달아 실패해 남은 %d개 배치를 보내지 않고 멈췄다 — 마지막 오류: %s"
                                         .formatted(연속_실패_한도, 남은_배치.size(), result.failures().get(0).reason()),
                                 partial));
-                    }))
+                    })
                     .last(TupleWriteResult.empty());
         });
     }

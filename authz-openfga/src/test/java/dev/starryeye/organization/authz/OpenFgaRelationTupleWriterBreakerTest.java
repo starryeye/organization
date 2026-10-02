@@ -9,9 +9,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.IntStream;
@@ -110,5 +112,57 @@ class OpenFgaRelationTupleWriterBreakerTest {
         // then
         assertThat(보낸것).hasSize(6);
         assertThat(결과.written()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("묶음을 설정한 수만큼 동시에 보내되 넘지 않고, 지우기 묶음을 다 보낸 뒤 쓰기 묶음을 보낸다")
+    void 동시에_보내되_지우기가_먼저다() {
+        // given — 지우기 묶음 넷, 쓰기 묶음 넷
+        List<Batch> 배치 = new ArrayList<>();
+        IntStream.range(0, 4).forEach(i -> 배치.add(Batch.deletes(List.of(RelationTuple.directMember("d" + i, "DEV002")))));
+        IntStream.range(0, 4).forEach(i -> 배치.add(Batch.writes(List.of(RelationTuple.directMember("w" + i, "DEV002")))));
+        AtomicInteger 지금 = new AtomicInteger();
+        AtomicInteger 최대 = new AtomicInteger();
+        List<Boolean> 시작한_종류 = new CopyOnWriteArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            최대.accumulateAndGet(지금.incrementAndGet(), Math::max);
+            시작한_종류.add(batch.delete());
+            return Mono.delay(Duration.ofMillis(50))
+                    .map(tick -> {
+                        지금.decrementAndGet();
+                        return batch.succeeded();
+                    });
+        });
+
+        // when
+        TupleWriteResult 결과 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 2).block();
+
+        // then
+        assertThat(최대.get()).isEqualTo(2);
+        assertThat(시작한_종류.subList(0, 4)).containsOnly(true);
+        assertThat(시작한_종류.subList(4, 8)).containsOnly(false);
+        assertThat(결과.deleted()).hasSize(4);
+        assertThat(결과.written()).hasSize(4);
+    }
+
+    @Test
+    @DisplayName("동시에 보내도 차단기는 보낸 순서대로 세어 세 묶음째에서 멈추고, 이미 나간 묶음은 보내지 않은 것으로 센다")
+    void 동시에_보내도_순서대로_센다() {
+        // given — 쓰기 묶음 여덟 개가 모두 일시 오류다
+        List<Batch> 배치 = IntStream.range(0, 8)
+                .mapToObj(i -> Batch.writes(List.of(RelationTuple.directMember("u" + i, "DEV002"))))
+                .toList();
+        AtomicInteger 보낸 = new AtomicInteger();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            보낸.incrementAndGet();
+            return Mono.delay(Duration.ofMillis(10)).thenReturn(batch.failed("일시 오류"));
+        });
+
+        // when, then
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).block())
+                .isInstanceOf(TupleWriteAbortedException.class)
+                .satisfies(error -> assertThat(((TupleWriteAbortedException) error).partial().failures())
+                        .as("실패한 셋 + 보내지 않은(이미 나간 것 포함) 다섯").hasSize(8));
+        assertThat(보낸.get()).isLessThanOrEqualTo(7);
     }
 }
