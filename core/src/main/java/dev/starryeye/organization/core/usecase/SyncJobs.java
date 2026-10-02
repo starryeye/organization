@@ -84,12 +84,22 @@ public class SyncJobs {
      */
     public Mono<SyncRun> startLocked(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
                                      Mono<SyncOutcome> work, Consumer<SyncRun> onFinished) {
+        return startLockedThen(source, trigger, purpose, work.map(Mono::just), onFinished);
+    }
+
+    /**
+     * {@link #startLocked} 와 같되, 락 안의 일이 <b>"반납 뒤 할 일"</b>을 내놓는다(설계 2026-10-02 §5). 순서: 작업 → 반납 → 반납 뒤 할 일 → 기록.
+     * 락이 필요 없는 마무리(SCIM 재적재의 튜플 스냅샷 저장 등)를 락 밖으로 빼 그동안 다른 쓰기를 막지 않는다. 반납 뒤 할 일은 기한·서버 종료 경주 밖에서
+     * 돈다 — 짧은 마무리만 둔다. 실패하면 그 사유로 FAILED 다.
+     */
+    public Mono<SyncRun> startLockedThen(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
+                                         Mono<Mono<SyncOutcome>> work, Consumer<SyncRun> onFinished) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             return lock.acquire(purpose)
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
-                    .flatMap(lease -> start(source, trigger, work,
+                    .flatMap(lease -> 띄운다(source, trigger, work,
                             run -> 남은_기록을_닫는다(source, run.runId()),
                             일 -> keeper.keep(lease, 일, "작업 도중 리스 상실"),
                             () -> lock.release(lease),
@@ -106,7 +116,8 @@ public class SyncJobs {
 
     Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
                         Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
-        return start(source, trigger, work, run -> Mono.empty(), UnaryOperator.identity(), release, onFinished);
+        return 띄운다(source, trigger, work.map(Mono::just), run -> Mono.empty(), UnaryOperator.identity(),
+                release, onFinished);
     }
 
     /**
@@ -115,12 +126,13 @@ public class SyncJobs {
      * @param 먼저       기록을 연 뒤·일을 시작하기 전에 할 일. 실패하면 일을 하지 않고 FAILED 로 끝나므로 오류를 스스로
      *                   삼켜야 한다(남은_기록을_닫는다 가 그렇다)
      * @param 지키기     {@code 먼저} 와 {@code work} 를 합친 것을 감싼다({@link LeaseKeeper#keep} 이 쓴다) — 락을 쥔 채
-     *                   돌아야 하는 구간이 {@code work} 만이 아니라 남은 기록 정리까지이기 때문이다
+     *                   돌아야 하는 구간이 {@code work} 만이 아니라 남은 기록 정리까지이기 때문이다. {@code work} 가 내놓는
+     *                   "반납 뒤 할 일"은 이 구간 밖이다 — 락을 반납한 뒤에 돈다(설계 2026-10-02 §5)
      * @param release    겹침 검사(락·가드)를 푸는 수단. 작업이 어떻게 끝나든 정확히 한 번 부른다
      * @param onFinished 끝난 기록으로 부른다(지표·로그). 기록에 실패하면 부르지 않는다
      */
-    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
-                        Function<SyncRun, Mono<Void>> 먼저, UnaryOperator<Mono<SyncOutcome>> 지키기,
+    Mono<SyncRun> 띄운다(SyncSource source, SyncTrigger trigger, Mono<Mono<SyncOutcome>> work,
+                        Function<SyncRun, Mono<Void>> 먼저, UnaryOperator<Mono<Mono<SyncOutcome>>> 지키기,
                         Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
         return Mono.deferContextual(context -> {
             Sinks.One<SyncRun> 열림 = Sinks.one();
@@ -176,22 +188,22 @@ public class SyncJobs {
     }
 
     /**
-     * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다.
+     * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다. 종료·기한은
+     * 락을 쥔 구간({@code 지키기} 가 감싼 부분)만 경주 상대로 삼는다 — 반납 뒤 할 일은 그 경주 밖에서 돈다(설계 2026-10-02 §5).
      */
-    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<SyncOutcome> work, Function<SyncRun, Mono<Void>> 먼저,
-                                    UnaryOperator<Mono<SyncOutcome>> 지키기, Supplier<Mono<Void>> release) {
-        Mono<SyncOutcome> 종료되면 = 종료.asMono().then(Mono.error(() -> new IllegalStateException(종료_사유)));
-        Mono<SyncOutcome> 일 = 지키기.apply(Mono.defer(() -> 먼저.apply(run)).then(work));
+    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<Mono<SyncOutcome>> work, Function<SyncRun, Mono<Void>> 먼저,
+                                    UnaryOperator<Mono<Mono<SyncOutcome>>> 지키기, Supplier<Mono<Void>> release) {
+        Mono<Mono<SyncOutcome>> 종료되면 = 종료.asMono().then(Mono.error(() -> new IllegalStateException(종료_사유)));
+        Mono<Mono<SyncOutcome>> 일 = 지키기.apply(Mono.defer(() -> 먼저.apply(run)).then(work));
         return Mono.firstWithSignal(종료되면, 일)
                 .timeout(timeout, Mono.error(() -> new IllegalStateException("기한 초과 — " + 사람말로(timeout))))
                 .switchIfEmpty(Mono.error(() -> new IllegalStateException("작업이 결과 없이 끝났다")))
-                .onErrorResume(error -> {
-                    // 메시지 없는 오류도 있다 — 이유를 비워 두면 기록만 보고는 무엇이 터졌는지 모른다
-                    String 사유 = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
-                    log.error("[{}] 작업 실패: {}", run.runId(), 사유, error);
-                    return Mono.just(SyncOutcome.failed(사유));
-                })
-                .flatMap(outcome -> 반납한다(release).thenReturn(outcome))
+                .onErrorResume(error -> Mono.just(Mono.just(실패로(run, error))))
+                .flatMap(반납_뒤 -> 반납한다(release).thenReturn(반납_뒤))
+                // 반납 뒤 할 일(설계 2026-10-02 §5) — 락 없이 돈다
+                .flatMap(반납_뒤 -> 반납_뒤
+                        .switchIfEmpty(Mono.error(() -> new IllegalStateException("반납 뒤 할 일이 결과 없이 끝났다")))
+                        .onErrorResume(error -> Mono.just(실패로(run, error))))
                 .flatMap(outcome -> runs.finish(run, outcome))
                 .doOnNext(finished -> log.info("[{}] 작업 끝: status={} written={} deleted={} failed={}",
                         finished.runId(), finished.status(), finished.writtenCount(),
@@ -200,6 +212,13 @@ public class SyncJobs {
                     log.error("[{}] 작업 결과를 기록하지 못했다 — 기록이 RUNNING 으로 남는다", run.runId(), error);
                     return Mono.empty();
                 });
+    }
+
+    /** 메시지 없는 오류도 있다 — 이유를 비워 두면 기록만 보고는 무엇이 터졌는지 모른다. */
+    private static SyncOutcome 실패로(SyncRun run, Throwable error) {
+        String 사유 = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+        log.error("[{}] 작업 실패: {}", run.runId(), 사유, error);
+        return SyncOutcome.failed(사유);
     }
 
     /**

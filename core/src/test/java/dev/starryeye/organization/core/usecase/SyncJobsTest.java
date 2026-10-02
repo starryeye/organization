@@ -468,4 +468,43 @@ class SyncJobsTest {
                 .as("반납과 기록 사이의 틈에 낡은 RUNNING 사본을 보고 방금 끝난 결과를 덮어쓰면 안 된다")
                 .isEqualTo(SyncStatus.SUCCEEDED);
     }
+
+    // ---------- 반납 뒤 할 일 (설계 2026-10-02 §5) ----------
+
+    @Test
+    @DisplayName("반납 뒤 할 일은 락을 반납한 뒤 돌고, 그 결론이 기록된다")
+    void 반납_뒤_할_일은_락_밖에서_돈다() {
+        // given
+        AtomicReference<Boolean> 그때_락 = new AtomicReference<>();
+        Mono<Mono<SyncOutcome>> 작업 = Mono.just(Mono.fromSupplier(() -> {
+            그때_락.set(lock.isHeld());
+            return SyncOutcome.noChange();
+        }));
+
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(jobs.startLockedThen(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, 작업, run -> {
+                }).block().runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(그때_락.get()).as("반납 뒤에 돈다").isFalse();
+    }
+
+    @Test
+    @DisplayName("반납 뒤 할 일이 실패하면 그 사유로 FAILED 를 기록한다")
+    void 반납_뒤_할_일이_실패하면_FAILED() {
+        // given
+        Mono<Mono<SyncOutcome>> 작업 = Mono.just(Mono.error(new IllegalStateException("뒤에서 실패")));
+
+        // when
+        SyncRun 끝난것 = runs.awaitFinished(jobs.startLockedThen(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, 작업, run -> {
+                }).block().runId());
+
+        // then
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(끝난것.message()).isEqualTo("뒤에서 실패");
+        assertThat(lock.released).hasValue(1);
+    }
 }
