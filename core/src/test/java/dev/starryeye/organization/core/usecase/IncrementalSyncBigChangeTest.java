@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 큰 변경을 싸게 — 조직 삭제는 계산 없이, 빠지는 멤버는 Check 없이 지운다 (설계 2026-10-02 §4.1·§4.2, 점검 C6).
@@ -27,6 +28,7 @@ class IncrementalSyncBigChangeTest {
     private FakeStateRepository state;
     private FakeTupleWriter writer;
     private FakeTupleChecker checker;
+    private FakeMutationLock lock;
     private IncrementalSyncUseCase useCase;
 
     @BeforeEach
@@ -34,7 +36,8 @@ class IncrementalSyncBigChangeTest {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
-        useCase = new IncrementalSyncUseCase(state, writer, checker, new FakeMutationLock(), Duration.ZERO,
+        lock = new FakeMutationLock();
+        useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
                 IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
 
         // 본부(HQ) ⊃ 팀(TEAM) ⊃ kim(활성)·lee(비활성)·하위 조직 SUB
@@ -112,6 +115,34 @@ class IncrementalSyncBigChangeTest {
         assertThat(result.fullyApplied()).isFalse();
         assertThat(state.groups.get("TEAM").members()).containsExactly(MemberRef.user("kim"));
         assertThat(state.groups.get("HQ").members()).as("상위 조직 줄은 지워졌다").isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직 삭제 도중 리스를 잃으면 503 이고 커밋하지 않아 조직이 남는다 — 락을 다시 쥘 수 있게 되면 같은 삭제를 다시 보내 끝난다")
+    void 조직_삭제_도중_리스를_잃으면_조직이_남는다() {
+        // given — OpenFGA 에서 지우는 사이 리스를 잃는다. 커밋 직전 확인이 실패한다
+        writer.onApply(() -> lock.failRenew = true);
+
+        // when, then
+        assertThatThrownBy(() -> useCase.removeGroup("TEAM").block())
+                .isInstanceOf(LockUnavailableException.class);
+        assertThat(state.deleteGroupCalls).as("커밋하지 않는다").isEmpty();
+        assertThat(state.groups.get("TEAM").members()).as("조직이 그대로 남는다")
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.group("SUB"));
+        assertThat(state.groups.get("HQ").members()).containsExactly(MemberRef.group("TEAM"));
+        assertThat(lock.isHeld()).isFalse();
+
+        // when — 락을 다시 쥘 수 있게 되어 IdP 가 같은 삭제를 다시 보낸다
+        lock.failRenew = false;
+        writer.onApply(() -> {
+        });
+        var 재시도 = useCase.removeGroup("TEAM").block();
+
+        // then
+        assertThat(재시도.fullyApplied()).isTrue();
+        assertThat(state.deleteGroupCalls).containsExactly("TEAM");
+        assertThat(state.groups).doesNotContainKey("TEAM");
+        assertThat(state.groups.get("HQ").members()).isEmpty();
     }
 
     @Test

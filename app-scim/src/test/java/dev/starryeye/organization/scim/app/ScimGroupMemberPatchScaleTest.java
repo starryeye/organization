@@ -45,7 +45,7 @@ import static org.awaitility.Awaitility.await;
  * <p>한 명을 넣고 빼는 PATCH 가 조직 파티션을 훑지 않는다는 것을 <b>읽은 양</b>으로 단정한다 — DynamoDB Local 의 속도는 AWS 와 달라
  * 시간으로는 아무것도 증명하지 못한다. 조직은 저장소에 직접 심는다 — 멤버 줄만 있으면 된다. 바뀌지 않는 멤버의 직원 레코드와
  * 튜플은 이 경로가 보지 않으므로 심지 않는다. 10만 명 전체 교체는 HTTP 본문 한도(256KB)를 넘으므로 유스케이스를 직접 부른다.
- * 조직 삭제(점검 C6)도 같은 조직으로 잰다 — 마지막 순서다.
+ * 조직 삭제(점검 C6)도 같은 조직으로 잰다 — 마지막 순서다. 리스 TTL 을 10초로 줄여 삭제가 갱신 없이는 끝나지 못하게 한다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -67,6 +67,10 @@ class ScimGroupMemberPatchScaleTest {
     @DynamicPropertySource
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
+
+        // 조직 삭제보다 짧은 리스. 갱신이 없으면 삭제가 TTL 보다 오래 걸려 리스를 잃고 실패한다(점검 C6).
+        registry.add("dynamodb.lock-ttl", () -> "10s");
+        registry.add("dynamodb.lock-renew-interval", () -> "3s");
     }
 
     @Autowired WebTestClient client;

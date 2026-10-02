@@ -11,12 +11,14 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.port.LockLease;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import reactor.core.Disposable;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.List;
@@ -149,8 +151,18 @@ class IncrementalSyncLeaseTest {
     @Test
     @DisplayName("요청이 끊겨도 커밋까지 하고 그다음 반납한다 — 반쯤 반영된 채 락이 풀리지 않는다(점검 S3)")
     void 요청이_끊겨도_커밋까지_하고_반납한다() throws InterruptedException {
-        // given — OpenFGA 쓰기가 300ms 걸린다
+        // given — OpenFGA 쓰기가 300ms 걸린다. 반납이 불릴 때마다 그 순간 커밋이 이미 있었는지 적어 둔다
         writer.delay = Duration.ofMillis(300);
+        List<Boolean> 반납할_때_커밋돼_있었나 = new CopyOnWriteArrayList<>();
+        lock = new FakeMutationLock() {
+            @Override
+            public Mono<Void> release(LockLease lease) {
+                return Mono.defer(() -> {
+                    반납할_때_커밋돼_있었나.add(state.groups.get("DEV001").members().contains(MemberRef.user("kim")));
+                    return super.release(lease);
+                });
+            }
+        };
 
         // when — 쓰는 도중 IdP 가 연결을 끊는다
         Disposable 요청 = 유스케이스(Duration.ofSeconds(10)).upsertGroup(kim이_든_DEV001()).subscribe();
@@ -159,6 +171,7 @@ class IncrementalSyncLeaseTest {
 
         // then — 반납은 커밋 뒤에 일어난다
         await().atMost(Duration.ofSeconds(5)).until(() -> lock.released.get() == 1);
+        assertThat(반납할_때_커밋돼_있었나).as("반납은 한 번, 커밋 뒤에").containsExactly(true);
         assertThat(writer.appliedDeltas).hasSize(1);
         assertThat(state.groups.get("DEV001").members()).containsExactly(MemberRef.user("kim"));
     }

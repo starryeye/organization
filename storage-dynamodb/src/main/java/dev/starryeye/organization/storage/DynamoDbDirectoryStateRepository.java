@@ -435,7 +435,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     /**
      * 이 조직의 소속 줄만 읽어 상위 조직을 알아낸다(줄 몇 개) — 멤버 줄 10만 개를 다시 훑지 않는다. 지우기는 25개씩 묶어
-     * {@link BatchRequests} 로 보낸다(멤버 10만 명이면 약 8,000번, 묶음 재시도 상한).
+     * {@link BatchRequests} 로 보낸다(멤버 10만 명이면 약 8,000번, 묶음 재시도 상한). 지우기 요청은 보낼 차례에 만든다 — 10만 명이면
+     * 20만 개를 미리 쥐지 않는다.
      */
     @Override
     public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
@@ -444,17 +445,16 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return querySortKeys(pk, Keys.BELONGS_TO_PREFIX)
                 .collectList()
                 .flatMap(소속_정렬키 -> {
-                    List<WriteRequest> 멤버_줄 = new ArrayList<>();
-                    소속_정렬키.forEach(sk -> 멤버_줄.add(지우기(Keys.groupPk(Keys.parseBelongsToSk(sk)), Keys.memberSk(이조직))));
-                    members.forEach(member -> 멤버_줄.add(지우기(pk, Keys.memberSk(member))));
+                    Flux<WriteRequest> 멤버_줄 = Flux.concat(
+                            Flux.fromIterable(소속_정렬키)
+                                    .map(sk -> 지우기(Keys.groupPk(Keys.parseBelongsToSk(sk)), Keys.memberSk(이조직))),
+                            Flux.fromIterable(members).map(member -> 지우기(pk, Keys.memberSk(member))));
+                    Flux<WriteRequest> 소속_줄 = Flux.concat(
+                            Flux.fromIterable(소속_정렬키).map(sk -> 지우기(pk, sk)),
+                            Flux.fromIterable(members).map(member -> 지우기(Keys.memberPk(member), Keys.belongsToSk(groupId))));
 
-                    List<WriteRequest> 소속_줄 = new ArrayList<>();
-                    소속_정렬키.forEach(sk -> 소속_줄.add(지우기(pk, sk)));
-                    members.forEach(member -> 소속_줄.add(지우기(Keys.memberPk(member), Keys.belongsToSk(groupId))));
-
-                    return 묶어_보낸다(멤버_줄)
-                            .then(Mono.defer(() -> 묶어_보낸다(소속_줄)))
-                            .then(Mono.defer(() -> deleteItem(pk, Keys.META)));
+                    // 단계 순서: 멤버 줄 → 소속 줄 → META 맨 마지막
+                    return Flux.concat(묶어_보낸다(멤버_줄), 묶어_보낸다(소속_줄), deleteItem(pk, Keys.META)).then();
                 });
     }
 
@@ -466,9 +466,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .build();
     }
 
-    private Mono<Void> 묶어_보낸다(List<WriteRequest> requests) {
+    private Mono<Void> 묶어_보낸다(Flux<WriteRequest> requests) {
         BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
-        return Flux.fromIterable(requests)
+        return requests
                 .buffer(BatchRequests.WRITE_LIMIT)
                 .flatMap(묶음::write, QUERY_CONCURRENCY)
                 .then();
