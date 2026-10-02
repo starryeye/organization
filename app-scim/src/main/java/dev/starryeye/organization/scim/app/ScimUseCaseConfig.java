@@ -38,7 +38,7 @@ public class ScimUseCaseConfig {
                                                           DynamoDbProperties dynamoDb,
                                                           ScimSyncMetrics metrics) {
         return new IncrementalSyncUseCase(state, writer, checker, lock,
-                dynamoDb.getLockAcquireTimeout(), metrics, metrics);
+                dynamoDb.getLockAcquireTimeout(), dynamoDb.getLockRenewInterval(), metrics, metrics);
     }
 
     /**

@@ -22,7 +22,7 @@ import lombok.extern.slf4j.Slf4j;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.SignalType;
+import reactor.core.publisher.Sinks;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
@@ -114,6 +114,9 @@ public class IncrementalSyncUseCase {
     /** 획득 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 재시도 횟수다. */
     private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
 
+    /** 갱신 주기를 넘기지 않는 생성자가 쓰는 값 — 운영 결선은 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofSeconds(10);
+
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
     private final RelationTupleChecker checker;
@@ -125,8 +128,17 @@ public class IncrementalSyncUseCase {
      * 조용히 달라진다.
      */
     private final Duration acquireTimeout;
+    /** 락을 쥔 동안 리스를 갱신하는 주기(설계 2026-10-02 §3.1). */
+    private final Duration renewInterval;
     private final DriftObserver driftObserver;
     private final LockObserver lockObserver;
+
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 8인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
+                                  LockObserver lockObserver) {
+        this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
+    }
 
     private long acquireRetries() {
         return acquireTimeout.toMillis() / ACQUIRE_RETRY_DELAY.toMillis();
@@ -506,33 +518,22 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 변경 하나를 락 안에서 실행한다 (설계 §4).
+     * 변경 하나를 락 안에서 실행한다 (설계 §4, 2026-10-02 §3).
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
      * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 여덟 경로({@link #upsertUser}·
      * {@link #createUser}·{@link #changeUser}·{@link #removeUser}·{@link #upsertGroup}·
-     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가
-     * 빠짐없이 덮이고 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
-     * 같은 이유로 여기(구 버전의 이 자리)에 있었지만, 인스턴스가 둘이면 아무것도 막지 못했다
-     * (설계 §4.5). 지금은 그 자리를 이 분산 락이 대신한다.
+     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가 빠짐없이 덮인다.
      *
-     * <p><b>{@code work} 가 끝나면 반납한다 — 단, 두 틈은 이것으로 못 막는다.</b>
-     * {@code work} 자체가 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가
-     * {@code lock.release(lease)} 를 부르는 것은 맞다. 하지만
-     * <ol>
-     *   <li>반납 호출 자체가 실패하면(스로틀, 네트워크 등) {@code .subscribe()} 가 구독자 없이
-     *       구독하는 것이라 그 에러는 아무도 받지 않고 {@code Hooks.onErrorDropped} 로만 샌다 —
-     *       재시도하지 않으므로 리스가 자연 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다.</li>
-     *   <li>{@code lock.acquire} 내부에서 조건부 쓰기(DynamoDB PutItem)가 이미 성공한 뒤,
-     *       그 결과가 구독자에게 리스로 전달되기 전에 구독이 취소되면 이 메서드는 그 리스를
-     *       아예 손에 쥐지 못해 반납을 시도할 대상조차 없다 — {@code Mono.fromFuture} 는
-     *       다운스트림 취소를 내부 {@code CompletableFuture} 취소로 전파하지 않으므로, 쓰기는
-     *       이미 저장소에 반영된 채로 남는다.
-     * </ol>
-     * 두 경우 모두 락이 TTL 이 지날 때까지 묶인다 — 완벽한 상호 배제가 아니라는 설계 §4 의
-     * 전제와 같은 종류의 틈이다. <b>막지는 못해도 세기는 한다</b>: 둘 다
-     * {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다. 응답에는
-     * 아무 흔적도 남지 않는 사건이라, 지표가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
+     * <p><b>요청과 떼어 돈다(점검 S3).</b> 락 잡기부터 반납까지를 요청의 구독과 따로 돌린다. IdP 가 연결을 끊어도 커밋까지 마치고
+     * 반납한다 — 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다. 락을 잡는 도중에
+     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId)는 이어받는다.
+     *
+     * <p><b>리스를 지킨다.</b> 쥔 동안 {@link LeaseKeeper} 가 리스를 갱신하고, 잃으면 멈춰 503 이다. OpenFGA 쓰기 직전·DynamoDB 커밋 직전에
+     * 다시 확인한다({@link #반영하고_커밋한다}). <b>반납한 뒤 응답한다</b> — IdP 의 다음 요청이 이 요청의 락에 막히지 않는다.
+     *
+     * <p><b>반납이 실패하면</b>(스로틀, 네트워크) 리스가 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다. 응답은 성공이다 — 일은 끝났다.
+     * 대신 {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다.
      *
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
      * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
@@ -541,6 +542,16 @@ public class IncrementalSyncUseCase {
      * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
+        return Mono.deferContextual(context -> {
+            Sinks.One<IncrementalSyncResult> 결과 = Sinks.one();
+            잡고_돌린다(work)
+                    .contextWrite(context)
+                    .subscribe(결과::tryEmitValue, 결과::tryEmitError, 결과::tryEmitEmpty);
+            return 결과.asMono();
+        });
+    }
+
+    private Mono<IncrementalSyncResult> 잡고_돌린다(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             AtomicBoolean 경합했다 = new AtomicBoolean();
@@ -559,27 +570,25 @@ public class IncrementalSyncUseCase {
                             error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
                     // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도
                     // LockUnavailableException 으로 옮기므로 예외 타입으로는 구별할 수 없고,
-                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다 — 여기에 true 를 박으면
-                    // 저장소 장애가 scim.lock.contended 를 올려, 장애 대응 중인 운영자를
-                    // "전역 락을 다시 볼 때다"(설계 §4.1) 라는 엉뚱한 방향으로 민다.
+                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
-                    // 획득이 성공한 뒤 리스가 전달되기 전에 취소되면 그 리스는 손에 들어오지
-                    // 않은 채로 TTL 만큼 샌다(위 2번). 취소 자체는 막을 수 없으니 세기라도 한다.
-                    .doFinally(signal -> {
-                        if (signal == SignalType.CANCEL) {
-                            lockObserver.leaseLost("획득 도중 취소 — 리스가 새어 TTL 까지 묶일 수 있다");
-                        }
-                    })
-                    .flatMap(lease -> Mono.defer(() -> work.apply(lease))
-                            .doFinally(signal -> lock.release(lease).subscribe(
-                                    released -> {
-                                    },
-                                    error -> {
-                                        log.warn("변경 락 반납이 실패했다. 리스가 만료될 때까지 아무도 잡지 못한다", error);
-                                        lockObserver.leaseLost("반납 실패");
-                                    })));
+                    .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
+                            .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
+                            .materialize()
+                            .flatMap(끝 -> 반납한다(lease).thenReturn(끝))
+                            .<IncrementalSyncResult>dematerialize());
         });
+    }
+
+    /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */
+    private Mono<Void> 반납한다(LockLease lease) {
+        return lock.release(lease)
+                .onErrorResume(error -> {
+                    log.warn("변경 락 반납이 실패했다. 리스가 만료될 때까지 아무도 잡지 못한다", error);
+                    lockObserver.leaseLost("반납 실패");
+                    return Mono.empty();
+                });
     }
 
     private static Duration 경과(long 시작나노) {
@@ -600,12 +609,7 @@ public class IncrementalSyncUseCase {
      * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
      * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
      *
-     * <p><b>리스 재확인은 델타가 있을 때만 일어난다(설계 §4.7).</b> {@code lock.renew(lease)} 는
-     * 델타가 비지 않은 분기 — 즉 실제로 {@code writer.apply} 가 OpenFGA 에 쓰기를 낼 분기 —
-     * 에서만 부른다. 델타가 비면 OpenFGA 에 아무것도 쓰지 않고 곧바로 {@code commit} 으로
-     * 넘어가며, 이 경로는 리스를 재확인하지 않는다. §4.7 이 요구하는 것은 "OpenFGA 쓰기 직전"
-     * 재확인이고 이 경로엔 그 쓰기가 없으므로 스펙과 어긋나지 않는다 — 다만 재확인이 <b>모든
-     * 커밋</b>에 걸린다고 읽으면 안 된다.
+     * <p><b>리스는 OpenFGA 쓰기 직전과 커밋 직전에 늘 확인한다</b> — {@link #반영하고_커밋한다} 참고(설계 2026-10-02 §3.2).
      *
      * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
      * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이
@@ -647,30 +651,41 @@ public class IncrementalSyncUseCase {
                 }
 
                 Set<RelationTuple> 원하는것 = mentioning(tuplesOf(afterSnapshot), focus);
-                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after -> {
-                    TupleDelta delta = TupleDiff.between(actual, after);
-
-                    if (delta.isEmpty()) {
-                        return commit.apply(TupleWriteResult.empty(), actual, after)
-                                .thenReturn(IncrementalSyncResult.noChange());
-                    }
-                    // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
-                    // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
-                    // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
-                    // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
-                    // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
-                    // writer.apply(delta) 를 Mono.defer 로 감싼다 — 감싸지 않으면 이 Java
-                    // 표현식이 .then() 호출 시점에 곧바로 평가돼, renew 가 실패해도 그
-                    // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
-                    // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
-                    return lock.renew(lease)
-                            .doOnError(error -> lockObserver.leaseLost("쓰기 직전 리스 재확인 실패"))
-                            .then(Mono.defer(() -> writer.apply(delta)))
-                            .flatMap(result -> commit.apply(result, actual, after)
-                                    .thenReturn(IncrementalSyncResult.of(result)));
-                });
+                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after ->
+                        반영하고_커밋한다(TupleDiff.between(actual, after), lease,
+                                result -> commit.apply(result, actual, after)));
             });
         });
+    }
+
+    /**
+     * 델타를 OpenFGA 에 반영하고 DynamoDB 에 커밋한다. <b>OpenFGA 쓰기 직전과 커밋 직전에 늘 리스를 확인한다</b>(설계 2026-10-02 §3.2, 점검 M8) —
+     * 바뀐 튜플이 없을 때도. 커밋은 조건 없는 덮어쓰기라, 30초 넘게 멈춘 요청이 확인 없이 커밋하면 다른 인스턴스가 저장한 비활성화를 되돌린다.
+     * 확인이 실패하면 쓰지 않고 503 이다. renew 는 토큰 조건이 걸린 조건부 쓰기라 성공했다는 것이 곧 "아직 내가 쥐고 있다"는 증거다.
+     *
+     * <p>{@code writer.apply}·{@code 커밋} 을 {@code Mono.defer} 로 감싼다 — 감싸지 않으면 확인이 실패해도 그 표현식이 이미 평가된 뒤다.
+     */
+    private Mono<IncrementalSyncResult> 반영하고_커밋한다(TupleDelta delta, LockLease lease,
+                                                   Function<TupleWriteResult, Mono<Void>> 커밋) {
+        if (delta.isEmpty()) {
+            return 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
+                    .then(Mono.defer(() -> 커밋.apply(TupleWriteResult.empty())))
+                    .thenReturn(IncrementalSyncResult.noChange());
+        }
+        return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
+                .then(Mono.defer(() -> writer.apply(delta)))
+                .flatMap(result -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
+                        .then(Mono.defer(() -> 커밋.apply(result)))
+                        .thenReturn(IncrementalSyncResult.of(result)));
+    }
+
+    /** 리스를 확인(갱신)한다. 실패하면 {@link LockUnavailableException} — 저장소 장애도 503 으로 옮긴다(획득과 같은 이유). */
+    private Mono<Void> 리스를_확인한다(LockLease lease, String 실패_사유) {
+        return lock.renew(lease)
+                .doOnError(error -> lockObserver.leaseLost(실패_사유))
+                .onErrorMap(error -> !(error instanceof LockUnavailableException),
+                        error -> new LockUnavailableException("변경 락 리스를 확인하지 못했습니다", error))
+                .then();
     }
 
     /**
