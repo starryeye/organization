@@ -502,7 +502,7 @@ public class IncrementalSyncUseCase {
                                     group, emptyLike, beforeTuples, afterTuples, result);
                             return saveParents.then(Mono.defer(() -> state.saveGroup(reconciledGroup)));
                         }
-                        return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId)));
+                        return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId, group.members())));
                     };
 
                     return diffAndApply(before, after, RelationTuple.groupRef(groupId), lease, commit);

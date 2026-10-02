@@ -14,13 +14,16 @@ import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -431,26 +434,44 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     /**
-     * 조직 파티션을 비우고, <b>그 멤버들의 소속 줄까지</b> 지운다. 소속 줄을 남기면 역참조가
-     * 그 조직을 후보로 계속 들고 오고(확인 단계가 걸러 내지만) 파티션에 영원히 쌓인다.
+     * 이 조직의 소속 줄만 읽어 상위 조직을 알아낸다(줄 몇 개) — 멤버 줄 10만 개를 다시 훑지 않는다. 지우기는 25개씩 묶어
+     * {@link BatchRequests} 로 보낸다(멤버 10만 명이면 약 8,000번, 묶음 재시도 상한).
      */
     @Override
-    public Mono<Void> deleteGroup(String groupId) {
-        return queryPartition(Keys.groupPk(groupId))
-                .map(item -> Attrs.str(item, Keys.SK))
+    public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
+        String pk = Keys.groupPk(groupId);
+        MemberRef 이조직 = MemberRef.group(groupId);
+        return querySortKeys(pk, Keys.BELONGS_TO_PREFIX)
                 .collectList()
-                .flatMap(sks -> {
-                    List<MemberRef> members = sks.stream()
-                            .filter(Keys::isMemberSk)
-                            .map(Keys::parseMemberSk)
-                            .toList();
-                    return Flux.fromIterable(sks)
-                            .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
-                            .thenMany(Flux.fromIterable(members))
-                            .flatMap(ref -> deleteItem(Keys.memberPk(ref), Keys.belongsToSk(groupId)),
-                                    QUERY_CONCURRENCY)
-                            .then();
+                .flatMap(소속_정렬키 -> {
+                    List<WriteRequest> 멤버_줄 = new ArrayList<>();
+                    소속_정렬키.forEach(sk -> 멤버_줄.add(지우기(Keys.groupPk(Keys.parseBelongsToSk(sk)), Keys.memberSk(이조직))));
+                    members.forEach(member -> 멤버_줄.add(지우기(pk, Keys.memberSk(member))));
+
+                    List<WriteRequest> 소속_줄 = new ArrayList<>();
+                    소속_정렬키.forEach(sk -> 소속_줄.add(지우기(pk, sk)));
+                    members.forEach(member -> 소속_줄.add(지우기(Keys.memberPk(member), Keys.belongsToSk(groupId))));
+
+                    return 묶어_보낸다(멤버_줄)
+                            .then(Mono.defer(() -> 묶어_보낸다(소속_줄)))
+                            .then(Mono.defer(() -> deleteItem(pk, Keys.META)));
                 });
+    }
+
+    private static WriteRequest 지우기(String pk, String sk) {
+        return WriteRequest.builder()
+                .deleteRequest(DeleteRequest.builder()
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                        .build())
+                .build();
+    }
+
+    private Mono<Void> 묶어_보낸다(List<WriteRequest> requests) {
+        BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
+        return Flux.fromIterable(requests)
+                .buffer(BatchRequests.WRITE_LIMIT)
+                .flatMap(묶음::write, QUERY_CONCURRENCY)
+                .then();
     }
 
     private Map<String, AttributeValue> memberItem(String groupId, MemberRef member) {
@@ -579,7 +600,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .then();
                     Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
                             .filter(id -> !snapshot.groups().containsKey(id))
-                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                            .flatMap(id -> findMemberRefs(id).collect(Collectors.toSet())
+                                    .flatMap(members -> deleteGroup(id, members)), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
                             .filter(id -> !snapshot.users().containsKey(id))

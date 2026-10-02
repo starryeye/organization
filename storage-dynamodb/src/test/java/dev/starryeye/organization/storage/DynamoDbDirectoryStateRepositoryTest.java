@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
@@ -242,7 +243,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         repository.saveGroup(조직("DEV002", "백엔드팀", MemberRef.user("kim"))).block();
 
         // when
-        repository.deleteGroup("DEV002").block();
+        repository.deleteGroup("DEV002", Set.of(MemberRef.user("kim"))).block();
 
         // then
         assertThat(repository.findGroup("DEV002").block()).isNull();
@@ -488,11 +489,58 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
                 MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
 
         // when
-        repository.deleteGroup("DEV002").block();
+        repository.deleteGroup("DEV002", Set.of(MemberRef.user("kim"), MemberRef.group("DEV003"))).block();
 
         // then
         assertThat(정렬키들("USER#kim")).isEmpty();
         assertThat(정렬키들("GROUP#DEV003")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직을 지우면 상위 조직의 그 조직 줄, 그 조직의 소속 줄, 멤버 줄, 멤버들의 소속 줄, META 가 모두 사라진다")
+    void 조직_삭제가_상위_조직_줄까지_치운다() {
+        // given — 본부 ⊃ 팀 ⊃ kim
+        repository.saveGroup(조직("TEAM", "팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("HQ", "본부", MemberRef.group("TEAM"))).block();
+
+        // when
+        repository.deleteGroup("TEAM", Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(정렬키들("GROUP#TEAM")).isEmpty();
+        assertThat(정렬키들("USER#kim")).isEmpty();
+        assertThat(repository.findGroup("HQ").block().members()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지우다 중간에 멈춰도 META 가 남아, 다시 지우면 끝난다")
+    void 중간에_멈춰도_다시_지우면_끝난다() {
+        // given — 멤버 60명(멤버 줄 묶음이 셋), 두 번째 BatchWrite 가 실패한다
+        Set<MemberRef> 멤버 = new LinkedHashSet<>();
+        for (int i = 0; i < 60; i++) {
+            멤버.add(MemberRef.user("u" + i));
+        }
+        repository.saveGroup(new DirectoryGroup("BIG", "BIG", "큰 조직", 멤버)).block();
+        AtomicInteger 보낸_횟수 = new AtomicInteger();
+        DynamoDbAsyncClient 두번째에_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("batchWriteItem") && 보낸_횟수.incrementAndGet() == 2) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("batchWriteItem 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+        var 멈추는_저장소 = new DynamoDbDirectoryStateRepository(두번째에_실패하는_클라이언트, properties, clock);
+
+        // when — 첫 시도는 실패한다
+        assertThatThrownBy(() -> 멈추는_저장소.deleteGroup("BIG", 멤버).block());
+
+        // then — META 가 남아 조직이 보이고, 다시 지우면 끝난다
+        DirectoryGroup 남은것 = repository.findGroup("BIG").block();
+        assertThat(남은것).isNotNull();
+        repository.deleteGroup("BIG", 남은것.members()).block();
+        assertThat(repository.findGroup("BIG").block()).isNull();
+        assertThat(정렬키들("USER#u0")).isEmpty();
     }
 
     @Test

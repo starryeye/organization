@@ -50,7 +50,14 @@ public interface DirectoryStateRepository {
 
     Mono<Void> deleteUser(String userId);
 
-    Mono<Void> deleteGroup(String groupId);
+    /**
+     * 조직을 지운다 — 상위 조직들의 "이 조직" 멤버 줄과 이 조직의 멤버 줄을 먼저, 이 조직의 소속 줄과 멤버들의 소속 줄을 그다음, META 를 맨 마지막에
+     * (설계 2026-10-02 §4.1). 멤버는 호출자가 이미 읽은 것을 받는다 — 조직 파티션을 다시 훑지 않는다.
+     *
+     * <p><b>META 가 맨 마지막이다.</b> 중간에 멈추면(오류·리스 상실) 조직이 남아, 같은 삭제를 다시 부르면 남은 것을 마저 지운다. 멤버 줄을 소속 줄보다
+     * 먼저 지운다 — 소속 줄만 남는 방향으로만 어긋난다(강한 소속 조회 설계 §5).
+     */
+    Mono<Void> deleteGroup(String groupId, Set<MemberRef> members);
 
     /**
      * 역참조 — 이 멤버가 속한 조직들. SCIM 이 직원·조직을 삭제하거나 상위 조직을 찾을 때 쓴다.
