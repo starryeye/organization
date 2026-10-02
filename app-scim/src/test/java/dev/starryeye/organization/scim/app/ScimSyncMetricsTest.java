@@ -12,8 +12,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 설계 §7 이 요구한 지표 넷이 실제로 나가는지 본다.
  *
- * <p>{@code scim.lock.lease_lost} 가 특히 중요하다 — 리스를 잃는 세 갈래는 어느 것도 응답에
- * 나타나지 않아, 이 카운터가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
+ * <p>{@code scim.lock.lease_lost} 가 특히 중요하다 — 리스를 잃는 갈래(작업·쓰기 도중 갱신 실패, 쓰기 직전·커밋 직전 재확인 실패,
+ * 반납 실패)는 응답에 흔적이 없거나(반납 실패) 503 뿐이어서, 이 카운터가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
  */
 class ScimSyncMetricsTest {
 

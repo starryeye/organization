@@ -14,9 +14,11 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.model.TupleSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -440,6 +443,50 @@ class ScimRebuildUseCaseTest {
 
         // then — 안 반납하면 이후 모든 SCIM 변경이 영구히 503 이 된다
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(lock.released).hasValue(1);
+    }
+
+    // ---------- 반납 뒤 저장 (설계 2026-10-02 §5, 점검 P8) ----------
+
+    @Test
+    @DisplayName("튜플 스냅샷은 락을 반납한 뒤에 저장한다 — 저장하는 동안 SCIM 쓰기를 막지 않는다(점검 P8)")
+    void 스냅샷은_락을_반납한_뒤_저장한다() {
+        // given
+        AtomicReference<Boolean> 저장할때_락 = new AtomicReference<>();
+        FakeSnapshotRepository 지켜보는_저장소 = new FakeSnapshotRepository() {
+            @Override
+            public Mono<Void> save(TupleSnapshot snapshot) {
+                return Mono.defer(() -> {
+                    저장할때_락.set(lock.isHeld());
+                    return super.save(snapshot);
+                });
+            }
+        };
+        var 재적재 = new ScimRebuildUseCase(state, writer, scanner, 지켜보는_저장소,
+                new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+
+        // when
+        var run = runs.awaitFinished(재적재.start(ScimRebuildMode.TUPLES).block().runId());
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(저장할때_락.get()).as("저장할 때 락은 이미 풀려 있다").isFalse();
+        assertThat(지켜보는_저장소.saved).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("반납 뒤 스냅샷 저장이 실패하면 FAILED 이고 사유에 장부는 맞췄다고 남긴다")
+    void 반납_뒤_저장_실패는_FAILED() {
+        // given
+        snapshots.failSave(new IllegalStateException("스로틀"));
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).startsWith("장부는 맞췄다 — 스냅샷 저장 실패: ").contains("스로틀");
         assertThat(lock.released).hasValue(1);
     }
 }

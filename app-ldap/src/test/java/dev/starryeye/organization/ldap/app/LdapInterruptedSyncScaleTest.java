@@ -189,7 +189,7 @@ class LdapInterruptedSyncScaleTest {
         @Override public Mono<Void> saveUser(DirectoryUser user) { return 실제.saveUser(user); }
         @Override public Mono<Void> saveGroup(DirectoryGroup group) { return 실제.saveGroup(group); }
         @Override public Mono<Void> deleteUser(String userId) { return 실제.deleteUser(userId); }
-        @Override public Mono<Void> deleteGroup(String groupId) { return 실제.deleteGroup(groupId); }
+        @Override public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) { return 실제.deleteGroup(groupId, members); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) {
             return 실제.findGroupIdsContaining(ref);
         }

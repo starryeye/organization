@@ -178,4 +178,30 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
         // then
         assertThat(인스턴스2.peek().block()).isEqualTo(LockPurpose.SYNC);
     }
+
+    @Test
+    @DisplayName("같은 토큰으로 다시 잡으면 성공한다 — 서버에선 성공했는데 응답을 잃어 SDK 가 같은 요청을 다시 보낸 경우(점검 S14)")
+    void 같은_토큰이면_다시_잡힌다() {
+        // given — 첫 PutItem 은 서버에서 성공했다
+        인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰").block();
+
+        // when — SDK 가 같은 요청(같은 토큰)을 다시 보낸다
+        var lease = 인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰").block();
+
+        // then — 자기 락에 막히지 않고, 반납도 된다
+        assertThat(lease.token()).isEqualTo("같은-토큰");
+        인스턴스1.release(lease).block();
+        assertThat(인스턴스2.peek().blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("다른 토큰은 여전히 막힌다")
+    void 다른_토큰은_막힌다() {
+        // given
+        인스턴스1.acquire(LockPurpose.WRITE, "가").block();
+
+        // when, then
+        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE, "나").block())
+                .isInstanceOf(LockUnavailableException.class);
+    }
 }

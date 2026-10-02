@@ -13,18 +13,17 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
-import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -71,11 +70,6 @@ import java.util.stream.Collectors;
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
 
     private static final int QUERY_CONCURRENCY = 8;
-
-    /** BatchGetItem 한 번에 담을 수 있는 키 수(DynamoDB 한도). */
-    private static final int BATCH_GET_LIMIT = 100;
-    /** 미처리 키를 다시 읽기 전에 쉬는 시간. 처리량이 모자라 남은 키라 곧바로 다시 부르면 또 남는다. */
-    private static final Duration UNPROCESSED_RETRY_DELAY = Duration.ofMillis(50);
 
     private static final String EXTERNAL_ID = "externalId";
     private static final String USER_NAME = "userName";
@@ -380,12 +374,12 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     /**
      * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
-     * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 잠깐 쉬었다 다시 읽는다 — 빠뜨리면 멤버를 "없다" 로 본다.
+     * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 {@link BatchRequests} 규칙(5번까지, 백오프)으로 다시 읽는다.
      */
     @Override
     public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
         return Flux.fromIterable(candidates)
-                .buffer(BATCH_GET_LIMIT)
+                .buffer(BatchRequests.GET_LIMIT)
                 .concatMap(chunk -> batchGet(chunk.stream()
                         .map(ref -> Map.of(
                                 Keys.PK, Attrs.s(Keys.groupPk(groupId)),
@@ -411,23 +405,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
-        String table = properties.getTableName();
-        KeysAndAttributes 처음 = KeysAndAttributes.builder().keys(keys).consistentRead(true).build();
-        return Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
-                        .requestItems(Map.of(table, 처음))
-                        .build()))
-                .expand(response -> {
-                    KeysAndAttributes 남은것 = response.unprocessedKeys().get(table);
-                    if (남은것 == null || !남은것.hasKeys() || 남은것.keys().isEmpty()) {
-                        return Mono.empty();
-                    }
-                    KeysAndAttributes 다시 = 남은것.toBuilder().consistentRead(true).build();
-                    return Mono.delay(UNPROCESSED_RETRY_DELAY)
-                            .then(Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
-                                    .requestItems(Map.of(table, 다시))
-                                    .build())));
-                })
-                .concatMapIterable(response -> response.responses().getOrDefault(table, List.of()));
+        return new BatchRequests(client, properties.getTableName()).get(keys);
     }
 
     /** 파티션에서 정렬키가 {@code prefix} 로 시작하는 줄의 <b>정렬키만</b> 강한 일관성으로 읽는다. */
@@ -456,26 +434,44 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     /**
-     * 조직 파티션을 비우고, <b>그 멤버들의 소속 줄까지</b> 지운다. 소속 줄을 남기면 역참조가
-     * 그 조직을 후보로 계속 들고 오고(확인 단계가 걸러 내지만) 파티션에 영원히 쌓인다.
+     * 이 조직의 소속 줄만 읽어 상위 조직을 알아낸다(줄 몇 개) — 멤버 줄 10만 개를 다시 훑지 않는다. 지우기는 25개씩 묶어
+     * {@link BatchRequests} 로 보낸다(멤버 10만 명이면 약 8,000번, 묶음 재시도 상한). 지우기 요청은 보낼 차례에 만든다 — 10만 명이면
+     * 20만 개를 미리 쥐지 않는다.
      */
     @Override
-    public Mono<Void> deleteGroup(String groupId) {
-        return queryPartition(Keys.groupPk(groupId))
-                .map(item -> Attrs.str(item, Keys.SK))
+    public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
+        String pk = Keys.groupPk(groupId);
+        MemberRef 이조직 = MemberRef.group(groupId);
+        return querySortKeys(pk, Keys.BELONGS_TO_PREFIX)
                 .collectList()
-                .flatMap(sks -> {
-                    List<MemberRef> members = sks.stream()
-                            .filter(Keys::isMemberSk)
-                            .map(Keys::parseMemberSk)
-                            .toList();
-                    return Flux.fromIterable(sks)
-                            .flatMap(sk -> deleteItem(Keys.groupPk(groupId), sk), QUERY_CONCURRENCY)
-                            .thenMany(Flux.fromIterable(members))
-                            .flatMap(ref -> deleteItem(Keys.memberPk(ref), Keys.belongsToSk(groupId)),
-                                    QUERY_CONCURRENCY)
-                            .then();
+                .flatMap(소속_정렬키 -> {
+                    Flux<WriteRequest> 멤버_줄 = Flux.concat(
+                            Flux.fromIterable(소속_정렬키)
+                                    .map(sk -> 지우기(Keys.groupPk(Keys.parseBelongsToSk(sk)), Keys.memberSk(이조직))),
+                            Flux.fromIterable(members).map(member -> 지우기(pk, Keys.memberSk(member))));
+                    Flux<WriteRequest> 소속_줄 = Flux.concat(
+                            Flux.fromIterable(소속_정렬키).map(sk -> 지우기(pk, sk)),
+                            Flux.fromIterable(members).map(member -> 지우기(Keys.memberPk(member), Keys.belongsToSk(groupId))));
+
+                    // 단계 순서: 멤버 줄 → 소속 줄 → META 맨 마지막
+                    return Flux.concat(묶어_보낸다(멤버_줄), 묶어_보낸다(소속_줄), deleteItem(pk, Keys.META)).then();
                 });
+    }
+
+    private static WriteRequest 지우기(String pk, String sk) {
+        return WriteRequest.builder()
+                .deleteRequest(DeleteRequest.builder()
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                        .build())
+                .build();
+    }
+
+    private Mono<Void> 묶어_보낸다(Flux<WriteRequest> requests) {
+        BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
+        return requests
+                .buffer(BatchRequests.WRITE_LIMIT)
+                .flatMap(묶음::write, QUERY_CONCURRENCY)
+                .then();
     }
 
     private Map<String, AttributeValue> memberItem(String groupId, MemberRef member) {
@@ -604,7 +600,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .then();
                     Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
                             .filter(id -> !snapshot.groups().containsKey(id))
-                            .flatMap(this::deleteGroup, QUERY_CONCURRENCY)
+                            .flatMap(id -> findMemberRefs(id).collect(Collectors.toSet())
+                                    .flatMap(members -> deleteGroup(id, members)), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
                             .filter(id -> !snapshot.users().containsKey(id))

@@ -27,8 +27,8 @@ public class OpenFgaConfig {
     }
 
     @Bean
-    public RelationTupleChecker relationTupleChecker(StoreBootstrapper bootstrapper) {
-        return new OpenFgaRelationTupleChecker(bootstrapper);
+    public RelationTupleChecker relationTupleChecker(StoreBootstrapper bootstrapper, OpenFgaProperties properties) {
+        return new OpenFgaRelationTupleChecker(bootstrapper, properties.getRequestConcurrency());
     }
 
     /** 재적재의 장부 훑기. Read API 를 쓰는 유일한 빈이다 — 판단·쓰기 경로에 주입하지 않는다. */

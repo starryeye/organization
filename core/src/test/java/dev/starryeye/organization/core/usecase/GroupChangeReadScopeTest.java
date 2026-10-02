@@ -89,8 +89,8 @@ class GroupChangeReadScopeTest {
         // then
         assertThat(state.findGroupCalls).isEmpty();
         assertThat(state.findMembersCalls).containsExactly(Set.of(MemberRef.user("u0"), MemberRef.group("u0")));
-        assertThat(state.findUserCalls).isNotEmpty().allMatch("u0"::equals);
-        assertThat(checker.checked).containsOnly(RelationTuple.directMember("u0", 대형조직));
+        assertThat(state.findUserCalls).as("빠지는 멤버는 읽지 않는다").isEmpty();
+        assertThat(checker.checked).as("빠지는 멤버는 Check 하지 않는다").isEmpty();
         assertThat(writer.deleted).containsExactly(RelationTuple.directMember("u0", 대형조직));
         assertThat(state.groups.get(대형조직).members()).hasSize(멤버수 - 1);
     }
@@ -109,9 +109,8 @@ class GroupChangeReadScopeTest {
         // then
         assertThat(state.findMemberRefsCalls).containsExactly(대형조직);
         assertThat(state.findGroupCalls).isEmpty();
-        assertThat(state.findUserCalls).isNotEmpty().allMatch(id -> id.equals("u0") || id.equals("newbie"));
-        assertThat(checker.checked).containsOnly(
-                RelationTuple.directMember("u0", 대형조직), RelationTuple.directMember("newbie", 대형조직));
+        assertThat(state.findUserCalls).isNotEmpty().allMatch("newbie"::equals);
+        assertThat(checker.checked).containsOnly(RelationTuple.directMember("newbie", 대형조직));
         assertThat(state.groups.get(대형조직).members()).isEqualTo(목표);
     }
 }

@@ -10,7 +10,6 @@ import dev.openfga.sdk.api.configuration.ClientCheckOptions;
 import dev.openfga.sdk.api.model.ConsistencyPreference;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -31,7 +30,6 @@ import java.util.Set;
  * 헬스 체크만 여전히 {@code findExistingStore()}(보기만)다 — 오타 난 이름으로 빈 store 를 만들지 않는다.
  */
 @Slf4j
-@RequiredArgsConstructor
 public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
 
     /**
@@ -48,6 +46,18 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
     private static final ConsistencyPreference 실제_값 = ConsistencyPreference.HIGHER_CONSISTENCY;
 
     private final StoreBootstrapper bootstrapper;
+    /** 동시에 보내는 묶음 수(설계 2026-10-02 §4.3). */
+    private final int 동시;
+
+    /** 묶음을 하나씩 묻는다 — 테스트용. 운영 결선은 {@code openfga.request-concurrency} 를 넘긴다. */
+    public OpenFgaRelationTupleChecker(StoreBootstrapper bootstrapper) {
+        this(bootstrapper, 1);
+    }
+
+    public OpenFgaRelationTupleChecker(StoreBootstrapper bootstrapper, int 동시) {
+        this.bootstrapper = bootstrapper;
+        this.동시 = Math.max(1, 동시);
+    }
 
     @Override
     public Mono<Boolean> check(RelationTuple tuple) {
@@ -76,7 +86,7 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
         return bootstrapper.resolveStore()
                 .flatMap(storeId -> Flux.fromIterable(List.copyOf(candidates))
                         .buffer(BATCH_SIZE)
-                        .concatMap(chunk -> checkChunk(storeId, chunk))
+                        .flatMap(chunk -> checkChunk(storeId, chunk), 동시)
                         .collect(LinkedHashSet<RelationTuple>::new, Set::add)
                         .map(found -> (Set<RelationTuple>) found));
     }

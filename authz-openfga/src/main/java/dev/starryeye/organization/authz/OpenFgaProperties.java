@@ -18,4 +18,7 @@ public class OpenFgaProperties {
     private int writeBatchSize = 100;
 
     private int maxRetries = 3;
+
+    /** Check·Write 묶음을 동시에 이만큼 보낸다(설계 2026-10-02 §4.3). OpenFGA 가 버거우면 낮춘다. */
+    private int requestConcurrency = 4;
 }

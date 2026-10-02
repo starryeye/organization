@@ -139,8 +139,7 @@ class IncrementalSyncCandidateScopeTest {
         useCase.removeGroup("DEV001").block();
 
         // then
-        assertThat(checker.checked)
-                .containsExactlyInAnyOrder(KIM_DEV001, PARK_DEV001, DEV001_HQ);
+        assertThat(checker.checked).as("삭제는 Check 없이 지운다(설계 2026-10-02 §4.1)").isEmpty();
         assertThat(writer.deleted)
                 .as("좁히면서 지워야 할 것을 놓치면 조직만 사라지고 권한이 남는다")
                 .containsExactlyInAnyOrder(KIM_DEV001, PARK_DEV001, DEV001_HQ);

@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -56,13 +57,18 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         List<Batch> batches = batchesFor(delta);
 
         return bootstrapper.resolveStore()
-                .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch));
+                .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch, properties.getRequestConcurrency()));
     }
 
     /**
-     * 배치를 차례로 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
-     * 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 멈추기 전까지의 결과(멈추게 한 배치까지)에 보내지 않은 배치를 실패로 더한 것이다 —
+     * 같은 종류(지우기·쓰기) 안에서 {@code 동시}개까지 동시에 보내고, 결과는 보낸 순서대로 센다(설계 2026-10-02 §4.3). 지우기 묶음을
+     * 다 보낸 뒤 쓰기 묶음을 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
+     * 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 모든 묶음의 결과다 — 실제로 나간 묶음의 결과에 보내지 않은 묶음을 실패로 더한 것이다.
      * 호출자가 이미 나간 쓰기로 기록 규칙을 지킨다.
+     *
+     * <p>멈추면 이미 나간 묶음(최대 동시 수 − 1)은 결과를 기다려 실제 결과로 세고, 아직 안 나간 묶음만 보내지 않는다. 그 묶음들의 재시도
+     * 시간만큼 더 걸리고, 그동안 하트비트가 리스를 지킨다. 그래서 락을 반납한 뒤에 늦게 떨어지는 쓰기가 없다 — 남아 있으면 상태가 모르는
+     * 튜플이 생겨 다음 요청이 지우지 못한다. 멈춘 뒤 이미 나간 묶음이 성공해도 멈춤은 풀리지 않는다.
      *
      * <p>OpenFGA 가 느리거나 죽으면 배치마다 재시도를 거친 뒤 실패로 넘어가는데, 10만 명 재적재는 배치가 약 1,100개라 전부 그렇게 돌면
      * 수십 분 동안 락을 쥔다. 연달아 실패하는 것은 대개 한 배치가 아니라 OpenFGA 의 문제다. 드문 실패 한두 건은 지금처럼 결과의
@@ -76,30 +82,46 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      */
     static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
                                                      Function<Batch, Mono<TupleWriteResult>> send) {
+        return 보내되_연속_실패면_멈춘다(batches, send, 1);
+    }
+
+    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
+                                                     Function<Batch, Mono<TupleWriteResult>> send, int 동시) {
+        int 동시_수 = Math.max(1, 동시);
         return Mono.defer(() -> {
             AtomicInteger 연속_실패 = new AtomicInteger();
-            AtomicReference<TupleWriteResult> 지금까지 = new AtomicReference<>(TupleWriteResult.empty());
+            AtomicBoolean 멈춤 = new AtomicBoolean();
+            AtomicReference<String> 멈춘_사유 = new AtomicReference<>();
+            AtomicInteger 보내지_않은_수 = new AtomicInteger();
+            Function<Batch, Mono<TupleWriteResult>> 멈췄으면_보내지_않는다 = batch -> Mono.defer(() -> {
+                if (멈춤.get()) {
+                    보내지_않은_수.incrementAndGet();
+                    return Mono.just(batch.failed("연속 실패로 보내지 않음"));
+                }
+                return send.apply(batch);
+            });
             return Flux.fromIterable(batches)
-                    .index()
-                    .concatMap(indexed -> send.apply(indexed.getT2()).flatMap(result -> {
-                        TupleWriteResult 누적 = 지금까지.accumulateAndGet(result, OpenFgaRelationTupleWriter::merge);
-                        if (!한_줄도_못_살렸다(result)) {
-                            연속_실패.set(0);
-                            return Mono.just(누적);
+                    // 지우기 묶음을 다 보낸 뒤 쓰기 묶음을 보낸다(batchesFor 순서) — 같은 종류 안에서만 동시에 보낸다
+                    .windowUntilChanged(Batch::delete)
+                    .concatMap(같은_종류 -> 같은_종류.flatMapSequential(멈췄으면_보내지_않는다, 동시_수))
+                    // 결과는 보낸 순서대로 센다. 앞 묶음을 센 뒤에야 다음 묶음이 나가므로, 멈춤 표시는 다음 묶음이 나가기 전에 선다
+                    .reduce(TupleWriteResult.empty(), (누적, result) -> {
+                        if (!멈춤.get()) {
+                            if (!한_줄도_못_살렸다(result)) {
+                                연속_실패.set(0);
+                            } else if (연속_실패.incrementAndGet() >= 연속_실패_한도) {
+                                멈춘_사유.set(result.failures().get(0).reason());
+                                멈춤.set(true);
+                            }
                         }
-                        if (연속_실패.incrementAndGet() < 연속_실패_한도) {
-                            return Mono.just(누적);
-                        }
-                        List<Batch> 남은_배치 = batches.subList(Math.toIntExact(indexed.getT1()) + 1, batches.size());
-                        TupleWriteResult partial = 남은_배치.stream()
-                                .map(batch -> batch.failed("연속 실패로 보내지 않음"))
-                                .reduce(누적, OpenFgaRelationTupleWriter::merge);
-                        return Mono.<TupleWriteResult>error(new TupleWriteAbortedException(
-                                "OpenFGA 쓰기 배치가 %d번 연달아 실패해 남은 %d개 배치를 보내지 않고 멈췄다 — 마지막 오류: %s"
-                                        .formatted(연속_실패_한도, 남은_배치.size(), result.failures().get(0).reason()),
-                                partial));
-                    }))
-                    .last(TupleWriteResult.empty());
+                        return merge(누적, result);
+                    })
+                    .flatMap(누적 -> 멈춤.get()
+                            ? Mono.<TupleWriteResult>error(new TupleWriteAbortedException(
+                                    "OpenFGA 쓰기 배치가 %d번 연달아 실패해 남은 %d개 배치를 보내지 않고 멈췄다 — 마지막 오류: %s"
+                                            .formatted(연속_실패_한도, 보내지_않은_수.get(), 멈춘_사유.get()),
+                                    누적))
+                            : Mono.just(누적));
         });
     }
 

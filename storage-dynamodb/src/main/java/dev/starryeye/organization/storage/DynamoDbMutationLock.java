@@ -50,10 +50,19 @@ public class DynamoDbMutationLock implements MutationLock {
 
     @Override
     public Mono<LockLease> acquire(LockPurpose purpose) {
+        return acquire(purpose, UUID.randomUUID().toString());
+    }
+
+    /**
+     * 정한 토큰으로 잡는다. <b>같은 토큰이면 이미 있는 줄도 다시 써서 성공한다</b>(설계 2026-10-02 §3.4, 점검 S14) — SDK 는 응답을 잃은 PutItem 을
+     * 같은 요청(같은 토큰)으로 다시 보내는데, 조건에 이 경우가 없으면 서버에서 이미 성공한 자기 락에 막혀 30초 동안 모든 쓰기가 503 이 된다.
+     * 앱 쪽 재시도(획득 대기)도 같은 토큰을 쓴다 — {@link #acquire(LockPurpose)} 가 토큰을 한 번 만들고, 재시도는 같은 {@code Mono} 를 다시
+     * 구독한다. 같은 토큰은 자기 락만 맞추므로 남의 락을 가져가지 않고, "응답만 잃은" 경우의 보호가 앱 재시도까지 넓어진다.
+     */
+    Mono<LockLease> acquire(LockPurpose purpose, String token) {
         return Mono.defer(() -> {
             Instant now = clock.instant();
             Instant expiresAt = now.plus(properties.getLockTtl());
-            String token = UUID.randomUUID().toString();
 
             Map<String, AttributeValue> item = new HashMap<>();
             item.put(Keys.PK, Attrs.s(Keys.LOCK_PK));
@@ -66,10 +75,12 @@ public class DynamoDbMutationLock implements MutationLock {
             return Mono.fromFuture(() -> client.putItem(PutItemRequest.builder()
                             .tableName(properties.getTableName())
                             .item(item)
-                            // 아무도 없거나, 있어도 이미 만료됐으면 가져간다
-                            .conditionExpression("attribute_not_exists(#pk) OR #expiresAt < :now")
-                            .expressionAttributeNames(Map.of("#pk", Keys.PK, "#expiresAt", Keys.EXPIRES_AT))
-                            .expressionAttributeValues(Map.of(":now", Attrs.n(now.getEpochSecond())))
+                            // 아무도 없거나, 있어도 이미 만료됐거나, 내 토큰이면(응답을 잃은 재시도) 가져간다
+                            .conditionExpression("attribute_not_exists(#pk) OR #expiresAt < :now OR #token = :token")
+                            .expressionAttributeNames(Map.of(
+                                    "#pk", Keys.PK, "#expiresAt", Keys.EXPIRES_AT, "#token", TOKEN))
+                            .expressionAttributeValues(Map.of(
+                                    ":now", Attrs.n(now.getEpochSecond()), ":token", Attrs.s(token)))
                             .build()))
                     .thenReturn(new LockLease(token, expiresAt))
                     .onErrorMap(ConditionalCheckFailedException.class, error ->

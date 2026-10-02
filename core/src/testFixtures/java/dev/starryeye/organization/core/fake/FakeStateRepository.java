@@ -48,6 +48,9 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** {@link #findChildGroupIds} 가 불린 순서대로의 조직 id. */
     public final List<String> findChildGroupIdsCalls = new ArrayList<>();
 
+    /** {@link #deleteGroup} 가 불린 조직 id — 삭제 전용 경로가 조직을 몇 번 지우는지 본다. */
+    public final List<String> deleteGroupCalls = new ArrayList<>();
+
     private RuntimeException loadAllFailure;
 
     /** 설정하면 {@link #loadAll} 이 이 예외로 실패한다. 재적재가 읽기에 실패하는 경로를 보는 데 쓴다. */
@@ -106,9 +109,20 @@ public class FakeStateRepository implements DirectoryStateRepository {
     }
 
     @Override
-    public Mono<Void> deleteGroup(String groupId) {
-        groups.remove(groupId);
-        return Mono.empty();
+    public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
+        return Mono.fromRunnable(() -> {
+            deleteGroupCalls.add(groupId);
+            groups.remove(groupId);
+            MemberRef 이조직 = MemberRef.group(groupId);
+            groups.replaceAll((id, group) -> {
+                if (!group.members().contains(이조직)) {
+                    return group;
+                }
+                Set<MemberRef> 남은멤버 = new LinkedHashSet<>(group.members());
+                남은멤버.remove(이조직);
+                return new DirectoryGroup(group.id(), group.externalId(), group.displayName(), 남은멤버);
+            });
+        });
     }
 
     @Override

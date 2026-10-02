@@ -21,6 +21,7 @@ openfga:
   store-name: organization-scim
   write-batch-size: 100
   max-retries: 3
+  request-concurrency: 4
 
 dynamodb:
   endpoint: http://localhost:8000

@@ -29,8 +29,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 락에서 일어난 일이 지표로 나간다 (설계 §7).
  *
- * <p>리스를 잃는 세 갈래 — 재적재 중 상실, 반납 실패, 획득 도중 취소 — 는 <b>어느 것도 응답에
- * 나타나지 않는다</b>. 세지 않으면 로그를 사람이 읽을 때까지 아무도 모르고, 그동안 락은 TTL 이
+ * <p>리스를 잃는 갈래 — 작업·쓰기 도중 갱신 실패, 쓰기 직전·커밋 직전 재확인 실패, 반납 실패({@link LockObserver}) — 는
+ * <b>응답에 흔적이 없거나(반납 실패) 503 뿐이다</b>. 세지 않으면 로그를 사람이 읽을 때까지 아무도 모르고, 그동안 락은 TTL 이
  * 지날 때까지 묶여 있거나 두 인스턴스가 동시에 쓰고 있다.
  */
 class IncrementalSyncLockObservabilityTest {

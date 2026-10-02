@@ -22,7 +22,7 @@ import lombok.extern.slf4j.Slf4j;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.SignalType;
+import reactor.core.publisher.Sinks;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
@@ -92,6 +92,11 @@ import java.util.stream.Collectors;
  *       있지만 요청 한 건마다 비용이 훨씬 크다.</li>
  * </ul>
  *
+ * <p><b>손으로 만드는 튜플 — 지울 줄만(설계 2026-10-02 §4.1·§4.2).</b> 조직 삭제({@link #removeGroup})의 줄과 조직 PATCH·PUT 에서
+ * 빠지는 멤버의 줄은 {@link TupleMapper} 를 거치지 않고 {@link #tupleFor} 로 바로 만든다 — "튜플 규칙은 한 곳에만"의 예외다.
+ * 지우기뿐이라 안전하다. 비활성 직원처럼 줄이 없어야 할 멤버의 줄도 함께 넣고 "없으면 무시"로 지우므로 활성 여부·존재 같은 규칙을
+ * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다.
+ *
  * <p>이 유스케이스는 {@code SyncRun} 을 기록하지 않는다. SCIM 은 요청 단위라 이력이 폭증한다.
  *
  * <p><b>부분 실패(design §7.2).</b> OpenFGA 배치는 트랜잭션이므로 SCIM 단건 변경은 대개
@@ -100,7 +105,7 @@ import java.util.stream.Collectors;
  * 그 반대인) 상태가 되고, 다음 동기화의 diff는 "이미 같다"고 판단해 이 불일치를 영원히
  * 다시 잡지 못한다 — 재시도가 diff 할 "이전" 자체가 이미 목표값으로 오염됐기 때문이다.
  * 그래서 모든 커밋은 반드시 {@code TupleWriteResult} 를 보고 실제로 반영된 만큼만 상태에
- * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}, {@link #reconcileRemovedMember}).
+ * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -114,6 +119,9 @@ public class IncrementalSyncUseCase {
     /** 획득 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 재시도 횟수다. */
     private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
 
+    /** 갱신 주기를 넘기지 않는 생성자가 쓰는 값 — 운영 결선은 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofSeconds(10);
+
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
     private final RelationTupleChecker checker;
@@ -125,8 +133,17 @@ public class IncrementalSyncUseCase {
      * 조용히 달라진다.
      */
     private final Duration acquireTimeout;
+    /** 락을 쥔 동안 리스를 갱신하는 주기(설계 2026-10-02 §3.1). */
+    private final Duration renewInterval;
     private final DriftObserver driftObserver;
     private final LockObserver lockObserver;
+
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 8인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
+                                  LockObserver lockObserver) {
+        this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
+    }
 
     private long acquireRetries() {
         return acquireTimeout.toMillis() / ACQUIRE_RETRY_DELAY.toMillis();
@@ -204,7 +221,7 @@ public class IncrementalSyncUseCase {
                                 return Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
                             };
 
-                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), lease, commit);
+                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, commit);
                         }));
     }
 
@@ -317,7 +334,7 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroup(reconciled));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), lease, commit);
+                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, commit);
                 }));
     }
 
@@ -343,6 +360,8 @@ public class IncrementalSyncUseCase {
      *
      * <p>증분은 요청에 나온 멤버를 전후가 같아도 그림에 남긴다 — 그 멤버의 어긋남은 지금처럼 고친다. 요청에 나오지 않은 멤버는
      * 점검하지 않는다(설계 §11). 전체 교체는 목록이 전원을 가리키므로 바뀌는 멤버만 싣는다.
+     *
+     * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock(lease -> changeGroupInternal(groupId, change, lease));
@@ -352,8 +371,15 @@ public class IncrementalSyncUseCase {
         return state.findGroupHeader(groupId)
                 .flatMap(header -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
                     GroupHeader 바뀐헤더 = change.applyTo(header);
+                    Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
                     DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
+                    // 그림에는 빠지는 멤버를 싣지 않는다 — 그 멤버의 직원을 읽지도, 그 줄을 Check 하지도 않는다(설계 2026-10-02 §4.2)
+                    DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
+                            차집합(전후.전(), 빠질것));
                     DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
+                    Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
+                            .map(member -> tupleFor(member, groupId))
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
@@ -362,12 +388,15 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroupChange(바뀐헤더, 넣을것, 뺄것));
                     };
 
-                    return diffAndApply(snapshotOfGroups(Set.of(전)), snapshotOfGroups(Set.of(후)),
-                            RelationTuple.groupRef(groupId), lease, commit);
+                    return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
+                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit);
                 }));
     }
 
-    /** 그림에 실을 멤버의 변경 전·후 소속. 전 은 지금 멤버 중 그림에 실을 것, 후 는 반영 뒤 멤버가 될 것(아직 멤버가 아닌 넣을 멤버 포함). */
+    /**
+     * 이번 변경이 닿는 멤버의 변경 전·후 소속. 전 은 지금 멤버 중 변경이 닿는 것(전체 교체면 빠질 멤버), 후 는 반영 뒤 멤버가 될 것(아직 멤버가
+     * 아닌 넣을 멤버 포함). 전 에만 있는 멤버(빠질 멤버)는 그림에 싣지 않고 Check·직원 읽기 없이 지운다(설계 2026-10-02 §4.2).
+     */
     private record 멤버전후(Set<MemberRef> 전, Set<MemberRef> 후) {
     }
 
@@ -431,7 +460,7 @@ public class IncrementalSyncUseCase {
                     Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
-                        // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(reconcileRemovedMember 와 같은 판단).
+                        // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(아래 멤버십을_지운다).
                         // 나머지는 그 직원의 멤버 줄·소속 줄만 지운다 — 조직 멤버 목록 전체를 읽고 쓰지 않는다(설계 §5).
                         Mono<Void> saveGroups = Flux.fromIterable(headers)
                                 .filter(header -> 멤버십을_지운다(tupleFor(이직원, header.id()), beforeTuples, result))
@@ -443,7 +472,7 @@ public class IncrementalSyncUseCase {
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.userRef(userId), lease, commit);
+                    return diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, commit);
                 }));
     }
 
@@ -453,14 +482,11 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 삭제. 상위 조직에서의 child 튜플까지 함께 지운다.
+     * 조직 삭제 (설계 2026-10-02 §4.1). 삭제 뒤의 모습은 "이 조직을 언급하는 줄이 하나도 없음"으로 정해져 있어 계산(직원 읽기·Check·diff)을 하지 않는다.
+     * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
      *
-     * <p>상위 조직 쪽 삭제가 실패한 것은 그 상위 조직의 멤버 목록을 원래대로 유지하고
-     * ({@link #reconcileRemovedMember}), 이 조직 자신의 멤버 튜플 삭제가 실패한 것은
-     * 이 조직 자신의 멤버 목록에서 그 멤버를 남긴다({@link #reconcileGroupMembers} 를
-     * "멤버 없는 목표"로 재사용). 하나라도 실패하면 이 조직 레코드 자체는 지우지 않는다.
-     *
-     * <p>대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
+     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 5xx 이고
+     * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
         return withLock(lease -> removeGroupInternal(groupId, lease));
@@ -468,33 +494,36 @@ public class IncrementalSyncUseCase {
 
     private Mono<IncrementalSyncResult> removeGroupInternal(String groupId, LockLease lease) {
         return state.findGroup(groupId)
-                .flatMap(group -> parentsOf(groupId).flatMap(parents -> {
-                    Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);
-                    beforeGroups.add(group);
-                    Mono<DirectorySnapshot> before = snapshotOfGroups(beforeGroups);
+                .flatMap(group -> state.findGroupIdsContaining(MemberRef.group(groupId))
+                        .collect(LinkedHashSet<String>::new, Set::add)
+                        .flatMap(parentIds -> 반영하고_커밋한다(
+                                TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease,
+                                result -> 조직_삭제를_커밋한다(group, parentIds, result))));
+    }
 
-                    Set<DirectoryGroup> afterParents = removeMemberFrom(parents, MemberRef.group(groupId));
-                    Mono<DirectorySnapshot> after = snapshotOfGroups(afterParents);
+    /** 조직이 사라지면 없어야 할 줄 — 직원→조직, 하위 조직→조직, 조직→상위 조직. 비활성 직원의 줄도 넣는다 — 있으면 지워야 하고 없으면 무시된다. */
+    private static Set<RelationTuple> 조직을_언급하는_튜플(DirectoryGroup group, Set<String> parentIds) {
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        group.members().forEach(member -> tuples.add(tupleFor(member, group.id())));
+        parentIds.forEach(parent -> tuples.add(RelationTuple.child(group.id(), parent)));
+        return tuples;
+    }
 
-                    Commit commit = (result, beforeTuples, afterTuples) -> {
-                        Set<DirectoryGroup> reconciledParents = reconcileRemovedMember(
-                                parents, afterParents, MemberRef.group(groupId), beforeTuples, result);
-                        Mono<Void> saveParents = Flux.fromIterable(reconciledParents)
-                                .flatMap(state::saveGroup, LOAD_CONCURRENCY)
-                                .then();
-
-                        if (result.hasFailure()) {
-                            DirectoryGroup emptyLike = new DirectoryGroup(
-                                    group.id(), group.externalId(), group.displayName(), Set.of());
-                            DirectoryGroup reconciledGroup = reconcileGroupMembers(
-                                    group, emptyLike, beforeTuples, afterTuples, result);
-                            return saveParents.then(Mono.defer(() -> state.saveGroup(reconciledGroup)));
-                        }
-                        return saveParents.then(Mono.defer(() -> state.deleteGroup(groupId)));
-                    };
-
-                    return diffAndApply(before, after, RelationTuple.groupRef(groupId), lease, commit);
-                }));
+    private Mono<Void> 조직_삭제를_커밋한다(DirectoryGroup group, Set<String> parentIds, TupleWriteResult result) {
+        if (!result.hasFailure()) {
+            return state.deleteGroup(group.id(), group.members());
+        }
+        MemberRef 이조직 = MemberRef.group(group.id());
+        Set<MemberRef> 지운멤버 = group.members().stream()
+                .filter(member -> result.deleted().contains(tupleFor(member, group.id())))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        GroupHeader header = new GroupHeader(group.id(), group.externalId(), group.displayName());
+        Mono<Void> 상위에서_뺀다 = Flux.fromIterable(parentIds)
+                .filter(parent -> result.deleted().contains(RelationTuple.child(group.id(), parent)))
+                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+                .flatMap(parent -> state.saveGroupChange(parent, Set.of(), Set.of(이조직)), LOAD_CONCURRENCY)
+                .then();
+        return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, Set.of(), 지운멤버)));
     }
 
     // ---------- 공통 ----------
@@ -506,33 +535,23 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 변경 하나를 락 안에서 실행한다 (설계 §4).
+     * 변경 하나를 락 안에서 실행한다 (설계 §4, 2026-10-02 §3).
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
      * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 여덟 경로({@link #upsertUser}·
      * {@link #createUser}·{@link #changeUser}·{@link #removeUser}·{@link #upsertGroup}·
-     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가
-     * 빠짐없이 덮이고 경로가 늘어도 자동으로 포함된다 — 인메모리 {@code MutationGate} 가 인스턴스 하나 안에서
-     * 같은 이유로 여기(구 버전의 이 자리)에 있었지만, 인스턴스가 둘이면 아무것도 막지 못했다
-     * (설계 §4.5). 지금은 그 자리를 이 분산 락이 대신한다.
+     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가 빠짐없이 덮인다.
      *
-     * <p><b>{@code work} 가 끝나면 반납한다 — 단, 두 틈은 이것으로 못 막는다.</b>
-     * {@code work} 자체가 성공·실패·취소 어느 경로로 끝나든 {@code doFinally} 가
-     * {@code lock.release(lease)} 를 부르는 것은 맞다. 하지만
-     * <ol>
-     *   <li>반납 호출 자체가 실패하면(스로틀, 네트워크 등) {@code .subscribe()} 가 구독자 없이
-     *       구독하는 것이라 그 에러는 아무도 받지 않고 {@code Hooks.onErrorDropped} 로만 샌다 —
-     *       재시도하지 않으므로 리스가 자연 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다.</li>
-     *   <li>{@code lock.acquire} 내부에서 조건부 쓰기(DynamoDB PutItem)가 이미 성공한 뒤,
-     *       그 결과가 구독자에게 리스로 전달되기 전에 구독이 취소되면 이 메서드는 그 리스를
-     *       아예 손에 쥐지 못해 반납을 시도할 대상조차 없다 — {@code Mono.fromFuture} 는
-     *       다운스트림 취소를 내부 {@code CompletableFuture} 취소로 전파하지 않으므로, 쓰기는
-     *       이미 저장소에 반영된 채로 남는다.
-     * </ol>
-     * 두 경우 모두 락이 TTL 이 지날 때까지 묶인다 — 완벽한 상호 배제가 아니라는 설계 §4 의
-     * 전제와 같은 종류의 틈이다. <b>막지는 못해도 세기는 한다</b>: 둘 다
-     * {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다. 응답에는
-     * 아무 흔적도 남지 않는 사건이라, 지표가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
+     * <p><b>요청과 떼어 돈다(점검 S3).</b> 락 잡기부터 반납까지를 요청의 구독과 따로 돌린다. IdP 가 연결을 끊어도 커밋까지 마치고
+     * 반납한다 — 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다. 락을 잡는 도중에
+     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId)는 이어받는다. 요청이 떠난 뒤의 실패·부분 반영은 받을 곳이 없으므로
+     * 경고 로그로 남긴다 — 요청이 남아 있으면 응답과 {@code ScimRouter} 가 알리므로 남기지 않는다.
+     *
+     * <p><b>리스를 지킨다.</b> 쥔 동안 {@link LeaseKeeper} 가 리스를 갱신하고, 잃으면 멈춰 503 이다. OpenFGA 쓰기 직전·DynamoDB 커밋 직전에
+     * 다시 확인한다({@link #반영하고_커밋한다}). <b>반납한 뒤 응답한다</b> — IdP 의 다음 요청이 이 요청의 락에 막히지 않는다.
+     *
+     * <p><b>반납이 실패하면</b>(스로틀, 네트워크) 리스가 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다. 응답은 성공이다 — 일은 끝났다.
+     * 대신 {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다.
      *
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
      * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
@@ -541,6 +560,29 @@ public class IncrementalSyncUseCase {
      * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
+        return Mono.deferContextual(context -> {
+            Sinks.One<IncrementalSyncResult> 결과 = Sinks.one();
+            AtomicBoolean 요청이_떠났다 = new AtomicBoolean();
+            // 알리기 전에 본다 — 값을 받은 뒤에 오는 취소는 떠난 것이 아니다.
+            잡고_돌린다(work)
+                    .contextWrite(context)
+                    .subscribe(value -> {
+                        if (요청이_떠났다.get() && !value.fullyApplied()) {
+                            log.warn("요청이 떠난 뒤 SCIM 쓰기가 부분 반영으로 끝났다 — 실패한 튜플 {}개. IdP 는 이 결과를 받지 못했다",
+                                    value.writeResult().failures().size());
+                        }
+                        결과.tryEmitValue(value);
+                    }, error -> {
+                        if (요청이_떠났다.get()) {
+                            log.warn("요청이 떠난 뒤 SCIM 쓰기가 실패했다 — IdP 는 이 결과를 받지 못했다", error);
+                        }
+                        결과.tryEmitError(error);
+                    }, 결과::tryEmitEmpty);
+            return 결과.asMono().doOnCancel(() -> 요청이_떠났다.set(true));
+        });
+    }
+
+    private Mono<IncrementalSyncResult> 잡고_돌린다(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             AtomicBoolean 경합했다 = new AtomicBoolean();
@@ -559,27 +601,25 @@ public class IncrementalSyncUseCase {
                             error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
                     // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도
                     // LockUnavailableException 으로 옮기므로 예외 타입으로는 구별할 수 없고,
-                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다 — 여기에 true 를 박으면
-                    // 저장소 장애가 scim.lock.contended 를 올려, 장애 대응 중인 운영자를
-                    // "전역 락을 다시 볼 때다"(설계 §4.1) 라는 엉뚱한 방향으로 민다.
+                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
-                    // 획득이 성공한 뒤 리스가 전달되기 전에 취소되면 그 리스는 손에 들어오지
-                    // 않은 채로 TTL 만큼 샌다(위 2번). 취소 자체는 막을 수 없으니 세기라도 한다.
-                    .doFinally(signal -> {
-                        if (signal == SignalType.CANCEL) {
-                            lockObserver.leaseLost("획득 도중 취소 — 리스가 새어 TTL 까지 묶일 수 있다");
-                        }
-                    })
-                    .flatMap(lease -> Mono.defer(() -> work.apply(lease))
-                            .doFinally(signal -> lock.release(lease).subscribe(
-                                    released -> {
-                                    },
-                                    error -> {
-                                        log.warn("변경 락 반납이 실패했다. 리스가 만료될 때까지 아무도 잡지 못한다", error);
-                                        lockObserver.leaseLost("반납 실패");
-                                    })));
+                    .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
+                            .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
+                            .materialize()
+                            .flatMap(끝 -> 반납한다(lease).thenReturn(끝))
+                            .<IncrementalSyncResult>dematerialize());
         });
+    }
+
+    /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */
+    private Mono<Void> 반납한다(LockLease lease) {
+        return lock.release(lease)
+                .onErrorResume(error -> {
+                    log.warn("변경 락 반납이 실패했다. 리스가 만료될 때까지 아무도 잡지 못한다", error);
+                    lockObserver.leaseLost("반납 실패");
+                    return Mono.empty();
+                });
     }
 
     private static Duration 경과(long 시작나노) {
@@ -600,12 +640,7 @@ public class IncrementalSyncUseCase {
      * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
      * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
      *
-     * <p><b>리스 재확인은 델타가 있을 때만 일어난다(설계 §4.7).</b> {@code lock.renew(lease)} 는
-     * 델타가 비지 않은 분기 — 즉 실제로 {@code writer.apply} 가 OpenFGA 에 쓰기를 낼 분기 —
-     * 에서만 부른다. 델타가 비면 OpenFGA 에 아무것도 쓰지 않고 곧바로 {@code commit} 으로
-     * 넘어가며, 이 경로는 리스를 재확인하지 않는다. §4.7 이 요구하는 것은 "OpenFGA 쓰기 직전"
-     * 재확인이고 이 경로엔 그 쓰기가 없으므로 스펙과 어긋나지 않는다 — 다만 재확인이 <b>모든
-     * 커밋</b>에 걸린다고 읽으면 안 된다.
+     * <p><b>리스는 OpenFGA 쓰기 직전과 커밋 직전에 늘 확인한다</b> — {@link #반영하고_커밋한다} 참고(설계 2026-10-02 §3.2).
      *
      * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
      * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이
@@ -616,10 +651,13 @@ public class IncrementalSyncUseCase {
      * 단 하나의 예외가 <b>레코드의 존재 자체</b>다 — 그것은 부모의 child 엣지가 성립하는
      * 조건이므로 튜플 식별자에 해당한다. 그래서 {@link #upsertGroup} 은 새 조직에 한해,
      * {@link #removeUser}/{@link #removeGroup} 은 삭제에 한해 실패 시 존재 여부를 건드리지 않는다.
+     *
+     * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
                                                       String focus,
+                                                      Set<RelationTuple> 확인없이_지울것,
                                                       LockLease lease,
                                                       Commit commit) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
@@ -648,29 +686,51 @@ public class IncrementalSyncUseCase {
 
                 Set<RelationTuple> 원하는것 = mentioning(tuplesOf(afterSnapshot), focus);
                 return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after -> {
-                    TupleDelta delta = TupleDiff.between(actual, after);
-
-                    if (delta.isEmpty()) {
-                        return commit.apply(TupleWriteResult.empty(), actual, after)
-                                .thenReturn(IncrementalSyncResult.noChange());
+                    TupleDelta 계산 = TupleDiff.between(actual, after);
+                    if (확인없이_지울것.isEmpty()) {
+                        return 반영하고_커밋한다(계산, lease, result -> commit.apply(result, actual, after));
                     }
-                    // 쓰기 직전에 리스를 다시 확인한다 (설계 §4.7).
-                    // renew 는 토큰 조건이 걸린 조건부 쓰기라, 성공했다는 것이 곧
-                    // "아직 내가 쥐고 있다" 는 증거다 — 메모리에 든 expiresAt 을 보는 것과
-                    // 달리 저장소가 답한다. 여기서 실패하면 GC 정지 등으로 리스를 잃은
-                    // 것이므로, 늦은 쓰기를 내보내지 않고 멈춘다.
-                    // writer.apply(delta) 를 Mono.defer 로 감싼다 — 감싸지 않으면 이 Java
-                    // 표현식이 .then() 호출 시점에 곧바로 평가돼, renew 가 실패해도 그
-                    // 평가(어댑터에 따라 부수효과가 있을 수 있다)가 이미 일어난 뒤다.
-                    // defer 로 감싸야 renew 가 실제로 성공한 뒤에만 실행된다.
-                    return lock.renew(lease)
-                            .doOnError(error -> lockObserver.leaseLost("쓰기 직전 리스 재확인 실패"))
-                            .then(Mono.defer(() -> writer.apply(delta)))
-                            .flatMap(result -> commit.apply(result, actual, after)
-                                    .thenReturn(IncrementalSyncResult.of(result)));
+                    // 빠지는 멤버의 줄은 Check 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2). 커밋의 재조정은 그 줄이 있었다고 본다 —
+                    // 지우기가 실패한 멤버만 남는다.
+                    Set<RelationTuple> 지울것 = new LinkedHashSet<>(계산.toDelete());
+                    지울것.addAll(확인없이_지울것);
+                    Set<RelationTuple> 있다고_볼것 = new LinkedHashSet<>(actual);
+                    있다고_볼것.addAll(확인없이_지울것);
+                    return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease,
+                            result -> commit.apply(result, 있다고_볼것, after));
                 });
             });
         });
+    }
+
+    /**
+     * 델타를 OpenFGA 에 반영하고 DynamoDB 에 커밋한다. <b>OpenFGA 쓰기 직전과 커밋 직전에 늘 리스를 확인한다</b>(설계 2026-10-02 §3.2, 점검 M8) —
+     * 바뀐 튜플이 없을 때도. 커밋은 조건 없는 덮어쓰기라, 30초 넘게 멈춘 요청이 확인 없이 커밋하면 다른 인스턴스가 저장한 비활성화를 되돌린다.
+     * 확인이 실패하면 쓰지 않고 503 이다. renew 는 토큰 조건이 걸린 조건부 쓰기라 성공했다는 것이 곧 "아직 내가 쥐고 있다"는 증거다.
+     *
+     * <p>{@code writer.apply}·{@code 커밋} 을 {@code Mono.defer} 로 감싼다 — 감싸지 않으면 확인이 실패해도 그 표현식이 이미 평가된 뒤다.
+     */
+    private Mono<IncrementalSyncResult> 반영하고_커밋한다(TupleDelta delta, LockLease lease,
+                                                   Function<TupleWriteResult, Mono<Void>> 커밋) {
+        if (delta.isEmpty()) {
+            return 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
+                    .then(Mono.defer(() -> 커밋.apply(TupleWriteResult.empty())))
+                    .thenReturn(IncrementalSyncResult.noChange());
+        }
+        return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
+                .then(Mono.defer(() -> writer.apply(delta)))
+                .flatMap(result -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
+                        .then(Mono.defer(() -> 커밋.apply(result)))
+                        .thenReturn(IncrementalSyncResult.of(result)));
+    }
+
+    /** 리스를 확인(갱신)한다. 실패하면 {@link LockUnavailableException} — 저장소 장애도 503 으로 옮긴다(획득과 같은 이유). */
+    private Mono<Void> 리스를_확인한다(LockLease lease, String 실패_사유) {
+        return lock.renew(lease)
+                .doOnError(error -> lockObserver.leaseLost(실패_사유))
+                .onErrorMap(error -> !(error instanceof LockUnavailableException),
+                        error -> new LockUnavailableException("변경 락 리스를 확인하지 못했습니다", error))
+                .then();
     }
 
     /**
@@ -835,7 +895,8 @@ public class IncrementalSyncUseCase {
      * 썼거나({@code result.written()}), 이미 있어서 쓸 필요가 없었거나({@code beforeTuples},
      * 즉 Check 기준선), 애초에 튜플이 필요 없는 멤버거나(비활성 유저, 존재하지 않는 하위 조직).
      * 빠진 멤버는 그 튜플이 실제로 지워졌을 때만(또는 원래 튜플이 없었을 때) 제외된다 —
-     * 삭제가 실패하면 여전히 멤버로 남아, 다음 동기화가 다시 지우려 시도한다.
+     * 삭제가 실패하면 여전히 멤버로 남아, 다음 동기화가 다시 지우려 시도한다. {@link #changeGroup} 은 빠지는 멤버의 줄을 Check 없이
+     * 지우므로 {@code beforeTuples} 에 그 줄이 있다고 넣어 준다({@link #diffAndApply}) — 지우기가 실패한 멤버만 남는다.
      *
      * <p><b>"이미 있음" 을 빠뜨리면 안 된다.</b> 기준선이 상태였을 때는 새 멤버의 튜플이 언제나
      * 델타에 들어가 {@code written} 에 나타났다. 기준선이 OpenFGA 로 바뀐 지금은 <b>이미 있는
@@ -844,9 +905,8 @@ public class IncrementalSyncUseCase {
      * 않는다 — OpenFGA 쓰기 성공 뒤 DynamoDB 커밋이 실패해 IdP 가 같은 요청을 재시도하는,
      * 이 기능이 없애려는 바로 그 경로다.
      *
-     * <p>{@code requested} 의 멤버를 빈 집합으로 주면 "이 조직을 통째로 비우려는 시도"를
-     * 표현할 수 있다 — {@link #removeGroup} 이 자기 자신의 멤버 튜플 삭제를 이 방식으로
-     * 재사용한다.
+     * <p>부르는 곳은 {@link #upsertGroup} 과 {@link #changeGroup} 이다. 조직 삭제({@link #removeGroup})는 이 계산을 쓰지 않는다 —
+     * 전용 경로가 지운 줄로 바로 정한다(설계 2026-10-02 §4.1).
      */
     private DirectoryGroup reconcileGroupMembers(DirectoryGroup existing,
                                                  DirectoryGroup requested,
@@ -883,31 +943,6 @@ public class IncrementalSyncUseCase {
         }
 
         return new DirectoryGroup(requested.id(), requested.externalId(), requested.displayName(), persisted);
-    }
-
-    /**
-     * {@code ref}(직원 또는 하위 조직)를 {@code originalGroups} 각각에서 빼려던 결과를,
-     * 실제로 삭제 튜플이 반영된 조직만 골라 되돌린다. 삭제가 실패한 조직은
-     * {@code originalGroups} 의 원래 멤버 목록을 그대로 유지해, 다음 동기화가 diff 할
-     * "이전"을 보존하고 재시도가 가능하게 한다.
-     */
-    private static Set<DirectoryGroup> reconcileRemovedMember(Set<DirectoryGroup> originalGroups,
-                                                               Set<DirectoryGroup> withoutGroups,
-                                                               MemberRef ref,
-                                                               Set<RelationTuple> beforeTuples,
-                                                               TupleWriteResult result) {
-        Map<String, DirectoryGroup> originalById = byId(originalGroups);
-        Set<DirectoryGroup> reconciled = new LinkedHashSet<>();
-        for (DirectoryGroup candidate : withoutGroups) {
-            RelationTuple tuple = tupleFor(ref, candidate.id());
-            boolean existedBefore = beforeTuples.contains(tuple);
-            if (existedBefore && !result.deleted().contains(tuple)) {
-                reconciled.add(originalById.get(candidate.id())); // 삭제 실패 -> 원래 멤버 목록 유지
-            } else {
-                reconciled.add(candidate); // 삭제 성공, 또는 애초에 튜플이 없었음
-            }
-        }
-        return reconciled;
     }
 
     private static RelationTuple tupleFor(MemberRef member, String groupId) {
@@ -1042,16 +1077,6 @@ public class IncrementalSyncUseCase {
                         ? Mono.just(overrideById.get(id))
                         : state.findUser(id), LOAD_CONCURRENCY)
                 .collect(LinkedHashMap<String, DirectoryUser>::new, (map, user) -> map.put(user.id(), user));
-    }
-
-    private static Set<DirectoryGroup> removeMemberFrom(Set<DirectoryGroup> groups, MemberRef ref) {
-        Set<DirectoryGroup> result = new LinkedHashSet<>();
-        for (DirectoryGroup group : groups) {
-            Set<MemberRef> members = new LinkedHashSet<>(group.members());
-            members.remove(ref);
-            result.add(new DirectoryGroup(group.id(), group.externalId(), group.displayName(), members));
-        }
-        return result;
     }
 
     private static Map<String, DirectoryGroup> byId(Set<DirectoryGroup> groups) {

@@ -37,8 +37,9 @@ import java.util.Set;
  * <p><b>{@code WIPE} 는 장부를 비운 뒤에만 조직도를 지운다.</b> 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고 FAILED 다 —
  * 조직도가 남아 있어야 다시 실행할 수 있다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만 살아남는다.
  *
- * <p><b>요청과 떼어 돈다(설계 2026-09-29 §4, 2026-09-30 §3).</b> {@link #start} 는 {@link SyncJobs#startLocked} 로 작업 락을 잡고 실행 기록을 연 뒤
- * 곧바로 돌아온다. 재적재가 도는 동안 리스를 갱신하고, 리스를 잃으면 멈춰 FAILED 로 남긴다. 끝나면 락을 반납한 뒤 결과를 기록한다.
+ * <p><b>요청과 떼어 돈다(설계 2026-09-29 §4, 2026-09-30 §3).</b> {@link #start} 는 {@link SyncJobs#startLockedThen} 으로 작업 락을 잡고 실행 기록을
+ * 연 뒤 곧바로 돌아온다. 재적재가 도는 동안 리스를 갱신하고, 리스를 잃으면 멈춰 FAILED 로 남긴다. 순서는 일 → 반납 → 튜플 스냅샷 저장 → 기록이다 —
+ * 스냅샷 저장은 락을 반납한 뒤에 해 그동안 SCIM 쓰기를 막지 않는다(설계 2026-10-02 §5, 점검 P8).
  *
  * <p><b>감사 이력은 지우지 않는다.</b> {@code WIPE} 도 스냅샷과 실행 이력은 남긴다. 사고 뒤에 "무슨 일이 있었나"를 볼 유일한 기록인데
  * 그것까지 지우면 조사할 수단이 사라진다.
@@ -56,13 +57,14 @@ public class ScimRebuildUseCase {
 
     /**
      * 작업 락(REBUILD)을 잡고 실행 기록(RUNNING)을 연 뒤 돌려준다. 재적재는 요청과 떼어 돈다 — 결과는 실행 기록으로 본다. 락 잡기·갱신·리스를
-     * 잃으면 멈추기·반납은 {@link SyncJobs#startLocked} 가 한다. 못 잡으면 {@link LockUnavailableException} 이고 아무것도 시작하지 않는다.
+     * 잃으면 멈추기·반납과 반납 뒤의 스냅샷 저장은 {@link SyncJobs#startLockedThen} 이 한다. 못 잡으면 {@link LockUnavailableException} 이고
+     * 아무것도 시작하지 않는다.
      *
      * <p>{@code WIPE} 의 확인값 검증은 호출자(컨트롤러)의 몫이다. 여기까지 왔다는 것은 이미 확인됐다는 뜻이므로 값 자체는 받지 않는다.
      */
     public Mono<SyncRun> start(ScimRebuildMode mode) {
         log.warn("SCIM 재적재 요청: mode={}", mode);
-        return jobs.startLocked(SyncSource.SCIM, triggerFor(mode), MutationLock.LockPurpose.REBUILD,
+        return jobs.startLockedThen(SyncSource.SCIM, triggerFor(mode), MutationLock.LockPurpose.REBUILD,
                 Mono.defer(() -> rebuild(mode)), run -> {
                 });
     }
@@ -71,8 +73,9 @@ public class ScimRebuildUseCase {
         return mode == ScimRebuildMode.WIPE ? SyncTrigger.RESET : SyncTrigger.REBUILD;
     }
 
-    private Mono<SyncOutcome> rebuild(ScimRebuildMode mode) {
-        return mode == ScimRebuildMode.WIPE ? wipe() : reloadTuples();
+    /** 락 안에서 할 일을 하고 "반납 뒤 할 일"을 내놓는다 — 튜플 스냅샷 저장은 락을 반납한 뒤에 한다(설계 2026-10-02 §5, 점검 P8). */
+    private Mono<Mono<SyncOutcome>> rebuild(ScimRebuildMode mode) {
+        return mode == ScimRebuildMode.WIPE ? wipe().map(Mono::just) : reloadTuples();
     }
 
     // ---------- TUPLES ----------
@@ -83,29 +86,31 @@ public class ScimRebuildUseCase {
     private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
             desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
 
-    private Mono<SyncOutcome> reloadTuples() {
+    private Mono<Mono<SyncOutcome>> reloadTuples() {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
             return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
-                    .flatMap(reconciliation -> reconciliation.held()
+                    .map(reconciliation -> reconciliation.held()
                             ? Mono.just(SyncOutcome.failed(reconciliation.heldReason()))
                             : commitTuples(reconciliation));
         });
     }
 
     /**
-     * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 의도한 것을 담으면 부분 실패 뒤 스냅샷이 장부보다 앞서게
-     * 되고, 그 기록을 믿는 다음 판단이 전부 어긋난다. 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다(설계 §5).
+     * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다.
+     * <b>락을 반납한 뒤에 돈다</b>(설계 2026-10-02 §5) — SCIM 쓰기 경로는 이 스냅샷을 읽지 않는다. 저장이 실패하면 FAILED 다 — 장부는 이미 맞췄다.
      */
     private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation) {
-        Instant now = clock.instant();
-        TupleSnapshot snapshot = new TupleSnapshot(
-                SnapshotIds.generate(now, SyncSource.SCIM), now, SyncSource.SCIM, reconciliation.ledger());
-
-        return snapshots.save(snapshot)
-                .thenReturn(reconciliation.outcome(snapshot.id()));
+        return Mono.defer(() -> {
+                    Instant now = clock.instant();
+                    TupleSnapshot snapshot = new TupleSnapshot(
+                            SnapshotIds.generate(now, SyncSource.SCIM), now, SyncSource.SCIM, reconciliation.ledger());
+                    return snapshots.save(snapshot).thenReturn(reconciliation.outcome(snapshot.id()));
+                })
+                .onErrorMap(error -> new IllegalStateException("장부는 맞췄다 — 스냅샷 저장 실패: "
+                        + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()), error));
     }
 
     // ---------- WIPE ----------
