@@ -8,11 +8,13 @@ import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -146,7 +148,7 @@ class OpenFgaRelationTupleWriterBreakerTest {
     }
 
     @Test
-    @DisplayName("동시에 보내도 차단기는 보낸 순서대로 세어 세 묶음째에서 멈추고, 이미 나간 묶음은 보내지 않은 것으로 센다")
+    @DisplayName("동시에 보내도 차단기는 보낸 순서대로 세어 세 묶음째에서 멈추고, 이미 나간 묶음은 결과를 기다려 센다")
     void 동시에_보내도_순서대로_센다() {
         // given — 쓰기 묶음 여덟 개가 모두 일시 오류다
         List<Batch> 배치 = IntStream.range(0, 8)
@@ -158,11 +160,79 @@ class OpenFgaRelationTupleWriterBreakerTest {
             return Mono.delay(Duration.ofMillis(10)).thenReturn(batch.failed("일시 오류"));
         });
 
+        // when, then — 앞 묶음을 센 뒤에야 다음 묶음이 나가므로, 셋째를 셀 때 나가 있던 것은 넷째~여섯째다
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).block())
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("남은 2개");
+                    assertThat(멈춤.partial().failures()).as("실패한 셋 + 이미 나가 실패한 셋 + 보내지 않은 둘").hasSize(8)
+                            .filteredOn(failure -> failure.reason().equals("연속 실패로 보내지 않음"))
+                            .hasSize(2);
+                });
+        assertThat(보낸.get()).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("멈출 때 이미 나간 묶음은 결과를 기다려 실제 결과로 세고, 아직 안 나간 묶음만 보내지 않는다 — 반납 뒤에 늦게 떨어지는 쓰기가 없다")
+    void 멈출_때_이미_나간_묶음은_결과를_기다려_실제_결과로_센다() {
+        // given — 동시 4. 묶음마다 응답을 손으로 준다
+        List<Batch> 배치 = 배치들(8);
+        List<Sinks.One<TupleWriteResult>> 응답 = new CopyOnWriteArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            Sinks.One<TupleWriteResult> sink = Sinks.one();
+            응답.add(sink);
+            return sink.asMono();
+        });
+        CompletableFuture<TupleWriteResult> 끝 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).toFuture();
+        assertThat(응답).hasSize(4);
+
+        // when — 앞 셋이 실패한다. 첫째·둘째를 세는 사이 다섯째·여섯째가 나가고, 셋째에서 멈춘다
+        응답.get(0).tryEmitValue(배치.get(0).failed("연결 거부"));
+        응답.get(1).tryEmitValue(배치.get(1).failed("연결 거부"));
+        응답.get(2).tryEmitValue(배치.get(2).failed("연결 거부"));
+        assertThat(응답).as("멈춘 뒤에는 새로 보내지 않는다").hasSize(6);
+
+        // then — 이미 나간 넷째~여섯째의 결과가 나올 때까지 끝나지 않는다. 넷째가 마지막이다
+        응답.get(4).tryEmitValue(배치.get(4).succeeded());
+        응답.get(5).tryEmitValue(배치.get(5).succeeded());
+        assertThat(끝).as("넷째가 아직 나가 있다").isNotDone();
+        응답.get(3).tryEmitValue(배치.get(3).succeeded());
+
+        assertThat(끝).isCompletedExceptionally();
+        assertThatThrownBy(끝::join)
+                .cause()
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("남은 2개")
+                            .hasMessageContaining("연결 거부");
+                    assertThat(멈춤.partial().written()).as("멈춘 뒤 성공해도 멈춤은 풀리지 않고, 성공은 성공으로 센다")
+                            .containsExactlyInAnyOrder(
+                                    배치.get(3).tuples().get(0), 배치.get(4).tuples().get(0), 배치.get(5).tuples().get(0));
+                    assertThat(멈춤.partial().failures()).hasSize(5)
+                            .filteredOn(failure -> failure.reason().equals("연속 실패로 보내지 않음"))
+                            .extracting(TupleFailure::tuple)
+                            .containsExactly(배치.get(6).tuples().get(0), 배치.get(7).tuples().get(0));
+                });
+        assertThat(응답).as("일곱째·여덟째는 보내지 않는다").hasSize(6);
+    }
+
+    @Test
+    @DisplayName("지우기 묶음에서 멈추면 뒤따르는 쓰기 묶음은 하나도 보내지 않는다")
+    void 지우기에서_멈추면_쓰기는_보내지_않는다() {
+        // given — 지우기 묶음 셋이 모두 실패한다
+        List<Batch> 배치 = new ArrayList<>();
+        IntStream.range(0, 3).forEach(i -> 배치.add(Batch.deletes(List.of(RelationTuple.directMember("d" + i, "DEV002")))));
+        IntStream.range(0, 4).forEach(i -> 배치.add(Batch.writes(List.of(RelationTuple.directMember("w" + i, "DEV002")))));
+        List<Batch> 보낸것 = new CopyOnWriteArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.fromSupplier(() -> {
+            보낸것.add(batch);
+            return batch.failed("연결 거부");
+        });
+
         // when, then
         assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).block())
-                .isInstanceOf(TupleWriteAbortedException.class)
-                .satisfies(error -> assertThat(((TupleWriteAbortedException) error).partial().failures())
-                        .as("실패한 셋 + 보내지 않은(이미 나간 것 포함) 다섯").hasSize(8));
-        assertThat(보낸.get()).isLessThanOrEqualTo(7);
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("남은 4개");
+                    assertThat(멈춤.partial().failures()).hasSize(7);
+                });
+        assertThat(보낸것).allMatch(Batch::delete).hasSize(3);
     }
 }

@@ -494,7 +494,8 @@ IdP가 연결을 끊어도 그 변경은 커밋까지 마치고 락을 반납한
 마저 지운다. 멤버 전원 빼기·빈 교체도 빠지는 멤버는 Check·직원 읽기 없이 지운다.
 
 **OpenFGA 요청은 동시에 여러 개 보낸다.** Check·Write 묶음을 `openfga.request-concurrency`(기본 4)만큼 동시에 보낸다 — 지우기 묶음을 다
-보낸 뒤 쓰기 묶음을 보낸다. 재적재·LDAP 동기화도 함께 빨라진다. OpenFGA가 버거우면 낮춘다. DynamoDB 묶음 요청(BatchGet·BatchWrite)은
+보낸 뒤 쓰기 묶음을 보낸다. 재적재·LDAP 동기화도 함께 빨라진다. OpenFGA가 버거우면 낮춘다. 차단기로 멈출 때 이미 나간 묶음은 결과를
+기다려 세고 아직 안 나간 묶음만 보내지 않는다 — 락을 반납한 뒤에 늦게 떨어지는 쓰기가 없다. DynamoDB 묶음 요청(BatchGet·BatchWrite)은
 처리 못 한 키를 5번까지(100ms부터 두 배씩) 다시 보내고, 그래도 남으면 실패한다.
 
 **재적재가 도중에 리스를 잃으면 중단하고 `FAILED`로 기록한다.** 갱신(`lock-renew-interval`)이
