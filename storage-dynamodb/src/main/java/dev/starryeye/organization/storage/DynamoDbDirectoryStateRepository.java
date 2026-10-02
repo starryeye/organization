@@ -13,17 +13,13 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
-import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -71,11 +67,6 @@ import java.util.stream.Collectors;
 public class DynamoDbDirectoryStateRepository implements DirectoryStateRepository {
 
     private static final int QUERY_CONCURRENCY = 8;
-
-    /** BatchGetItem 한 번에 담을 수 있는 키 수(DynamoDB 한도). */
-    private static final int BATCH_GET_LIMIT = 100;
-    /** 미처리 키를 다시 읽기 전에 쉬는 시간. 처리량이 모자라 남은 키라 곧바로 다시 부르면 또 남는다. */
-    private static final Duration UNPROCESSED_RETRY_DELAY = Duration.ofMillis(50);
 
     private static final String EXTERNAL_ID = "externalId";
     private static final String USER_NAME = "userName";
@@ -380,12 +371,12 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     /**
      * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
-     * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 잠깐 쉬었다 다시 읽는다 — 빠뜨리면 멤버를 "없다" 로 본다.
+     * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 {@link BatchRequests} 규칙(5번까지, 백오프)으로 다시 읽는다.
      */
     @Override
     public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
         return Flux.fromIterable(candidates)
-                .buffer(BATCH_GET_LIMIT)
+                .buffer(BatchRequests.GET_LIMIT)
                 .concatMap(chunk -> batchGet(chunk.stream()
                         .map(ref -> Map.of(
                                 Keys.PK, Attrs.s(Keys.groupPk(groupId)),
@@ -411,23 +402,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
-        String table = properties.getTableName();
-        KeysAndAttributes 처음 = KeysAndAttributes.builder().keys(keys).consistentRead(true).build();
-        return Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
-                        .requestItems(Map.of(table, 처음))
-                        .build()))
-                .expand(response -> {
-                    KeysAndAttributes 남은것 = response.unprocessedKeys().get(table);
-                    if (남은것 == null || !남은것.hasKeys() || 남은것.keys().isEmpty()) {
-                        return Mono.empty();
-                    }
-                    KeysAndAttributes 다시 = 남은것.toBuilder().consistentRead(true).build();
-                    return Mono.delay(UNPROCESSED_RETRY_DELAY)
-                            .then(Mono.fromFuture(() -> client.batchGetItem(BatchGetItemRequest.builder()
-                                    .requestItems(Map.of(table, 다시))
-                                    .build())));
-                })
-                .concatMapIterable(response -> response.responses().getOrDefault(table, List.of()));
+        return new BatchRequests(client, properties.getTableName()).get(keys);
     }
 
     /** 파티션에서 정렬키가 {@code prefix} 로 시작하는 줄의 <b>정렬키만</b> 강한 일관성으로 읽는다. */

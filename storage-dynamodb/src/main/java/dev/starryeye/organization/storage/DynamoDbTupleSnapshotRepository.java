@@ -12,7 +12,6 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
@@ -45,12 +44,8 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository {
 
-    private static final int BATCH_SIZE = 25;
+    private static final int BATCH_SIZE = BatchRequests.WRITE_LIMIT;
     private static final int DELETE_CONCURRENCY = 4;
-
-    /** BatchWriteItem 의 UnprocessedItems 재시도 상한. AWS 는 지수 백오프 재시도를 권장한다. */
-    private static final int MAX_BATCH_ATTEMPTS = 5;
-    private static final Duration BATCH_RETRY_BASE_DELAY = Duration.ofMillis(100);
 
     private static final String CREATED_AT = "createdAt";
     private static final String SOURCE = "source";
@@ -82,12 +77,13 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     private Mono<Void> writeTuples(TupleSnapshot snapshot) {
+        BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
         return Flux.fromIterable(snapshot.tuples())
                 .map(tuple -> WriteRequest.builder()
                         .putRequest(PutRequest.builder().item(tupleItem(snapshot.id(), tuple)).build())
                         .build())
                 .buffer(BATCH_SIZE)
-                .concatMap(this::batchWrite)
+                .concatMap(묶음::write)
                 .then();
     }
 
@@ -264,6 +260,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
      * 그대로 뒤집은 순서다 — 메타를 먼저 지우면 튜플 배치 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
      */
     private Mono<Void> deleteSnapshot(String snapshotId) {
+        BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
         return queryPartition(Keys.snapshotPk(snapshotId))
                 .filter(item -> !Keys.META.equals(Attrs.str(item, Keys.SK)))
                 .map(item -> WriteRequest.builder()
@@ -273,46 +270,11 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                                 .build())
                         .build())
                 .buffer(BATCH_SIZE)
-                .concatMap(this::batchWrite)
+                .concatMap(묶음::write)
                 .then(Mono.defer(() -> deleteItem(Keys.snapshotPk(snapshotId), Keys.META)));
     }
 
     // ---------- 공통 ----------
-
-    /**
-     * UnprocessedItems 가 남으면 다시 보낸다. DynamoDB 는 배치 일부를 거절할 수 있고,
-     * AWS 는 지수 백오프로 재시도할 것을 권장한다. 재시도 상한을 두지 않으면 지속적인
-     * 스로틀링 아래에서 무한히 돌며 서비스에 핫루프를 거는 셈이라, {@link #MAX_BATCH_ATTEMPTS}
-     * 를 넘기면 남은 건수를 담아 에러로 실패시킨다 — save() 가 실패하면 FullSyncUseCase 가
-     * 이번 실행을 FAILED 로 기록하고 다음 동기화는 온전한 이전 스냅샷을 기준으로 다시 diff 한다.
-     */
-    private Mono<Void> batchWrite(List<WriteRequest> requests) {
-        return batchWrite(requests, 1);
-    }
-
-    private Mono<Void> batchWrite(List<WriteRequest> requests, int attempt) {
-        if (requests.isEmpty()) {
-            return Mono.empty();
-        }
-        return Mono.fromFuture(() -> client.batchWriteItem(BatchWriteItemRequest.builder()
-                        .requestItems(Map.of(properties.getTableName(), requests))
-                        .build()))
-                .flatMap(response -> {
-                    List<WriteRequest> unprocessed =
-                            response.unprocessedItems().getOrDefault(properties.getTableName(), List.of());
-                    if (unprocessed.isEmpty()) {
-                        return Mono.empty();
-                    }
-                    if (attempt >= MAX_BATCH_ATTEMPTS) {
-                        return Mono.error(new IllegalStateException(
-                                "BatchWriteItem 이 %d회 재시도한 뒤에도 %d건을 처리하지 못했다"
-                                        .formatted(attempt, unprocessed.size())));
-                    }
-                    Duration delay = BATCH_RETRY_BASE_DELAY.multipliedBy(1L << (attempt - 1));
-                    return Mono.delay(delay).then(batchWrite(unprocessed, attempt + 1));
-                })
-                .then();
-    }
 
     private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
         QueryRequest request = QueryRequest.builder()
