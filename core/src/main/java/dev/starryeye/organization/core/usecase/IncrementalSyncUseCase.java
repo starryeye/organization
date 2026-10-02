@@ -92,6 +92,11 @@ import java.util.stream.Collectors;
  *       있지만 요청 한 건마다 비용이 훨씬 크다.</li>
  * </ul>
  *
+ * <p><b>손으로 만드는 튜플 — 지울 줄만(설계 2026-10-02 §4.1·§4.2).</b> 조직 삭제({@link #removeGroup})의 줄과 조직 PATCH·PUT 에서
+ * 빠지는 멤버의 줄은 {@link TupleMapper} 를 거치지 않고 {@link #tupleFor} 로 바로 만든다 — "튜플 규칙은 한 곳에만"의 예외다.
+ * 지우기뿐이라 안전하다. 비활성 직원처럼 줄이 없어야 할 멤버의 줄도 함께 넣고 "없으면 무시"로 지우므로 활성 여부·존재 같은 규칙을
+ * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다.
+ *
  * <p>이 유스케이스는 {@code SyncRun} 을 기록하지 않는다. SCIM 은 요청 단위라 이력이 폭증한다.
  *
  * <p><b>부분 실패(design §7.2).</b> OpenFGA 배치는 트랜잭션이므로 SCIM 단건 변경은 대개
@@ -388,7 +393,10 @@ public class IncrementalSyncUseCase {
                 }));
     }
 
-    /** 그림에 실을 멤버의 변경 전·후 소속. 전 은 지금 멤버 중 그림에 실을 것, 후 는 반영 뒤 멤버가 될 것(아직 멤버가 아닌 넣을 멤버 포함). */
+    /**
+     * 이번 변경이 닿는 멤버의 변경 전·후 소속. 전 은 지금 멤버 중 변경이 닿는 것(전체 교체면 빠질 멤버), 후 는 반영 뒤 멤버가 될 것(아직 멤버가
+     * 아닌 넣을 멤버 포함). 전 에만 있는 멤버(빠질 멤버)는 그림에 싣지 않고 Check·직원 읽기 없이 지운다(설계 2026-10-02 §4.2).
+     */
     private record 멤버전후(Set<MemberRef> 전, Set<MemberRef> 후) {
     }
 
@@ -887,7 +895,8 @@ public class IncrementalSyncUseCase {
      * 썼거나({@code result.written()}), 이미 있어서 쓸 필요가 없었거나({@code beforeTuples},
      * 즉 Check 기준선), 애초에 튜플이 필요 없는 멤버거나(비활성 유저, 존재하지 않는 하위 조직).
      * 빠진 멤버는 그 튜플이 실제로 지워졌을 때만(또는 원래 튜플이 없었을 때) 제외된다 —
-     * 삭제가 실패하면 여전히 멤버로 남아, 다음 동기화가 다시 지우려 시도한다.
+     * 삭제가 실패하면 여전히 멤버로 남아, 다음 동기화가 다시 지우려 시도한다. {@link #changeGroup} 은 빠지는 멤버의 줄을 Check 없이
+     * 지우므로 {@code beforeTuples} 에 그 줄이 있다고 넣어 준다({@link #diffAndApply}) — 지우기가 실패한 멤버만 남는다.
      *
      * <p><b>"이미 있음" 을 빠뜨리면 안 된다.</b> 기준선이 상태였을 때는 새 멤버의 튜플이 언제나
      * 델타에 들어가 {@code written} 에 나타났다. 기준선이 OpenFGA 로 바뀐 지금은 <b>이미 있는
@@ -896,9 +905,8 @@ public class IncrementalSyncUseCase {
      * 않는다 — OpenFGA 쓰기 성공 뒤 DynamoDB 커밋이 실패해 IdP 가 같은 요청을 재시도하는,
      * 이 기능이 없애려는 바로 그 경로다.
      *
-     * <p>{@code requested} 의 멤버를 빈 집합으로 주면 "이 조직을 통째로 비우려는 시도"를
-     * 표현할 수 있다 — {@link #removeGroup} 이 자기 자신의 멤버 튜플 삭제를 이 방식으로
-     * 재사용한다.
+     * <p>부르는 곳은 {@link #upsertGroup} 과 {@link #changeGroup} 이다. 조직 삭제({@link #removeGroup})는 이 계산을 쓰지 않는다 —
+     * 전용 경로가 지운 줄로 바로 정한다(설계 2026-10-02 §4.1).
      */
     private DirectoryGroup reconcileGroupMembers(DirectoryGroup existing,
                                                  DirectoryGroup requested,

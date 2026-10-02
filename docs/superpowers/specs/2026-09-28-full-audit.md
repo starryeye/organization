@@ -1256,7 +1256,7 @@ AD 보안 그룹이 검색 범위에 섞여 튜플이 200만이 되면 삽입이
 | S10 | 415 오류 `detail` 에 내부 자바 클래스 이름이 실려 인증 없는 엔드포인트로 나간다 | `ScimRouter.java:87-89` | 코드로 확인(문구는 추정) | F11 |
 | S11 | path 없는 `remove` 의 `scimType` 이 RFC 가 정한 `noTarget` 이 아니라 `invalidSyntax` 다(상태코드는 맞다) | `ScimPatchApplier.java:80-82,155-157,310-314` | 코드로 확인 | F12 |
 | S12 | 우리가 거절하는 조회·참조 모양 — `manager` 필터·PATCH, Entra 이메일 매칭 `emails[type eq "work"]`, Ping 관리자 필터 `co`, JumpCloud 이메일 재연결 — 모두 400. "표준 신호만 받는다" 원칙에 따른 알려진 제한. 격리 영향은 M18 | `ScimUserListing.java:27-32`, `ScimFilter.java:87,107-118` | 코드로 확인 | 카탈로그 |
-| S13 | 재적재 하트비트가 일시 오류(스로틀·네트워크) 한 번에 재적재를 중단한다. 리스가 20초 남았는데도 store 를 반쯤 채운 채 FAILED, 락 반납 | `ScimRebuildUseCase.java:129-138`, `DynamoDbMutationLock.java:101-119` | 코드로 확인 | R-11 |
+| S13 | 재적재 하트비트가 일시 오류(스로틀·네트워크) 한 번에 재적재를 중단한다. 리스가 20초 남았는데도 store 를 반쯤 채운 채 FAILED, 락 반납. ③-1(2026-10-02) 뒤로 같은 성질이 큰 SCIM 쓰기(조직 삭제 등)에도 적용된다 — 갱신 한 번 실패로 멈추지만 META 가 마지막이라 재시도로 회복된다 | `ScimRebuildUseCase.java:129-138`, `DynamoDbMutationLock.java:101-119` | 코드로 확인 | R-11 |
 | S14 | 락 획득 PutItem 이 서버에서 성공했는데 응답이 유실돼 SDK 가 재시도하면, 자기 락에 막혀 30초 동안 모든 SCIM 쓰기 503·재적재 409 | `DynamoDbMutationLock.java:65-75` | 코드로 확인(SDK 재시도 경로는 추정) | R-12 **→ 해결(2026-10-02, 슬라이드 ③-1)** |
 | S15 | 락 만료 판단이 각 인스턴스의 로컬 시계다. 시계가 30초 이상 어긋나면 남의 락을 가져간다(NTP 환경이면 드묾) | `DynamoDbMutationLock.java:53-54,69-71,104` | 코드로 확인 | R-13 |
 | S16 | 형식만 맞춘 위조 커서가 400 이 아니라 500 이다(파티션 밖을 읽지는 못한다). 조직 멤버 목록 커서는 오프셋이라 페이지 사이에 멤버가 바뀌면 건너뛰거나 두 번 준다 | `Cursor.java:50-78`, `AdminQueryUseCase.java:305-348` | 코드로 확인 | R-14 |

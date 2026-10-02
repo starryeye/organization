@@ -89,8 +89,11 @@ public class SyncJobs {
 
     /**
      * {@link #startLocked} 와 같되, 락 안의 일이 <b>"반납 뒤 할 일"</b>을 내놓는다(설계 2026-10-02 §5). 순서: 작업 → 반납 → 반납 뒤 할 일 → 기록.
-     * 락이 필요 없는 마무리(SCIM 재적재의 튜플 스냅샷 저장 등)를 락 밖으로 빼 그동안 다른 쓰기를 막지 않는다. 반납 뒤 할 일은 기한·서버 종료 경주 밖에서
-     * 돈다 — 짧은 마무리만 둔다. 실패하면 그 사유로 FAILED 다.
+     * 락이 필요 없는 마무리(SCIM 재적재의 튜플 스냅샷 저장 등)를 락 밖으로 빼 그동안 다른 쓰기를 막지 않는다. 실패하면 그 사유로 FAILED 다.
+     *
+     * <p>반납 뒤 할 일은 기한·서버 종료 경주 밖에서 돈다 — SCIM 재적재의 스냅샷 저장은 10만 명이면 수십 초~2분이다. {@link #shutdown} 은 최대
+     * {@link #종료_대기} 만 기다리므로 그 사이 서버가 내려가면 DynamoDB 클라이언트가 닫히며 실패하고, 기록은 RUNNING 으로 남는다. 다음 락 작업이
+     * 그 기록을 "비정상 종료로 중단"으로 닫는다.
      */
     public Mono<SyncRun> startLockedThen(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
                                          Mono<Mono<SyncOutcome>> work, Consumer<SyncRun> onFinished) {
