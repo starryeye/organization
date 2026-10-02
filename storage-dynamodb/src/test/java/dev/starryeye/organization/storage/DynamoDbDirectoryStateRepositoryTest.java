@@ -540,7 +540,10 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(남은것).isNotNull();
         repository.deleteGroup("BIG", 남은것.members()).block();
         assertThat(repository.findGroup("BIG").block()).isNull();
-        assertThat(정렬키들("USER#u0")).isEmpty();
+        assertThat(repository.findMemberRefs("BIG").collectList().block()).isEmpty();
+        assertThat(repository.findGroupIdsContaining(MemberRef.user("u0")).collectList().block())
+                .as("이미 지운 멤버의 소속 줄이 남아도 역참조는 멤버 줄로 확인한다")
+                .isEmpty();
     }
 
     @Test
