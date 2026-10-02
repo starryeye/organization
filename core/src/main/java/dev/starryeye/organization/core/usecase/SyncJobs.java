@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * 동기화·재적재 작업을 요청과 떼어 돌린다 (설계 2026-09-29 §4·§5, 점검 C3·C7).
@@ -29,7 +30,8 @@ import java.util.function.Supplier;
  *
  * <p><b>작업 락(설계 2026-09-30 §3).</b> {@link #startLocked} 가 앱의 작업 락을 잡고, 작업 동안 리스를 갱신하고, 리스를 잃으면(=남이 가져갔으면)
  * 작업을 멈추고({@link LeaseKeeper}), 끝나면 반납한다. 여러 인스턴스가 같은 초에 걸어도 한 번에 하나만 돈다. SCIM 재적재·LDAP 동기화·LDAP 재적재가
- * 모두 이것을 탄다.
+ * 모두 이것을 탄다. 하트비트는 남은 기록 정리와 일을 함께 덮는다 — 그 앞에는 리스를 막 잡아 TTL 이 그대로인 채로 도는 실행 기록 PutItem 하나만
+ * 있다.
  *
  * <p>한 작업이 지키는 규칙:
  * <ol>
@@ -87,9 +89,9 @@ public class SyncJobs {
             return lock.acquire(purpose)
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
-                    .flatMap(lease -> start(source, trigger,
-                            keeper.keep(lease, work, "작업 도중 리스 상실"),
+                    .flatMap(lease -> start(source, trigger, work,
                             run -> 남은_기록을_닫는다(source, run.runId()),
+                            일 -> keeper.keep(lease, 일, "작업 도중 리스 상실"),
                             () -> lock.release(lease),
                             onFinished));
         });
@@ -104,7 +106,7 @@ public class SyncJobs {
 
     Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
                         Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
-        return start(source, trigger, work, run -> Mono.empty(), release, onFinished);
+        return start(source, trigger, work, run -> Mono.empty(), UnaryOperator.identity(), release, onFinished);
     }
 
     /**
@@ -112,12 +114,14 @@ public class SyncJobs {
      *
      * @param 먼저       기록을 연 뒤·일을 시작하기 전에 할 일. 실패하면 일을 하지 않고 FAILED 로 끝나므로 오류를 스스로
      *                   삼켜야 한다(남은_기록을_닫는다 가 그렇다)
+     * @param 지키기     {@code 먼저} 와 {@code work} 를 합친 것을 감싼다({@link LeaseKeeper#keep} 이 쓴다) — 락을 쥔 채
+     *                   돌아야 하는 구간이 {@code work} 만이 아니라 남은 기록 정리까지이기 때문이다
      * @param release    겹침 검사(락·가드)를 푸는 수단. 작업이 어떻게 끝나든 정확히 한 번 부른다
      * @param onFinished 끝난 기록으로 부른다(지표·로그). 기록에 실패하면 부르지 않는다
      */
     Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
-                        Function<SyncRun, Mono<Void>> 먼저, Supplier<Mono<Void>> release,
-                        Consumer<SyncRun> onFinished) {
+                        Function<SyncRun, Mono<Void>> 먼저, UnaryOperator<Mono<SyncOutcome>> 지키기,
+                        Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
         return Mono.deferContextual(context -> {
             Sinks.One<SyncRun> 열림 = Sinks.one();
             Sinks.Empty<Void> 끝남 = Sinks.empty();
@@ -136,7 +140,7 @@ public class SyncJobs {
                     .flatMap(run -> {
                         log.info("[{}] 작업 시작: source={} trigger={}", run.runId(), source, trigger);
                         열림.tryEmitValue(run);
-                        return 끝까지_돌린다(run, work, 먼저, release);
+                        return 끝까지_돌린다(run, work, 먼저, 지키기, release);
                     })
                     .doOnNext(onFinished)
                     .doFinally(signal -> {
@@ -174,10 +178,10 @@ public class SyncJobs {
     /**
      * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다.
      */
-    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<SyncOutcome> work,
-                                    Function<SyncRun, Mono<Void>> 먼저, Supplier<Mono<Void>> release) {
+    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<SyncOutcome> work, Function<SyncRun, Mono<Void>> 먼저,
+                                    UnaryOperator<Mono<SyncOutcome>> 지키기, Supplier<Mono<Void>> release) {
         Mono<SyncOutcome> 종료되면 = 종료.asMono().then(Mono.error(() -> new IllegalStateException(종료_사유)));
-        Mono<SyncOutcome> 일 = Mono.defer(() -> 먼저.apply(run)).then(work);
+        Mono<SyncOutcome> 일 = 지키기.apply(Mono.defer(() -> 먼저.apply(run)).then(work));
         return Mono.firstWithSignal(종료되면, 일)
                 .timeout(timeout, Mono.error(() -> new IllegalStateException("기한 초과 — " + 사람말로(timeout))))
                 .switchIfEmpty(Mono.error(() -> new IllegalStateException("작업이 결과 없이 끝났다")))

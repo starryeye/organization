@@ -399,6 +399,28 @@ class SyncJobsTest {
     }
 
     @Test
+    @DisplayName("남은 기록 정리가 오래 걸려도 그동안 리스를 갱신한다")
+    void 남은_기록_정리가_오래_걸려도_리스를_갱신한다() {
+        // given — findRecent(남은 기록 정리가 쓰는 조회)가 느린 저장소. 하트비트가 work 에만 걸리면 이 구간은 갱신 없이 지나간다
+        FakeSyncRunRepository 느린_정리_저장소 = new FakeSyncRunRepository(지금) {
+            @Override
+            public Flux<SyncRun> findRecent(int limit) {
+                return super.findRecent(limit).delaySubscription(Duration.ofMillis(300));
+            }
+        };
+        jobs = new SyncJobs(느린_정리_저장소, lock, Duration.ofMillis(50), LockObserver.NOOP, Duration.ofMinutes(1));
+
+        // when
+        SyncRun 끝난것 = 느린_정리_저장소.awaitFinished(jobs.startLocked(SyncSource.LDAP, SyncTrigger.MANUAL,
+                MutationLock.LockPurpose.SYNC, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then
+        assertThat(lock.renewed.get()).isGreaterThanOrEqualTo(3);
+        assertThat(끝난것.status()).isEqualTo(SyncStatus.SUCCEEDED);
+    }
+
+    @Test
     @DisplayName("락을 잡은 작업은 시작할 때 같은 앱의 끝나지 못한 락 작업 기록을 '비정상 종료로 중단'으로 닫는다 — 아카이빙 기록과 자기 기록은 두고")
     void 끝나지_못한_기록을_닫는다() {
         // given — 죽은 인스턴스가 남긴 SCIM 재적재 기록, 도는 중인 아카이빙, 다른 앱(LDAP)의 기록
