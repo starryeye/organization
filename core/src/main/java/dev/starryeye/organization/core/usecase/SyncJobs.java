@@ -5,12 +5,9 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
-import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import lombok.extern.slf4j.Slf4j;
-import reactor.core.Disposable;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
@@ -31,7 +28,8 @@ import java.util.function.Supplier;
  * 받아 간다.
  *
  * <p><b>작업 락(설계 2026-09-30 §3).</b> {@link #startLocked} 가 앱의 작업 락을 잡고, 작업 동안 리스를 갱신하고, 리스를 잃으면(=남이 가져갔으면)
- * 작업을 멈추고, 끝나면 반납한다. 여러 인스턴스가 같은 초에 걸어도 한 번에 하나만 돈다. SCIM 재적재·LDAP 동기화·LDAP 재적재가 모두 이것을 탄다.
+ * 작업을 멈추고({@link LeaseKeeper}), 끝나면 반납한다. 여러 인스턴스가 같은 초에 걸어도 한 번에 하나만 돈다. SCIM 재적재·LDAP 동기화·LDAP 재적재가
+ * 모두 이것을 탄다.
  *
  * <p>한 작업이 지키는 규칙:
  * <ol>
@@ -61,7 +59,7 @@ public class SyncJobs {
 
     private final SyncRunRepository runs;
     private final MutationLock lock;
-    private final Duration renewInterval;
+    private final LeaseKeeper keeper;
     private final LockObserver lockObserver;
     private final Duration timeout;
     private final Sinks.Empty<Void> 종료 = Sinks.empty();
@@ -71,7 +69,7 @@ public class SyncJobs {
                     LockObserver lockObserver, Duration timeout) {
         this.runs = runs;
         this.lock = lock;
-        this.renewInterval = renewInterval;
+        this.keeper = new LeaseKeeper(lock, renewInterval, lockObserver);
         this.lockObserver = lockObserver;
         this.timeout = timeout;
     }
@@ -89,18 +87,11 @@ public class SyncJobs {
             return lock.acquire(purpose)
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
-                    .flatMap(lease -> {
-                        Sinks.One<Throwable> 리스상실 = Sinks.one();
-                        Disposable heartbeat = 리스를_갱신한다(lease, 리스상실);
-                        return start(source, trigger,
-                                Mono.firstWithSignal(work, 리스상실.asMono().flatMap(Mono::error)),
-                                run -> 남은_기록을_닫는다(source, run.runId()),
-                                () -> {
-                                    heartbeat.dispose();
-                                    return lock.release(lease);
-                                },
-                                onFinished);
-                    });
+                    .flatMap(lease -> start(source, trigger,
+                            keeper.keep(lease, work, "작업 도중 리스 상실"),
+                            run -> 남은_기록을_닫는다(source, run.runId()),
+                            () -> lock.release(lease),
+                            onFinished));
         });
     }
 
@@ -238,21 +229,6 @@ public class SyncJobs {
                 .onErrorResume(error -> {
                     log.warn("끝나지 못한 실행 기록을 찾지 못했다 — 작업은 계속한다", error);
                     return Mono.empty();
-                });
-    }
-
-    /**
-     * 작업이 도는 동안 리스를 계속 미룬다(설계 §4.4). TTL 은 30초인데 작업은 몇 분 걸린다. 갱신이 실패하면 이미 리스를 잃은 것이다 —
-     * 그 사실을 {@code 리스상실} 로 흘려 작업을 취소하고 FAILED 로 기록하게 한다. {@code concatMap} 이 에러를 전파하므로 이 구독도 함께 끝난다.
-     */
-    private Disposable 리스를_갱신한다(LockLease lease, Sinks.One<Throwable> 리스상실) {
-        return Flux.interval(renewInterval, renewInterval)
-                .concatMap(tick -> lock.renew(lease))
-                .subscribe(renewed -> {
-                }, error -> {
-                    log.error("작업 도중 락 리스를 잃었다. 작업을 멈추고 FAILED 로 기록한다", error);
-                    lockObserver.leaseLost("작업 도중 리스 상실");
-                    리스상실.tryEmitValue(error);
                 });
     }
 
