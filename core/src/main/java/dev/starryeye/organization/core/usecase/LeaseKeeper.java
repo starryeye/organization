@@ -38,6 +38,8 @@ final class LeaseKeeper {
         return Mono.defer(() -> {
             Sinks.One<T> 상실 = Sinks.one();
             Disposable heartbeat = Flux.interval(renewInterval, renewInterval)
+                    // 갱신이 매달린 동안 온 tick 은 버린다 — 넘침 오류가 아니라 아래 시간 상한이 상실 사유가 되게
+                    .onBackpressureDrop()
                     .concatMap(tick -> lock.renew(lease).timeout(renewInterval))
                     .subscribe(renewed -> {
                     }, error -> {
