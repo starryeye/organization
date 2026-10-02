@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -30,8 +32,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * 멤버 10만 명 조직의 멤버 변경 (조직 멤버 PATCH 설계 §8.5).
@@ -39,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>한 명을 넣고 빼는 PATCH 가 조직 파티션을 훑지 않는다는 것을 <b>읽은 양</b>으로 단정한다 — DynamoDB Local 의 속도는 AWS 와 달라
  * 시간으로는 아무것도 증명하지 못한다. 조직은 저장소에 직접 심는다 — 멤버 줄만 있으면 된다. 바뀌지 않는 멤버의 직원 레코드와
  * 튜플은 이 경로가 보지 않으므로 심지 않는다. 10만 명 전체 교체는 HTTP 본문 한도(256KB)를 넘으므로 유스케이스를 직접 부른다.
+ * 조직 삭제(점검 C6)도 같은 조직으로 잰다 — 마지막 순서다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -68,6 +75,7 @@ class ScimGroupMemberPatchScaleTest {
     @Autowired StoreBootstrapper bootstrapper;
     @Autowired DynamoDbReadCounter counter;
     @Autowired TupleCheckCounter checks;
+    @Autowired MutationLock lock;
 
     private static String 멤버(int i) {
         return "m%06d".formatted(i);
@@ -216,5 +224,48 @@ class ScimGroupMemberPatchScaleTest {
         assertThat(checks.checkedTuples.get()).isLessThanOrEqualTo(1);
         assertThat(state.findMembers(조직, Set.of(MemberRef.user("leaver"))).block()).isEmpty();
         assertThat(check("user:leaver", "member", "group:" + 조직)).isFalse();
+    }
+
+    private void 직원을_만든다(String userName, HttpStatus 기대) {
+        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"%s","active":true}
+                        """.formatted(userName))
+                .exchange().expectStatus().isEqualTo(기대);
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("10만 명 조직 삭제는 직원을 읽지 않고 Check 하지 않는다. 그동안 다른 쓰기는 503 이고, 끝나면 받아진다(점검 C6)")
+    void 큰_조직을_지운다() throws Exception {
+        // given
+        counter.reset();
+        checks.reset();
+        AtomicInteger 들여다봄 = new AtomicInteger();
+        long 시작 = System.currentTimeMillis();
+
+        // when — 삭제를 따로 걸고, 락이 잡힌 동안 다른 쓰기를 보낸다
+        CompletableFuture<Void> 삭제 = CompletableFuture.runAsync(() ->
+                client.mutate().responseTimeout(Duration.ofMinutes(10)).build()
+                        .delete().uri("/scim/v2/Groups/" + 조직).exchange().expectStatus().isNoContent());
+        await().atMost(Duration.ofSeconds(60)).until(() -> {
+            들여다봄.incrementAndGet();
+            return lock.peek().blockOptional().isPresent();
+        });
+        직원을_만든다("during-delete", HttpStatus.SERVICE_UNAVAILABLE);
+        삭제.get(10, TimeUnit.MINUTES);
+
+        // then
+        읽은양을_찍는다("큰 조직 삭제", 시작);
+        assertThat(counter.getItems.get() - 들여다봄.get()).as("멤버 직원을 읽지 않는다").isLessThanOrEqualTo(20);
+        assertThat(checks.checkedTuples.get()).as("Check 없이 지운다").isZero();
+        assertThat(counter.scannedItems.get()).as("조직 파티션을 한 번만 훑는다").isLessThanOrEqualTo(전체 + 20);
+        assertThat(state.findGroupHeader(조직).blockOptional()).isEmpty();
+        assertThat(state.findMemberRefs(조직).count().block(Duration.ofMinutes(5))).isZero();
+        assertThat(state.findGroupIdsContaining(MemberRef.user(멤버(5))).collectList().block()).isEmpty();
+        assertThat(check("user:newbie1", "member", "group:" + 조직)).isFalse();
+
+        // and — 끝난 뒤에는 쓰기가 받아진다
+        직원을_만든다("after-delete", HttpStatus.CREATED);
     }
 }
