@@ -395,6 +395,28 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("대소문자·공백이 달라도 type 없는 멤버를 모아 묻는다 — 모으는 쪽과 적용하는 쪽이 같은 모양을 읽는다")
+    void 모양이_달라도_type_없는_멤버를_빠뜨리지_않는다() {
+        // given — 모으는 쪽이 한 모양을 놓치면 그 아이디는 묻지 않고 직원으로 떨어져, 조직이 경고 없이 직원이 된다
+        List<Set<String>> 물은것 = new ArrayList<>();
+        MemberTypeResolver 모두_조직 = ids -> {
+            물은것.add(Set.copyOf(ids));
+            return Mono.just(ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.GROUP)));
+        };
+        var patch = 패치(
+                new ScimOperation(" ADD ", "MEMBERS", List.of(Map.of("VALUE", "g1"))),
+                new ScimOperation("Add", null, Map.of("Members", List.of(Map.of("value", "g2", "TYPE", " ")))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, 모두_조직).block();
+
+        // then
+        assertThat(물은것).containsExactly(Set.of("g1", "g2"));
+        assertThat(change.applyTo(조직(), id -> false).members())
+                .containsExactlyInAnyOrder(MemberRef.group("g1"), MemberRef.group("g2"));
+    }
+
+    @Test
     @DisplayName("members 의 value 도 userName·externalId 과 같은 규칙으로 정규화된다")
     void 멤버_value가_정규화된다() {
         // given — 정규화하지 않으면 저장·응답은 되지만 튜플은 하나도 만들어지지 않는다
