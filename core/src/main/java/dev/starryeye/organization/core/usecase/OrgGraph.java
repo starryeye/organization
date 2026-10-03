@@ -127,7 +127,8 @@ final class OrgGraph {
             for (GroupEdge edge : 연결) {
                 if (!actual.contains(edge.tuple())) {
                     새연결.add(edge);
-                } else if (cut.contains(edge)) {
+                } else if (cut.remove(edge)) {
+                    // OpenFGA 에 있는 연결은 목록에 남아 있어도 튜플 그래프에 있다 — 쓰기 뒤 목록에서 빼기 전에 멈춘 경우다. 뒤 검사가 이 연결을 지나간다
                     풀린.add(edge);
                 }
             }

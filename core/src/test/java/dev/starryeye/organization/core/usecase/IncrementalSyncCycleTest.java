@@ -188,6 +188,23 @@ class IncrementalSyncCycleTest {
     }
 
     @Test
+    @DisplayName("OpenFGA 에 있는 연결은 보류 목록에 남아 있어도 튜플 그래프에 있다 — 그 연결을 지나는 순환을 닫는 새 연결을 보류한다")
+    void OpenFGA에_있는_보류_연결도_그래프에_있다() {
+        // given — X ⊃ G 는 OpenFGA 에 있는데 보류 목록에도 남았다(쓰기 뒤 목록에서 빼기 전에 멈춘 경우)
+        state.groups.put("G", 조직("G"));
+        state.groups.put("X", 조직("X", MemberRef.group("G")));
+        checker.allowed.add(RelationTuple.child("G", "X"));
+        state.cutEdges.add(new GroupEdge("X", "G"));
+
+        // when — G 에 X 를 넣는다. G ⊃ X 는 OpenFGA 에 있는 X ⊃ G 와 순환을 닫는다
+        useCase.upsertGroup(조직("G", MemberRef.group("X"))).block();
+
+        // then — 새 연결은 보류하고, OpenFGA 에 있는 X ⊃ G 는 목록에서 뺀다
+        assertThat(writer.written).doesNotContain(RelationTuple.child("X", "G"));
+        assertThat(state.cutEdges).containsExactly(new GroupEdge("G", "X"));
+    }
+
+    @Test
     @DisplayName("상태 기준선은 보류한 연결을 뺀다 — 보류 연결이 OpenFGA 에 없는 것을 어긋남으로 세지 않는다")
     void 보류_연결은_어긋남이_아니다() {
         // given
