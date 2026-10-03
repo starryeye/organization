@@ -50,8 +50,8 @@ import java.util.stream.Collectors;
  *
  * <p>영향 범위:
  * <ul>
- *   <li>조직 변경 — 그 조직 + <b>그 조직을 하위 조직으로 갖는 상위 조직들</b>(멤버 목록까지
- *       그대로. {@link #upsertGroup} 참고) + 그 조직들의 멤버 유저들(활성 여부 판정에 필요) +
+ *   <li>조직 변경 — 그 조직 + <b>그 조직을 하위 조직으로 갖는 상위 조직들</b>(헤더만, 멤버는
+ *       이 조직 하나로. {@link #upsertGroup} 참고) + 그 조직들의 멤버 유저들(활성 여부 판정에 필요) +
  *       멤버로 참조된 하위 조직의 <b>존재</b>(존재 확인에 필요, {@link TupleMapper} 가 child
  *       엣지를 만들려면 그 하위 조직이 스냅샷에 있어야 한다 — 단, 그 하위 조직 자신의 멤버까지
  *       실으면 안 된다. {@link #expandWithReferencedGroups} 참고). 조직 PATCH·PUT
@@ -78,7 +78,7 @@ import java.util.stream.Collectors;
  *       최소 스냅샷은 언제나 그만큼은 싣는다.</li>
  *   <li><b>스냅샷이 볼 수 없는 것 1 — child 엣지의 존재 조건.</b> 엣지 {@code (child, parent)}
  *       는 부모 쪽 멤버 목록에서 나오므로, 자식만 실은 스냅샷에는 아예 나타나지 않는다.
- *       → {@link #upsertGroup} 이 {@link #parentsOf} 로 <b>상위 조직들을 멤버 목록째로</b>
+ *       → {@link #upsertGroup} 이 {@link #상위_조직들} 로 <b>상위 조직들을 헤더만 읽고 멤버는 이 조직 하나로</b>
  *       both 스냅샷에 싣는 것으로 해결한다. 그래야 "부모가 먼저 참조해 둔 자식이 나중에 도착"
  *       하는 순서에서도 엣지가 만들어진다. 이때 <b>없던 조직은 before 스냅샷에서 완전히
  *       빼야</b> 한다 — 멤버 0개짜리 대역을 넣으면 before 에도 엣지가 생겨 델타가 비어버린다.</li>
@@ -289,9 +289,10 @@ public class IncrementalSyncUseCase {
      * 부모의 멤버 목록에서 나오므로, 이 조직만 실은 스냅샷에는 그 엣지가 아예 등장하지 않는다.
      * 그래서 부모가 이미 이 조직을 멤버로 적어 둔 채 이 조직이 뒤늦게 도착하면
      * ({@link TupleMapper} 가 "스냅샷에 없어 건너뜁니다" 로 미뤄 뒀던 경우) 그 엣지를 영원히
-     * 쓰지 못했다. {@link #parentsOf} 로 상위 조직들을 <b>멤버 목록 그대로</b> before/after
+     * 쓰지 못했다. {@link #상위_조직들} 로 상위 조직들을 <b>헤더만 읽고 멤버는 이 조직 하나로</b> before/after
      * 양쪽에 실어 기여를 대칭으로 만든다 — 이미 존재하던 조직이면 엣지가 양쪽에 다 있어
      * 델타에 나타나지 않고, 새로 생긴 조직이면 after 에만 있어 정확히 그 엣지만 새로 쓰인다.
+     * 이 연산은 이 조직을 언급하는 튜플만 보므로 상위 조직의 다른 멤버는 결과에 기여하지 않는다(설계 2026-10-03 §3.4).
      *
      * <p><b>없던 조직은 before 에서 통째로 뺀다.</b> "멤버 0개인 조직이 있다" 와 "조직이 없다"
      * 는 서로 다른 상태다. 없는 조직 자리에 멤버 0개짜리 대역을 넣으면
@@ -313,7 +314,7 @@ public class IncrementalSyncUseCase {
         return state.findGroup(group.id())
                 .map(Optional::of)
                 .defaultIfEmpty(Optional.empty())
-                .flatMap(existing -> parentsOf(group.id()).flatMap(parents -> {
+                .flatMap(existing -> 상위_조직들(group.id()).flatMap(parents -> {
                     Set<DirectoryGroup> beforeGroups = new LinkedHashSet<>(parents);
                     existing.ifPresent(beforeGroups::add);
                     Set<DirectoryGroup> afterGroups = new LinkedHashSet<>(parents);
@@ -951,10 +952,15 @@ public class IncrementalSyncUseCase {
                 : RelationTuple.child(member.id(), groupId);
     }
 
-    /** 이 조직을 하위 조직으로 갖는 상위 조직들. */
-    private Mono<Set<DirectoryGroup>> parentsOf(String groupId) {
+    /**
+     * 이 조직을 하위 조직으로 적어 둔 상위 조직들 — <b>헤더만</b> 읽고 멤버는 이 조직 하나로만 싣는다(설계 2026-10-03 §3.4). 이 연산은 후보·목표·상태 기준선을
+     * 모두 이 조직을 언급하는 튜플로 좁히므로({@link #mentioning}) 상위 조직의 다른 멤버는 결과에 기여하지 않는다 — {@link #직원한명_그림} 과 같은 논리다.
+     */
+    private Mono<Set<DirectoryGroup>> 상위_조직들(String groupId) {
+        Set<MemberRef> 이조직만 = Set.of(MemberRef.group(groupId));
         return state.findGroupIdsContaining(MemberRef.group(groupId))
-                .flatMap(state::findGroup, LOAD_CONCURRENCY)
+                .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
+                .map(header -> new DirectoryGroup(header.id(), header.externalId(), header.displayName(), 이조직만))
                 .collect(LinkedHashSet<DirectoryGroup>::new, Set::add);
     }
 
@@ -1056,27 +1062,27 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직들의 멤버 유저를 현재상태에서 읽어온다. {@code overrides} 에 있는 유저는
-     * 저장된 값 대신 그 값을 쓴다 — 아직 저장 전인 변경 후 상태를 반영하기 위해서다.
+     * 조직들의 멤버 유저를 현재상태에서 <b>묶어</b> 읽는다(설계 2026-10-03 §3.3). {@code overrides} 에 있는 유저는 저장된 값 대신 그 값을 쓴다 — 아직 저장 전인
+     * 변경 후 상태를 반영하기 위해서다.
      */
-    private Mono<Map<String, DirectoryUser>> loadMemberUsers(Set<DirectoryGroup> groups,
-                                                              Set<DirectoryUser> overrides) {
+    private Mono<Map<String, DirectoryUser>> loadMemberUsers(Set<DirectoryGroup> groups, Set<DirectoryUser> overrides) {
         Map<String, DirectoryUser> overrideById = byUserId(overrides);
-        Set<String> memberIds = new LinkedHashSet<>();
+        Set<String> 읽을것 = new LinkedHashSet<>();
         for (DirectoryGroup group : groups) {
             for (MemberRef member : group.members()) {
-                if (member.type() == MemberType.USER) {
-                    memberIds.add(member.id());
+                if (member.type() == MemberType.USER && !overrideById.containsKey(member.id())) {
+                    읽을것.add(member.id());
                 }
             }
         }
-        memberIds.addAll(overrideById.keySet());
-
-        return Flux.fromIterable(memberIds)
-                .flatMap(id -> overrideById.containsKey(id)
-                        ? Mono.just(overrideById.get(id))
-                        : state.findUser(id), LOAD_CONCURRENCY)
-                .collect(LinkedHashMap<String, DirectoryUser>::new, (map, user) -> map.put(user.id(), user));
+        Mono<Map<String, DirectoryUser>> 읽은것 = 읽을것.isEmpty()
+                ? Mono.just(Map.of())
+                : state.findUsers(읽을것).collectMap(DirectoryUser::id);
+        return 읽은것.map(read -> {
+            Map<String, DirectoryUser> users = new LinkedHashMap<>(read);
+            users.putAll(overrideById);
+            return users;
+        });
     }
 
     private static Map<String, DirectoryGroup> byId(Set<DirectoryGroup> groups) {

@@ -200,4 +200,27 @@ class IncrementalSyncReadScopeTest {
         assertThat(result.fullyApplied()).isTrue();
         assertThat(state.users).doesNotContainKey("loner");
     }
+
+    @Test
+    @DisplayName("새 조직 POST 는 그 조직을 먼저 적어 둔 상위 조직을 통째로 읽지 않는다 — 헤더만, 상위 조직의 직원도 읽지 않는다")
+    void POST는_상위_조직을_통째로_읽지_않는다() {
+        // given — 대형조직이 아직 없는 LATE 를 하위 조직으로 적어 두었다(늦게 도착한 조직)
+        DirectoryGroup 상위 = state.groups.get(대형조직);
+        Set<MemberRef> 멤버 = new LinkedHashSet<>(상위.members());
+        멤버.add(MemberRef.group("LATE"));
+        state.groups.put(대형조직, new DirectoryGroup(상위.id(), 상위.externalId(), 상위.displayName(), 멤버));
+        state.findGroupCalls.clear();
+        state.findUserCalls.clear();
+        state.findUsersCalls.clear();
+
+        // when
+        var result = useCase.createGroup(new DirectoryGroup("LATE", "ou=late", "늦게 온 조직", Set.of())).block(Duration.ofSeconds(10));
+
+        // then — 늦게 도착한 조직의 상위 연결은 지금처럼 쓰인다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.written).contains(RelationTuple.child("LATE", 대형조직));
+        assertThat(state.findGroupCalls).as("상위 조직 파티션을 읽지 않는다").doesNotContain(대형조직);
+        assertThat(state.findUserCalls).isEmpty();
+        assertThat(state.findUsersCalls).allSatisfy(ids -> assertThat(ids).isEmpty());
+    }
 }

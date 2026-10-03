@@ -174,7 +174,8 @@ class IncrementalSyncBigChangeTest {
 
         // then
         assertThat(checker.checked).containsExactly(RelationTuple.directMember("park", "TEAM"));
-        assertThat(state.findUserCalls).containsOnly("park");
+        assertThat(state.findUserCalls).as("직원을 한 명씩 읽지 않는다").isEmpty();
+        assertThat(state.findUsersCalls).containsExactly(Set.of("park"));
         assertThat(writer.written).containsExactly(RelationTuple.directMember("park", "TEAM"));
         assertThat(state.groups.get("TEAM").members()).containsExactly(MemberRef.user("park"));
     }
