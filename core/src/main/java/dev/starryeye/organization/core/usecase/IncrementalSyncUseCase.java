@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -357,6 +358,8 @@ public class IncrementalSyncUseCase {
      * 점검하지 않는다(설계 §11). 전체 교체는 목록이 전원을 가리키므로 바뀌는 멤버만 싣는다.
      *
      * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
+     *
+     * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock(lease -> changeGroupInternal(groupId, change, lease));
@@ -383,8 +386,12 @@ public class IncrementalSyncUseCase {
                         return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것));
                     };
 
+                    boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
                     return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
-                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit);
+                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit)
+                            .flatMap(result -> 하위_조직을_뺀다
+                                    ? 보류를_다시_본다(lease).thenReturn(result)
+                                    : Mono.just(result));
                 }));
     }
 
@@ -482,6 +489,8 @@ public class IncrementalSyncUseCase {
      *
      * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 5xx 이고
      * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
+     *
+     * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
         return withLock(lease -> removeGroupInternal(groupId, lease));
@@ -491,9 +500,15 @@ public class IncrementalSyncUseCase {
         return state.findGroup(groupId)
                 .flatMap(group -> state.findGroupIdsContaining(MemberRef.group(groupId))
                         .collect(LinkedHashSet<String>::new, Set::add)
-                        .flatMap(parentIds -> 반영하고_커밋한다(
-                                TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease,
-                                result -> 조직_삭제를_커밋한다(group, parentIds, result))));
+                        .flatMap(parentIds -> {
+                            boolean 연결을_지운다 = !parentIds.isEmpty()
+                                    || group.members().stream().anyMatch(member -> member.type() == MemberType.GROUP);
+                            return 반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease,
+                                    result -> 조직_삭제를_커밋한다(group, parentIds, result))
+                                    .flatMap(result -> 연결을_지운다
+                                            ? 보류를_다시_본다(lease).thenReturn(result)
+                                            : Mono.just(result));
+                        }));
     }
 
     /** 조직이 사라지면 없어야 할 줄 — 직원→조직, 하위 조직→조직, 조직→상위 조직. 비활성 직원의 줄도 넣는다 — 있으면 지워야 하고 없으면 무시된다. */
@@ -519,6 +534,46 @@ public class IncrementalSyncUseCase {
                 .flatMap(parent -> state.saveGroupChange(parent, parent, Set.of(), Set.of(이조직)), LOAD_CONCURRENCY)
                 .then();
         return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)));
+    }
+
+    /**
+     * 하위 조직 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1). 순환은 연결을 지울 때만 풀린다. 멤버 줄이 없는 보류 줄은 지우고,
+     * 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
+     *
+     * <p><b>원래 요청을 실패시키지 않는다.</b> 원래 연산은 이미 커밋됐다. 여기서 난 오류(OpenFGA·DynamoDB·리스 확인)는 경고만 남기고 목록을 그대로 둔다 — 다음 지우기
+     * 요청이나 재적재가 다시 본다.
+     */
+    private Mono<Void> 보류를_다시_본다(LockLease lease) {
+        OrgGraph 그래프 = new OrgGraph(state);
+        return 그래프.보류()
+                .flatMapMany(cut -> Flux.fromIterable(cut.stream().sorted(OrgGraph.아이디순).toList()))
+                .concatMap(edge -> 한_줄을_다시_본다(edge, 그래프, lease))
+                .then()
+                .onErrorResume(error -> {
+                    log.warn("보류 목록을 다시 보지 못했다 — 다음 지우기 요청이나 재적재가 다시 본다", error);
+                    return Mono.empty();
+                });
+    }
+
+    private Mono<Void> 한_줄을_다시_본다(GroupEdge edge, OrgGraph 그래프, LockLease lease) {
+        return state.findMembers(edge.parent(), Set.of(MemberRef.group(edge.child()))).flatMap(멤버 -> {
+            if (멤버.isEmpty()) {
+                그래프.보류에서_뺀다(edge);
+                return state.changeCutEdges(Set.of(), Set.of(edge));
+            }
+            return 그래프.순환인가(edge).flatMap(순환 -> 순환
+                    ? Mono.<Void>empty()
+                    : 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
+                            .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(edge.tuple()), Set.of()))))
+                            .flatMap(result -> {
+                                if (!result.written().contains(edge.tuple())) {
+                                    return Mono.empty(); // 쓰기 실패 — 목록에 남겨 다음에 다시 본다
+                                }
+                                그래프.보류에서_뺀다(edge);
+                                log.info("순환이 풀려 보류했던 연결을 썼다: 조직 '{}' → '{}'", edge.parent(), edge.child());
+                                return state.changeCutEdges(Set.of(), Set.of(edge));
+                            }));
+        });
     }
 
     // ---------- 공통 ----------
