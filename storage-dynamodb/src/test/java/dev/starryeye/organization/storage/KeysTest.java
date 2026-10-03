@@ -169,8 +169,14 @@ class KeysTest {
     @Test
     @DisplayName("보류 연결의 정렬키를 되읽으면 같은 연결이다")
     void 보류_연결_정렬키() {
+        // given
         var edge = new GroupEdge("개발본부", "백엔드팀");
-        assertThat(Keys.cutEdgeSk(edge)).isEqualTo("EDGE#개발본부|백엔드팀");
-        assertThat(Keys.parseCutEdgeSk(Keys.cutEdgeSk(edge))).isEqualTo(edge);
+
+        // when
+        String sk = Keys.cutEdgeSk(edge);
+
+        // then
+        assertThat(sk).isEqualTo("EDGE#개발본부|백엔드팀");
+        assertThat(Keys.parseCutEdgeSk(sk)).isEqualTo(edge);
     }
 }
