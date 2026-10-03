@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncRun;
@@ -302,6 +303,53 @@ class ScimRebuildUseCaseTest {
         assertThat(lock.released).hasValue(1);
     }
 
+    // ---------- 보류 목록 (설계 2026-10-03 §4.6) ----------
+
+    @Test
+    @DisplayName("재적재는 순환으로 버린 연결로 보류 목록을 다시 쓴다 — 묵은 줄은 사라진다")
+    void 재적재가_보류_목록을_다시_쓴다() {
+        // given — A ⊃ B, B ⊃ A. 보류 목록에는 묵은 줄이 있다
+        state.saveGroup(조직("A", MemberRef.group("B"))).block();
+        state.saveGroup(조직("B", MemberRef.group("A"))).block();
+        state.cutEdges.add(new GroupEdge("OLD", "X"));
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — 사전순 DFS 가 B ⊃ A 를 버린다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.cutEdges).containsExactly(new GroupEdge("B", "A"));
+    }
+
+    @Test
+    @DisplayName("조직도에 순환이 없으면 재적재가 보류 목록을 비운다")
+    void 순환이_없으면_보류_목록을_비운다() {
+        // given
+        조직도를_심는다();
+        state.cutEdges.add(new GroupEdge("OLD", "X"));
+
+        // when
+        재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(state.cutEdges).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직도가 비어 재적재가 멈추면 보류 목록을 건드리지 않는다")
+    void 빈_조직도로_멈추면_보류_목록을_두고_간다() {
+        // given — 조직도는 비었는데 장부에 줄이 있다(②-2 의 빈 조직도 가드)
+        writer.stored.add(김_백엔드);
+        state.cutEdges.add(new GroupEdge("A", "B"));
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(state.cutEdges).containsExactly(new GroupEdge("A", "B"));
+    }
+
     // ---------- wipe 모드 ----------
 
     @Test
@@ -319,6 +367,20 @@ class ScimRebuildUseCaseTest {
         assertThat(writer.stored).isEmpty();
         assertThat(state.users).isEmpty();
         assertThat(state.groups).isEmpty();
+    }
+
+    @Test
+    @DisplayName("wipe 는 보류 목록도 비운다")
+    void wipe는_보류_목록을_비운다() {
+        // given
+        조직도를_심는다();
+        state.cutEdges.add(new GroupEdge("DEV001", "DEV002"));
+
+        // when
+        재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(state.cutEdges).isEmpty();
     }
 
     @Test

@@ -124,7 +124,7 @@ public interface DirectoryStateRepository {
 
     /**
      * 보류 목록 — 순환이라 튜플을 쓰지 않은 하위 조직 연결(설계 2026-10-03 §4.1). 멤버 줄은 따로 남아 있다. 보통 비어 있다. 강한 일관성.
-     * "튜플 그래프 = 멤버 줄의 하위 조직 연결 − 보류 목록"이다.
+     * "튜플 그래프 = 멤버 줄의 하위 조직 연결 − 보류 목록(OpenFGA 에 없는 줄)"이다.
      */
     Flux<GroupEdge> findCutEdges();
 

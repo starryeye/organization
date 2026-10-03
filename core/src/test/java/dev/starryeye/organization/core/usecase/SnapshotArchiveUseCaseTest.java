@@ -1,5 +1,8 @@
 package dev.starryeye.organization.core.usecase;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
@@ -7,15 +10,18 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.MutationLock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -34,9 +40,15 @@ class SnapshotArchiveUseCaseTest {
     private FakeSyncRunRepository runs;
     private FakeMutationLock lock;
     private SnapshotArchiveUseCase useCase;
+    private ListAppender<ILoggingEvent> 로그;
+    private Logger logger;
 
     @BeforeEach
     void setUp() {
+        logger = (Logger) LoggerFactory.getLogger(SnapshotArchiveUseCase.class);
+        로그 = new ListAppender<>();
+        로그.start();
+        logger.addAppender(로그);
         state = new FakeStateRepository();
         checker = new FakeTupleChecker();
         snapshots = new FakeSnapshotRepository();
@@ -44,6 +56,12 @@ class SnapshotArchiveUseCaseTest {
         lock = new FakeMutationLock();
         useCase = new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock,
                 Clock.fixed(고정시각, ZoneOffset.UTC));
+    }
+
+    @AfterEach
+    void 원복한다() {
+        logger.detachAppender(로그);
+        로그.stop();
     }
 
     @Test
@@ -152,5 +170,42 @@ class SnapshotArchiveUseCaseTest {
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+    }
+
+    @Test
+    @DisplayName("아카이빙은 보류 목록을 따른다 — 순증이 고른 쪽을 어긋남으로 세지 않는다")
+    void 보류_목록을_따른다() {
+        // given — A ⊃ B, B ⊃ A. 순증은 "B 는 A 의 하위"(A ⊃ B)를 보류하고 "A 는 B 의 하위"를 썼다
+        state.saveGroup(new DirectoryGroup("A", null, "A", Set.of(MemberRef.group("B")))).block();
+        state.saveGroup(new DirectoryGroup("B", null, "B", Set.of(MemberRef.group("A")))).block();
+        state.cutEdges.add(new GroupEdge("A", "B"));
+        checker.allowed.add(RelationTuple.child("A", "B"));
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(로그.list).extracting(ILoggingEvent::getFormattedMessage).noneMatch(message -> message.contains("어긋남"));
+    }
+
+    @Test
+    @DisplayName("OpenFGA 에 튜플이 있는 낡은 보류 줄은 어긋남으로 세지 않는다 — 튜플 그래프에 있는 연결로 본다")
+    void 낡은_보류_줄은_어긋남이_아니다() {
+        // given — 위와 같은 순환인데 보류 목록에 A ⊃ B 와 함께 B ⊃ A 도 남아 있다.
+        // B ⊃ A 는 튜플이 이미 OpenFGA 에 있다(쓴 뒤 목록에서 빼기 전에 멈췄다)
+        state.saveGroup(new DirectoryGroup("A", null, "A", Set.of(MemberRef.group("B")))).block();
+        state.saveGroup(new DirectoryGroup("B", null, "B", Set.of(MemberRef.group("A")))).block();
+        state.cutEdges.add(new GroupEdge("A", "B"));
+        state.cutEdges.add(new GroupEdge("B", "A"));
+        checker.allowed.add(RelationTuple.child("A", "B"));
+
+        // when
+        var run = useCase.execute().block();
+
+        // then — 낡은 줄도 목록 그대로 빼면 "A 는 B 의 하위" 튜플이 있어선 안 될 것으로 세어진다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(로그.list).extracting(ILoggingEvent::getFormattedMessage).noneMatch(message -> message.contains("어긋남"));
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(RelationTuple.child("A", "B"));
     }
 }
