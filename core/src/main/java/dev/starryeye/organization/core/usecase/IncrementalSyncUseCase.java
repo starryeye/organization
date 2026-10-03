@@ -28,7 +28,6 @@ import reactor.util.retry.Retry;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -82,14 +81,15 @@ import java.util.stream.Collectors;
  *       both 스냅샷에 싣는 것으로 해결한다. 그래야 "부모가 먼저 참조해 둔 자식이 나중에 도착"
  *       하는 순서에서도 엣지가 만들어진다. 이때 <b>없던 조직은 before 스냅샷에서 완전히
  *       빼야</b> 한다 — 멤버 0개짜리 대역을 넣으면 before 에도 엣지가 생겨 델타가 비어버린다.</li>
- *   <li><b>스냅샷이 볼 수 없는 것 2 — 비순환 보장(설계 §5.3).</b>
+ *   <li><b>스냅샷이 볼 수 없는 것 2 — 비순환 보장(설계 §5.3, 2026-10-03 §4.2·§4.3).</b>
  *       {@link TupleMapper#toTuples} 의 DFS 는 스냅샷 안의 그래프만 훑는다. 참조로 딸려온
  *       하위 조직은 일부러 멤버를 비워 싣기 때문에({@link #expandWithReferencedGroups})
- *       두 홉 이상 떨어진 순환은 최소 스냅샷에서 보이지 않는다.
- *       → 새로 생기는 child 엣지마다 {@link #reaches} 로 저장소를 타고 자손을 훑어
- *       도달성을 직접 확인하고, 순환을 닫는 엣지는 {@link TupleMapper} 와 같은 문구로 경고하며
- *       버린다({@link #withoutCycleCreatingEdges}). 조상·자손 전체를 스냅샷에 싣는 방법도
- *       있지만 요청 한 건마다 비용이 훨씬 크다.</li>
+ *       두 홉 이상 떨어진 순환은 최소 스냅샷에서 보이지 않는다. 한 홉 순환도 그 DFS 는 조직코드
+ *       순서로 버릴 쪽을 골라 두 연결을 다 버릴 수 있다(점검 S4). 그래서 순증 경로는 목표를 순환 제거 없이 만든다.
+ *       → 새로 생기는 child 엣지마다 {@link OrgGraph} 가 저장소의 <b>튜플 그래프(멤버 줄 − 보류 목록)</b>를
+ *       부모에서 위로 올라가 확인하고, 순환을 닫는 엣지는 쓰지 않고 보류 목록에 적는다 — 먼저 저장된
+ *       연결이 이긴다. 멤버 줄은 남긴다. 조상·자손 전체를 스냅샷에 싣는 방법도 있지만 요청 한 건마다
+ *       비용이 훨씬 크다.</li>
  * </ul>
  *
  * <p><b>손으로 만드는 튜플 — 지울 줄만(설계 2026-10-02 §4.1·§4.2).</b> 조직 삭제({@link #removeGroup})의 줄과 조직 PATCH·PUT 에서
@@ -112,9 +112,6 @@ import java.util.stream.Collectors;
 public class IncrementalSyncUseCase {
 
     private static final int LOAD_CONCURRENCY = 8;
-
-    /** 요청 하나의 순환 검사가 훑을 수 있는 조직 수 상한. {@link CycleScan} 참고. */
-    private static final int MAX_GRAPH_EXPANSIONS = 10_000;
 
     /** 획득 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 재시도 횟수다. */
     private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
@@ -650,6 +647,8 @@ public class IncrementalSyncUseCase {
      * 조건이므로 튜플 식별자에 해당한다. 그래서 {@link #upsertGroup} 은 새 조직에 한해,
      * {@link #removeUser}/{@link #removeGroup} 은 삭제에 한해 실패 시 존재 여부를 건드리지 않는다.
      *
+     * <p>보류 목록은 커밋 앞뒤로 맞춘다(설계 2026-10-03 §4.4) — {@link #보류와_함께_커밋한다} 참고.
+     *
      * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
@@ -666,15 +665,20 @@ public class IncrementalSyncUseCase {
             모든후보.addAll(TupleMapper.candidateTuples(beforeSnapshot));
             모든후보.addAll(TupleMapper.candidateTuples(afterSnapshot));
             Set<RelationTuple> candidates = mentioning(모든후보, focus);
+            // 순환을 버리지 않은 목표 — 순환 판단은 OrgGraph 가 튜플 그래프로 한다(설계 2026-10-03 §4.3)
+            Set<RelationTuple> 있어야했던것 = mentioning(순환을_버리지_않고(beforeSnapshot), focus);
+            Set<RelationTuple> 원하는것 = mentioning(순환을_버리지_않고(afterSnapshot), focus);
+            OrgGraph 그래프 = new OrgGraph(state);
 
-            return checker.existing(candidates).flatMap(actual -> {
+            return checker.existing(candidates).flatMap(actual -> 그래프.필요하면_보류(있어야했던것, 원하는것).flatMap(보류 -> {
                 // 상태 기준선(있어야 했던 것)과 Check 기준선(실제 있는 것)을 비교한다 —
                 // 이 둘이 다르면 그것이 곧 어긋남이다(설계 §7). 델타 계산 자체는 여전히
                 // Check 기준선(actual)을 쓴다; 여기서는 오직 관측만 한다.
                 // 상태 기준선도 같은 술어로 좁힌다 — actual 이 초점 밖 튜플을 아예 담지
                 // 않으므로, 좁히지 않으면 이 연산이 보지도 않은 튜플이 전부 missing 으로
-                // 세어져 지표가 거짓말을 한다.
-                Set<RelationTuple> 상태기준선 = mentioning(tuplesOf(beforeSnapshot), focus);
+                // 세어져 지표가 거짓말을 한다. 보류한 연결은 상태 기준선에서 뺀다 — OpenFGA 에 없는 것이 맞다.
+                Set<RelationTuple> 상태기준선 = new LinkedHashSet<>(있어야했던것);
+                보류.forEach(edge -> 상태기준선.remove(edge.tuple()));
                 int extra = (int) actual.stream().filter(t -> !상태기준선.contains(t)).count();
                 int missing = (int) 상태기준선.stream().filter(t -> !actual.contains(t)).count();
                 if (extra > 0 || missing > 0) {
@@ -682,11 +686,11 @@ public class IncrementalSyncUseCase {
                     driftObserver.observed(extra, missing);
                 }
 
-                Set<RelationTuple> 원하는것 = mentioning(tuplesOf(afterSnapshot), focus);
-                return withoutCycleCreatingEdges(actual, 원하는것).flatMap(after -> {
+                return 그래프.거른다(actual, 원하는것, focus).flatMap(거름 -> {
+                    Set<RelationTuple> after = 거름.남길것();
                     TupleDelta 계산 = TupleDiff.between(actual, after);
                     if (확인없이_지울것.isEmpty()) {
-                        return 반영하고_커밋한다(계산, lease, result -> commit.apply(result, actual, after));
+                        return 반영하고_커밋한다(계산, lease, result -> 보류와_함께_커밋한다(거름, actual, result, actual, after, commit));
                     }
                     // 빠지는 멤버의 줄은 Check 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2). 커밋의 재조정은 그 줄이 있었다고 본다 —
                     // 지우기가 실패한 멤버만 남는다.
@@ -695,10 +699,28 @@ public class IncrementalSyncUseCase {
                     Set<RelationTuple> 있다고_볼것 = new LinkedHashSet<>(actual);
                     있다고_볼것.addAll(확인없이_지울것);
                     return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease,
-                            result -> commit.apply(result, 있다고_볼것, after));
+                            result -> 보류와_함께_커밋한다(거름, actual, result, 있다고_볼것, after, commit));
                 });
-            });
+            }));
         });
+    }
+
+    /**
+     * 커밋 앞뒤로 보류 목록을 맞춘다(설계 2026-10-03 §4.4). 새로 보류할 줄을 <b>멤버 줄보다 먼저</b> 쓴다 — 거꾸로면 멈춘 뒤 "멤버 줄은 있는데 튜플도 보류 기록도
+     * 없는" 연결이 남아 영영 쓰이지 않는다(점검 M1 과 같은 누락). 풀린 줄은 OpenFGA 에 실제로 있게 된 것만 커밋 뒤에 뺀다.
+     */
+    private Mono<Void> 보류와_함께_커밋한다(OrgGraph.거른결과 거름, Set<RelationTuple> actual, TupleWriteResult result,
+                                    Set<RelationTuple> 기준, Set<RelationTuple> 목표, Commit commit) {
+        return state.changeCutEdges(거름.새로_보류(), Set.of())
+                .then(Mono.defer(() -> commit.apply(result, 기준, 목표)))
+                .then(Mono.defer(() -> state.changeCutEdges(Set.of(), 거름.뺄것(actual, result))));
+    }
+
+    /** 순환을 버리지 않은 튜플. 순환이 아닌 경고(없는 멤버 등)는 지금처럼 남긴다. */
+    private Set<RelationTuple> 순환을_버리지_않고(DirectorySnapshot snapshot) {
+        var mapping = TupleMapper.toTuplesKeepingCycles(snapshot);
+        mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
+        return mapping.tuples();
     }
 
     /**
@@ -732,121 +754,13 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 새로 생기는 child 엣지 가운데 조직 계층에 순환을 만드는 것을 걸러낸다(설계 §5.3).
-     *
-     * <p>{@link TupleMapper#toTuples} 도 같은 보장을 DFS 로 하지만 그것은 <b>스냅샷 안의</b>
-     * 그래프만 본다. 최소 스냅샷은 참조로 딸려온 하위 조직을 일부러 멤버 없이 싣기 때문에
-     * ({@link #expandWithReferencedGroups}) 두 홉 이상 떨어진 순환은 보이지 않는다. 그래서
-     * 여기서 현재상태 저장소를 직접 타고 내려가 도달성을 확인한다 — 새 엣지의 자식으로부터
-     * 부모에 이미 도달할 수 있다면 그 엣지는 순환을 닫는다.
-     *
-     * <p>버려진 엣지는 {@link #reconcileGroupMembers} 입장에서 "애초에 튜플이 필요 없던 멤버"와
-     * 똑같이 취급된다 — 멤버십 자체는 상태에 남고 튜플만 생기지 않는다. 이는 전체 동기화에서
-     * {@link TupleMapper} 가 순환 간선을 버릴 때와 같은 결과다.
-     */
-    private Mono<Set<RelationTuple>> withoutCycleCreatingEdges(Set<RelationTuple> before,
-                                                               Set<RelationTuple> after) {
-        List<RelationTuple> newEdges = after.stream()
-                .filter(tuple -> tuple.relation().equals(RelationTuple.CHILD))
-                .filter(tuple -> !before.contains(tuple))
-                .toList();
-        if (newEdges.isEmpty()) {
-            return Mono.just(after);
-        }
-        CycleScan scan = new CycleScan();
-        return Flux.fromIterable(newEdges)
-                .concatMap(edge -> {
-                    String child = stripType(edge.user());
-                    String parent = stripType(edge.object());
-                    return reaches(child, parent, scan)
-                            .filter(Boolean::booleanValue)
-                            .doOnNext(cycle -> log.warn("튜플 변환 경고: {}",
-                                    "조직 '%s' → '%s' 간선이 순환을 만들어 제외합니다".formatted(parent, child)))
-                            .map(cycle -> edge);
-                })
-                .collect(LinkedHashSet<RelationTuple>::new, Set::add)
-                .map(dropped -> {
-                    if (dropped.isEmpty()) {
-                        return after;
-                    }
-                    Set<RelationTuple> kept = new LinkedHashSet<>(after);
-                    kept.removeAll(dropped);
-                    return kept;
-                });
-    }
-
-    /**
-     * 한 요청 안에서 일어나는 모든 순환 검사가 공유하는 작업 공간.
-     *
-     * <p><b>인접 리스트는 공유하고 visited 는 공유하지 않는다.</b> 어떤 조직의 하위 조직 목록은
-     * 현재상태의 순수한 함수라서 요청 하나 안에서는 몇 번을 물어도 같은 답이다 — 그래서
-     * 캐시해도 안전하고, 이게 실제 비용(DynamoDB 파티션 조회)의 대부분이다. 반면 visited 는
-     * 엣지마다 출발점과 목표가 달라서 공유하면 답이 틀린다: 앞선 엣지가 훑고 지나간 노드를
-     * 뒤 엣지가 건너뛰면, 그 노드 너머에 있는 목표에 도달하지 못했다고 잘못 결론 내린다.
-     *
-     * <p>{@code budget} 은 요청 하나가 펼칠 수 있는 노드 수의 상한이다. 캐시 덕분에 같은 조직을
-     * 두 번 펼치지는 않으므로, 이 값은 사실상 "요청 하나가 훑을 수 있는 조직 수"다. 현실의
-     * 조직도는 수천 개 규모라 {@value #MAX_GRAPH_EXPANSIONS} 를 넘길 일이 없다 — 넘긴다면
-     * 병리적인 그래프이거나 버그이므로, 조용히 추측하는 대신 요청을 실패시킨다.
-     */
-    private static final class CycleScan {
-        private final Map<String, List<String>> childIds = new LinkedHashMap<>();
-        private int budget = MAX_GRAPH_EXPANSIONS;
-    }
-
-    /**
-     * {@code from} 에서 하위 조직 간선을 따라 {@code target} 에 닿는지 현재상태 저장소를 훑어
-     * 확인한다. 자기 자신도 도달한 것으로 본다 — 자기 자신을 하위 조직으로 넣는 것도 순환이다.
-     */
-    private Mono<Boolean> reaches(String from, String target, CycleScan scan) {
-        if (from.equals(target)) {
-            return Mono.just(true);
-        }
-        Set<String> visited = new LinkedHashSet<>();
-        visited.add(from);
-        // 너비 우선 확장을 Flux.expand 에 맡긴다. 레벨마다 walk 를 재귀 호출하면 계층 깊이만큼
-        // 연산자가 중첩돼, 깊은 사슬에서 예산 검사가 걸리기도 전에 StackOverflowError 가 난다.
-        // expand 는 내부적으로 반복 처리하므로 깊이가 스택을 쓰지 않고, any 는 목표를 만나는
-        // 즉시 상위를 취소해 나머지 계층을 읽지 않는다.
-        return Flux.just(from)
-                .expand(groupId -> childIdsOf(groupId, scan)
-                        .flatMapIterable(ids -> ids)
-                        .filter(visited::add))
-                .any(target::equals);
-    }
-
-    /**
-     * 한 조직의 하위 조직 id 목록을 돌려준다. 요청 단위 캐시에 없을 때만 저장소를 읽고,
-     * 읽을 때마다 예산을 하나 쓴다. 없는 조직은 빈 목록으로 캐시한다 — 부모가 참조하지만
-     * 아직 도착하지 않은 조직이 흔하고, 그때마다 다시 읽을 이유가 없다.
-     */
-    private Mono<List<String>> childIdsOf(String groupId, CycleScan scan) {
-        List<String> cached = scan.childIds.get(groupId);
-        if (cached != null) {
-            return Mono.just(cached);
-        }
-        if (scan.budget-- <= 0) {
-            return Mono.error(new IllegalStateException(
-                    "조직 계층 순환 검사가 %d개 조직을 넘겼습니다. 계층이 비정상적으로 크거나 깊습니다: %s"
-                            .formatted(MAX_GRAPH_EXPANSIONS, groupId)));
-        }
-        return state.findChildGroupIds(groupId)
-                .collectList()
-                .doOnNext(ids -> scan.childIds.put(groupId, ids));
-    }
-
-    private static String stripType(String typedId) {
-        int separator = typedId.indexOf(':');
-        return separator < 0 ? typedId : typedId.substring(separator + 1);
-    }
-
-    /**
      * 이번 연산의 <b>초점 엔티티</b>를 언급하는 튜플만 남긴다 (설계 §5.2).
      *
-     * <p>최소 스냅샷은 영향 조직을 <b>멤버 목록째로</b> 싣는다 — child 엣지의 존재 조건과
-     * 활성 판정에 필요하기 때문이다. 그래서 {@code candidateTuples} 를 그대로 쓰면 영향 조직의
-     * <i>모든</i> 멤버가 후보가 되고, {@code PUT /Users/kim} 한 번이 5000명 조직 전체를
-     * BatchCheck 하게 된다 — 전역 락을 쥔 채로. 설계 §5.2 는 정반대를 요구한다:
+     * <p>최소 스냅샷이 싣는 영향 조직은 대개 이미 좁혀져 있다 — 상위 조직은 이 조직 하나만({@link #상위_조직들}),
+     * 직원 연산의 소속 조직은 그 직원 하나만({@link #직원한명_그림}) 멤버로 싣는다. 그래도 이 술어로 한 번 더 좁힌다.
+     * 영향 조직을 멤버 목록째로 실으면 {@code candidateTuples} 를 그대로 쓸 때 그 조직의 <i>모든</i> 멤버가
+     * 후보가 되고, {@code PUT /Users/kim} 한 번이 5000명 조직 전체를 BatchCheck 하게 된다 — 전역 락을 쥔 채로.
+     * 그림을 넓히는 변경이 생겨도 그 비용이 돌아오지 않게 하는 마지막 울타리다. 설계 §5.2 는 정반대를 요구한다:
      * <i>"upsertUser 가 소속 조직의 전체 멤버를 확인하지 않는 것이 중요하다"</i>,
      * <i>"무관한 튜플까지 확인하면 비용만 늘고 삭제 범위만 위험해진다"</i>.
      *
@@ -866,12 +780,6 @@ public class IncrementalSyncUseCase {
             }
         }
         return narrowed;
-    }
-
-    private Set<RelationTuple> tuplesOf(DirectorySnapshot snapshot) {
-        var mapping = TupleMapper.toTuples(snapshot);
-        mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
-        return mapping.tuples();
     }
 
     /**
@@ -952,6 +860,8 @@ public class IncrementalSyncUseCase {
     /**
      * 이 조직을 하위 조직으로 적어 둔 상위 조직들 — <b>헤더만</b> 읽고 멤버는 이 조직 하나로만 싣는다(설계 2026-10-03 §3.4). 이 연산은 후보·목표·상태 기준선을
      * 모두 이 조직을 언급하는 튜플로 좁히므로({@link #mentioning}) 상위 조직의 다른 멤버는 결과에 기여하지 않는다 — {@link #직원한명_그림} 과 같은 논리다.
+     * 목표는 순환을 버리지 않고 만들고 순환 판단은 {@link OrgGraph} 가 저장소의 튜플 그래프로 하므로(설계 2026-10-03 §4.3), 그림 안의 DFS 가 상위 조직의
+     * 다른 멤버를 보고 버릴 연결을 고르는 일이 없다 — 상위 조직을 통째로 읽은 것과 결과가 정확히 같다.
      */
     private Mono<Set<DirectoryGroup>> 상위_조직들(String groupId) {
         Set<MemberRef> 이조직만 = Set.of(MemberRef.group(groupId));

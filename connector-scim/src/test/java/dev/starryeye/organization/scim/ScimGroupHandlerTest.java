@@ -312,6 +312,30 @@ class ScimGroupHandlerTest {
     }
 
     @Test
+    @DisplayName("조직 계층이 순환 검사 한도를 넘으면 400 invalidValue 다 — 다시 보내도 늘 넘는다")
+    void 계층이_너무_크면_400이다() {
+        // given — G1 ⊃ … ⊃ G10101
+        int 깊이 = 10_100;
+        for (int i = 1; i <= 깊이; i++) {
+            state.groups.put("G" + i, new DirectoryGroup("G" + i, "G" + i, "G" + i, Set.of(MemberRef.group("G" + (i + 1)))));
+        }
+        state.groups.put("G" + (깊이 + 1), new DirectoryGroup("G" + (깊이 + 1), "G" + (깊이 + 1), "맨 아래", Set.of()));
+        state.groups.put("NEW", new DirectoryGroup("NEW", "NEW", "새 조직", Set.of()));
+        String body = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members","value":[{"value":"NEW","type":"Group"}]}]}
+                """;
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/G" + (깊이 + 1))
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidValue");
+    }
+
+    @Test
     @DisplayName("없는 조직에 PATCH 하면 404 이고 아무것도 쓰지 않는다")
     void 없는_조직_PATCH는_404다() {
         // given

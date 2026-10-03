@@ -369,8 +369,8 @@ public class AdminQueryUseCase {
      * 한 번의 순회(직원 하나의 계층 순회, 또는 조직 하나의 조상 순회)가 공유하는 작업 공간.
      * {@link Flux#expand} 의 여러 분기가 이 인스턴스를 함께 참조하지만, Reactive Streams
      * 규격상 한 Subscriber 에 대한 신호는 직렬화되어 도달하므로(동시 onNext 없음) 평범한
-     * {@link ArrayList}/{@link LinkedHashSet} 로도 안전하다 — {@link IncrementalSyncUseCase}
-     * 의 {@code CycleScan}/{@code visited} 와 같은 전제다.
+     * {@link ArrayList}/{@link LinkedHashSet} 로도 안전하다 — {@code OrgGraph}
+     * 의 부모 캐시/{@code visited} 와 같은 전제다.
      */
     private static final class Reached {
         private final Set<String> seen = new LinkedHashSet<>();

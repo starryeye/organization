@@ -434,14 +434,6 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return querySortKeys(Keys.groupPk(groupId), Keys.MEMBER_PREFIX).map(Keys::parseMemberSk);
     }
 
-    /** 하위 조직 멤버 줄만 읽는다 — 순환 검사가 직원 줄까지 읽지 않게(조직 멤버 PATCH 설계 §1.4). */
-    @Override
-    public Flux<String> findChildGroupIds(String groupId) {
-        return querySortKeys(Keys.groupPk(groupId), Keys.memberSkPrefix(MemberType.GROUP))
-                .map(Keys::parseMemberSk)
-                .map(MemberRef::id);
-    }
-
     private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
         return new BatchRequests(client, properties.getTableName()).get(keys);
     }

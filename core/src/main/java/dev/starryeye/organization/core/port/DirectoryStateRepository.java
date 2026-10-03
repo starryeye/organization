@@ -106,9 +106,6 @@ public interface DirectoryStateRepository {
     /** 이 조직의 멤버 전부를 <b>키만</b> 읽는다. 전체 교체가 목표 목록과 비교하는 데 쓴다. 강한 일관성이다. */
     Flux<MemberRef> findMemberRefs(String groupId);
 
-    /** 이 조직의 하위 조직 id. 직원 멤버는 읽지 않는다 — 순환 검사가 계층을 내려갈 때 쓴다. 조직이 없으면 비어 있다. */
-    Flux<String> findChildGroupIds(String groupId);
-
     /**
      * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code after} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
      * 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저, META 는 이름이나 멤버가 바뀌었을 때만 {@code updatedAt} 을 찍는다. 부르는 쪽이

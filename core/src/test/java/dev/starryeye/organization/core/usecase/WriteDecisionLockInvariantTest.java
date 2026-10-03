@@ -74,7 +74,6 @@ class WriteDecisionLockInvariantTest {
         @Override public Mono<GroupHeader> findGroupHeader(String id) { return 본다("findGroupHeader " + id, () -> super.findGroupHeader(id)); }
         @Override public Mono<Set<MemberRef>> findMembers(String g, Set<MemberRef> c) { return 본다("findMembers " + g, () -> super.findMembers(g, c)); }
         @Override public Flux<MemberRef> findMemberRefs(String g) { return 본다Flux("findMemberRefs " + g, () -> super.findMemberRefs(g)); }
-        @Override public Flux<String> findChildGroupIds(String g) { return 본다Flux("findChildGroupIds " + g, () -> super.findChildGroupIds(g)); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) { return 본다Flux("findGroupIdsContaining " + ref.id(), () -> super.findGroupIdsContaining(ref)); }
         @Override public Flux<GroupEdge> findCutEdges() { return 본다Flux("findCutEdges", super::findCutEdges); }
     }

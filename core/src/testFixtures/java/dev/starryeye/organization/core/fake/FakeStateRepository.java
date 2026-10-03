@@ -52,8 +52,11 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** {@link #findMemberRefs} 가 불린 순서대로의 조직 id. */
     public final List<String> findMemberRefsCalls = new ArrayList<>();
 
-    /** {@link #findChildGroupIds} 가 불린 순서대로의 조직 id. */
-    public final List<String> findChildGroupIdsCalls = new ArrayList<>();
+    /** {@link #findGroupIdsContaining} 이 받은 멤버의 아이디 — 순환 검사가 위로 몇 조직을 읽는지 단언한다. */
+    public final List<String> findGroupIdsContainingCalls = new ArrayList<>();
+
+    /** 쓰기 순서 — {@code saveGroup:<id>}, {@code saveGroupChange:<id>}, {@code 보류+}, {@code 보류-}. 보류 줄이 멤버 줄보다 먼저인지 단언한다. */
+    public final List<String> 쓴순서 = new ArrayList<>();
 
     /** {@link #deleteGroup} 가 불린 조직 id — 삭제 전용 경로가 조직을 몇 번 지우는지 본다. */
     public final List<String> deleteGroupCalls = new ArrayList<>();
@@ -142,6 +145,7 @@ public class FakeStateRepository implements DirectoryStateRepository {
     @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
         groups.put(group.id(), group);
+        쓴순서.add("saveGroup:" + group.id());
         return Mono.empty();
     }
 
@@ -170,9 +174,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
-        return Flux.fromIterable(groups.values())
-                .filter(group -> group.members().contains(ref))
-                .map(DirectoryGroup::id);
+        return Flux.defer(() -> {
+            findGroupIdsContainingCalls.add(ref.id());
+            return Flux.fromIterable(groups.values())
+                    .filter(group -> group.members().contains(ref))
+                    .map(DirectoryGroup::id);
+        });
     }
 
     @Override
@@ -193,16 +200,6 @@ public class FakeStateRepository implements DirectoryStateRepository {
         });
     }
 
-    @Override
-    public Flux<String> findChildGroupIds(String groupId) {
-        return Flux.defer(() -> {
-            findChildGroupIdsCalls.add(groupId);
-            return Flux.fromIterable(membersOf(groupId))
-                    .filter(ref -> ref.type() == MemberType.GROUP)
-                    .map(MemberRef::id);
-        });
-    }
-
     /** 헤더를 읽지 않는다 — {@link #saveUser(DirectoryUser)} 와 같은 이유로 포트 default 를 덮는다. */
     @Override
     public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
@@ -212,6 +209,7 @@ public class FakeStateRepository implements DirectoryStateRepository {
     @Override
     public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
         return Mono.fromRunnable(() -> {
+            쓴순서.add("saveGroupChange:" + after.id());
             Set<MemberRef> members = new LinkedHashSet<>(membersOf(after.id()));
             members.removeAll(removed);
             members.addAll(added);
@@ -235,6 +233,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
     @Override
     public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
         return Mono.fromRunnable(() -> {
+            if (!added.isEmpty()) {
+                쓴순서.add("보류+");
+            }
+            if (!removed.isEmpty()) {
+                쓴순서.add("보류-");
+            }
             cutEdges.addAll(added);
             cutEdges.removeAll(removed);
         });

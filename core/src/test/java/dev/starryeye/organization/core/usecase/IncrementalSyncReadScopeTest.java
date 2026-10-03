@@ -167,9 +167,9 @@ class IncrementalSyncReadScopeTest {
                 .block(Duration.ofSeconds(10));
 
         // then
-        assertThat(state.findGroupCalls).as("존재는 헤더로, 하위 조직 id 는 하위 조직 줄로").doesNotContain(대형조직);
+        assertThat(state.findGroupCalls).as("존재는 헤더로 본다").doesNotContain(대형조직);
         assertThat(state.findGroupHeaderCalls).contains(대형조직);
-        assertThat(state.findChildGroupIdsCalls).contains(대형조직);
+        assertThat(state.findGroupIdsContainingCalls).as("순환 검사가 하위 조직 쪽으로 내려가지 않는다").doesNotContain(대형조직);
     }
 
     @Test

@@ -1195,21 +1195,6 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("하위 조직 id 는 하위 조직 멤버 줄만 읽는다")
-    void 하위_조직_id를_읽는다() {
-        // given
-        repository.saveGroup(조직("DEV", "개발본부",
-                MemberRef.user("kim"), MemberRef.group("TEAM1"), MemberRef.group("TEAM2"))).block();
-
-        // when
-        var ids = repository.findChildGroupIds("DEV").collectList().block();
-
-        // then
-        assertThat(ids).containsExactlyInAnyOrder("TEAM1", "TEAM2");
-        assertThat(repository.findChildGroupIds("NONE").collectList().block()).isEmpty();
-    }
-
-    @Test
     @DisplayName("멤버 변경 저장은 준 멤버 줄만 넣고 빼며 소속 줄도 함께 움직인다")
     void 멤버_변경을_저장한다() {
         // given

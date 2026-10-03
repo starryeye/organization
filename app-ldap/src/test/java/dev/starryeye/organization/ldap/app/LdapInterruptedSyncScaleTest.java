@@ -202,7 +202,6 @@ class LdapInterruptedSyncScaleTest {
             return 실제.findMembers(groupId, candidates);
         }
         @Override public Flux<MemberRef> findMemberRefs(String groupId) { return 실제.findMemberRefs(groupId); }
-        @Override public Flux<String> findChildGroupIds(String groupId) { return 실제.findChildGroupIds(groupId); }
         @Override public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
             return 실제.saveGroupChange(before, after, added, removed);
         }
