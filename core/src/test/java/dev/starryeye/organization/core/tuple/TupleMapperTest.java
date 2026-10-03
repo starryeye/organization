@@ -346,8 +346,19 @@ class TupleMapperTest {
     @Test
     @DisplayName("하위 조직 연결 튜플을 연결 값으로 되돌린다 — direct_member 는 연결이 아니다")
     void 튜플을_연결로_되돌린다() {
-        assertThat(GroupEdge.of(RelationTuple.child("B", "A"))).contains(new GroupEdge("A", "B"));
-        assertThat(new GroupEdge("A", "B").tuple()).isEqualTo(RelationTuple.child("B", "A"));
-        assertThat(GroupEdge.of(RelationTuple.directMember("kim", "A"))).isEmpty();
+        // given — A ⊃ B 의 하위 조직 연결 튜플, 같은 연결 값, 직원 소속 튜플
+        var 하위조직_튜플 = RelationTuple.child("B", "A");
+        var 연결 = new GroupEdge("A", "B");
+        var 직원_튜플 = RelationTuple.directMember("kim", "A");
+
+        // when
+        var 튜플에서_되돌린_연결 = GroupEdge.of(하위조직_튜플);
+        var 연결에서_만든_튜플 = 연결.tuple();
+        var 직원_튜플에서_되돌린_연결 = GroupEdge.of(직원_튜플);
+
+        // then
+        assertThat(튜플에서_되돌린_연결).contains(연결);
+        assertThat(연결에서_만든_튜플).isEqualTo(하위조직_튜플);
+        assertThat(직원_튜플에서_되돌린_연결).isEmpty();
     }
 }
