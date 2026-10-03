@@ -134,7 +134,7 @@ public class AdminQueryUseCase {
      * 그 flatMap 콜백이 같은 스레드에서 곧바로 실행되어 계층 깊이만큼 자바 콜스택이 쌓인다 —
      * 깊은 사슬에서는 자체 예산(MAX_PATHS) 검사가 걸리기도 전에 StackOverflowError 가 날 수
      * 있다. 대신 {@link Flux#expand} 에 너비 우선 확장을 맡긴다 — 내부적으로 반복 처리되어
-     * 깊이가 스택을 쓰지 않는다. {@code IncrementalSyncUseCase.reaches()} 가 순환 검사에 같은
+     * 깊이가 스택을 쓰지 않는다. {@code OrgGraph.순환인가} 가 부모에서 위로 올라가는 순환 검사에 같은
      * 연산자를 쓰는 것과 같은 이유다.
      */
     private Mono<Reached> climb(String employeeId) {
