@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.IntStream;
 
@@ -222,5 +223,22 @@ class IncrementalSyncReadScopeTest {
         assertThat(state.findGroupCalls).as("상위 조직 파티션을 읽지 않는다").doesNotContain(대형조직);
         assertThat(state.findUserCalls).isEmpty();
         assertThat(state.findUsersCalls).allSatisfy(ids -> assertThat(ids).isEmpty());
+    }
+
+    @Test
+    @DisplayName("직원 생성·변경은 직원 META 를 한 번만 읽는다(점검 S28)")
+    void 직원_쓰기는_한_번만_읽는다() {
+        // given
+        state.findUserCalls.clear();
+
+        // when
+        useCase.createUser(new DirectoryUser("park", "uid=park", "park", "박", "park@example.com", true)).block(Duration.ofSeconds(10));
+        var 생성때 = List.copyOf(state.findUserCalls);
+        state.findUserCalls.clear();
+        useCase.changeUser("park", user -> user.withDisplayName("박 님")).block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(생성때).containsExactly("park");
+        assertThat(state.findUserCalls).containsExactly("park");
     }
 }

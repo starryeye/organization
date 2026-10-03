@@ -120,10 +120,16 @@ public class FakeStateRepository implements DirectoryStateRepository {
                         group.id(), group.externalId(), group.displayName()));
     }
 
+    /** 읽지 않고 그대로 넣는다 — 시드에 쓰여 읽기 계측({@link #findUserCalls})을 더럽히지 않게 포트 default 를 덮는다. */
     @Override
     public Mono<Void> saveUser(DirectoryUser user) {
         users.put(user.id(), user);
         return Mono.empty();
+    }
+
+    @Override
+    public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) {
+        return saveUser(after);
     }
 
     @Override
@@ -190,13 +196,19 @@ public class FakeStateRepository implements DirectoryStateRepository {
         });
     }
 
+    /** 헤더를 읽지 않는다 — {@link #saveUser(DirectoryUser)} 와 같은 이유로 포트 default 를 덮는다. */
     @Override
     public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return saveGroupChange(null, header, added, removed);
+    }
+
+    @Override
+    public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
         return Mono.fromRunnable(() -> {
-            Set<MemberRef> members = new LinkedHashSet<>(membersOf(header.id()));
+            Set<MemberRef> members = new LinkedHashSet<>(membersOf(after.id()));
             members.removeAll(removed);
             members.addAll(added);
-            groups.put(header.id(), new DirectoryGroup(header.id(), header.externalId(), header.displayName(), members));
+            groups.put(after.id(), new DirectoryGroup(after.id(), after.externalId(), after.displayName(), members));
         });
     }
 

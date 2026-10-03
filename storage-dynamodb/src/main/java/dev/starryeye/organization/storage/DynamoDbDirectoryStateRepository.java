@@ -113,18 +113,18 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     /**
-     * 저장된 META 와 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
+     * 넘겨받은 저장본과 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
      * 프로젝션)이 매번 {@code updatedAt} 때문에 다시 쓰여 {@code USER_INDEX} 한 파티션키로 몰렸다.
      *
-     * <p>저장본은 <b>강한 일관성</b>으로 한 건 읽는다 — SCIM 요청 하나의 쓰기 경로라 한 건 더 읽어도 싸다.
+     * <p>저장본을 다시 읽지 않는다(설계 2026-10-03 §3.5) — 부르는 쪽이 락 안에서 강한 일관성으로 읽었다. {@link #writeUser} 와 같은 이유로
+     * 이후 값을 한 번 인코딩했다가 되읽어 비교한다.
      */
     @Override
-    public Mono<Void> saveUser(DirectoryUser user) {
-        return findMeta(Keys.userPk(user.id()))
-                .map(this::storedUser)
-                .map(Optional::of)
-                .defaultIfEmpty(Optional.empty())
-                .flatMap(stored -> writeUser(user, stored.orElse(null)));
+    public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) {
+        if (before != null && before.equals(toUser(after.id(), userItem(after)))) {
+            return Mono.empty();
+        }
+        return putItem(stamped(userItem(after)));
     }
 
     /**
@@ -309,11 +309,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return storedGroupOf(group.id()).flatMap(stored -> writeGroup(group, stored.orElse(null)));
     }
 
-    /** 지금 멤버와 비교하지 않는다 — 부르는 쪽이 락 안에서 {@link #findMembers} 로 확인한 차이다(조직 멤버 PATCH 설계 §6). */
+    /**
+     * 지금 멤버와 비교하지 않는다 — 부르는 쪽이 락 안에서 {@link #findMembers} 로 확인한 차이다(조직 멤버 PATCH 설계 §6). META 도 다시 읽지 않고
+     * 넘겨받은 헤더와 비교한다(설계 2026-10-03 §3.5).
+     */
     @Override
-    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
-        return storedGroupOf(header.id())
-                .flatMap(stored -> writeMembership(header, stored.orElse(null), List.copyOf(added), List.copyOf(removed)));
+    public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
+        Stored<GroupHeader> stored = before == null ? null : new Stored<>(before, true);
+        return writeMembership(after, stored, List.copyOf(added), List.copyOf(removed));
     }
 
     private Mono<Optional<Stored<GroupHeader>>> storedGroupOf(String groupId) {

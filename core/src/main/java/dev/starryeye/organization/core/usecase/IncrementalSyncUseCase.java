@@ -197,32 +197,29 @@ public class IncrementalSyncUseCase {
      * 엣지를 <b>영원히</b> 못 쓰게 되므로 더 심각하다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
-        return withLock(lease -> upsertUserInternal(user, lease));
+        return withLock(lease -> state.findUser(user.id())
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(existing -> upsertUserInternal(user, existing, lease)));
     }
 
-    private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user, LockLease lease) {
+    /** {@code existing} 은 부르는 쪽이 락 안에서 읽은 저장본이다 — 저장소에 그대로 넘겨 META 를 다시 읽지 않게 한다(설계 2026-10-03 §3.5). */
+    private Mono<IncrementalSyncResult> upsertUserInternal(DirectoryUser user, Optional<DirectoryUser> existing, LockLease lease) {
         DirectoryUser neverStored = user.withActive(false);
+        return affectedGroupHeadersOf(user.id()).flatMap(headers -> {
+            DirectoryUser existingUser = existing.orElse(neverStored);
+            Mono<DirectorySnapshot> before = 직원한명_그림(headers, user.id(), Mono.just(existingUser));
+            Mono<DirectorySnapshot> after = 직원한명_그림(headers, user.id(), Mono.just(user));
 
-        return affectedGroupHeadersOf(user.id())
-                .flatMap(headers -> state.findUser(user.id())
-                        .map(Optional::of)
-                        .defaultIfEmpty(Optional.empty())
-                        .flatMap(existing -> {
-                            DirectoryUser existingUser = existing.orElse(neverStored);
-                            Mono<DirectorySnapshot> before =
-                                    직원한명_그림(headers, user.id(), Mono.just(existingUser));
-                            Mono<DirectorySnapshot> after =
-                                    직원한명_그림(headers, user.id(), Mono.just(user));
+            Commit commit = (result, beforeTuples, afterTuples) -> {
+                if (existing.isEmpty() && result.hasFailure()) {
+                    return Mono.empty();
+                }
+                return Mono.defer(() -> state.saveUser(existing.orElse(null), reconcileUser(existingUser, user, result)));
+            };
 
-                            Commit commit = (result, beforeTuples, afterTuples) -> {
-                                if (existing.isEmpty() && result.hasFailure()) {
-                                    return Mono.empty();
-                                }
-                                return Mono.defer(() -> state.saveUser(reconcileUser(existingUser, user, result)));
-                            };
-
-                            return diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, commit);
-                        }));
+            return diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, commit);
+        });
     }
 
     /**
@@ -239,7 +236,7 @@ public class IncrementalSyncUseCase {
                 .flatMap(existing -> Mono.<IncrementalSyncResult>error(
                         new DirectoryConflictException("이미 존재하는 직원입니다: " + user.id())))
                 .switchIfEmpty(Mono.defer(() -> userName을_확인한다(user.userName(), user.id())
-                        .then(Mono.defer(() -> upsertUserInternal(user, lease))))));
+                        .then(Mono.defer(() -> upsertUserInternal(user, Optional.empty(), lease))))));
     }
 
     /**
@@ -257,7 +254,7 @@ public class IncrementalSyncUseCase {
                     Mono<Void> 확인 = Objects.equals(before.userName(), after.userName())
                             ? Mono.empty()
                             : userName을_확인한다(after.userName(), userId);
-                    return 확인.then(Mono.defer(() -> upsertUserInternal(after, lease)));
+                    return 확인.then(Mono.defer(() -> upsertUserInternal(after, Optional.of(before), lease)));
                 }));
     }
 
@@ -386,7 +383,7 @@ public class IncrementalSyncUseCase {
                         DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
                         Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
                         Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
-                        return Mono.defer(() -> state.saveGroupChange(바뀐헤더, 넣을것, 뺄것));
+                        return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것));
                     };
 
                     return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
@@ -465,7 +462,7 @@ public class IncrementalSyncUseCase {
                         // 나머지는 그 직원의 멤버 줄·소속 줄만 지운다 — 조직 멤버 목록 전체를 읽고 쓰지 않는다(설계 §5).
                         Mono<Void> saveGroups = Flux.fromIterable(headers)
                                 .filter(header -> 멤버십을_지운다(tupleFor(이직원, header.id()), beforeTuples, result))
-                                .flatMap(header -> state.saveGroupChange(header, Set.of(), Set.of(이직원)), LOAD_CONCURRENCY)
+                                .flatMap(header -> state.saveGroupChange(header, header, Set.of(), Set.of(이직원)), LOAD_CONCURRENCY)
                                 .then();
                         if (result.hasFailure()) {
                             return saveGroups;
@@ -522,9 +519,9 @@ public class IncrementalSyncUseCase {
         Mono<Void> 상위에서_뺀다 = Flux.fromIterable(parentIds)
                 .filter(parent -> result.deleted().contains(RelationTuple.child(group.id(), parent)))
                 .flatMap(state::findGroupHeader, LOAD_CONCURRENCY)
-                .flatMap(parent -> state.saveGroupChange(parent, Set.of(), Set.of(이조직)), LOAD_CONCURRENCY)
+                .flatMap(parent -> state.saveGroupChange(parent, parent, Set.of(), Set.of(이조직)), LOAD_CONCURRENCY)
                 .then();
-        return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, Set.of(), 지운멤버)));
+        return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)));
     }
 
     // ---------- 공통 ----------

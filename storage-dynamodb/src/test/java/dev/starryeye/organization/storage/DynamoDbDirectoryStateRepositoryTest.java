@@ -697,7 +697,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("키가 예전 규칙으로 저장돼 있으면 값이 같아도 다시 써서 키를 고친다")
+    @DisplayName("전체 교체는 키가 예전 규칙으로 저장돼 있으면 값이 같아도 다시 써서 키를 고친다 — saveUser 는 넘겨받은 저장본과만 비교한다(설계 2026-10-03 §3.5)")
     void 예전_키는_값이_같아도_고친다() {
         // given — GSI1 정렬키가 소문자가 되기 전(원문 대소문자)의 저장본을 흉내낸다
         DirectoryUser kim = new DirectoryUser("Kim", "e1", "Kim", "김철수", null, true);
@@ -708,7 +708,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         clock.앞으로(Duration.ofHours(1));
 
         // when
-        repository.saveUser(kim).block();
+        repository.replaceWith(new DirectorySnapshot(Map.of("Kim", kim), Map.of())).block();
 
         // then
         assertThat(meta(Keys.userPk("Kim")).get(Keys.GSI1SK).s()).isEqualTo("kim");
@@ -1278,5 +1278,48 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(repository.findGroupHeader("DEV").block().displayName()).isEqualTo("플랫폼본부");
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T02:00:00Z");
         assertThat(repository.findGroup("DEV").block().members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("이전 값을 넘기면 META 를 다시 읽지 않고, 같으면 쓰지 않고 다르면 쓴다(점검 S28)")
+    void 이전_값을_넘기면_다시_읽지_않는다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        var 저장본 = repository.findUser("kim").block();
+        GetCounter gets = new GetCounter();
+        WriteCounter writes = new WriteCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(writes.wrap(gets.wrap(client)), properties, clock);
+
+        // when — 같은 값
+        세는.saveUser(저장본, 직원("kim")).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(writes.puts()).isZero();
+
+        // when — 바뀐 값
+        세는.saveUser(저장본, 직원("kim").withDisplayName("새 이름")).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(writes.puts()).isEqualTo(1);
+        assertThat(repository.findUser("kim").block().displayName()).isEqualTo("새 이름");
+    }
+
+    @Test
+    @DisplayName("조직 변경도 이전 헤더를 넘기면 META 를 다시 읽지 않는다 — 멤버만 빼면 줄만 지우고 META 는 바뀐 것으로 찍는다")
+    void 조직_변경도_다시_읽지_않는다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발", MemberRef.user("kim"))).block();
+        var 헤더 = repository.findGroupHeader("DEV").block();
+        GetCounter gets = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(gets.wrap(client), properties, clock);
+
+        // when
+        세는.saveGroupChange(헤더, 헤더, Set.of(), Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(repository.findMemberRefs("DEV").collectList().block()).isEmpty();
     }
 }

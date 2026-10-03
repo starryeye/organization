@@ -10,6 +10,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -57,7 +58,19 @@ public interface DirectoryStateRepository {
      */
     Mono<GroupHeader> findGroupHeader(String groupId);
 
-    Mono<Void> saveUser(DirectoryUser user);
+    /**
+     * 직원 META 를 {@code after} 로 맞춘다. {@code before} 는 부르는 쪽이 락 안에서 강한 일관성으로 읽은 저장본이다(없으면 null) — 저장소가 다시 읽지 않고 이것과
+     * 비교해 바뀌었을 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(설계 2026-10-03 §3.5, 점검 S28).
+     */
+    Mono<Void> saveUser(DirectoryUser before, DirectoryUser after);
+
+    /** 저장본을 읽어 {@link #saveUser(DirectoryUser, DirectoryUser)} 로 넘긴다 — 저장본을 모르는 쪽(심기·테스트)이 쓴다. */
+    default Mono<Void> saveUser(DirectoryUser user) {
+        return findUser(user.id())
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(before -> saveUser(before.orElse(null), user));
+    }
 
     /** 멤버십까지 포함해 교체한다. 기존 멤버십 중 사라진 것은 삭제된다. */
     Mono<Void> saveGroup(DirectoryGroup group);
@@ -96,11 +109,20 @@ public interface DirectoryStateRepository {
     Flux<String> findChildGroupIds(String groupId);
 
     /**
-     * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code header} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
+     * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code after} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
      * 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저, META 는 이름이나 멤버가 바뀌었을 때만 {@code updatedAt} 을 찍는다. 부르는 쪽이
      * {@code added} 가 지금 멤버가 아니고 {@code removed} 가 지금 멤버라는 것을 확인했다고 본다(락 안에서 {@link #findMembers} 로).
+     * {@code before} 는 락 안에서 읽은 헤더(없으면 null) — 저장소가 META 를 다시 읽지 않는다(점검 S28).
      */
-    Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed);
+    Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed);
+
+    /** 헤더를 읽어 {@link #saveGroupChange(GroupHeader, GroupHeader, Set, Set)} 로 넘긴다 — 저장본을 모르는 쪽이 쓴다. */
+    default Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return findGroupHeader(header.id())
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(before -> saveGroupChange(before.orElse(null), header, added, removed));
+    }
 
     /** LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. */
     Mono<Void> replaceWith(DirectorySnapshot snapshot);
