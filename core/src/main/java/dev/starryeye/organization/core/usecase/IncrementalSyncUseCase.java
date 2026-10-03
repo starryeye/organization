@@ -537,15 +537,17 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 하위 조직 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1). 순환은 연결을 지울 때만 풀린다. 멤버 줄이 없는 보류 줄은 지우고,
-     * 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
+     * 하위 조직 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1). 순환은 연결을 지울 때만 풀린다. 튜플이 이미 OpenFGA 에 있는 줄과
+     * 멤버 줄이 없는 보류 줄은 지우고, 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
      *
      * <p><b>원래 요청을 실패시키지 않는다.</b> 원래 연산은 이미 커밋됐다. 여기서 난 오류(OpenFGA·DynamoDB·리스 확인)는 경고만 남기고 목록을 그대로 둔다 — 다음 지우기
      * 요청이나 재적재가 다시 본다.
      */
     private Mono<Void> 보류를_다시_본다(LockLease lease) {
-        OrgGraph 그래프 = new OrgGraph(state);
+        OrgGraph 그래프 = new OrgGraph(state, checker);
         return 그래프.보류()
+                // 튜플이 이미 있는 줄은 보류가 아니다 — 저장된 목록에서 먼저 지우고, 남은 줄만 본다
+                .flatMap(cut -> state.changeCutEdges(Set.of(), 그래프.이미_있던_보류()).thenReturn(cut))
                 .flatMapMany(cut -> Flux.fromIterable(cut.stream().sorted(OrgGraph.아이디순).toList()))
                 .concatMap(edge -> 한_줄을_다시_본다(edge, 그래프, lease))
                 .then()
@@ -723,7 +725,7 @@ public class IncrementalSyncUseCase {
             // 순환을 버리지 않은 목표 — 순환 판단은 OrgGraph 가 튜플 그래프로 한다(설계 2026-10-03 §4.3)
             Set<RelationTuple> 있어야했던것 = mentioning(순환을_버리지_않고(beforeSnapshot), focus);
             Set<RelationTuple> 원하는것 = mentioning(순환을_버리지_않고(afterSnapshot), focus);
-            OrgGraph 그래프 = new OrgGraph(state);
+            OrgGraph 그래프 = new OrgGraph(state, checker);
 
             return checker.existing(candidates).flatMap(actual -> 그래프.필요하면_보류(있어야했던것, 원하는것).flatMap(보류 -> {
                 // 상태 기준선(있어야 했던 것)과 Check 기준선(실제 있는 것)을 비교한다 —
@@ -745,7 +747,7 @@ public class IncrementalSyncUseCase {
                     Set<RelationTuple> after = 거름.남길것();
                     TupleDelta 계산 = TupleDiff.between(actual, after);
                     if (확인없이_지울것.isEmpty()) {
-                        return 반영하고_커밋한다(계산, lease, result -> 보류와_함께_커밋한다(거름, actual, result, actual, after, commit));
+                        return 반영하고_커밋한다(계산, lease, result -> 보류와_함께_커밋한다(거름, result, actual, after, commit));
                     }
                     // 빠지는 멤버의 줄은 Check 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2). 커밋의 재조정은 그 줄이 있었다고 본다 —
                     // 지우기가 실패한 멤버만 남는다.
@@ -754,7 +756,7 @@ public class IncrementalSyncUseCase {
                     Set<RelationTuple> 있다고_볼것 = new LinkedHashSet<>(actual);
                     있다고_볼것.addAll(확인없이_지울것);
                     return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease,
-                            result -> 보류와_함께_커밋한다(거름, actual, result, 있다고_볼것, after, commit));
+                            result -> 보류와_함께_커밋한다(거름, result, 있다고_볼것, after, commit));
                 });
             }));
         });
@@ -762,13 +764,13 @@ public class IncrementalSyncUseCase {
 
     /**
      * 커밋 앞뒤로 보류 목록을 맞춘다(설계 2026-10-03 §4.4). 새로 보류할 줄을 <b>멤버 줄보다 먼저</b> 쓴다 — 거꾸로면 멈춘 뒤 "멤버 줄은 있는데 튜플도 보류 기록도
-     * 없는" 연결이 남아 영영 쓰이지 않는다(점검 M1 과 같은 누락). 풀린 줄은 OpenFGA 에 실제로 있게 된 것만 커밋 뒤에 뺀다.
+     * 없는" 연결이 남아 영영 쓰이지 않는다(점검 M1 과 같은 누락). 풀린 줄은 OpenFGA 에 실제로 있게 된 것만, 목록을 읽을 때 이미 튜플이 있던 줄은 모두 커밋 뒤에 뺀다.
      */
-    private Mono<Void> 보류와_함께_커밋한다(OrgGraph.거른결과 거름, Set<RelationTuple> actual, TupleWriteResult result,
+    private Mono<Void> 보류와_함께_커밋한다(OrgGraph.거른결과 거름, TupleWriteResult result,
                                     Set<RelationTuple> 기준, Set<RelationTuple> 목표, Commit commit) {
         return state.changeCutEdges(거름.새로_보류(), Set.of())
                 .then(Mono.defer(() -> commit.apply(result, 기준, 목표)))
-                .then(Mono.defer(() -> state.changeCutEdges(Set.of(), 거름.뺄것(actual, result))));
+                .then(Mono.defer(() -> state.changeCutEdges(Set.of(), 거름.뺄것(result))));
     }
 
     /** 순환을 버리지 않은 튜플. 순환이 아닌 경고(없는 멤버 등)는 지금처럼 남긴다. */

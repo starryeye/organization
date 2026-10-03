@@ -5,11 +5,13 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.RelationTupleChecker;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,10 +24,14 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * 요청 하나 동안 보는 <b>튜플 그래프</b> — 하위 조직 멤버 줄에서 보류 목록을 뺀 것(설계 2026-10-03 §4.1). 순환 검사(§4.2)와 보류 판단(§4.3)을 한다.
+ * 요청 하나 동안 보는 <b>튜플 그래프</b> — 하위 조직 멤버 줄에서 <b>OpenFGA 에 없는</b> 보류 연결을 뺀 것(설계 2026-10-03 §4.1). 순환 검사(§4.2)와 보류 판단(§4.3)을 한다.
  *
  * <p><b>왜 튜플 그래프인가.</b> 순환이라 쓰지 않은 연결도 멤버 줄은 남는다 — 멤버십은 IdP 가 보낸 사실이다. 그래서 멤버 줄의 그래프에는 순환이 있고 OpenFGA 에는
  * 없다. 멤버 줄로 순환을 보면 이미 보류한 연결을 지나는 경로 때문에 멀쩡한 새 연결까지 버린다.
+ *
+ * <p><b>보류 목록에 있어도 OpenFGA 에 튜플이 있으면 그래프에 있는 연결이다.</b> 튜플을 쓴 뒤 목록에서 빼기 전에 멈추거나 빼기가 실패하면 그런 줄이 남는다. 이 줄을
+ * 그래프에서 빼면 실제로 있는 경로를 못 보고, 그 경로를 지나는 순환을 닫는 연결을 쓰게 된다. 그래서 {@link #보류()} 가 목록을 읽은 직후 한 번 Check 해
+ * OpenFGA 에 있는 줄을 목록에서 걷어 {@link #이미_있던_보류()} 에 따로 둔다 — 호출한 쪽이 저장된 목록에서도 뺀다.
  *
  * <p><b>위로 올라간다(점검 P2).</b> 새 연결 P ⊃ c 는 c 가 P 자신이거나 P 의 조상이면 순환이다. 조상은 보통 조직도 깊이 × 다중 부모 수라, 자손 수천 개를
  * 훑던 옛 검사보다 훨씬 적게 읽는다. 펼친 조직 수가 {@value #MAX_EXPANSIONS} 를 넘으면 {@link GroupGraphTooLargeException} 이다.
@@ -46,38 +52,75 @@ final class OrgGraph {
      * @param 남길것   순환을 만드는 새 연결을 뺀 목표
      * @param 새로_보류 이번에 보류 목록에 넣을 연결(이미 목록에 있던 것은 빼고)
      * @param 풀린_보류 목록에 있었지만 이제 목표에 남는 연결 — OpenFGA 에 실제로 있게 된 것만 목록에서 뺀다({@link #뺄것})
+     * @param 이미_있던_보류 목록을 읽을 때 이미 OpenFGA 에 튜플이 있던 줄({@link #이미_있던_보류()}) — 쓰기 결과와 상관없이 목록에서 뺀다
      */
-    record 거른결과(Set<RelationTuple> 남길것, Set<GroupEdge> 새로_보류, Set<GroupEdge> 풀린_보류) {
+    record 거른결과(Set<RelationTuple> 남길것, Set<GroupEdge> 새로_보류, Set<GroupEdge> 풀린_보류, Set<GroupEdge> 이미_있던_보류) {
 
-        /** 풀린 보류 중 OpenFGA 에 이제 있는 것 — 원래 있었거나 이번에 썼다. 쓰기가 실패한 연결은 목록에 남긴다(설계 §4.4). */
-        Set<GroupEdge> 뺄것(Set<RelationTuple> actual, TupleWriteResult result) {
-            return 풀린_보류.stream()
-                    .filter(edge -> actual.contains(edge.tuple()) || result.written().contains(edge.tuple()))
+        /**
+         * 목록에서 뺄 줄 — 풀린 보류 중 OpenFGA 에 이제 있는 것(이번에 썼다)과 목록을 읽을 때 이미 있던 줄. 쓰기가 실패한 연결은 목록에 남긴다(설계 §4.4).
+         * 이미 있던 줄은 쓰기 결과와 상관없다 — 튜플이 있으니 목록에 둘 이유가 없다.
+         */
+        Set<GroupEdge> 뺄것(TupleWriteResult result) {
+            Set<GroupEdge> 뺄것 = 풀린_보류.stream()
+                    .filter(edge -> result.written().contains(edge.tuple()))
                     .collect(Collectors.toCollection(LinkedHashSet::new));
+            뺄것.addAll(이미_있던_보류);
+            return 뺄것;
         }
     }
 
     private final DirectoryStateRepository state;
+    private final RelationTupleChecker checker;
     private final Map<String, Set<String>> 부모들 = new HashMap<>();
+    private final Set<GroupEdge> 이미_있던 = new LinkedHashSet<>();
     private Mono<Set<GroupEdge>> 보류;
     /** 읽은 보류 목록 — {@link #보류에서_뺀다} 가 고친다. 아직 안 읽었으면 null. */
     private Set<GroupEdge> 읽은보류;
     private int budget = MAX_EXPANSIONS;
 
-    OrgGraph(DirectoryStateRepository state) {
+    OrgGraph(DirectoryStateRepository state, RelationTupleChecker checker) {
         this.state = state;
+        this.checker = checker;
     }
 
-    /** 보류 목록. 요청 안에서 한 번만 읽고, 같은 요청의 보류·해제가 이 집합에 반영된다. */
+    /**
+     * 보류 목록 중 <b>OpenFGA 에 튜플이 없는</b> 줄. 요청 안에서 한 번만 읽고, 같은 요청의 보류·해제가 이 집합에 반영된다.
+     *
+     * <p>튜플이 이미 있는 줄은 보류가 아니라 그래프에 있는 연결이다 — 읽은 직후 목록이 비어 있지 않을 때만 한 번 Check({@code existing}) 해 걷어낸다.
+     * 걷어낸 줄은 {@link #이미_있던_보류()} 에 둔다. 목록은 보통 비어 있어 Check 를 부르지 않는다.
+     */
     Mono<Set<GroupEdge>> 보류() {
         if (보류 == null) {
             보류 = state.findCutEdges()
                     .collect(Collectors.toCollection(LinkedHashSet::new))
-                    .<Set<GroupEdge>>map(set -> set)
+                    .<Set<GroupEdge>>flatMap(this::OpenFGA에_있는_줄을_걷어낸다)
                     .doOnNext(set -> 읽은보류 = set)
                     .cache();
         }
         return 보류;
+    }
+
+    private Mono<Set<GroupEdge>> OpenFGA에_있는_줄을_걷어낸다(Set<GroupEdge> cut) {
+        if (cut.isEmpty()) {
+            return Mono.just(cut);
+        }
+        Set<RelationTuple> 튜플들 = cut.stream().map(GroupEdge::tuple).collect(Collectors.toCollection(LinkedHashSet::new));
+        return checker.existing(튜플들).map(있는것 -> {
+            Set<GroupEdge> 있던줄 = cut.stream()
+                    .filter(edge -> 있는것.contains(edge.tuple()))
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            cut.removeAll(있던줄);
+            이미_있던.addAll(있던줄);
+            return cut;
+        });
+    }
+
+    /**
+     * 보류 목록을 읽을 때 OpenFGA 에 이미 튜플이 있던 줄 — 튜플을 쓴 뒤 목록에서 빼기 전에 멈추거나 빼기가 실패해 남은 줄이다. 그래프에 있는 연결이라 저장된 목록에서
+     * 지워야 한다. 목록을 아직 안 읽었거나 그런 줄이 없으면 비어 있다.
+     */
+    Set<GroupEdge> 이미_있던_보류() {
+        return Collections.unmodifiableSet(이미_있던);
     }
 
     /** 이 튜플들에 하위 조직 연결이 있을 때만 보류 목록을 읽는다 — 직원 연산·직원만 바뀌는 조직 연산은 읽지 않는다. */
@@ -118,7 +161,7 @@ final class OrgGraph {
     Mono<거른결과> 거른다(Set<RelationTuple> actual, Set<RelationTuple> after, String focus) {
         List<GroupEdge> 연결 = after.stream().map(GroupEdge::of).flatMap(Optional::stream).toList();
         if (연결.isEmpty()) {
-            return Mono.just(new 거른결과(after, Set.of(), Set.of()));
+            return Mono.just(new 거른결과(after, Set.of(), Set.of(), new LinkedHashSet<>(이미_있던)));
         }
         String 초점조직 = focus.startsWith(GROUP_PREFIX) ? focus.substring(GROUP_PREFIX.length()) : "";
         return 보류().flatMap(cut -> {
@@ -127,9 +170,6 @@ final class OrgGraph {
             for (GroupEdge edge : 연결) {
                 if (!actual.contains(edge.tuple())) {
                     새연결.add(edge);
-                } else if (cut.remove(edge)) {
-                    // OpenFGA 에 있는 연결은 목록에 남아 있어도 튜플 그래프에 있다 — 쓰기 뒤 목록에서 빼기 전에 멈춘 경우다. 뒤 검사가 이 연결을 지나간다
-                    풀린.add(edge);
                 }
             }
             새연결.sort(Comparator.comparing((GroupEdge edge) -> edge.child().equals(초점조직) ? 0 : 1).thenComparing(아이디순));
@@ -148,7 +188,7 @@ final class OrgGraph {
                             풀린.add(edge);
                         }
                     }))
-                    .then(Mono.fromSupplier(() -> new 거른결과(남길것, 새로_보류, 풀린)));
+                    .then(Mono.fromSupplier(() -> new 거른결과(남길것, 새로_보류, 풀린, new LinkedHashSet<>(이미_있던))));
         });
     }
 
