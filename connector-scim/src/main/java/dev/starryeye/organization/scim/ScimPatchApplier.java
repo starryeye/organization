@@ -3,11 +3,11 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashSet;
@@ -17,7 +17,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
-import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,15 +45,23 @@ public final class ScimPatchApplier {
 
     /**
      * 조직 PATCH 를 <b>저장소를 읽지 않고</b> {@link GroupChange} 로 정리한다(조직 멤버 PATCH 설계 §4). 연산은 배열 순서대로 쌓인다.
-     * {@code type} 이 빠진 멤버의 종류만 {@code resolver} 로 판정한다. 멤버십을 보고 하는 판단(지금 멤버인가, id 빼기가 직원·하위
+     * {@code type} 이 빠진 멤버의 종류만, 요청의 아이디를 먼저 모아 {@code resolver} 로 한 번에 판정한다(설계 2026-10-03 §3.2). 멤버십을 보고 하는 판단(지금 멤버인가, id 빼기가 직원·하위
      * 조직 중 무엇인가)은 유스케이스가 락 안에서 한다 — 락 밖에서 읽은 목록으로 계산하면 동시에 온 PATCH 가 서로를 지운다.
      */
     public static Mono<GroupChange> toGroupChange(ScimPatchOp patch, MemberTypeResolver resolver) {
-        Mono<GroupChange> current = Mono.just(GroupChange.delta());
-        for (ScimOperation operation : operations(patch)) {
-            current = current.flatMap(change -> applyOne(change, operation, resolver));
-        }
-        return current;
+        List<ScimOperation> operations = operations(patch);
+        return Mono.defer(() -> {
+                    Set<String> 모름 = new LinkedHashSet<>();
+                    operations.forEach(operation -> 모름.addAll(typeless(operation)));
+                    return resolver.resolveAll(모름);
+                })
+                .map(종류 -> {
+                    GroupChange change = GroupChange.delta();
+                    for (ScimOperation operation : operations) {
+                        change = applyOne(change, operation, 종류);
+                    }
+                    return change;
+                });
     }
 
     public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
@@ -74,14 +81,50 @@ public final class ScimPatchApplier {
 
     // ---------- 그룹 ----------
 
-    private static Mono<GroupChange> applyOne(GroupChange change, ScimOperation operation,
-                                              MemberTypeResolver resolver) {
+    /**
+     * 이 연산이 넣는 멤버 중 {@code type} 이 없는 아이디(정규화한 값, 설계 2026-10-03 §3.2). 모양이 틀린 연산은 비워 두고 {@link #applyOne} 이 거절한다 —
+     * 여기서는 예외를 던지지 않는다.
+     */
+    @SuppressWarnings("unchecked")
+    private static Set<String> typeless(ScimOperation operation) {
+        String op = operation.op() == null ? "" : operation.op().trim().toLowerCase(Locale.ROOT);
+        if (!op.equals("add") && !op.equals("replace")) {
+            return Set.of();
+        }
+        String path = operation.path();
+        Object members = null;
+        if (path == null || path.isBlank()) {
+            if (operation.value() instanceof Map<?, ?> map) {
+                members = attribute((Map<String, Object>) map, "members");
+            }
+        } else if (path.trim().equalsIgnoreCase("members")) {
+            members = operation.value();
+        }
+        if (!(members instanceof List<?> list)) {
+            return Set.of();
+        }
+        Set<String> ids = new LinkedHashSet<>();
+        for (Object element : list) {
+            if (!(element instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> map = (Map<String, Object>) raw;
+            Object id = attribute(map, "value");
+            Object type = attribute(map, "type");
+            if (id != null && !id.toString().isBlank() && (type == null || type.toString().isBlank())) {
+                ids.add(IdNormalizer.normalize(id.toString()));
+            }
+        }
+        return ids;
+    }
+
+    private static GroupChange applyOne(GroupChange change, ScimOperation operation, Map<String, MemberType> 종류) {
         String op = normalizeOp(operation.op());
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
             requireReplaceOrAdd(op, operation.op());
-            return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), resolver);
+            return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), 종류);
         }
 
         Matcher filter = MEMBER_FILTER.matcher(path.trim());
@@ -90,27 +133,27 @@ public final class ScimPatchApplier {
                 throw ScimException.invalidPath(
                         "members 필터는 remove 에만 지원합니다: op=" + operation.op() + ", path=" + path);
             }
-            return Mono.just(change.removingId(memberId(filter.group("filter"), path)));
+            return change.removingId(memberId(filter.group("filter"), path));
         }
 
         if (path.trim().equalsIgnoreCase("members")) {
             return switch (op) {
-                case "add" -> toMemberRefs(operation.value(), resolver).map(change::adding);
+                case "add" -> change.adding(toMemberRefs(operation.value(), 종류));
                 case "remove" -> {
                     // RFC 7644 §3.5.2.2 — 필터 없는 remove 는 전원 삭제다. remove 의 value 는 RFC 가 정하지 않은 칸이다
                     if (operation.value() != null) {
                         throw ScimException.invalidValue(REMOVE_WITH_VALUE);
                     }
-                    yield Mono.just(change.replacing(Set.of()));
+                    yield change.replacing(Set.of());
                 }
-                case "replace" -> toMemberRefs(operation.value(), resolver).map(change::replacing);
+                case "replace" -> change.replacing(toMemberRefs(operation.value(), 종류));
                 default -> throw ScimException.invalidSyntax("알 수 없는 op 입니다: " + operation.op());
             };
         }
 
         if (path.trim().equalsIgnoreCase("displayName")) {
             requireReplaceOrAdd(op, operation.op());
-            return Mono.just(change.renamed(asString(operation.value())));
+            return change.renamed(asString(operation.value()));
         }
 
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
@@ -137,16 +180,16 @@ public final class ScimPatchApplier {
      * 경로 없는 add/replace 의 {@code members} — {@code op} 가 {@code add} 면 증분 추가, 아니면(=replace) 전체 교체다
      * (RFC 7644 §3.5.2.1, 최종 리뷰 F2). {@code op} 는 이미 {@link #normalizeOp} 로 소문자다.
      */
-    private static Mono<GroupChange> mergeGroupAttributes(GroupChange change, String op, Map<String, Object> attributes,
-                                                          MemberTypeResolver resolver) {
+    private static GroupChange mergeGroupAttributes(GroupChange change, String op, Map<String, Object> attributes,
+                                                    Map<String, MemberType> 종류) {
         GroupChange renamed = has(attributes, "displayName")
                 ? change.renamed(asString(attribute(attributes, "displayName")))
                 : change;
         if (!has(attributes, "members")) {
-            return Mono.just(renamed);
+            return renamed;
         }
-        Function<Set<MemberRef>, GroupChange> apply = op.equals("add") ? renamed::adding : renamed::replacing;
-        return toMemberRefs(attribute(attributes, "members"), resolver).map(apply);
+        Set<MemberRef> members = toMemberRefs(attribute(attributes, "members"), 종류);
+        return op.equals("add") ? renamed.adding(members) : renamed.replacing(members);
     }
 
     // ---------- 직원 ----------
@@ -336,38 +379,34 @@ public final class ScimPatchApplier {
      * {@code value} 는 {@link ScimMapper} 와 같은 규칙으로 정규화한다 — 정규화를 빼먹으면
      * 그 멤버는 저장되고 응답에도 실리지만 튜플은 하나도 만들어지지 않는다.
      */
-    private static Mono<Set<MemberRef>> toMemberRefs(Object value, MemberTypeResolver resolver) {
+    private static Set<MemberRef> toMemberRefs(Object value, Map<String, MemberType> 종류) {
         if (!(value instanceof List<?> raw)) {
             throw ScimException.invalidSyntax("members 값은 배열이어야 합니다");
         }
-        if (raw.isEmpty()) {
-            return Mono.just(Set.of());
+        Set<MemberRef> members = new LinkedHashSet<>();
+        for (Object element : raw) {
+            members.add(memberRef(element, 종류));
         }
-        return Flux.fromIterable(raw)
-                .concatMap(element -> memberRef(element, resolver))
-                .collect(LinkedHashSet<MemberRef>::new, Set::add)
-                .map(members -> members);
+        return members;
     }
 
     @SuppressWarnings("unchecked")
-    private static Mono<MemberRef> memberRef(Object element, MemberTypeResolver resolver) {
+    private static MemberRef memberRef(Object element, Map<String, MemberType> 종류) {
         if (!(element instanceof Map<?, ?> rawMap)) {
-            return Mono.error(ScimException.invalidSyntax("members 원소는 객체여야 합니다"));
+            throw ScimException.invalidSyntax("members 원소는 객체여야 합니다");
         }
         Map<String, Object> map = (Map<String, Object>) rawMap;
         Object rawId = attribute(map, "value");
         if (rawId == null || rawId.toString().isBlank()) {
-            return Mono.error(ScimException.invalidSyntax("members 원소에 value 가 없습니다"));
+            throw ScimException.invalidSyntax("members 원소에 value 가 없습니다");
         }
         String id = IdNormalizer.normalize(rawId.toString());
         Object type = attribute(map, "type");
-        // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고 현재상태로 판정한다.
+        // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고, 요청 앞에서 모아 현재상태로 판정한 결과를 쓴다
         if (type == null || type.toString().isBlank()) {
-            return resolver.resolve(id).map(resolved -> new MemberRef(resolved, id));
+            return new MemberRef(종류.getOrDefault(id, MemberType.USER), id);
         }
-        return Mono.just(type.toString().equalsIgnoreCase("Group")
-                ? MemberRef.group(id)
-                : MemberRef.user(id));
+        return type.toString().equalsIgnoreCase("Group") ? MemberRef.group(id) : MemberRef.user(id);
     }
 
     @SuppressWarnings("unchecked")

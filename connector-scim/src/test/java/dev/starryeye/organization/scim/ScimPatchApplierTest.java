@@ -13,12 +13,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import reactor.core.publisher.Mono;
 
@@ -27,8 +29,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimPatchApplierTest {
 
-    /** 대부분의 케이스는 type 이 명시돼 있어 resolver 를 타지 않는다. 타면 User 로 답한다. */
-    private static final MemberTypeResolver USER_ONLY = id -> Mono.just(MemberType.USER);
+    /** 대부분의 케이스는 type 이 명시돼 있어 resolver 를 타지 않는다. 타면 모두 User 로 답한다. */
+    private static final MemberTypeResolver USER_ONLY = ids -> Mono.just(
+            ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.USER)));
 
     private static DirectoryGroup 조직(MemberRef... members) {
         return new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of(members));
@@ -41,6 +44,10 @@ class ScimPatchApplierTest {
     private static ScimPatchOp 패치(String op, String path, Object value) {
         return new ScimPatchOp(List.of(ScimSchemas.PATCH_OP),
                 List.of(new ScimOperation(op, path, value)));
+    }
+
+    private static ScimPatchOp 패치(ScimOperation... operations) {
+        return new ScimPatchOp(List.of(ScimSchemas.PATCH_OP), List.of(operations));
     }
 
     private static Map<String, Object> 멤버(String value, String type) {
@@ -342,6 +349,49 @@ class ScimPatchApplierTest {
         // then
         assertThat(after.members()).containsExactly(MemberRef.group("DEV003"));
         assertThat(state.findGroupCalls).as("존재만 보면 되므로 조직 파티션을 통째로 읽지 않는다").isEmpty();
+    }
+
+    @Test
+    @DisplayName("여러 operation 에 걸친 type 없는 멤버를 한 번에 판정한다 — type 있는 멤버는 묻지 않는다")
+    void 요청당_한_번_판정한다() {
+        // given
+        List<Set<String>> 물은것 = new ArrayList<>();
+        MemberTypeResolver resolver = ids -> {
+            물은것.add(Set.copyOf(ids));
+            return USER_ONLY.resolveAll(ids);
+        };
+        var patch = 패치(
+                new ScimOperation("add", "members", List.of(Map.of("value", "a"), Map.of("value", "b"))),
+                new ScimOperation("add", null, Map.of("members", List.of(Map.of("value", "c"), Map.of("value", "d", "type", "User")))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, resolver).block();
+
+        // then
+        assertThat(물은것).containsExactly(Set.of("a", "b", "c"));
+        assertThat(change.applyTo(조직(), id -> false).members()).containsExactlyInAnyOrder(
+                MemberRef.user("a"), MemberRef.user("b"), MemberRef.user("c"), MemberRef.user("d"));
+    }
+
+    @Test
+    @DisplayName("같은 아이디가 여러 operation 에 나와도 한 번만 묻고 멤버도 한 번만 들어간다")
+    void 같은_아이디는_한_번만_묻는다() {
+        // given
+        List<Set<String>> 물은것 = new ArrayList<>();
+        MemberTypeResolver resolver = ids -> {
+            물은것.add(Set.copyOf(ids));
+            return USER_ONLY.resolveAll(ids);
+        };
+        var patch = 패치(
+                new ScimOperation("add", "members", List.of(Map.of("value", "a"))),
+                new ScimOperation("add", "members", List.of(Map.of("value", "a"))));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, resolver).block();
+
+        // then
+        assertThat(물은것).containsExactly(Set.of("a"));
+        assertThat(change.applyTo(조직(), id -> false).members()).containsExactly(MemberRef.user("a"));
     }
 
     @Test

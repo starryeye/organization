@@ -14,8 +14,10 @@ import dev.starryeye.organization.scim.dto.ScimUser;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import reactor.core.publisher.Mono;
 
@@ -24,8 +26,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimMapperTest {
 
-    /** type 이 명시된 케이스는 이 resolver 를 타지 않는다. 타면 User 로 답한다. */
-    private static final MemberTypeResolver USER_ONLY = id -> Mono.just(MemberType.USER);
+    /** type 이 명시된 케이스는 이 resolver 를 타지 않는다. 타면 모두 User 로 답한다. */
+    private static final MemberTypeResolver USER_ONLY = ids -> Mono.just(
+            ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.USER)));
 
     @Test
     @DisplayName("직원 아이디는 userName 에서 오고 표시명은 displayName 을 우선한다")
@@ -288,6 +291,27 @@ class ScimMapperTest {
 
         // then
         assertThat(group.members()).containsExactly(MemberRef.group("DEV002"));
+    }
+
+    @Test
+    @DisplayName("POST·PUT 본문의 type 없는 멤버를 한 번에 판정한다")
+    void 본문당_한_번_판정한다() {
+        // given
+        List<Set<String>> 물은것 = new ArrayList<>();
+        MemberTypeResolver resolver = ids -> {
+            물은것.add(Set.copyOf(ids));
+            return USER_ONLY.resolveAll(ids);
+        };
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
+                List.of(new ScimMember("kim", null, null), new ScimMember("lee", null, null), new ScimMember("DEV002", "Group", null)), null);
+
+        // when
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, resolver).block();
+
+        // then
+        assertThat(물은것).containsExactly(Set.of("kim", "lee"));
+        assertThat(group.members()).containsExactlyInAnyOrder(
+                MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.group("DEV002"));
     }
 
     @Test
