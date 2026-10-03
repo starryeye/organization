@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.fake;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -56,6 +57,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     /** {@link #deleteGroup} 가 불린 조직 id — 삭제 전용 경로가 조직을 몇 번 지우는지 본다. */
     public final List<String> deleteGroupCalls = new ArrayList<>();
+
+    /** 보류 목록(설계 2026-10-03 §4.1). {@link #replaceWith} 는 건드리지 않는다 — 실제 저장소도 그렇다. */
+    public final Set<GroupEdge> cutEdges = new LinkedHashSet<>();
+
+    /** {@link #findCutEdges} 가 불린 수 — 보류 목록을 언제 읽는지 단언한다. */
+    public int findCutEdgesCalls;
 
     private RuntimeException loadAllFailure;
 
@@ -215,6 +222,30 @@ public class FakeStateRepository implements DirectoryStateRepository {
     private Set<MemberRef> membersOf(String groupId) {
         DirectoryGroup group = groups.get(groupId);
         return group == null ? Set.of() : group.members();
+    }
+
+    @Override
+    public Flux<GroupEdge> findCutEdges() {
+        return Flux.defer(() -> {
+            findCutEdgesCalls++;
+            return Flux.fromIterable(List.copyOf(cutEdges));
+        });
+    }
+
+    @Override
+    public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+        return Mono.fromRunnable(() -> {
+            cutEdges.addAll(added);
+            cutEdges.removeAll(removed);
+        });
+    }
+
+    @Override
+    public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
+        return Mono.fromRunnable(() -> {
+            cutEdges.clear();
+            cutEdges.addAll(edges);
+        });
     }
 
     @Override

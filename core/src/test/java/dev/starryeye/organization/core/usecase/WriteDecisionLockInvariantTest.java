@@ -7,6 +7,7 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -75,6 +76,7 @@ class WriteDecisionLockInvariantTest {
         @Override public Flux<MemberRef> findMemberRefs(String g) { return 본다Flux("findMemberRefs " + g, () -> super.findMemberRefs(g)); }
         @Override public Flux<String> findChildGroupIds(String g) { return 본다Flux("findChildGroupIds " + g, () -> super.findChildGroupIds(g)); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) { return 본다Flux("findGroupIdsContaining " + ref.id(), () -> super.findGroupIdsContaining(ref)); }
+        @Override public Flux<GroupEdge> findCutEdges() { return 본다Flux("findCutEdges", super::findCutEdges); }
     }
 
     @BeforeEach

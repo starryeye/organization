@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -1321,5 +1322,42 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(gets.gets()).isZero();
         assertThat(repository.findMemberRefs("DEV").collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("보류 목록에 넣고 빼고 통째로 바꾼다")
+    void 보류_목록을_다룬다() {
+        // given
+        var ab = new GroupEdge("A", "B");
+        var cd = new GroupEdge("C", "D");
+        var ef = new GroupEdge("E", "F");
+
+        // when
+        repository.changeCutEdges(Set.of(ab, cd), Set.of()).block();
+        var 넣은뒤 = repository.findCutEdges().collectList().block();
+        repository.changeCutEdges(Set.of(), Set.of(ab)).block();
+        var 뺀뒤 = repository.findCutEdges().collectList().block();
+        repository.replaceCutEdges(Set.of(ef)).block();
+        var 바꾼뒤 = repository.findCutEdges().collectList().block();
+
+        // then
+        assertThat(넣은뒤).containsExactlyInAnyOrder(ab, cd);
+        assertThat(뺀뒤).containsExactly(cd);
+        assertThat(바꾼뒤).containsExactly(ef);
+    }
+
+    @Test
+    @DisplayName("보류 목록 줄은 직원·조직 열거에 섞이지 않는다")
+    void 보류_줄은_조직도에_섞이지_않는다() {
+        // given
+        repository.saveGroup(조직("A", "에이", MemberRef.group("B"))).block();
+        repository.changeCutEdges(Set.of(new GroupEdge("A", "B")), Set.of()).block();
+
+        // when
+        var 전체 = repository.loadAll().block();
+
+        // then
+        assertThat(전체.groups()).containsOnlyKeys("A");
+        assertThat(전체.users()).isEmpty();
     }
 }

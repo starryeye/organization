@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -25,6 +26,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -85,6 +87,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String ACTIVE = "active";
     /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
+    /** 보류 목록 줄의 속성(설계 2026-10-03 §4.1). 키에도 담겨 있지만 줄만 보고 읽을 수 있게 둔다. */
+    private static final String CUT_PARENT = "parent";
+    private static final String CUT_CHILD = "child";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -686,6 +691,47 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .build();
 
         return Paginator.queryAll(client, request).map(item -> parsePk.apply(Attrs.str(item, Keys.PK)));
+    }
+
+    // ---------- 보류 목록 ----------
+
+    /** 보류 목록 파티션 한 곳의 정렬키만 읽는다 — 보통 비어 있어 읽기 1번이다. */
+    @Override
+    public Flux<GroupEdge> findCutEdges() {
+        return querySortKeys(Keys.CYCLE_CUT_PK, Keys.CUT_EDGE_PREFIX).map(Keys::parseCutEdgeSk);
+    }
+
+    @Override
+    public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+        return Flux.fromIterable(added)
+                .flatMap(edge -> putItem(cutEdgeItem(edge)), QUERY_CONCURRENCY)
+                .thenMany(Flux.fromIterable(removed)
+                        .flatMap(edge -> deleteItem(Keys.CYCLE_CUT_PK, Keys.cutEdgeSk(edge)), QUERY_CONCURRENCY))
+                .then();
+    }
+
+    /**
+     * 지금 목록과 비교해 달라진 줄만 넣고 뺀다. {@link #replaceWith} 가 GSI1 로 직원·조직만 열거해 보류 줄을 건드리지 않으므로, 재적재는 이 메서드를
+     * 따로 부른다.
+     */
+    @Override
+    public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
+        return findCutEdges().collect(Collectors.toSet()).flatMap(지금 -> {
+            Set<GroupEdge> 뺄것 = new HashSet<>(지금);
+            뺄것.removeAll(edges);
+            Set<GroupEdge> 넣을것 = new HashSet<>(edges);
+            넣을것.removeAll(지금);
+            return changeCutEdges(넣을것, 뺄것);
+        });
+    }
+
+    private Map<String, AttributeValue> cutEdgeItem(GroupEdge edge) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.CYCLE_CUT_PK));
+        item.put(Keys.SK, Attrs.s(Keys.cutEdgeSk(edge)));
+        item.put(CUT_PARENT, Attrs.s(edge.parent()));
+        item.put(CUT_CHILD, Attrs.s(edge.child()));
+        return item;
     }
 
     // ---------- 공통 ----------

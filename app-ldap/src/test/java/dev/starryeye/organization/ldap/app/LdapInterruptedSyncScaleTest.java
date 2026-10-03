@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -205,6 +206,11 @@ class LdapInterruptedSyncScaleTest {
         @Override public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
             return 실제.saveGroupChange(before, after, added, removed);
         }
+        @Override public Flux<GroupEdge> findCutEdges() { return 실제.findCutEdges(); }
+        @Override public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+            return 실제.changeCutEdges(added, removed);
+        }
+        @Override public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) { return 실제.replaceCutEdges(edges); }
         @Override public Mono<DirectorySnapshot> loadAll() { return 실제.loadAll(); }
     }
 }

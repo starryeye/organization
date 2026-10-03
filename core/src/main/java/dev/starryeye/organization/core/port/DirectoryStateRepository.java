@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.port;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -123,6 +124,18 @@ public interface DirectoryStateRepository {
                 .defaultIfEmpty(Optional.empty())
                 .flatMap(before -> saveGroupChange(before.orElse(null), header, added, removed));
     }
+
+    /**
+     * 보류 목록 — 순환이라 튜플을 쓰지 않은 하위 조직 연결(설계 2026-10-03 §4.1). 멤버 줄은 따로 남아 있다. 보통 비어 있다. 강한 일관성.
+     * "튜플 그래프 = 멤버 줄의 하위 조직 연결 − 보류 목록"이다.
+     */
+    Flux<GroupEdge> findCutEdges();
+
+    /** 보류 목록에 {@code added} 를 넣고 {@code removed} 를 뺀다. 둘 다 비면 아무것도 하지 않는다. */
+    Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed);
+
+    /** 보류 목록을 {@code edges} 로 통째로 바꾼다 — SCIM 재적재·wipe 가 쓴다(설계 2026-10-03 §4.6). */
+    Mono<Void> replaceCutEdges(Set<GroupEdge> edges);
 
     /** LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. */
     Mono<Void> replaceWith(DirectorySnapshot snapshot);
