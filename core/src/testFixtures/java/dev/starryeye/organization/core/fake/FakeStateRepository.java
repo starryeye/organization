@@ -39,6 +39,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** {@link #findUser} 가 불린 순서대로의 직원 아이디. {@link #findGroupCalls} 와 같은 목적. */
     public final List<String> findUserCalls = new ArrayList<>();
 
+    /** {@link #findUsers} 가 받은 아이디 묶음 — 멤버 직원을 묶어 읽는지 단언한다. */
+    public final List<Set<String>> findUsersCalls = new ArrayList<>();
+
+    /** {@link #findMemberTypes} 가 받은 아이디 묶음. */
+    public final List<Set<String>> findMemberTypesCalls = new ArrayList<>();
+
     /** {@link #findMembers} 가 받은 후보들. 무엇을 물었는지 단언하는 계측이다. */
     public final List<Set<MemberRef>> findMembersCalls = new ArrayList<>();
 
@@ -62,6 +68,30 @@ public class FakeStateRepository implements DirectoryStateRepository {
     public Mono<DirectoryUser> findUser(String userId) {
         return Mono.fromRunnable(() -> findUserCalls.add(userId))
                 .then(Mono.justOrEmpty(users.get(userId)));
+    }
+
+    @Override
+    public Flux<DirectoryUser> findUsers(Set<String> userIds) {
+        return Flux.defer(() -> {
+            findUsersCalls.add(Set.copyOf(userIds));
+            return Flux.fromIterable(userIds).flatMap(id -> Mono.justOrEmpty(users.get(id)));
+        });
+    }
+
+    @Override
+    public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) {
+        return Mono.fromCallable(() -> {
+            findMemberTypesCalls.add(Set.copyOf(ids));
+            Map<String, MemberType> found = new LinkedHashMap<>();
+            for (String id : ids) {
+                if (groups.containsKey(id)) {
+                    found.put(id, MemberType.GROUP);
+                } else if (users.containsKey(id)) {
+                    found.put(id, MemberType.USER);
+                }
+            }
+            return found;
+        });
     }
 
     @Override

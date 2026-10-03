@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,7 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -64,6 +66,8 @@ class WriteDecisionLockInvariantTest {
         }
 
         @Override public Mono<DirectoryUser> findUser(String id) { return 본다("findUser " + id, () -> super.findUser(id)); }
+        @Override public Flux<DirectoryUser> findUsers(Set<String> ids) { return 본다Flux("findUsers " + ids, () -> super.findUsers(ids)); }
+        @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 본다("findMemberTypes " + ids, () -> super.findMemberTypes(ids)); }
         @Override public Flux<String> findUserIdsByUserName(String n) { return 본다Flux("findUserIdsByUserName " + n, () -> super.findUserIdsByUserName(n)); }
         @Override public Mono<DirectoryGroup> findGroup(String id) { return 본다("findGroup " + id, () -> super.findGroup(id)); }
         @Override public Mono<GroupHeader> findGroupHeader(String id) { return 본다("findGroupHeader " + id, () -> super.findGroupHeader(id)); }

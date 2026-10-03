@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import org.junit.jupiter.api.BeforeEach;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
@@ -1048,6 +1049,64 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(counter.puts()).isZero();
+    }
+
+    // ---------- 묶음 읽기: 멤버 종류 판정·직원 (설계 2026-10-03 §3.1) ----------
+
+    @Test
+    @DisplayName("아이디마다 조직인지 직원인지 한 번에 판정한다 — 둘 다 있으면 조직, 없으면 결과에 없다")
+    void 종류를_한_번에_판정한다() {
+        // given
+        repository.saveGroup(조직("G1", "팀")).block();
+        repository.saveUser(직원("u1")).block();
+        repository.saveUser(직원("both")).block();
+        repository.saveGroup(조직("both", "겹치는 조직")).block();
+
+        // when
+        var 종류 = repository.findMemberTypes(Set.of("G1", "u1", "both", "ghost")).block();
+
+        // then
+        assertThat(종류).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "G1", MemberType.GROUP, "u1", MemberType.USER, "both", MemberType.GROUP));
+    }
+
+    @Test
+    @DisplayName("종류 판정과 직원 묶음 읽기는 BatchGet 으로 100개씩 읽는다 — GetItem 을 하지 않는다")
+    void 묶음으로_읽는다() {
+        // given — 직원 150명
+        Set<String> 아이디 = new LinkedHashSet<>();
+        for (int i = 0; i < 150; i++) {
+            repository.saveUser(직원("b" + i)).block();
+            아이디.add("b" + i);
+        }
+        GetCounter counter = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, clock);
+
+        // when
+        var 종류 = 세는.findMemberTypes(아이디).block();
+        long 판정_묶음 = counter.batchGets();
+        counter.reset();
+        var 직원들 = 세는.findUsers(Set.copyOf(아이디)).collectList().block();
+
+        // then — 판정은 키 300개(조직 META·직원 META) = 3묶음, 직원은 150개 = 2묶음
+        assertThat(종류).hasSize(150).containsValue(MemberType.USER).doesNotContainValue(MemberType.GROUP);
+        assertThat(판정_묶음).isEqualTo(3);
+        assertThat(직원들).hasSize(150).extracting(DirectoryUser::id).containsExactlyInAnyOrderElementsOf(아이디);
+        assertThat(counter.batchGets()).isEqualTo(2);
+        assertThat(counter.gets()).isZero();
+    }
+
+    @Test
+    @DisplayName("직원 묶음 읽기는 없는 아이디를 빼고 돌려준다")
+    void 없는_직원은_빠진다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+
+        // when
+        var 직원들 = repository.findUsers(Set.of("kim", "ghost")).collectList().block();
+
+        // then
+        assertThat(직원들).containsExactly(직원("kim"));
     }
 
     // ---------- 조직 멤버 PATCH (설계 §6) ----------

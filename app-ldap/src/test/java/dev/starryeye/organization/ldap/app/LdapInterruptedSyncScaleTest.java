@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -43,6 +44,7 @@ import reactor.core.publisher.Mono;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -181,6 +183,8 @@ class LdapInterruptedSyncScaleTest {
         }
 
         @Override public Mono<DirectoryUser> findUser(String userId) { return 실제.findUser(userId); }
+        @Override public Flux<DirectoryUser> findUsers(Set<String> userIds) { return 실제.findUsers(userIds); }
+        @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 실제.findMemberTypes(ids); }
         @Override public Flux<String> findUserIdsByUserName(String userName) {
             return 실제.findUserIdsByUserName(userName);
         }

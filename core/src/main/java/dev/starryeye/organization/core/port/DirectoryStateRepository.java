@@ -5,9 +5,11 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -16,6 +18,18 @@ import java.util.Set;
 public interface DirectoryStateRepository {
 
     Mono<DirectoryUser> findUser(String userId);
+
+    /**
+     * 직원 여러 명을 한 번에 읽는다(설계 2026-10-03 §3.1). 없는 아이디는 결과에 없다. BatchGet(키 100개씩), 강한 일관성 — 조직 PATCH·PUT·POST 의
+     * 멤버 직원을 한 명씩 GetItem 으로 읽지 않으려고 쓴다.
+     */
+    Flux<DirectoryUser> findUsers(Set<String> userIds);
+
+    /**
+     * 아이디마다 조직인지 직원인지 — 조직 META 와 직원 META 를 한 번에 묻는다(설계 2026-10-03 §3.1, 점검 P1). 둘 다 있으면 조직이다(조직을 먼저 찾던
+     * 판정 순서). 없는 아이디는 결과에 없다. BatchGet(키 100개씩), 강한 일관성.
+     */
+    Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids);
 
     /**
      * {@code userName} 으로 직원 아이디를 찾는다. <b>대소문자를 가리지 않는다</b> — RFC 7643 은

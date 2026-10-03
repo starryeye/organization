@@ -372,6 +372,36 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .then());
     }
 
+    /** 직원 META 키를 {@link BatchRequests} 로 묶어 강한 일관성으로 읽는다(설계 2026-10-03 §3.1). */
+    @Override
+    public Flux<DirectoryUser> findUsers(Set<String> userIds) {
+        return Flux.fromIterable(userIds)
+                .map(id -> Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META)))
+                .buffer(BatchRequests.GET_LIMIT)
+                .flatMap(this::batchGet, QUERY_CONCURRENCY)
+                .map(item -> toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item));
+    }
+
+    /** 아이디마다 조직 META·직원 META 키를 함께 묻는다 — 키가 아이디의 두 배라 100개 묶음에 50명씩 든다(설계 2026-10-03 §3.1). */
+    @Override
+    public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) {
+        return Flux.fromIterable(ids)
+                .flatMapIterable(id -> List.of(
+                        Map.of(Keys.PK, Attrs.s(Keys.groupPk(id)), Keys.SK, Attrs.s(Keys.META)),
+                        Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META))))
+                .buffer(BatchRequests.GET_LIMIT)
+                .flatMap(this::batchGet, QUERY_CONCURRENCY)
+                .map(item -> Attrs.str(item, Keys.PK))
+                .collect(HashMap<String, MemberType>::new, (found, pk) -> {
+                    if (pk.startsWith(Keys.GROUP_PREFIX)) {
+                        found.put(Keys.parseGroupPk(pk), MemberType.GROUP);
+                    } else {
+                        found.putIfAbsent(Keys.parseUserPk(pk), MemberType.USER);
+                    }
+                })
+                .map(Map::copyOf);
+    }
+
     /**
      * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
      * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 {@link BatchRequests} 규칙(5번까지, 백오프)으로 다시 읽는다.
