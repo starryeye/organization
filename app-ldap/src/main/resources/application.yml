@@ -53,7 +53,8 @@ ldap:
     member-attribute: member
   dit:
     root-dn: ou=company
-    # AD 의 기본 컨테이너(CN=Users — OU 가 아니다)도 조직으로 읽으려면 "(|(objectClass=organizationalUnit)(objectClass=container))"
+    # AD 의 기본 컨테이너(CN=Users — OU 가 아니다)도 조직으로 읽으려면 "(|(objectClass=organizationalUnit)(&(objectClass=container)(cn=Users)))".
+    # 맨 "(objectClass=container)" 를 더하면 root-dn 이 도메인 루트일 때 CN=System·GPO 같은 시스템 컨테이너까지 조직이 된다
     org-unit-filter: "(objectClass=organizationalUnit)"
     group-id-attribute: entryUUID
     group-name-attribute: description
