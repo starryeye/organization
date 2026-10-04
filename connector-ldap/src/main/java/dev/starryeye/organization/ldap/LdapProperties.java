@@ -55,7 +55,11 @@ public class LdapProperties {
     @Setter
     public static class GroupOfNames {
         private String userSearchBase = "ou=people";
-        private String userObjectClass = "inetOrgPerson";
+        /**
+         * 직원 검색 필터(RFC 4515). AD 는 사람만 고르는 {@code (&(objectCategory=person)(objectClass=user))} — {@code user} 는 {@code computer} 의 상위
+         * 클래스라 {@code (objectClass=user)} 만 쓰면 컴퓨터 계정까지 직원이 된다(점검 M12). 필터 문자열은 그대로 서버에 간다
+         */
+        private String userFilter = "(objectClass=inetOrgPerson)";
         /**
          * 직원 id. 불변 id(설계 2026-10-04 §4.1) — 서버가 엔트리마다 만들어 이름이 바뀌어도 유지하는 {@code entryUUID} 가 기본이다.
          * AD 는 {@code objectGUID}. 이름 기반(uid/employeeNumber)도 쓸 수 있지만 개명이 삭제+생성이다.
@@ -66,7 +70,8 @@ public class LdapProperties {
         private String userNameAttribute = "displayName";
         private String userMailAttribute = "mail";
         private String groupSearchBase = "ou=groups";
-        private String groupObjectClass = "groupOfNames";
+        /** 그룹 검색 필터(RFC 4515). AD 는 {@code (objectClass=group)} */
+        private String groupFilter = "(objectClass=groupOfNames)";
         /** 조직 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(cn)도 쓸 수 있지만 개명이 삭제+생성이다 */
         private String groupIdAttribute = "entryUUID";
         /** 조직명. LDAP 그룹에는 표시명 표준 속성이 없어 description 을 쓴다. 없으면 DN 의 첫 RDN 값으로 대신한다 */
@@ -78,12 +83,17 @@ public class LdapProperties {
     @Setter
     public static class Dit {
         private String rootDn = "ou=company";
-        private String orgUnitObjectClass = "organizationalUnit";
+        /**
+         * 조직 검색 필터(RFC 4515). AD 의 기본 컨테이너({@code CN=Users} — OU 가 아니다)도 조직으로 읽으려면
+         * {@code (|(objectClass=organizationalUnit)(objectClass=container))}
+         */
+        private String orgUnitFilter = "(objectClass=organizationalUnit)";
         /** 조직 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(ou)도 쓸 수 있지만 개명이 삭제+생성이다 */
         private String groupIdAttribute = "entryUUID";
         /** 조직명. 없으면 DN 의 첫 RDN 값으로 대신한다 */
         private String groupNameAttribute = "description";
-        private String userObjectClass = "inetOrgPerson";
+        /** 직원 검색 필터(RFC 4515). AD 는 {@code (&(objectCategory=person)(objectClass=user))} */
+        private String userFilter = "(objectClass=inetOrgPerson)";
         /** 직원 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(uid)도 쓸 수 있지만 개명이 삭제+생성이다 */
         private String userIdAttribute = "entryUUID";
         /** 직원 userName 으로 쓸 로그인 속성. 원본 값 그대로 쓴다. AD 는 {@code sAMAccountName}. 값이 없으면 식별 값으로 대신한다 */

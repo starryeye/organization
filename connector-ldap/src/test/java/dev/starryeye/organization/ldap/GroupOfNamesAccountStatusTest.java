@@ -79,10 +79,10 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
         properties.setBaseDn(BASE_DN);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=people");
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setGroupSearchBase("ou=groups");
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setMemberAttribute("member");
         return properties;

@@ -55,7 +55,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
                         .attributes(직원_속성(config))
-                        .where("objectClass").is(config.getUserObjectClass()),
+                        .filter(config.getUserFilter()),
                 pageSize, userMapper(config, 지금));
 
         List<RawEntry> groupEntries = 범위가_잘린_멤버를_이어받는다(template, config,
@@ -63,7 +63,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                         LdapQueryBuilder.query()
                                 .base(config.getGroupSearchBase())
                                 .attributes(그룹_속성(config))
-                                .where("objectClass").is(config.getGroupObjectClass()),
+                                .filter(config.getGroupFilter()),
                         pageSize, groupMapper(config)));
 
         Map<String, String> userIdByDn = new LinkedHashMap<>();

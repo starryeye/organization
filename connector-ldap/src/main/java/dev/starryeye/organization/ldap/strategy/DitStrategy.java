@@ -54,14 +54,14 @@ public class DitStrategy implements LdapMappingStrategy {
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
                         .attributes(OU_속성(config))
-                        .where("objectClass").is(config.getOrgUnitObjectClass()),
+                        .filter(config.getOrgUnitFilter()),
                 pageSize, orgMapper(config));
 
         List<UserEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
                         .attributes(직원_속성(config))
-                        .where("objectClass").is(config.getUserObjectClass()),
+                        .filter(config.getUserFilter()),
                 pageSize, userMapper(config, 지금));
 
         // 조직코드 → 상대 DN, 상대 DN → 조직코드 양방향 색인

@@ -39,22 +39,26 @@ ldap:
   # 로그인 속성은 sAMAccountName 을 권한다. uid/cn/ou 같은 이름 기반 id 도 쓸 수 있지만 개명이 삭제+생성이 된다
   group-of-names:
     user-search-base: ou=people
-    user-object-class: inetOrgPerson
+    # 필터 전체(RFC 4515)를 그대로 서버에 보낸다. AD 는 "(&(objectCategory=person)(objectClass=user))" — user 가 computer 의 상위 클래스라 컴퓨터 계정을 빼려면 필요하다
+    user-filter: "(objectClass=inetOrgPerson)"
     user-id-attribute: entryUUID
     user-login-attribute: uid
     user-name-attribute: displayName
     user-mail-attribute: mail
     group-search-base: ou=groups
-    group-object-class: groupOfNames
+    # AD 는 "(objectClass=group)"
+    group-filter: "(objectClass=groupOfNames)"
     group-id-attribute: entryUUID
     group-name-attribute: description
     member-attribute: member
   dit:
     root-dn: ou=company
-    org-unit-object-class: organizationalUnit
+    # AD 의 기본 컨테이너(CN=Users — OU 가 아니다)도 조직으로 읽으려면 "(|(objectClass=organizationalUnit)(objectClass=container))"
+    org-unit-filter: "(objectClass=organizationalUnit)"
     group-id-attribute: entryUUID
     group-name-attribute: description
-    user-object-class: inetOrgPerson
+    # AD 는 "(&(objectCategory=person)(objectClass=user))"
+    user-filter: "(objectClass=inetOrgPerson)"
     user-id-attribute: entryUUID
     user-login-attribute: uid
     user-name-attribute: displayName

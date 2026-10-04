@@ -77,12 +77,12 @@ class PagingUnderServerSizeLimitTest extends EmbeddedLdapSupport {
         properties.setPageSize(pageSize);
         var groupOfNames = properties.getGroupOfNames();
         groupOfNames.setUserSearchBase("ou=people");
-        groupOfNames.setUserObjectClass("inetOrgPerson");
+        groupOfNames.setUserFilter("(objectClass=inetOrgPerson)");
         groupOfNames.setUserIdAttribute("uid");
         groupOfNames.setUserNameAttribute("displayName");
         groupOfNames.setUserMailAttribute("mail");
         groupOfNames.setGroupSearchBase("ou=groups");
-        groupOfNames.setGroupObjectClass("groupOfNames");
+        groupOfNames.setGroupFilter("(objectClass=groupOfNames)");
         groupOfNames.setGroupIdAttribute("cn");
         groupOfNames.setGroupNameAttribute("description");
         groupOfNames.setMemberAttribute("member");
