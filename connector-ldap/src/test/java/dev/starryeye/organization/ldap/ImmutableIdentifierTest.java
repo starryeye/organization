@@ -11,8 +11,6 @@ import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import dev.starryeye.organization.ldap.strategy.LdapIdentifiers;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.springframework.ldap.core.LdapTemplate;
-import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -549,16 +547,6 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
         properties.getGroupOfNames().setUserIdAttribute("objectGUID");
         properties.getGroupOfNames().setGroupIdAttribute("objectGUID");
         return properties;
-    }
-
-    /** 운영과 같은 컨텍스트 소스({@link LdapConfig#ldapContextSource}) — 식별 속성이 objectGUID 면 이진 선언이 환경에 들어간다. */
-    private LdapTemplate LdapConfig로_만든_템플릿(LdapProperties properties) throws Exception {
-        properties.setUrl("ldap://localhost:" + server.getListenPort());
-        properties.setBindDn(BIND_DN);
-        properties.setBindPassword(BIND_PASSWORD);
-        LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);
-        contextSource.afterPropertiesSet();
-        return LdapTemplates.configured(contextSource);
     }
 
     private void objectGUID를_단다(String dn, byte[] 바이트) throws LDAPException {

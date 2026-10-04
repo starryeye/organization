@@ -95,6 +95,20 @@ public abstract class EmbeddedLdapSupport {
         ldapTemplate = LdapTemplates.configured(contextSource);
     }
 
+    /**
+     * 운영과 같은 컨텍스트 소스({@link LdapConfig#ldapContextSource})로 만든 템플릿. {@link #ldapTemplate} 에는 JNDI 이진 선언이 없지만
+     * 이것에는 있다 — 식별 속성이 {@code objectGUID} 일 때와 AD 그룹의 {@code objectSid} 를 이진으로 받으려면 이쪽을 쓴다.
+     * 접속 정보를 {@code properties} 에 채운다.
+     */
+    protected LdapTemplate LdapConfig로_만든_템플릿(LdapProperties properties) throws Exception {
+        properties.setUrl("ldap://localhost:" + server.getListenPort());
+        properties.setBindDn(BIND_DN);
+        properties.setBindPassword(BIND_PASSWORD);
+        LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);
+        contextSource.afterPropertiesSet();
+        return LdapTemplates.configured(contextSource);
+    }
+
     @AfterEach
     void LDAP서버를_내린다() {
         if (server != null) {

@@ -67,14 +67,14 @@ class GroupOfNamesRangeContinuationTest {
         // given — A 는 범위 검색으로 첫 조각(2명)만 온 채 잘렸고, B 는 처음부터 3명 전부다.
         Class<?> rawEntryClass = Class.forName(GroupOfNamesStrategy.class.getName() + "$RawEntry");
         Constructor<?> rawEntryCtor = rawEntryClass.getDeclaredConstructor(
-                String.class, String.class, String.class, String.class,
+                String.class, String.class, String.class, String.class, Long.class,
                 List.class, boolean.class);
         rawEntryCtor.setAccessible(true);
 
         Object 엔트리A = rawEntryCtor.newInstance(
-                아이디A, 진짜DN_A, "제1공장 A", null, List.of("cn=u0", "cn=u1"), false);
+                아이디A, 진짜DN_A, "제1공장 A", null, 1105L, List.of("cn=u0", "cn=u1"), false);
         Object 엔트리B = rawEntryCtor.newInstance(
-                아이디B, 진짜DN_B, "제1공장:A", null, List.of("cn=x1", "cn=x2", "cn=x3"), true);
+                아이디B, 진짜DN_B, "제1공장:A", null, null, List.of("cn=x1", "cn=x2", "cn=x3"), true);
 
         // given — A 의 dn 을 베이스에 상대적인 DN 으로 바꿔 재조회하면 처음(0)부터 다시
         // 받는다({@code 전부_읽는다} 의 계약: 첫 조각은 검색을 돌린 다른 커넥션에서 왔으니
@@ -125,6 +125,8 @@ class GroupOfNamesRangeContinuationTest {
 
         assertThat(멤버(결과A)).containsExactly("cn=u0", "cn=u1", "cn=u2", "cn=u3");
         assertThat(완료(결과A)).isTrue();
+        // AD 기본 그룹의 RID(점검 M10)를 잃지 않는다 — 멤버가 많아 범위 검색으로 잘린 큰 그룹일수록 기본 그룹 소속이 많다
+        assertThat(호출(결과A, "rid")).isEqualTo(1105L);
 
         assertThat(멤버(결과B))
                 .as("잘리지 않은 조직이 남의(A의) 이어받은 멤버 목록을 받으면 안 된다")

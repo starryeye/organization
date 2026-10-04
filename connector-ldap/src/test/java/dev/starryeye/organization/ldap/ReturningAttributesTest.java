@@ -189,6 +189,34 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
     }
 
     @Test
+    @DisplayName("groupOfNames 는 AD 기본 그룹을 읽으려 직원의 primaryGroupID 와 그룹의 objectSid 를 요청한다(점검 M10)")
+    void groupOfNames_는_기본_그룹_속성을_요청한다() {
+        // given
+        var strategy = new GroupOfNamesStrategy(groupOfNames설정());
+
+        // when
+        strategy.read(ldapTemplate);
+
+        // then
+        assertThat(요청한_속성("inetOrgPerson")).contains("primaryGroupID");
+        assertThat(요청한_속성("groupOfNames")).contains("objectSid");
+    }
+
+    @Test
+    @DisplayName("DIT 는 기본 그룹을 읽지 않으므로 직원 검색이 primaryGroupID 를 요청하지 않는다")
+    void DIT_는_기본_그룹_속성을_요청하지_않는다() {
+        // given
+        var strategy = new DitStrategy(dit설정());
+
+        // when
+        strategy.read(ldapTemplate);
+
+        // then
+        assertThat(요청한_속성("inetOrgPerson")).doesNotContain("primaryGroupID");
+        assertThat(요청한_속성("organizationalUnit")).doesNotContain("objectSid");
+    }
+
+    @Test
     @DisplayName("groupOfNames 는 설정한 속성 이름으로 요청한다 — uid·displayName·description 을 박아 두지 않는다")
     void groupOfNames_는_설정한_속성_이름으로_요청한다() {
         // given
