@@ -82,8 +82,7 @@ public class DitStrategy implements LdapMappingStrategy {
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(code, entry.dn(), groupDnByCode)) {
-                건너뛴_조직.기록한다(SkippedEntries.사유.아이디_겹침,
-                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(code, entry.dn(), groupDnByCode.get(code)));
+                건너뛴_조직.겹침을_기록한다(code, entry.dn(), groupDnByCode.get(code));
                 continue;
             }
             codeByRdnPath.put(LdapDns.대조키(entry.dn()), code);
@@ -119,8 +118,7 @@ public class DitStrategy implements LdapMappingStrategy {
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(userId, entry.dn(), userDnById)) {
-                건너뛴_직원.기록한다(SkippedEntries.사유.아이디_겹침,
-                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(userId, entry.dn(), userDnById.get(userId)));
+                건너뛴_직원.겹침을_기록한다(userId, entry.dn(), userDnById.get(userId));
                 continue;
             }
             users.put(userId, new DirectoryUser(

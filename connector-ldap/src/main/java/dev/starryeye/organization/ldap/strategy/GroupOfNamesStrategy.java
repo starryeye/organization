@@ -76,8 +76,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), userDnById)) {
-                건너뛴_직원.기록한다(SkippedEntries.사유.아이디_겹침,
-                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(entry.id(), entry.dn(), userDnById.get(entry.id())));
+                건너뛴_직원.겹침을_기록한다(entry.id(), entry.dn(), userDnById.get(entry.id()));
                 continue;
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
@@ -98,8 +97,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), groupDnById)) {
-                건너뛴_조직.기록한다(SkippedEntries.사유.아이디_겹침,
-                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(entry.id(), entry.dn(), groupDnById.get(entry.id())));
+                건너뛴_조직.겹침을_기록한다(entry.id(), entry.dn(), groupDnById.get(entry.id()));
                 continue;
             }
             groupIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
@@ -112,6 +110,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         int 멤버값수 = 0;
         int 사용자대조수 = 0;
         int 조직대조수 = 0;
+        // 읽은 직원도 조직도 아닌 member 값 — 컴퓨터·연락처이거나 위에서 건너뛴 직원·조직이다. 값마다 한 줄이 아니라 요약 한 줄로 남긴다
+        SkippedEntries 건너뛴_member = SkippedEntries.member값();
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
@@ -129,10 +129,13 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     조직대조수++;
                     continue;
                 }
-                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다 (dn={})", entry.id(), memberDn, entry.dn());
+                건너뛴_member.기록한다(SkippedEntries.사유.읽지_않은_member,
+                        "조직 '%s'(dn='%s') 의 member '%s'".formatted(entry.id(), entry.dn(), memberDn));
             }
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
+        // 가드가 던지기 전에 남긴다 — 대조가 전부 어긋난 회차의 원인을 로그에서 볼 수 있다. 이 집계로는 멈추지 않는다(사람 대조 0 은 아래 가드의 몫)
+        건너뛴_member.요약을_남긴다();
         UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
         return new DirectorySnapshot(users, groups);

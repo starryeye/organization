@@ -243,4 +243,96 @@ class RequiredAttributeMissingTest extends EmbeddedLdapSupport {
                 .isInstanceOf(DirectoryDataException.class)
                 .hasMessageContaining("직원 검색").hasMessageContaining("employeeNumbr");
     }
+
+    @Test
+    @DisplayName("식별 속성이 없는 직원을 가리키는 member 는 값마다가 아니라 요약 한 줄로 남는다 — 직원 둘을 그룹 둘이 가리켜도 한 줄이다")
+    void 건너뛴_직원을_가리키는_member_는_경고_한_줄로_남는다() throws Exception {
+        // given — id 없는 직원 svc·svc2 를 그룹 DEV(svc)와 OPS(svc, svc2)가 가리킨다. 가리키는 값은 모두 셋이다
+        server.add("dn: uid=svc2,ou=NOCODE,ou=company," + BASE_DN,
+                "objectClass: inetOrgPerson", "uid: svc2", "cn: svc2", "sn: svc2");
+        server.add("dn: cn=OPS,ou=groups," + BASE_DN, "objectClass: groupOfNames", "cn: OPS",
+                "member: uid=svc,ou=NOCODE,ou=company," + BASE_DN,
+                "member: uid=svc2,ou=NOCODE,ou=company," + BASE_DN);
+        var properties = groupOfNames설정();
+        properties.getGroupOfNames().setUserIdAttribute("employeeNumber");
+
+        // when
+        var snapshot = new GroupOfNamesStrategy(properties).read(ldapTemplate);
+
+        // then — 경고는 직원 검색 요약 한 줄과 member 값 요약 한 줄뿐이다. member 값마다 한 줄이 아니다
+        List<String> 경고들 = logAppender.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+        assertThat(경고들).hasSize(2);
+        assertThat(경고들).noneMatch(message -> message.contains("사람도 그룹도 아니어서"));
+        List<String> member경고들 = 경고들.stream().filter(message -> message.startsWith("member 값")).toList();
+        assertThat(member경고들).hasSize(1);
+        assertThat(member경고들.get(0)).contains("3건").contains("조직 'DEV'").contains("조직 'OPS'")
+                .contains("member 'uid=svc2,");
+        assertThat(snapshot.groups().get("OPS").members()).as("대조되지 않은 member 는 멤버가 되지 않는다").isEmpty();
+        assertThat(snapshot.groups().get("DEV").members())
+                .containsExactlyInAnyOrder(MemberRef.user("1001"), MemberRef.user("1002"));
+    }
+
+    @Test
+    @DisplayName("일부 그룹에만 식별 속성이 없으면 그 그룹만 건너뛰고 나머지는 멤버를 그대로 가진 채 남는다 — 회차는 실패하지 않는다")
+    void 일부_그룹만_id_가_없으면_그_그룹만_건너뛴다() throws Exception {
+        // given — description 을 조직 id 로 읽는다. 기본 픽스처의 DEV 에는 description 이 없고, 새로 둘 그룹에는 있다
+        server.add("dn: cn=OPS,ou=groups," + BASE_DN, "objectClass: groupOfNames", "cn: OPS", "description: OPS1",
+                "member: uid=kim,ou=DEV001,ou=company," + BASE_DN, "member: uid=lee,ou=DEV001,ou=company," + BASE_DN);
+        server.add("dn: cn=SALES,ou=groups," + BASE_DN, "objectClass: groupOfNames", "cn: SALES", "description: SAL1",
+                "member: uid=lee,ou=DEV001,ou=company," + BASE_DN);
+        var properties = groupOfNames설정();
+        properties.getGroupOfNames().setGroupIdAttribute("description");
+        properties.getGroupOfNames().setGroupNameAttribute("cn");
+
+        // when
+        var snapshot = new GroupOfNamesStrategy(properties).read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.groups()).containsOnlyKeys("OPS1", "SAL1");
+        assertThat(snapshot.groups().get("OPS1").members())
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("lee"));
+        assertThat(snapshot.groups().get("SAL1").members()).containsExactly(MemberRef.user("lee"));
+        List<String> 조직경고들 = logAppender.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("조직 검색"))
+                .toList();
+        assertThat(조직경고들).hasSize(1);
+        assertThat(조직경고들.get(0)).contains("1건").contains("description").contains("cn=DEV,");
+    }
+
+    @Test
+    @DisplayName("groupOfNames — 식별 속성이 없는 직원은 계정 상태 값을 읽지 않는다 — 정수가 아닌 userAccountControl 이 있어도 회차는 계속된다")
+    void id_없는_직원의_계정_상태_값은_읽지_않는다() throws Exception {
+        // given — 식별 속성이 없고 userAccountControl 이 정수가 아닌 직원. 식별 속성이 있었다면 이 값에서 읽기가 실패한다
+        server.add("dn: uid=bad,ou=NOCODE,ou=company," + BASE_DN,
+                "objectClass: inetOrgPerson", "uid: bad", "cn: bad", "sn: bad", "userAccountControl: abc");
+        var properties = groupOfNames설정();
+        properties.getGroupOfNames().setUserIdAttribute("employeeNumber");
+
+        // when
+        var snapshot = new GroupOfNamesStrategy(properties).read(ldapTemplate);
+
+        // then — 직원은 건너뛰어졌고 나머지는 그대로다
+        assertThat(snapshot.users()).containsOnlyKeys("1001", "1002");
+    }
+
+    @Test
+    @DisplayName("DIT — 식별 속성이 없는 직원은 계정 상태 값을 읽지 않는다 — 정수가 아닌 userAccountControl 이 있어도 회차는 계속된다")
+    void dit_id_없는_직원의_계정_상태_값은_읽지_않는다() throws Exception {
+        // given
+        server.add("dn: uid=bad,ou=NOCODE,ou=company," + BASE_DN,
+                "objectClass: inetOrgPerson", "uid: bad", "cn: bad", "sn: bad", "userAccountControl: abc");
+        var properties = dit설정();
+        properties.getDit().setUserIdAttribute("employeeNumber");
+
+        // when
+        var snapshot = new DitStrategy(properties).read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("1001", "1002");
+    }
 }

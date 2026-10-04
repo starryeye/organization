@@ -46,6 +46,39 @@ class SkippedEntriesTest {
     }
 
     @Test
+    @DisplayName("겹침은 건너뛴 dn 과 유지된 dn 을 한 문구로 기록한다 — 경고를 읽는 쪽이 어느 쪽이 사라졌는지 안다")
+    void 겹침은_두_dn을_함께_기록한다() {
+        // given
+        var 건너뜀 = new SkippedEntries("직원", "uid");
+
+        // when
+        건너뜀.겹침을_기록한다("kim_lee", "uid=kim*lee,ou=people", "uid=kim lee,ou=people");
+
+        // then
+        assertThat(건너뜀.건수(SkippedEntries.사유.아이디_겹침)).isEqualTo(1);
+        assertThat(건너뜀.요약()).contains("아이디 겹침 1건")
+                .contains("kim_lee(건너뛴 dn='uid=kim*lee,ou=people', 유지된 dn='uid=kim lee,ou=people')");
+    }
+
+    @Test
+    @DisplayName("member 값은 식별 속성이 없는 별개의 집계다 — 읽은 직원도 조직도 아닌 값을 건수와 예시로 한 줄에 담는다")
+    void member_값_요약은_검색이_아니라_값을_센다() {
+        // given
+        var 건너뜀 = SkippedEntries.member값();
+        IntStream.range(0, 7).forEach(i -> 건너뜀.기록한다(SkippedEntries.사유.읽지_않은_member,
+                "조직 'DEV'(dn='cn=DEV') 의 member 'uid=svc" + i + "'"));
+
+        // when
+        String 요약 = 건너뜀.요약();
+
+        // then
+        assertThat(요약).startsWith("member 값 7건을 건너뛰었다")
+                .contains("직원도 조직도 아님").contains("컴퓨터").contains("연락처")
+                .contains("uid=svc4").doesNotContain("uid=svc5").contains("외 2건")
+                .doesNotContain("검색").doesNotContain("null");
+    }
+
+    @Test
     @DisplayName("받은 엔트리가 있는데 하나도 남지 않으면 데이터 오류다 — 권한이 0 이 되는 회차를 성공으로 끝내지 않는다")
     void 아무도_남지_않으면_멈춘다() {
         // given
