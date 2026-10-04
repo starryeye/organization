@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 불변 id e2e 두 클래스({@link LdapImmutableIdEndToEndTest}, {@link LdapDitImmutableIdEndToEndTest})가 함께 쓰는 도우미.
- * 두 전략이 같은 단언을 쓰므로 한 곳에 둔다 — 한쪽만 고쳐져 어긋나지 않게.
+ * 두 전략이 같은 단언을 쓰므로 한 곳에 둔다 — 한쪽만 고쳐져 어긋나지 않게. {@link #소속인가} 는 {@link LdapActiveDirectoryShapeEndToEndTest} 도 쓴다.
  */
 final class ImmutableIdEndToEndSupport {
 
