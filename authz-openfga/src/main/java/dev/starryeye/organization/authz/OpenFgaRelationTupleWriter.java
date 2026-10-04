@@ -18,9 +18,14 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -61,10 +66,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
     }
 
     /**
-     * 같은 종류(지우기·쓰기) 안에서 {@code 동시}개까지 동시에 보내고, 결과는 보낸 순서대로 센다(설계 2026-10-02 §4.3). 지우기 묶음을
-     * 다 보낸 뒤 쓰기 묶음을 보낸다. {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를 보내지 않고 {@link TupleWriteAbortedException} 으로
-     * 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 모든 묶음의 결과다 — 실제로 나간 묶음의 결과에 보내지 않은 묶음을 실패로 더한 것이다.
-     * 호출자가 이미 나간 쓰기로 기록 규칙을 지킨다.
+     * {@code 동시}개까지 동시에 보내고, 결과는 보낸 순서대로 센다(설계 2026-10-02 §4.3). {@value #연속_실패_한도}개가 연달아 실패하면 남은 배치를
+     * 보내지 않고 {@link TupleWriteAbortedException} 으로 끝낸다(점검 C7, 설계 §5). 그 {@code partial} 은 모든 묶음의 결과다 — 실제로 나간
+     * 묶음의 결과에 보내지 않은 묶음을 실패로 더한 것이다. 호출자가 이미 나간 쓰기로 기록 규칙을 지킨다.
      *
      * <p>멈추면 이미 나간 묶음(최대 동시 수 − 1)은 결과를 기다려 실제 결과로 세고, 아직 안 나간 묶음만 보내지 않는다. 그 묶음들의 재시도
      * 시간만큼 더 걸리고, 그동안 하트비트가 리스를 지킨다. 그래서 락을 반납한 뒤에 늦게 떨어지는 쓰기가 없다 — 남아 있으면 상태가 모르는
@@ -101,9 +105,8 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                 return send.apply(batch);
             });
             return Flux.fromIterable(batches)
-                    // 지우기 묶음을 다 보낸 뒤 쓰기 묶음을 보낸다(batchesFor 순서) — 같은 종류 안에서만 동시에 보낸다
-                    .windowUntilChanged(Batch::delete)
-                    .concatMap(같은_종류 -> 같은_종류.flatMapSequential(멈췄으면_보내지_않는다, 동시_수))
+                    // 지우기와 쓰기가 한 배치에 섞여 순서가 없으므로 모든 배치를 동시에 보낸다(설계 2026-10-05 §5)
+                    .flatMapSequential(멈췄으면_보내지_않는다, 동시_수)
                     // 결과는 보낸 순서대로 센다. 앞 묶음을 센 뒤에야 다음 묶음이 나가므로, 멈춤 표시는 다음 묶음이 나가기 전에 선다
                     .reduce(TupleWriteResult.empty(), (누적, result) -> {
                         if (!멈춤.get()) {
@@ -131,25 +134,72 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
     }
 
     /**
-     * 델타를 배치 리스트로 나눈다. 삭제 배치가 항상 쓰기 배치보다 앞에 온다.
-     * 같은 델타에 삭제와 생성이 섞였을 때 순서가 뒤집히면 결과가 달라지기 때문이다.
+     * 델타를 배치로 나눈다(설계 2026-10-05 §5, 점검 S20). 지우기와 쓰기를 튜플의 {@code user} 칸 — 옮겨 가는 대상: {@code direct_member} 는 직원,
+     * {@code child} 는 하위 조직 — 별로 모으고, 한 대상의 묶음을 쪼개지 않고 배치에 담는다. 배치 하나가 Write 요청 하나라 OpenFGA 가 원자적으로 반영한다 —
+     * 옮기는 직원은 옛 조직에서 새 조직으로 한 번에 넘어가고, 요청이 실패하면 둘 다 반영되지 않는다. 한도({@code write-batch-size})는 지우기와 쓰기를 합친 수다.
+     * 한 대상의 변경이 한도보다 많으면 그 대상만 여러 배치로 나눈다 — 그 대상은 원자적이지 않다(설계 §11). 대상 이름순이라 같은 델타는 같은 배치를 만든다.
      *
-     * <p>패키지 전용으로 열어 둔 것은 이 순서를 단위 테스트로 직접 고정하기 위해서다.
+     * <p>한 델타의 지우기와 쓰기는 겹치지 않으므로 순서가 결과를 바꾸지 않는다 — 예전에는 지우기 배치를 모두 보낸 뒤 쓰기를 보내 그 사이 옮기는 직원이 어느 조직에도
+     * 없었다. 패키지 전용 — 배치 짜기를 단위 테스트로 고정한다.
      */
     List<Batch> batchesFor(TupleDelta delta) {
+        int 한도 = properties.getWriteBatchSize();
+        Map<String, List<RelationTuple>> 지울것 = 대상별(delta.toDelete());
+        Map<String, List<RelationTuple>> 쓸것 = 대상별(delta.toWrite());
+        SortedSet<String> 대상들 = new TreeSet<>(지울것.keySet());
+        대상들.addAll(쓸것.keySet());
+
         List<Batch> batches = new ArrayList<>();
-        partition(List.copyOf(delta.toDelete())).forEach(chunk -> batches.add(Batch.deletes(chunk)));
-        partition(List.copyOf(delta.toWrite())).forEach(chunk -> batches.add(Batch.writes(chunk)));
+        List<RelationTuple> 쓰기 = new ArrayList<>();
+        List<RelationTuple> 지우기 = new ArrayList<>();
+        for (String 대상 : 대상들) {
+            List<RelationTuple> 대상_지우기 = 지울것.getOrDefault(대상, List.of());
+            List<RelationTuple> 대상_쓰기 = 쓸것.getOrDefault(대상, List.of());
+            int 크기 = 대상_지우기.size() + 대상_쓰기.size();
+            if (!쓰기.isEmpty() || !지우기.isEmpty()) {
+                if (쓰기.size() + 지우기.size() + 크기 > 한도) {
+                    batches.add(new Batch(List.copyOf(쓰기), List.copyOf(지우기)));
+                    쓰기.clear();
+                    지우기.clear();
+                }
+            }
+            if (크기 > 한도) {
+                batches.addAll(한도로_나눈다(대상_쓰기, 대상_지우기, 한도));
+                continue;
+            }
+            지우기.addAll(대상_지우기);
+            쓰기.addAll(대상_쓰기);
+        }
+        if (!쓰기.isEmpty() || !지우기.isEmpty()) {
+            batches.add(new Batch(List.copyOf(쓰기), List.copyOf(지우기)));
+        }
         return batches;
     }
 
-    private List<List<RelationTuple>> partition(List<RelationTuple> tuples) {
-        List<List<RelationTuple>> chunks = new ArrayList<>();
-        int size = properties.getWriteBatchSize();
-        for (int i = 0; i < tuples.size(); i += size) {
-            chunks.add(tuples.subList(i, Math.min(i + size, tuples.size())));
+    /** 대상별로 모은다. 대상 안의 줄도 정렬해 배치가 결정적이다 */
+    private static Map<String, List<RelationTuple>> 대상별(Set<RelationTuple> tuples) {
+        Map<String, List<RelationTuple>> 결과 = new TreeMap<>();
+        tuples.stream()
+                .sorted(Comparator.comparing(RelationTuple::user)
+                        .thenComparing(RelationTuple::relation)
+                        .thenComparing(RelationTuple::object))
+                .forEach(tuple -> 결과.computeIfAbsent(tuple.user(), k -> new ArrayList<>()).add(tuple));
+        return 결과;
+    }
+
+    /** 한도보다 큰 한 대상의 변경을 한도씩 자른다 — 지우기 다음 쓰기 순으로 이어 붙여 자른다 */
+    private static List<Batch> 한도로_나눈다(List<RelationTuple> 쓰기, List<RelationTuple> 지우기, int 한도) {
+        List<Batch> batches = new ArrayList<>();
+        List<RelationTuple> 줄들 = new ArrayList<>(지우기);
+        줄들.addAll(쓰기);
+        Set<RelationTuple> 지우기_집합 = Set.copyOf(지우기);
+        for (int i = 0; i < 줄들.size(); i += 한도) {
+            List<RelationTuple> 조각 = 줄들.subList(i, Math.min(i + 한도, 줄들.size()));
+            batches.add(new Batch(
+                    조각.stream().filter(t -> !지우기_집합.contains(t)).toList(),
+                    조각.stream().filter(지우기_집합::contains).toList()));
         }
-        return chunks;
+        return batches;
     }
 
     private Mono<TupleWriteResult> applyBatch(Batch batch) {
@@ -181,9 +231,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         return send.apply(batch)
                 .thenReturn(batch.succeeded())
                 .onErrorResume(error -> {
-                    if (거절인가.test(error) && batch.tuples().size() > 1) {
+                    if (거절인가.test(error) && batch.size() > 1) {
                         log.warn("OpenFGA 가 배치 {}건을 거절했다 — 반으로 나눠 다시 보낸다: {}",
-                                batch.tuples().size(), rootMessage(error));
+                                batch.size(), rootMessage(error));
                         return Flux.fromIterable(batch.halves())
                                 .concatMap(half -> 쪼개며_보낸다(half, send, 거절인가))
                                 .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
@@ -194,22 +244,24 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                 batch.tuples().get(0), rootMessage(error));
                         return Mono.just(batch.failed(rootMessage(error)));
                     }
-                    log.error("배치 {}건 적용 실패", batch.tuples().size(), error);
+                    log.error("배치 {}건 적용 실패", batch.size(), error);
                     return Mono.just(batch.failed(rootMessage(error)));
                 });
     }
 
-    private ClientWriteRequest toRequest(Batch batch) {
+    /** 패키지 전용 — 한 요청이 지우기와 쓰기를 함께 담는지 단위 테스트로 고정한다 */
+    ClientWriteRequest toRequest(Batch batch) {
         ClientWriteRequest request = new ClientWriteRequest();
-        if (batch.delete()) {
-            request.deletes(batch.tuples().stream()
+        if (!batch.deletes().isEmpty()) {
+            request.deletes(batch.deletes().stream()
                     .map(tuple -> new ClientTupleKeyWithoutCondition()
                             .user(tuple.user())
                             .relation(tuple.relation())
                             ._object(tuple.object()))
                     .toList());
-        } else {
-            request.writes(batch.tuples().stream()
+        }
+        if (!batch.writes().isEmpty()) {
+            request.writes(batch.writes().stream()
                     .map(tuple -> new ClientTupleKey()
                             .user(tuple.user())
                             .relation(tuple.relation())
@@ -219,9 +271,13 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         return request;
     }
 
-    /** 멱등 옵션. 이것이 없으면 rebuild 와 재실행이 배치 단위로 통째로 실패한다. */
+    /**
+     * 멱등 옵션. 이것이 없으면 rebuild 와 재실행이 배치 단위로 통째로 실패한다. 요청 하나가 트랜잭션 하나여야 지우기와 쓰기가 원자적이다 —
+     * SDK 0.9.11 의 기본값이지만 못박는다(꺼지면 SDK 가 줄마다 나눠 보낸다).
+     */
     private ClientWriteOptions writeOptions() {
         return new ClientWriteOptions()
+                .transactions(true)
                 .onDuplicate(WriteRequestWrites.OnDuplicateEnum.IGNORE)
                 .onMissing(WriteRequestDeletes.OnMissingEnum.IGNORE);
     }
@@ -244,33 +300,59 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
         return new TupleWriteResult(written, deleted, failures);
     }
 
-    /** 패키지 전용. 배치 순서를 검증하는 테스트가 delete() 플래그를 직접 확인한다. */
-    record Batch(List<RelationTuple> tuples, boolean delete) {
+    /** 패키지 전용. 한 Write 요청이다 — 쓰기와 지우기를 함께 담는다(설계 2026-10-05 §5). */
+    record Batch(List<RelationTuple> writes, List<RelationTuple> deletes) {
 
         static Batch writes(List<RelationTuple> tuples) {
-            return new Batch(tuples, false);
+            return new Batch(List.copyOf(tuples), List.of());
         }
 
         static Batch deletes(List<RelationTuple> tuples) {
-            return new Batch(tuples, true);
+            return new Batch(List.of(), List.copyOf(tuples));
+        }
+
+        int size() {
+            return writes.size() + deletes.size();
+        }
+
+        /** 지우기 다음 쓰기. 로그와 쪼개기에 쓴다 */
+        List<RelationTuple> tuples() {
+            List<RelationTuple> 전부 = new ArrayList<>(deletes);
+            전부.addAll(writes);
+            return 전부;
         }
 
         TupleWriteResult succeeded() {
-            return delete
-                    ? new TupleWriteResult(Set.of(), Set.copyOf(tuples), List.of())
-                    : new TupleWriteResult(Set.copyOf(tuples), Set.of(), List.of());
+            return new TupleWriteResult(Set.copyOf(writes), Set.copyOf(deletes), List.of());
         }
 
         TupleWriteResult failed(String reason) {
             return new TupleWriteResult(Set.of(), Set.of(),
-                    tuples.stream().map(tuple -> new TupleFailure(tuple, reason)).toList());
+                    tuples().stream().map(tuple -> new TupleFailure(tuple, reason)).toList());
         }
 
-        /** 반으로 나눈다 — 거절된 배치에서 나쁜 줄을 찾아 좁힐 때 쓴다(설계 2026-09-30 §6.2). */
+        /**
+         * 반으로 나눈다 — 거절된 배치에서 나쁜 줄을 찾아 좁힐 때 쓴다(설계 2026-09-30 §6.2). 대상 묶음 경계로 나눠 옮기는 직원의 지우기와 쓰기가 갈라지지 않게 하고,
+         * 대상이 하나뿐이면 줄 단위로 나눈다(한 줄까지 좁혀야 나쁜 줄을 찾는다).
+         */
         List<Batch> halves() {
-            int mid = tuples.size() / 2;
-            return List.of(new Batch(tuples.subList(0, mid), delete),
-                    new Batch(tuples.subList(mid, tuples.size()), delete));
+            List<RelationTuple> 전부 = tuples();
+            List<String> 대상들 = 전부.stream().map(RelationTuple::user).distinct().toList();
+            Set<RelationTuple> 지우기_집합 = Set.copyOf(deletes);
+            List<List<RelationTuple>> 두쪽;
+            if (대상들.size() > 1) {
+                Set<String> 앞대상 = Set.copyOf(대상들.subList(0, 대상들.size() / 2));
+                두쪽 = List.of(
+                        전부.stream().filter(t -> 앞대상.contains(t.user())).toList(),
+                        전부.stream().filter(t -> !앞대상.contains(t.user())).toList());
+            } else {
+                int mid = 전부.size() / 2;
+                두쪽 = List.of(전부.subList(0, mid), 전부.subList(mid, 전부.size()));
+            }
+            return 두쪽.stream()
+                    .map(쪽 -> new Batch(쪽.stream().filter(t -> !지우기_집합.contains(t)).toList(),
+                            쪽.stream().filter(지우기_집합::contains).toList()))
+                    .toList();
         }
     }
 }

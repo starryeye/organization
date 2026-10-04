@@ -93,4 +93,31 @@ class OpenFgaRelationTupleWriterSplitTest {
         assertThat(결과.failures()).hasSize(8);
         assertThat(결과.written()).isEmpty();
     }
+
+    @Test
+    @DisplayName("거절된 섞인 배치는 대상 묶음 경계로 반을 나눈다 — 옮기는 직원의 지우기와 쓰기가 갈라지지 않는다")
+    void 대상_경계로_반을_나눈다() {
+        // given
+        var batch = new Batch(
+                List.of(RelationTuple.directMember("kim", "B"), RelationTuple.directMember("lee", "B")),
+                List.of(RelationTuple.directMember("kim", "A"), RelationTuple.directMember("lee", "A")));
+
+        // when
+        List<Batch> 반 = batch.halves();
+
+        // then
+        assertThat(반).hasSize(2).allSatisfy(b ->
+                assertThat(b.tuples()).extracting(RelationTuple::user).containsOnly(b.tuples().get(0).user()));
+        assertThat(반).extracting(Batch::size).containsExactly(2, 2);
+    }
+
+    @Test
+    @DisplayName("대상이 하나뿐이면 줄 단위로 반을 나눈다 — 한 줄까지 좁힐 수 있어야 나쁜 줄을 찾는다")
+    void 대상이_하나면_줄_단위로_나눈다() {
+        // given
+        var batch = new Batch(List.of(RelationTuple.directMember("kim", "B")), List.of(RelationTuple.directMember("kim", "A")));
+
+        // when, then
+        assertThat(batch.halves()).extracting(Batch::size).containsExactly(1, 1);
+    }
 }
