@@ -135,6 +135,7 @@ class ScimListHandlerTest {
     @Test
     @DisplayName("단건 GET 과 쓰기 응답에도 attributes 를 적용한다")
     void 단건과_쓰기_응답의_속성_선택() {
+        // given, when, then — 단건 GET (park 은 setUp 에서 심었다)
         client.get().uri("/scim/v2/Users/park?attributes=userName")
                 .exchange()
                 .expectStatus().isOk()
@@ -143,13 +144,18 @@ class ScimListHandlerTest {
                 .jsonPath("$.userName").isEqualTo("park")
                 .jsonPath("$.displayName").doesNotExist();
 
-        client.post().uri("/scim/v2/Users?attributes=id")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"choi","active":true}
-                        """)
-                .exchange()
-                .expectStatus().isCreated()
+        // given
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"choi","active":true}
+                """;
+
+        // when
+        var 응답 = client.post().uri("/scim/v2/Users?attributes=id")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange();
+
+        // then
+        응답.expectStatus().isCreated()
                 .expectBody()
                 .jsonPath("$.id").value(id -> {
                     assertThat(UUID.fromString((String) id)).hasToString((String) id);
@@ -161,16 +167,20 @@ class ScimListHandlerTest {
     @Test
     @DisplayName("잘못된 속성 선택은 쓰기 전에 거절한다 — 상태가 바뀌지 않는다")
     void 잘못된_속성_선택은_쓰기_전에_거절한다() {
-        client.post().uri("/scim/v2/Users?attributes=nickName")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"choi","active":true}
-                        """)
-                .exchange()
-                .expectStatus().isBadRequest()
+        // given
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"choi","active":true}
+                """;
+
+        // when
+        var 응답 = client.post().uri("/scim/v2/Users?attributes=nickName")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange();
+
+        // then
+        응답.expectStatus().isBadRequest()
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("invalidValue");
-
         assertThat(state.users.values()).extracting(DirectoryUser::userName).doesNotContain("choi");
     }
 
