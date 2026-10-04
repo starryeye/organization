@@ -1,6 +1,7 @@
 package dev.starryeye.organization.authz;
 
 import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Batch;
+import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Phase;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleFailure;
 import dev.starryeye.organization.core.model.TupleWriteResult;
@@ -119,5 +120,56 @@ class OpenFgaRelationTupleWriterSplitTest {
 
         // when, then
         assertThat(batch.halves()).extracting(Batch::size).containsExactly(1, 1);
+    }
+
+    @Test
+    @DisplayName("반으로 나눠도 단계를 지킨다 — 조직 지우기 배치의 반쪽이 직원 배치가 되지 않는다")
+    void 반으로_나눠도_단계를_지킨다() {
+        // given
+        var 조직 = new Batch(List.of(), List.of(RelationTuple.child("A", "X"), RelationTuple.child("B", "X")), Phase.조직_지우기);
+        var 직원 = new Batch(List.of(RelationTuple.directMember("kim", "B")), List.of(RelationTuple.directMember("kim", "A")));
+
+        // when, then
+        assertThat(조직.halves()).extracting(Batch::단계).containsExactly(Phase.조직_지우기, Phase.조직_지우기);
+        assertThat(직원.halves()).extracting(Batch::단계).containsExactly(Phase.직원, Phase.직원);
+    }
+
+    @Test
+    @DisplayName("반으로 나눠도 쓰기는 쓰기로, 지우기는 지우기로 남는다 — 같은 줄이 양쪽에 있어도 한쪽으로 합쳐지지 않는다")
+    void 쓰기와_지우기는_자리로_가른다() {
+        // given — 같은 줄이 쓰기와 지우기에 모두 있는 배치(델타는 이렇게 만들어지지 않지만, 나누는 쪽이 줄의 내용으로 종류를 짐작하지 않는다)
+        var 줄 = RelationTuple.directMember("kim", "A");
+        var batch = new Batch(List.of(줄), List.of(줄));
+
+        // when
+        List<Batch> 반 = batch.halves();
+
+        // then
+        assertThat(반).containsExactly(new Batch(List.of(), List.of(줄)), new Batch(List.of(줄), List.of()));
+    }
+
+    @Test
+    @DisplayName("거절된 섞인 배치를 쪼개 보내면 반영된 줄과 실패한 줄이 대상 경계로 갈린다 — kim 은 반영되고 lee 의 줄만 실패로 남는다")
+    void 섞인_배치의_집계는_대상_경계로_갈린다() {
+        // given — kim 은 지우기 한 줄과 쓰기 한 줄, lee 는 쓰기 한 줄. lee 의 줄이 든 요청은 거절된다
+        var kim의_지우기 = RelationTuple.directMember("kim", "A");
+        var kim의_쓰기 = RelationTuple.directMember("kim", "B");
+        var lee의_쓰기 = RelationTuple.directMember("lee", "B");
+        var batch = new Batch(List.of(kim의_쓰기, lee의_쓰기), List.of(kim의_지우기));
+        AtomicInteger 보낸_횟수 = new AtomicInteger();
+        Function<Batch, Mono<Void>> send = b -> {
+            보낸_횟수.incrementAndGet();
+            return b.writes().contains(lee의_쓰기) ? Mono.error(new 거절("없는 타입")) : Mono.empty();
+        };
+
+        // when
+        TupleWriteResult 결과 = OpenFgaRelationTupleWriter.쪼개며_보낸다(batch, send, 거절인가).block();
+
+        // then — 통째로 한 번, kim 의 반쪽 한 번, lee 의 반쪽 한 번
+        assertThat(보낸_횟수).hasValue(3);
+        assertThat(결과.written()).containsExactly(kim의_쓰기);
+        assertThat(결과.deleted()).containsExactly(kim의_지우기);
+        assertThat(결과.failures()).extracting(TupleFailure::tuple).containsExactly(lee의_쓰기);
+        assertThat(결과.failures().get(0).reason()).contains("없는 타입");
     }
 }

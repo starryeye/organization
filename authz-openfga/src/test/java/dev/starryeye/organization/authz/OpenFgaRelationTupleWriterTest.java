@@ -163,6 +163,27 @@ class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
     }
 
     @Test
+    @DisplayName("하위 조직의 상위를 바꾸면 구성원은 옛 상위의 권한을 잃고 새 상위의 권한을 얻는다 — 두 단계로 나가도 끝 상태는 같다")
+    void 조직의_상위를_바꾸면_권한이_따라온다() {
+        // given
+        var 소속 = RelationTuple.directMember("kim", "TEAM");
+        var 옛 = RelationTuple.child("TEAM", "DEV001");
+        var 새 = RelationTuple.child("TEAM", "DEV002");
+        writer.apply(TupleDelta.writeOnly(Set.of(소속, 옛))).block();
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+
+        // when
+        var result = writer.apply(new TupleDelta(Set.of(새), Set.of(옛))).block();
+
+        // then
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(result.written()).containsExactly(새);
+        assertThat(result.deleted()).containsExactly(옛);
+        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
+        assertThat(check("user:kim", "member", "group:DEV001")).isFalse();
+    }
+
+    @Test
     @DisplayName("없는 타입의 줄 하나가 섞인 배치는 나머지를 반영하고 그 줄만 실패로 남긴다(점검 M16)")
     void 나쁜_줄_하나는_나머지를_끌고_가지_않는다() {
         // given — 정상 5줄과 모델에 없는 타입의 줄 하나를 한 배치로 보낸다

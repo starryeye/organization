@@ -1,6 +1,7 @@
 package dev.starryeye.organization.authz;
 
 import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Batch;
+import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Phase;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleFailure;
 import dev.starryeye.organization.core.model.TupleWriteResult;
@@ -31,6 +32,20 @@ class OpenFgaRelationTupleWriterBreakerTest {
     private static List<Batch> 배치들(int count) {
         return IntStream.range(0, count)
                 .mapToObj(i -> Batch.writes(List.of(RelationTuple.directMember("user" + i, "DEV002"))))
+                .toList();
+    }
+
+    /** 조직 지우기 단계 배치 — 조직 연결(child)을 지운다 */
+    private static List<Batch> 조직_지우기_배치들(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> Batch.deletes(List.of(RelationTuple.child("t" + i, "OLD"))))
+                .toList();
+    }
+
+    /** 조직 쓰기 단계 배치 — 조직 연결(child)을 쓴다 */
+    private static List<Batch> 조직_쓰기_배치들(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> Batch.writes(List.of(RelationTuple.child("t" + i, "NEW"))))
                 .toList();
     }
 
@@ -210,5 +225,86 @@ class OpenFgaRelationTupleWriterBreakerTest {
                             .containsExactly(배치.get(6).tuples().get(0), 배치.get(7).tuples().get(0));
                 });
         assertThat(응답).as("일곱째·여덟째는 보내지 않는다").hasSize(6);
+    }
+
+    @Test
+    @DisplayName("단계는 겹치지 않는다 — 앞 단계 묶음이 모두 끝난 뒤에야 다음 단계 묶음이 나가고, 한 단계 안에서는 설정한 수만큼 동시에 나간다")
+    void 단계는_겹치지_않고_단계_안에서는_동시에_보낸다() {
+        // given — 조직 지우기 셋, 직원 셋, 조직 쓰기 셋. 동시 2
+        List<Batch> 배치 = new ArrayList<>(조직_지우기_배치들(3));
+        배치.addAll(배치들(3));
+        배치.addAll(조직_쓰기_배치들(3));
+        AtomicInteger 지금 = new AtomicInteger();
+        AtomicInteger 최대 = new AtomicInteger();
+        AtomicInteger 끝난 = new AtomicInteger();
+        List<Phase> 앞이_안_끝났는데_나간_단계 = new CopyOnWriteArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            최대.accumulateAndGet(지금.incrementAndGet(), Math::max);
+            if (끝난.get() < batch.단계().ordinal() * 3) {
+                앞이_안_끝났는데_나간_단계.add(batch.단계());
+            }
+            return Mono.delay(Duration.ofMillis(50))
+                    .map(tick -> {
+                        지금.decrementAndGet();
+                        끝난.incrementAndGet();
+                        return batch.succeeded();
+                    });
+        });
+
+        // when
+        TupleWriteResult 결과 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 2).block();
+
+        // then
+        assertThat(앞이_안_끝났는데_나간_단계).isEmpty();
+        assertThat(최대.get()).isEqualTo(2);
+        assertThat(결과.deleted()).hasSize(3);
+        assertThat(결과.written()).hasSize(6);
+    }
+
+    @Test
+    @DisplayName("조직 지우기 단계에서 멈추면 뒤따르는 직원·조직 쓰기 묶음은 하나도 보내지 않는다")
+    void 조직_지우기에서_멈추면_뒤_단계는_보내지_않는다() {
+        // given — 조직 지우기 묶음 셋이 모두 실패한다
+        List<Batch> 배치 = new ArrayList<>(조직_지우기_배치들(3));
+        배치.addAll(배치들(4));
+        배치.addAll(조직_쓰기_배치들(2));
+        List<Batch> 보낸것 = new CopyOnWriteArrayList<>();
+        // 응답이 늦어야 동시 4 만큼 한꺼번에 나간다 — 단계로 막지 않으면 직원 묶음이 조직 지우기 묶음과 함께 나간다
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            보낸것.add(batch);
+            return Mono.delay(Duration.ofMillis(10)).thenReturn(batch.failed("연결 거부"));
+        });
+
+        // when, then
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).block())
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("남은 6개");
+                    assertThat(멈춤.partial().failures()).hasSize(9);
+                });
+        assertThat(보낸것).extracting(Batch::단계).containsOnly(Phase.조직_지우기).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("직원 단계에서 멈추면 뒤따르는 조직 쓰기 묶음은 하나도 보내지 않는다 — 앞 단계에서 나간 지우기는 결과에 남는다")
+    void 직원에서_멈추면_조직_쓰기는_보내지_않는다() {
+        // given — 조직 지우기 둘은 성공하고, 직원 묶음 셋이 모두 실패한다
+        List<Batch> 배치 = new ArrayList<>(조직_지우기_배치들(2));
+        배치.addAll(배치들(3));
+        배치.addAll(조직_쓰기_배치들(3));
+        List<Batch> 보낸것 = new CopyOnWriteArrayList<>();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> Mono.defer(() -> {
+            보낸것.add(batch);
+            return Mono.delay(Duration.ofMillis(10))
+                    .thenReturn(batch.단계() == Phase.직원 ? batch.failed("연결 거부") : batch.succeeded());
+        });
+
+        // when, then
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send, 4).block())
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤).hasMessageContaining("남은 3개");
+                    assertThat(멈춤.partial().deleted()).hasSize(2);
+                    assertThat(멈춤.partial().failures()).hasSize(6);
+                });
+        assertThat(보낸것).hasSize(5).extracting(Batch::단계).doesNotContain(Phase.조직_쓰기);
     }
 }
