@@ -49,7 +49,9 @@ README "인가 모델"·"조회 API — 식별자 셋".
   갈래는 없어진다.
 - **조직** — RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없다. 그래도 **`externalId` 가 있으면 겹칠 때 409** 다 — 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이 둘 생겨
   멤버가 갈린다. 지금도 조직코드(= `externalId`)로 같은 일을 막고 있다. 판정은 락 안에서 GSI3(`externalId`) + 본 테이블 재확인으로 한다(직원 `userName` 과 같은 방식).
-  `externalId` 가 없는 조직은 중복 판정이 없다.
+  `externalId` 가 없는 조직은 중복 판정이 없다. `externalId` 를 **바꾸는** PUT·PATCH 도 같은 확인을 한다(직원 `userName` 변경과 같다).
+- **구현 중 정한 것** — 조직 `externalId` 는 대소문자를 가린다(RFC 7643 `caseExact: true`). 직원의 `externalId` 는 중복을 판정하지 않는다(재시도 중복은 `userName`
+  이 막는다). 같은 `externalId` 를 가진 직원이 둘이면 `?externalId=` 가 여러 줄을 돌려준다(§5).
 
 ### 3.3 풀리는 것
 
@@ -74,7 +76,7 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - **직원 `userName`** — 새 설정 `user-login-attribute` 의 **원본 값**(정규화하지 않음, 점검 S25). 기본 `uid`, AD 는 `sAMAccountName` 을 권한다. 값이 없으면 식별 값으로 대신한다
   (지금 표시명 대체와 같은 규칙).
 - **조직 표시명** — 이름 속성(`group-name-attribute`, 기본 `description`)이 없으면 지금은 조직코드로 대신했다. 이제 **DN 의 첫 RDN 값**(`cn`/`ou`)으로 대신한다.
-- **`externalId`** — 지금처럼 서버가 준 절대 DN 이다.
+- **`externalId`** — 두 전략 모두 서버가 준 **절대 DN** 이다(DIT 는 지금까지 베이스를 뺀 상대 DN 이었다 — 아래 §4.4).
 
 ### 4.3 반환 속성 명시 (P7)
 
@@ -85,12 +87,28 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - DIT 전략도 매퍼에서 바로 필요한 값만 뽑아 작은 레코드로 들고 간다 — 원본 엔트리(`DirContextAdapter`)를 회차 끝까지 쥐지 않는다.
 - 회차당 전송량·힙이 AD 10만 명에서 1~2GB → 수백 MB 이하로 준다고 본다(추정, §11).
 
+### 4.4 구현 중 정한 것
+
+위 §4.1~§4.3 에 적지 않았고 구현하며 정했다.
+
+- **직원 표시명의 대체 순서는 표시명 속성 → `cn` → `userName` 이다.** 마지막이 id 가 아니라 원본 `userName`(§4.2) 이다 — 식별 값이 UUID 라 표시명으로 보이면 안 되고,
+  정규화된 id 도 원본 이름이 아니다.
+- **조직(groupOfNames 의 그룹, DIT 의 OU) 표시명의 대체는 이름 속성 → 절대 DN 의 첫 RDN 값이다**(점검 M9). `root-dn` 이 `""` 인 DIT 의 루트 OU 도 같은 규칙으로
+  DN 에서 뽑는다.
+- **DIT 의 `externalId` 도 절대 DN 이다.** 베이스를 뺀 상대 DN 이던 것을 groupOfNames 와 맞췄다 — 관리 API 의 `?externalId=` 조회(§5)가 전략과 무관하게 전체 DN 으로 찾게 하려는 것이다.
+  상대 DN 은 안쪽 키(대조키·부모 조회)와 로그에만 남는다. `docs/superpowers/plans/2026-08-15-follow-ups.md` 의 "externalId 형식이 두 전략 간 불일치" 항목이 이걸로 풀린다.
+- **데이터 오류는 조용히 건너뛰지 않고 읽기를 실패시킨다**(`DirectoryDataException`, 재시도하지 않는다). 둘이다.
+  - DIT 에서 같은 id 를 가진 직원 중 `userAccountControl`·`accountExpires` 가 정수가 아닌 것 — 지금까지는 말없이 건너뛰었다. groupOfNames 와 같아졌다.
+  - groupOfNames 에서 비어 있는 id.
+
 ## 5. 권한을 묻는 앱이 id 를 찾는 길
 
 - 직원: 이미 있는 `GET /admin/employees?userName=`(접두사 검색).
 - **새로: 관리 API 에 `?externalId=`(정확히 일치)** — `GET /admin/employees?externalId=…`·`GET /admin/organizations?externalId=…`. 이미 있는 GSI3 와
   `DirectoryQueryRepository#findUsersByExternalId`·`findGroupHeadersByExternalId` 를 쓴다 — 새 인덱스는 없다. SCIM 이면 IdP 가 보낸 `externalId`(예: Okta 사용자 id, Entra 에서
   objectId 를 매핑했으면 그 값)로 찾는다 — 앱이 로그인 토큰에서 받는 `sub`·`oid` 와 맞출 수 있다. LDAP 이면 `externalId` 는 DN 이다.
+  - **구현 중 정한 것** — 정확히 일치이고 한 페이지(`nextCursor` null)로 끝난다. GSI3 후보를 본 테이블로 다시 확인한다. 직원 조회는 `userName`·`displayName`·`externalId` 중 정확히 하나,
+    조직 조회는 `displayName`·`externalId` 중 정확히 하나를 받고 아니면 400 이다. `externalId` 가 겹치는 리소스가 둘이면 여러 줄이 온다.
 - app-scim 은 `GET /scim/v2/Users?filter=userName eq "…"`·`filter=externalId eq "…"` 로도 찾는다(이미 있다).
 - README "식별자 셋"을 새 뜻으로 다시 쓴다 — `employeeId` 는 불변 id, `userName` 은 원본 계정명, `displayName` 은 사람이 읽는 이름. 조직도 같다(`orgCode` 는 불변 id).
 
@@ -107,10 +125,11 @@ README "인가 모델"·"조회 API — 식별자 셋".
 |---|---|
 | connector-scim | POST 가 UUID 발급(`ScimMapper`·`ScimUserHandler`·`ScimGroupHandler`), `organizationCode` 없앰, 본문 `id` 무시 |
 | core | `createUser` 의 아이디 중복 갈래 정리, `createGroup` 의 `externalId` 중복 판정(락 안 — 상태 포트에 `findGroupIdsByExternalId`(GSI3)를 더하고 후보를 `findGroupHeader` 로 다시 확인, `userName` 확인과 같은 방식), `AdminQueryUseCase` 의 `externalId` 조회 |
-| connector-ldap | 식별 속성 기본값 `entryUUID`, `objectGUID` 이진 선언·GUID 문자열, `user-login-attribute`, 표시명 대체를 RDN 으로, 반환 속성 명시, DIT 매퍼가 값만 들고 감 |
+| connector-ldap | 식별 속성 기본값 `entryUUID`, `objectGUID` 이진 선언·GUID 문자열, `user-login-attribute`, 표시명 대체를 RDN 으로, 반환 속성 명시, DIT 매퍼가 값만 들고 감, DIT `externalId` 절대 DN(§4.4) |
 | admin-api | `?externalId=` 조회 |
-| testFixtures | SCIM 요청 하네스가 POST 응답의 `id` 를 받아 뒤 요청·기대값에 바꿔 넣는 번역 단계 |
-| app-scim·app-ldap 테스트 | e2e·규모 테스트를 새 id 로(LDAP 은 기본값 `entryUUID`, 기대값은 `userName` 으로 id 를 찾아 맞춘다) |
+| testFixtures | SCIM 요청 하네스가 POST 응답의 `id` 를 받아 뒤 요청·기대값에 바꿔 넣는 번역 단계(`ScimIdBook`), `OrgChart.아이디를_바꾼다` 는 바뀐 id → 처음 id 표를 남겨 `RollupSampling` 이 처음 id 로 표본을 골라 실행마다 같게 한다(서버 id 는 무작위라 그 순서로 고르면 매번 달라진다) |
+| app-scim 테스트 | e2e·규모 테스트를 `ScimIdBook` 으로 새 id 에 맞춘다. "늦게 도착함" 시나리오는 Entra 순서(빈 조직 → 직원 → 멤버 PATCH)로 다시 썼다(§8) |
+| app-ldap 테스트 | 기존 e2e·규모 테스트는 test 프로필이 이름 기반 id(groupOfNames `uid`/`cn`, DIT `uid`/`ou`)를 명시해 그대로 돈다. 기본값 `entryUUID` 는 새 테스트가 본다(§8) |
 | README | 식별자 셋, LDAP 식별 속성(AD 는 `objectGUID`, `user-login-attribute`), 옮기기 절차 |
 | 점검 문서 | M7·M9·P7·S25 해결 표시 |
 
@@ -131,7 +150,17 @@ README "인가 모델"·"조회 API — 식별자 셋".
 | 반환 속성 | 검색이 명시한 속성만 요청한다(그 밖의 속성은 오지 않는다), `entryUUID` 가 온다 | connector-ldap |
 | userName | LDAP 직원 `userName` 이 `user-login-attribute` 의 원본 값이다(S25) | connector-ldap |
 | 관리 API | `?externalId=` 로 직원·조직을 정확히 찾는다 | admin-api·core |
-| 규모 | 기존 SCIM·LDAP 규모 테스트(5천·10만)가 새 id 로 통과한다 | app-scim·app-ldap scaleTest |
+| 규모 | 기존 SCIM 규모 테스트(5천·10만)가 서버 발급 id 로, LDAP 은 기존 규모 테스트가 이름 기반 id 로 그대로, 기본값 `entryUUID` 는 `LdapEntryUuidScaleTest` 가 통과한다 | app-scim·app-ldap scaleTest |
+
+**구현 후 보정.** 위 표는 계획 시점의 것이고, 구현에서 다음과 같이 정리됐다.
+
+- **LDAP 기존 e2e·규모 테스트는 test 프로필이 이름 기반 id 를 명시해 그대로 돈다**(groupOfNames `uid`/`cn`, DIT `uid`/`ou`). 기본값 `entryUUID` 는 새 테스트가 본다 —
+  connector-ldap 의 `ImmutableIdentifierTest`(전략 테스트), app-ldap 의 `LdapImmutableIdEndToEndTest`(groupOfNames)·`LdapDitImmutableIdEndToEndTest`(DIT),
+  `LdapEntryUuidScaleTest`(groupOfNames 6,124명·352그룹 — 기대 조직도를 `entryUUID` 맵으로 번역해 이름 기반 규모 테스트와 같은 두 경로 검증을 돈다).
+- **개명은 두 갈래를 e2e 로 확인했다.** `entryUUID` 에서는 ModifyDN 이 같은 id 라 큰 개명도 삭제 가드에 걸리지 않고, 이름 기반 id 에서는 삭제+생성이라 가드가 멈춘다.
+- **SCIM 하네스는 `ScimIdBook` 이 번역한다.** 요청을 보낼 때는 조직도 id 를 서버 id 로, 검증할 때는 기대값과 Check 를 서버 id 로 바꾼다. 드리프트 복구·재적재 등의 e2e 는 POST 응답의 id 를 쓴다.
+- **"늦게 도착함" 시나리오는 SCIM 에서 일어날 수 없다** — IdP 는 받은 `id` 로만 참조한다. 그래서 Entra 순서(빈 조직 → 직원 → 멤버 PATCH)로 다시 썼다:
+  `ScimProvisioningOrderScaleTest` S1-a·S1-b, `ScimGroupMemberPatchScaleTest` 순서 8(10만 명 조직 밑에 새 조직을 PATCH 로 하위로 붙여도 파티션을 훑지 않는다), `ScimEndToEndTest` 순서 9.
 
 머지 전 컨트롤러가 `./gradlew cleanTest test` 와 `./gradlew cleanScaleTest scaleTest` 를 한 번에 하나씩 돌리고, 결과를 §9 에 적는다.
 
@@ -154,11 +183,16 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - **권한을 묻는 앱은 조회가 필요하다.** 로그인한 사용자를 우리 id 로 바꾸려면 관리 API(`userName`·`externalId`) 또는 SCIM 목록 필터를 불러야 한다. 토큰 클레임과의 자동 연결은
   하지 않는다.
 - **고아 튜플은 그대로 남는다.** 새 입사자가 물려받지 않을 뿐, 지운 직원의 옛 id 로 남은 튜플은 SCIM 재적재(`mode=tuples`)가 지운다.
-- **`objectGUID` 는 실제 AD 로 확인하지 못했다** — 바이트 변환은 단위 테스트, 이진 선언은 JNDI 환경 값으로만 본다.
+- **`objectGUID` 와 `member;range=` 는 실제 AD 로 확인하지 못했다** — 바이트 변환은 단위 테스트, 이진 선언은 JNDI 환경 값으로만 본다. 검색이 `member` 를 이름을 대 요청할 때
+  AD 가 `member;range=…` 로 나눠 주는 동작도 임베디드 서버로는 볼 수 없다.
 - **전송량·힙 감소는 추정이다** — 임베디드 서버는 속성이 몇 개뿐이라 AD 크기를 재지 못한다. 요청 속성 목록만 단정한다.
 - **튜플이 UUID 라 OpenFGA 를 직접 보는 운영자는 읽기 어렵다** — 관리 API 로 본다.
 - **옮길 때 한 번의 조치가 필요하다** — SCIM 은 재프로비저닝, LDAP 은 force 동기화(또는 테이블·store 새로).
 - **조직 `externalId` 중복 판정은 RFC 밖의 우리 규칙이다** — `externalId` 를 일부러 겹치게 보내는 IdP 설정이면 409 다.
+- **`userName`·조직 `externalId` 중복 판정은 GSI 후보를 본 테이블로 다시 확인한다** — 막 저장돼 GSI 에 아직 없는 리소스와는 겹칠 수 있다(직원 `userName` 의 기존 틈과 같다).
+- **SCIM 에서 "아직 없는 리소스를 먼저 참조"하는 경로는 이제 생기지 않는다** — IdP 는 받은 `id` 로만 가리킨다. 상위 조직이 새 조직을 먼저 적어 두는 처리(`상위_조직들`)는 SCIM 에서 비게 된다(코드는 남는다).
+- **`entryUUID` 규모 테스트는 groupOfNames 만 본다** — DIT 의 `entryUUID` 는 e2e(`LdapDitImmutableIdEndToEndTest`)까지만 있다.
+- **관리 API 의 `?externalId=` 조회도 같은 GSI3 지연이 있다** — 방금 만든 리소스는 잠깐(보통 1초 미만) 안 나올 수 있다. 중복 판정과 같은 인덱스를 쓴다.
 
 ## 12. 범위 밖
 

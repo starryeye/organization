@@ -67,12 +67,17 @@ type group
 어떤 직원이 하위 조직에만 직접 속해 있어도, 그 상위 조직들의 `member`로도 인정된다. 예를 들어
 `kim`이 `DEV002`(백엔드팀)의 직접 멤버이고 `DEV002`가 `DEV001`(개발본부)의 하위 조직이면,
 `Check(user:kim, member, group:DEV001)`은 `kim`을 `DEV001`에 명시적으로 넣지 않아도 참이다.
-이것이 이 인가 모델이 존재하는 이유다.
+이것이 이 인가 모델이 존재하는 이유다. (읽기 쉽도록 이름으로 적었다 — 실제 튜플의 `user:`·`group:` 뒤에는 아래의 불변 id가 온다.)
 
 **조직명은 튜플에 절대 넣지 않는다.** 조직명은 개편 때마다 바뀌지만 튜플은 그 시점의 사실을
 영구히 기록하는 것이 아니라 지금 참인 관계를 표현하는 것이라, 이름이 바뀔 때마다 튜플을 다시
-쓰는 것은 사고를 부른다. 튜플의 식별자는 **직원 아이디와 조직코드뿐**이다. 조직명은 DynamoDB의
+쓰는 것은 사고를 부른다. 튜플의 식별자는 **직원의 불변 id와 조직의 불변 id뿐**이다. 조직명은 DynamoDB의
 현재상태에만 보관되고, 조회가 필요하면 거기서 가져온다.
+
+**불변 id는 디렉터리가 정한다.** SCIM은 서버가 직원·조직을 만들 때 발급하는 UUID, LDAP은 엔트리마다 서버가 만들어 두는
+`entryUUID`(AD는 `objectGUID`)다. 계정명이나 조직명이 바뀌어도 id는 그대로라 튜플이 바뀌지 않고, 지운 직원의 이름을 새 입사자가
+쓰더라도 옛 id로 남은 권한을 물려받지 않는다. 대신 **권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다** — 아래 "조회 API"의
+`?userName=`·`?externalId=`로 찾는다. 튜플이 UUID 라 OpenFGA 를 직접 열어 보면 읽기 어렵다 — 누구의 튜플인지는 관리 API 로 본다.
 
 튜플을 다루는 OpenFGA 호출은 세 가지뿐이다. 쓰기는 Write(쓰기·지우기), 판단은 Check·BatchCheck(점 조회), 그리고
 **Read(목록 읽기)는 장부 훑기에서만** 쓴다(`RelationTupleScanner`) — 재적재와, 지난 회차가 기록 전에 멈춘 뒤 첫 동기화다. ListObjects는 쓰지 않는다.
@@ -264,26 +269,57 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 |---|---|
 | `GET /admin/employees?userName=` | 계정명 접두사로 직원 검색 |
 | `GET /admin/employees?displayName=` | 표시명 접두사로 직원 검색 |
+| `GET /admin/employees?externalId=` | `externalId`가 정확히 같은 직원 검색 — 권한을 묻는 앱이 IdP의 사용자 id로 우리 id를 얻는 길 |
 | `GET /admin/employees/{employeeId}` | 직원 상세 — 직속 소속과 상위 계층 전부, 각 줄에 실제 판정 포함 |
 | `GET /admin/organizations?displayName=` | 표시명 접두사로 조직 검색 |
+| `GET /admin/organizations?externalId=` | `externalId`가 정확히 같은 조직 검색 |
 | `GET /admin/organizations/{orgCode}` | 조직 상세 — 상위 계층, 직속 하위 조직, 직속 소속 직원 첫 페이지 |
 | `GET /admin/organizations/{orgCode}/members` | 조직의 직속 소속 직원 목록 (커서 페이징) |
 
 검색은 `?cursor=`로 이어 읽고, `?limit=`(기본 20, 최대 100)로 페이지 크기를 조절한다.
+직원 검색은 `userName`·`displayName`·`externalId` 중 **정확히 하나**를, 조직 검색은 `displayName`·`externalId` 중
+**정확히 하나**를 줘야 한다. 없거나 둘 이상이면 400이다.
 
 **식별자 셋.** 직원에는 이름이 다른 세 값이 붙는다.
 
-- `employeeId` — 정규화된 값. 실제로 OpenFGA 튜플(`user:{employeeId}`)에 실리는 값
-- `userName` — IdP/LDAP이 보낸 원본 계정명. 정규화 전 형태
+- `employeeId` — **불변 id**. 실제로 OpenFGA 튜플(`user:{employeeId}`)에 실리는 값이다. SCIM은 서버가 발급한 UUID, LDAP은
+  `entryUUID`(AD는 `objectGUID`)이고, 이름이 바뀌어도 변하지 않는다
+- `userName` — 원본 계정명. SCIM은 IdP가 보낸 `userName`, LDAP은 `user-login-attribute`(기본 `uid`)의 값을 정규화하지 않고
+  그대로 싣는다
 - `displayName` — 사람이 읽는 이름
 
-예를 들어 SCIM이 `userName: "gd.hong"`, `displayName: "홍길동"`으로 사용자를 보내면,
-`employeeId`도 `gd.hong`으로 정규화돼 튜플은 `user:gd.hong`이 된다. `/admin/employees/gd.hong`
-(경로에는 `employeeId`)로 상세를 조회하면 `userName`과 `displayName`을 함께 볼 수 있다.
+조직도 같다. `orgCode`가 불변 id이고 튜플의 `group:{orgCode}`에 실린다. 조직에는 `userName`이 없고 `displayName`이 이름이다.
+
+예를 들어 SCIM으로 `userName: "gd.hong"`, `displayName: "홍길동"`인 사용자를 만들면 서버가 `id`를 발급해 돌려준다.
+`employeeId`와 튜플은 그 값이다.
+
+```
+employeeId   3f6c1d52-8a0e-4b7d-9c21-5e0f7a4d2b18     → 튜플 user:3f6c1d52-8a0e-4b7d-9c21-5e0f7a4d2b18
+userName     gd.hong
+displayName  홍길동
+```
+
+`/admin/employees/3f6c1d52-8a0e-4b7d-9c21-5e0f7a4d2b18`(경로에는 `employeeId`)로 상세를 조회하면 `userName`과
+`displayName`을 함께 볼 수 있다.
+
+**권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다.** 토큰의 사용자 식별과 `employeeId`를 자동으로 잇지는 않는다.
+앱이 아는 값으로 한 번 조회해 `employeeId`를 얻는다.
+
+- `GET /admin/employees?userName=gd.hong` — 계정명으로 찾는다. 접두사 검색이라 더 긴 계정명도 함께 올라오므로 `userName`이 같은 줄을 고른다
+- `GET /admin/employees?externalId=<IdP의 사용자 id>` — 정확히 일치한다. SCIM이면 IdP가 보낸 `externalId`(Okta의 사용자 id, Entra에서
+  `objectId`를 `externalId`로 매핑했다면 그 값)이고, LDAP이면 서버가 준 절대 DN이다
+
+`Check(user:<얻은 employeeId>, member, group:<조직 id>)`로 묻는다. app-scim은 `GET /scim/v2/Users?filter=userName eq "…"`·
+`filter=externalId eq "…"`로도 찾을 수 있다.
+
+**`?externalId=`는 정확히 일치만 찾고 한 페이지로 끝난다**(`nextCursor`는 null). 같은 `externalId`를 가진 리소스가 둘이면 줄이 여럿 온다 —
+SCIM 조직의 `externalId`는 겹치면 409지만(아래 SCIM 절) 직원의 `externalId`는 겹침을 막지 않는다. 이 조회는 GSI3(`externalId`)로
+후보를 찾은 뒤 본 테이블에서 다시 확인한다. GSI는 읽기가 조금 늦게 따라오므로, **방금 만든 리소스는 잠깐(보통 1초 미만) 나오지
+않을 수 있다.**
 
 **검색은 접두사만 지원한다.** `displayName=홍`은 "홍"으로 시작하는 이름을 찾을 뿐, 부분일치나
-전문 검색은 지원하지 않는다. 조직코드(`orgCode`) 자체의 접두사 검색도 없다 — 조직은
-표시명으로만 검색하고, 정확한 코드를 안다면 `/admin/organizations/{orgCode}`로 바로 조회한다.
+전문 검색은 지원하지 않는다(`externalId`만 정확히 일치다). 조직 id(`orgCode`) 자체의 접두사 검색도 없다 — 조직은
+표시명 접두사나 `externalId`로 찾고, 정확한 id를 안다면 `/admin/organizations/{orgCode}`로 바로 조회한다.
 
 **`shouldHaveAccess`와 `openFgaCheck`가 갈리면.** 직원 상세(`paths`)의 각 줄은
 `shouldHaveAccess`(현재상태가 요구하는 값)와 `openFgaCheck`(OpenFGA에 실제로 Check해 받은
@@ -319,6 +355,41 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 
 ## LDAP
 
+**id 는 엔트리의 불변 값이다.** 식별 속성(groupOfNames 의 `user-id-attribute`·`group-id-attribute`, DIT 의 `user-id-attribute`·
+`group-id-attribute`(OU))의 기본값은 `entryUUID` 다(RFC 4530). OpenLDAP·389DS·UnboundID 가 엔트리마다 만들어 두고 이름이 바뀌어도
+그대로 둔다. 이 값이 튜플의 `user:`·`group:` 뒤에 실린다.
+
+**AD 는 `objectGUID` 로 설정한다.** `user-login-attribute` 도 `sAMAccountName` 으로 바꾼다.
+
+```yaml
+ldap:
+  group-of-names:            # DIT 는 dit: — 이름이 같다
+    user-id-attribute: objectGUID
+    group-id-attribute: objectGUID
+    user-login-attribute: sAMAccountName
+```
+
+식별 속성 이름이 `objectGUID`(대소문자 무시)면 이진 속성으로 자동으로 선언하고(JNDI `java.naming.ldap.attributes.binary` — 따로 설정하지
+않는다) 16바이트를 표준 GUID 문자열로 바꾼다. 소문자이고 앞 세 묶음은 바이트 순서를 뒤집는다(리틀 엔디언). AD 도구(`Get-ADUser`)가
+보여 주는 값과 같다. 16바이트가 아니면 데이터 오류다. 이진 선언과, `member` 를 이름을 대 요청할 때의 `member;range=` 동작은 임베디드 서버로 볼 수
+없어 **실제 AD 에서는 확인하지 못했다.**
+
+**이름 기반(`uid`/`cn`/`ou`/`employeeNumber`) id 도 설정으로 쓸 수 있지만 개명이 삭제+생성이다.** 이름이 바뀌면 새 id 의 직원·조직이
+생기고 옛 것의 튜플은 지워진다. DIT 에서 OU 하나를 개명하면 그 아래 직원 전원의 튜플이 지워졌다가 다시 쓰이고, 큰 조직을 개명하면 지울
+줄이 장부의 30% 를 넘어 삭제 가드가 그 회차를 `ABORTED` 로 멈춘다 — 그동안 퇴사도 반영되지 않는다. 대소문자만 바꿔도(`JKim` →
+`jkim`) 새 사람이다. `entryUUID`·`objectGUID` 에서는 개명해도 같은 id 라서 이런 일이 없다(큰 조직 개명이 삭제 가드에 걸리지 않는 것을
+e2e 로 확인했다).
+
+**`userName` 은 `user-login-attribute`(기본 `uid`)의 원본 값이다.** 정규화하지 않는다 — `uid: hong gd` 는 `hong gd` 그대로다. 그 속성이
+없으면 식별 값으로 대신한다. 표시명은 이렇게 채운다 — 직원은 `user-name-attribute`(기본 `displayName`) → `cn` → `userName`, 조직은
+`group-name-attribute`(기본 `description`) → DN 의 첫 RDN 값(`cn`/`ou`)이다. 끝까지 id 로 가지 않으므로 UUID 가 표시명으로 보이는 일이
+없다. `externalId` 는 두 전략 모두 서버가 준 절대 DN 이다.
+
+**검색은 쓰는 속성만 이름을 대 요청한다.** 운영 속성인 `entryUUID` 는 이름을 대야 오기도 하고, AD 사용자 하나에는 `memberOf`·
+`proxyAddresses`·`thumbnailPhoto` 등이 10~20KB 붙어 10만 명이면 한 회차에 1~2GB 였다(추정). 요청하는 속성은 직원의 식별·로그인·표시명·메일
+속성과 `cn`, 계정 상태(`userAccountControl`·`accountExpires`), 이름 속성, 그룹의 식별·이름·멤버 속성, OU 의 식별·이름 속성이다. DIT 전략도 엔트리
+원본이 아니라 필요한 값만 담은 작은 레코드를 들고 간다. 줄어든 양은 추정이다 — 임베디드 서버는 속성이 몇 개뿐이라 AD 크기를 재지 못한다.
+
 **AD 가 막은 계정은 비활성으로 읽는다.** 다음 둘 중 하나라도 해당하면 그 직원은 `active=false` 다 — 소속은
 남고 권한 튜플만 사라진다(SCIM 의 비활성과 같다). 다시 풀면 다음 동기화에서 권한이 돌아온다.
 
@@ -332,8 +403,8 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - 동기화 계정이 두 속성을 읽을 수 있어야 한다 — 못 읽으면 전원이 활성으로 읽힌다.
 - 막힌 직후부터 다음 동기화까지는 권한이 남는다. LDAP 은 주기 동기화다.
 
-**다시 읽어도 결과가 같은 실패는 재시도하지 않는다.** 정수가 아닌 계정 상태 값, 없는 필수 속성, 해석할 수 없는
-DN, 멤버가 하나도 대조되지 않는 설정이 여기 속한다 — 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
+**다시 읽어도 결과가 같은 실패는 재시도하지 않는다.** 정수가 아닌 계정 상태 값, 없는 필수 속성, 비어 있는 id,
+16바이트가 아닌 `objectGUID`, 해석할 수 없는 DN, 멤버가 하나도 대조되지 않는 설정이 여기 속한다 — 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
 통신이 끊기는 것 같은 일시적 실패만 설정한 횟수(`ldap.max-retries`)만큼 다시 읽는다.
 
 **연결·응답에 타임아웃이 있다.** `ldap.connect-timeout`(기본 10초)과 `ldap.read-timeout`(기본 150초)이다. **인증(bind) 응답
@@ -411,9 +482,20 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못한다.
 
 `op` 와 `path` 의 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1).
 
+**`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 무작위 UUID(v4, 소문자 하이픈)를 새로 만들어 응답으로 돌려주고,
+요청 본문의 `id` 는 무시한다. IdP 는 이 `id` 를 저장해 PATCH·PUT·DELETE 의 경로와 조직의 `members[].value` 에 쓴다. PUT 도 경로의 `id` 가
+기준이다. 이 `id` 가 곧 `employeeId`·`orgCode` 이고 튜플에 실린다. 그래서 지운 직원과 같은 `userName` 으로 다시 만들어도 새 `id` 라 옛 `id` 로
+남은 권한을 물려받지 않고, 이름을 바꾼 직원의 옛 `userName` 을 새 입사자가 쓸 수 있다. **아직 없는 리소스는 참조할 수 없다** — IdP 는 받은
+`id` 로만 가리키므로, 조직도 직원도 먼저 만들어 `id` 를 받은 뒤에 멤버를 PATCH 하는 순서가 된다. 조직의 `externalId`(IdP 가 정하는 값)는 속성으로만
+남고 id 를 만들지 않는다.
+
 **`userName` 은 POST·PUT·PATCH 모두에서 대소문자를 무시하고 유일하다**(RFC 7643 `uniqueness: server`, `caseExact: false`). 겹치면
-409 `uniqueness` 다. 확인은 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본 테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만)
-저장된 직원과 대소문자만 다른 이름은 드물게 통과할 수 있다. 설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`.
+409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
+PUT·PATCH 도 같다. RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이
+둘 생겨 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
+보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본
+테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만) 저장된 직원과 대소문자만 다른 이름, 방금 저장된 조직과 같은 `externalId` 는 드물게 통과할 수 있다.
+설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`, `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`.
 
 **경로 없는(path 없이 값 객체를 보내는) add/replace 도 같은 규칙으로 푼다.** 값 객체의 키 하나하나를
 `path`로 봐서 위 표와 똑같이 해석한다 — `name.givenName`, `emails[type eq "work"].value`, 코어 스키마
@@ -427,19 +509,19 @@ Entra 의 표준 호환 모드(`aadOptscim062020`)로 지우지 않고 남겨 �
 `invalidPath` 다 — 반영되지 않은 변경을 반영됐다고 IdP 가 오해하지 않게 하려는 것이다. **IdP 의 속성 매핑에서 이 속성들을 뺀다**
 (Entra 는 기본 매핑에 넣을 수 있다).
 
-`members[].value`는 `userName`·`externalId`과 같은 규칙(`IdNormalizer`)으로 정규화한다.
+`members[].value`는 IdP 가 받은 `id` 다. 지금도 `IdNormalizer` 를 거치지만 UUID 에는 바꿀 글자가 없어 그대로다.
 `members[].type`은 RFC 7643에서 선택 필드라 없을 수 있는데, 그때는 User로 단정하지 않고
-현재상태에서 조직 → 직원 순으로 찾아 판정한다 — 조직코드와 직원 아이디는 네임스페이스가
+현재상태에서 조직 → 직원 순으로 찾아 판정한다 — 조직 id 와 직원 id 는 네임스페이스가
 달라 겹칠 수 있어서, 잘못 단정하면 IdP가 조직을 중첩하려던 요청이 엉뚱한 직원 소속 튜플이
 된다. 판정은 요청에서 `type` 없는 아이디를 모아 **한 번에**(BatchGet, 키 100개씩) 한다 — 1,000명이어도 읽기는 스무 번
-안팎이다. 조직도 직원도 없는 아이디는 직원으로 본다(아직 도착하지 않은 직원을 먼저 참조할 수 있다). **있는 직원으로 판정되면
+안팎이다. 조직도 직원도 없는 아이디는 직원으로 본다(IdP 는 받은 `id` 로만 가리키므로 정상 흐름에서는 생기지 않는다). **있는 직원으로 판정되면
 로그가 없다**(Entra·Okta 의 정상 경로). 조직으로 추정했거나 없는 아이디가 있으면 요청당 경고 한 줄로, 몇 명인지와 아이디 앞
 10개를 남긴다.
 
 **중첩 조직과 순환.** 조직 A 의 멤버로 조직 B 를 넣는 연결이 순환을 닫으면(B 가 A 자신이거나 A 의 상위 조직이면) 그 연결의
 멤버십은 저장하지만 OpenFGA 튜플은 쓰지 않고 **보류 목록**(`CYCLE_CUT` 파티션)에 적는다. 연결마다 경고 로그가 한 줄 남는다. 순환 검사는
 새 연결의 부모에서 **위로** 올라가며 튜플 그래프 — 멤버 줄의 하위 조직 연결에서 "보류 목록 중 OpenFGA 에 없는 줄"을 뺀 것 —
-를 본다. **먼저 저장된 연결이 이긴다.** 새 연결이 순환을 닫으면 새 연결이 보류되고, 조직코드 순서와는 상관이 없다.
+를 본다. **먼저 저장된 연결이 이긴다.** 새 연결이 순환을 닫으면 새 연결이 보류되고, 조직 id 순서와는 상관이 없다.
 
 하위 조직 연결을 지운 요청(조직 PATCH·PUT 의 하위 조직 빼기, 조직 삭제)은 커밋한 뒤 같은 락 안에서 보류 목록을 다시 본다. 순환이
 풀린 연결은 튜플을 쓰고 목록에서 뺀다(INFO 로그) — 본부 ⊃ A ⊃ B 에서 B 를 A 위로 올리는 개편이 `PATCH B add A` → `PATCH A
@@ -482,7 +564,7 @@ organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 
 직렬화된다 — 인메모리 락(예전의 `MutationGate`)은 인스턴스 하나 안에서만 유효해 여러 대를
 띄우는 순간 조용히 뚫렸는데, 이 락은 저장소를 공유하므로 그렇지 않다.
 
-**쓰기 요청의 판단은 전부 락 안에서 일어난다.** 직원·조직을 읽고, 존재를 확인하고, 아이디·`userName` 중복을 확인하는 일을 모두 락을
+**쓰기 요청의 판단은 전부 락 안에서 일어난다.** 직원·조직을 읽고, 존재를 확인하고, `userName`·조직 `externalId` 중복을 확인하는 일을 모두 락을
 잡은 뒤에 한다 — 동시에 온 PATCH 가 서로의 변경을 지우거나(비활성화가 되돌려져 퇴사자 권한이 되살아나는 것 포함) 방금 지운 직원을
 되살리지 않는다. 직원 삭제는 소속 조직의 이름표만 읽고 그 직원의 줄만 지운다 — 조직 크기와 무관하다.
 
@@ -546,6 +628,19 @@ IdP가 연결을 끊어도 그 변경은 커밋까지 마치고 락을 반납한
 신호다 — 다만 이 지표는 "누군가 다시 건드린 리소스"에서만 드러난다. 아무도 건드리지 않는
 어긋남까지 잡는 주기적 대조는 아직 없다(아래 follow-ups 참고).
 
+## 불변 id 로 옮기기
+
+튜플의 id 가 이름에서 불변 id 로 바뀌었다. 옛 id(`user:kim`)와 새 id(`user:<UUID>`)는 전혀 달라 기존 배포는 한 번 다시 시작해야 한다.
+운영 배포 전이라 이관 코드는 만들지 않았다.
+
+- **app-scim** — 기존 데이터의 id 는 `userName` 에서 온 값이라 쓸 수 없다. `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` 으로
+  장부와 조직도를 비운 뒤 IdP 에서 프로비저닝을 처음부터 다시 건다(위 "⚠️ `mode=wipe`는 되돌릴 수 없다"). DynamoDB 테이블과 OpenFGA store 를 새로
+  만들어도 된다.
+- **app-ldap** — 첫 동기화에서 모든 id 가 바뀌어 옛 튜플 전부가 지울 대상이 되고 삭제 가드가 멈춘다. 첫 동기화를
+  `POST /admin/sync/full?force=true` 로 한 번 넘긴다. 테이블과 store 를 새로 만들어도 된다.
+
+권한을 묻는 앱이 옛 id 를 저장해 두었다면 위 "조회 API"로 새 id 를 다시 얻는다.
+
 ## 테스트
 
 ```bash
@@ -571,6 +666,13 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 지워 `shouldHaveAccess`와 `openFgaCheck`가 실제로 갈리는지까지 확인한다 — 조회 API가 존재하는
 이유 그 자체다. `app-ldap`의 `AdminQuerySmokeTest`는 같은 공유 모듈이 app-ldap 컨텍스트에서도
 자동설정으로 잡히는지만 확인한다.
+
+**id 가 바뀐 뒤의 테스트.** app-ldap 의 test 프로필은 이름 기반 id(groupOfNames `uid`/`cn`, DIT `uid`/`ou`)를 명시해 기존 e2e·규모 테스트가
+그대로 돈다. 기본값 `entryUUID` 는 connector-ldap 의 `ImmutableIdentifierTest`, app-ldap 의 `LdapImmutableIdEndToEndTest`(groupOfNames)·
+`LdapDitImmutableIdEndToEndTest`(DIT)·`LdapEntryUuidScaleTest` 가 본다(개명이 같은 id 라 삭제 가드에 걸리지 않는 것 포함). 규모 테스트는
+groupOfNames 만 `entryUUID` 로 돈다 — DIT 의 `entryUUID` 는 e2e 까지만 있다. SCIM 요청 하네스(connector-scim 의 testFixtures)는 `ScimIdBook` 으로 OrgChart 의 id 와
+서버가 발급한 id 를 번역한다. SCIM 에서는 IdP 가 받은 `id` 로만 참조할 수 있어, 멤버를 늦게 도착시키던 시나리오는 Entra 의 순서(빈 조직 → 직원 →
+멤버 PATCH)로 다시 썼다.
 
 **포트가 겹쳐도 엉뚱한 곳과 통신하지 않는다.** macOS 에서는 같은 포트 번호를 "127.0.0.1 전용" 리스너(IntelliJ 등
 개발 도구가 여럿 연다)와 "모든 주소" 리스너가 함께 쓸 수 있고, `localhost` 로 가는 연결은 전용 쪽이 받는다. 그래서
