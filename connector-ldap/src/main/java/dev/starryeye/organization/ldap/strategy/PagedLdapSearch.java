@@ -8,7 +8,10 @@ import org.springframework.ldap.query.LdapQuery;
 
 import javax.naming.directory.SearchControls;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * {@code LdapTemplate}에는 {@code LdapQuery} 기반 검색에 paged results control(RFC 2696)을
@@ -72,11 +75,28 @@ final class PagedLdapSearch {
         });
     }
 
+    /**
+     * 검색에 달 속성 이름 목록을 만든다. 설정 값에서 만들므로 비어 있거나(null·공백) 겹칠 수 있다 — 빈 이름은 빼고,
+     * 대소문자만 다른 이름은 처음 것만 남긴다(LDAP 속성 이름은 대소문자를 가리지 않는다). 순서는 처음 나온 대로다.
+     */
+    static String[] 속성목록(String... 이름들) {
+        Map<String, String> 처음나온것 = new LinkedHashMap<>();
+        for (String 이름 : 이름들) {
+            if (이름 != null && !이름.isBlank()) {
+                처음나온것.putIfAbsent(이름.toLowerCase(Locale.ROOT), 이름);
+            }
+        }
+        return 처음나온것.values().toArray(String[]::new);
+    }
+
     private static SearchControls controlsOf(LdapQuery query) {
         SearchControls controls = new SearchControls();
         controls.setSearchScope(query.searchScope() == null
                 ? SearchControls.SUBTREE_SCOPE
                 : query.searchScope().getId());
+        // 쓰는 속성만 요청한다 — 비워 두면 서버가 모든 사용자 속성을 준다(AD 10만 명이면 회차마다 1~2GB, 설계 2026-10-04 §4.3).
+        // 운영 속성(entryUUID)은 이름을 대야만 온다
+        controls.setReturningAttributes(query.attributes());
         return controls;
     }
 }

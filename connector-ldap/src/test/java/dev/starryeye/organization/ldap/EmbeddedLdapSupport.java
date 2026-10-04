@@ -38,6 +38,13 @@ public abstract class EmbeddedLdapSupport {
         return 0;
     }
 
+    /**
+     * 서버를 만들기 전에 설정을 더 손볼 자리. 서버가 받는 요청을 엿보는 인터셉터를 다는 테스트가 쓴다 —
+     * 접속 설정을 따로 적지 않고 이 클래스의 템플릿을 그대로 쓰기 위해서다.
+     */
+    protected void 서버설정을_고친다(InMemoryDirectoryServerConfig config) {
+    }
+
     @BeforeEach
     void LDAP서버를_띄운다() throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
@@ -47,6 +54,7 @@ public abstract class EmbeddedLdapSupport {
         if (maxSizeLimit() > 0) {
             config.setMaxSizeLimit(maxSizeLimit());
         }
+        서버설정을_고친다(config);
 
         server = new InMemoryDirectoryServer(config);
         server.importFromLDIF(true,

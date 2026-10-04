@@ -54,6 +54,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         List<UserEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
+                        .attributes(직원_속성(config))
                         .where("objectClass").is(config.getUserObjectClass()),
                 pageSize, userMapper(config, 지금));
 
@@ -61,6 +62,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 PagedLdapSearch.search(template,
                         LdapQueryBuilder.query()
                                 .base(config.getGroupSearchBase())
+                                .attributes(그룹_속성(config))
                                 .where("objectClass").is(config.getGroupObjectClass()),
                         pageSize, groupMapper(config)));
 
@@ -116,6 +118,24 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
         return new DirectorySnapshot(users, groups);
+    }
+
+    /**
+     * 직원 검색이 요청하는 속성. {@link #userMapper} 가 읽는 속성과 같아야 한다 — 요청하지 않은 속성은 오지 않는다.
+     * 설정 값에서 만들고 비었거나 겹친 이름은 뺀다.
+     */
+    static String[] 직원_속성(LdapProperties.GroupOfNames config) {
+        return PagedLdapSearch.속성목록(
+                config.getUserIdAttribute(), config.getUserNameAttribute(), config.getUserMailAttribute(), "cn",
+                AdAccountStatus.USER_ACCOUNT_CONTROL, AdAccountStatus.ACCOUNT_EXPIRES,
+                LdapPersonName.SN, LdapPersonName.GIVEN_NAME, LdapPersonName.MIDDLE_NAME,
+                LdapPersonName.GENERATION_QUALIFIER);
+    }
+
+    /** 그룹 검색이 요청하는 속성. {@link #groupMapper} 가 읽는 속성과 같아야 한다. */
+    static String[] 그룹_속성(LdapProperties.GroupOfNames config) {
+        return PagedLdapSearch.속성목록(
+                config.getGroupIdAttribute(), config.getGroupNameAttribute(), config.getMemberAttribute());
     }
 
     /**

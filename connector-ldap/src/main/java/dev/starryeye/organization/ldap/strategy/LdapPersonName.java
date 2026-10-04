@@ -18,17 +18,23 @@ import javax.naming.directory.Attributes;
  */
 final class LdapPersonName {
 
+    /** 읽는 속성 이름. 검색이 이 이름들을 요청해야 값이 온다(점검 P7). */
+    static final String SN = "sn";
+    static final String GIVEN_NAME = "givenName";
+    static final String MIDDLE_NAME = "middleName";
+    static final String GENERATION_QUALIFIER = "generationQualifier";
+
     private LdapPersonName() {
     }
 
     static PersonName from(Attributes attributes) {
         return new PersonName(
                 null,
-                first(attributes, "sn"),
-                first(attributes, "givenName"),
-                first(attributes, "middleName"),
+                first(attributes, SN),
+                first(attributes, GIVEN_NAME),
+                first(attributes, MIDDLE_NAME),
                 null,
-                first(attributes, "generationQualifier"));
+                first(attributes, GENERATION_QUALIFIER));
     }
 
     private static String first(Attributes attributes, String name) {
