@@ -110,7 +110,7 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
         assertThat(users.get("expired").active()).as("accountExpires 가 2020-01-01").isFalse();
         assertThat(users.get("locked").active()).as("pwdAccountLockedTime 000001010000Z — ppolicy 영구 잠금").isFalse();
         assertThat(users.get("normal").active()).as("userAccountControl 512").isTrue();
-        assertThat(users.get("plain").active()).as("두 속성이 없는 직원").isTrue();
+        assertThat(users.get("plain").active()).as("신호 속성이 없는 직원").isTrue();
     }
 
     @Test

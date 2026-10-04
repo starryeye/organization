@@ -69,8 +69,15 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
+        SkippedEntries 건너뛴_직원 = new SkippedEntries("직원", config.getUserIdAttribute());
         for (UserEntry entry : userEntries) {
-            if (DuplicateIdGuard.isDuplicate("직원 아이디", entry.id(), entry.dn(), userDnById)) {
+            if (entry.id() == null) {
+                건너뛴_직원.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                continue;
+            }
+            if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), userDnById)) {
+                건너뛴_직원.기록한다(SkippedEntries.사유.아이디_겹침,
+                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(entry.id(), entry.dn(), userDnById.get(entry.id())));
                 continue;
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
@@ -78,17 +85,28 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     entry.id(), entry.dn(), entry.userName(), entry.displayName(), entry.email(), entry.active(),
                     entry.name()));
         }
+        건너뛴_직원.요약을_남긴다();
+        건너뛴_직원.아무도_남지_않으면_멈춘다(userEntries.size(), users.size());
 
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
         Map<String, String> groupDnById = new LinkedHashMap<>();
         Map<String, RawEntry> survivingGroupEntries = new LinkedHashMap<>();
+        SkippedEntries 건너뛴_조직 = new SkippedEntries("조직", config.getGroupIdAttribute());
         for (RawEntry entry : groupEntries) {
-            if (DuplicateIdGuard.isDuplicate("조직코드", entry.id(), entry.dn(), groupDnById)) {
+            if (entry.id() == null) {
+                건너뛴_조직.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                continue;
+            }
+            if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), groupDnById)) {
+                건너뛴_조직.기록한다(SkippedEntries.사유.아이디_겹침,
+                        "%s(건너뛴 dn='%s', 유지된 dn='%s')".formatted(entry.id(), entry.dn(), groupDnById.get(entry.id())));
                 continue;
             }
             groupIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             survivingGroupEntries.put(entry.id(), entry);
         }
+        건너뛴_조직.요약을_남긴다();
+        건너뛴_조직.아무도_남지_않으면_멈춘다(groupEntries.size(), survivingGroupEntries.size());
 
         Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
         int 멤버값수 = 0;
@@ -146,7 +164,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
-            String 식별값 = LdapIdentifiers.필수(attributes, config.getUserIdAttribute(), dn);
+            String 식별값 = LdapIdentifiers.있으면(attributes, config.getUserIdAttribute(), dn);
+            if (식별값 == null) {
+                // 건너뛸 엔트리다 — 계정 상태 같은 나머지 속성은 읽지 않는다. 표준 밖의 값이 있어도 회차를 멈추지 않는다
+                return UserEntry.식별_속성_없음(dn);
+            }
             // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
             String userName = firstNonBlank(value(attributes, config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
@@ -175,7 +197,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
-            String code = IdNormalizer.normalize(LdapIdentifiers.필수(attributes, config.getGroupIdAttribute(), dn));
+            String 식별값 = LdapIdentifiers.있으면(attributes, config.getGroupIdAttribute(), dn);
+            if (식별값 == null) {
+                return RawEntry.식별_속성_없음(dn);
+            }
+            String code = IdNormalizer.normalize(식별값);
             RangedAttributeReader.Chunk 멤버 =
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
@@ -278,9 +304,9 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     }
 
     /**
-     * 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다.
+     * 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, 디렉터리가 막았는지를 싣는다.
      *
-     * @param id          정규화된 직원 id(기본은 entryUUID)
+     * @param id          정규화된 직원 id(기본은 entryUUID). 식별 속성이 없는 엔트리는 null 이다
      * @param dn          서버가 준 절대 DN. member 대조 키이자 externalId 다
      * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
      * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
@@ -290,14 +316,28 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      */
     private record UserEntry(String id, String dn, String userName, String displayName, String email,
                              boolean active, PersonName name) {
+
+        /** 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이라 나머지 칸은 자리만 채운다 */
+        static UserEntry 식별_속성_없음(String dn) {
+            return new UserEntry(null, dn, null, null, null, true, null);
+        }
     }
 
     /**
+     * @param id              정규화된 조직 id. 식별 속성이 없는 엔트리는 null 이다
      * @param dn              <b>서버가 준 절대 DN.</b> member 대조 키이자 externalId 이고,
      *                        범위 검색 재요청 때 엔트리를 다시 지목하는 좌표이기도 하다
      * @param membersComplete 멤버 목록이 잘리지 않고 다 왔는가
      */
     private record RawEntry(String id, String dn, String displayName, String email,
                             List<String> members, boolean membersComplete) {
+
+        /**
+         * 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이다 — 멤버는 비우고 완료로 둔다. 범위 검색으로 잘린 조직만 이어받으므로
+         * 이 엔트리는 이어받기 대상이 되지 않는다
+         */
+        static RawEntry 식별_속성_없음(String dn) {
+            return new RawEntry(null, dn, null, null, List.of(), true);
+        }
     }
 }

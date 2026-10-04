@@ -57,7 +57,7 @@ class LdapDirectorySnapshotSourceTest {
         }
     }
 
-    /** 항상 {@link DirectoryDataException} 을 던지는 전략 — 정수 아닌 값, 없는 필수 속성, 해석할 수 없는 DN. */
+    /** 항상 {@link DirectoryDataException} 을 던지는 전략 — 정수 아닌 값, 엔트리가 하나도 남지 않는 식별 속성, 해석할 수 없는 DN. */
     private static class 데이터가_어긋난_전략 implements LdapMappingStrategy {
 
         final AtomicInteger 호출수 = new AtomicInteger();

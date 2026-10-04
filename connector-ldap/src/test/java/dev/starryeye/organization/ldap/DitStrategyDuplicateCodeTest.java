@@ -110,7 +110,8 @@ class DitStrategyDuplicateCodeTest extends EmbeddedLdapSupport {
         // and — 경고 로그가 남는다
         List<ILoggingEvent> warnings = logAppender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .filter(event -> event.getFormattedMessage().contains("조직코드"))
+                .filter(event -> event.getFormattedMessage().contains("조직 검색"))
+                .filter(event -> event.getFormattedMessage().contains("아이디 겹침"))
                 .filter(event -> event.getFormattedMessage().contains("support"))
                 .toList();
         assertThat(warnings).isNotEmpty();

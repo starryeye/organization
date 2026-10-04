@@ -47,7 +47,7 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
      * 무엇이 잘못됐는지 말해야 하는 자리다.
      *
      * <p><b>{@link DirectoryDataException} 은 재시도하지 않는다.</b> 서버 장애나 네트워크 끊김 같은 일시적
-     * 문제가 아니라 디렉터리의 데이터나 설정이 어긋난 것이다 — 정수가 아닌 계정 상태 값, 없는 필수 속성,
+     * 문제가 아니라 디렉터리의 데이터나 설정이 어긋난 것이다 — 정수가 아닌 계정 상태 값, 엔트리가 하나도 남지 않는 식별 속성,
      * 해석할 수 없는 DN, 멤버가 하나도 대조되지 않는 설정({@link MemberMatchingFailedException}). 같은
      * 데이터를 다시 읽으면 같은 결과다. 그런데도 재시도에 맡기면 큰 디렉터리를 {@code maxRetries + 1} 번
      * 통째로 다시 읽고(대조 실패라면 매 회차 member 값마다 {@code log.warn} 을 수십만 줄 찍는다), 그 끝에 나온

@@ -27,7 +27,7 @@ class AccountStatusTest {
     private static final String 일초_후 = "134116992010000000";
 
     @Test
-    @DisplayName("두 속성이 모두 없으면 막히지 않은 것이다 — OpenLDAP 과 지금의 테스트 서버")
+    @DisplayName("속성이 모두 없으면 막히지 않은 것이다 — OpenLDAP 과 지금의 테스트 서버")
     void 속성이_없으면_막히지_않았다() {
         // given, when, then
         assertThat(AccountStatus.막혔는가(DN, 속성들(), 지금)).isFalse();
