@@ -39,10 +39,11 @@ class ActiveDirectoryPrimaryGroupTest {
     @ParameterizedTest
     @ValueSource(strings = {
             "01020000000000",                                     // 7바이트 — 헤더(8바이트)보다 짧다
+            "0100000000000005",                                   // 하위 권한이 0개 — RID 가 없다
             "0201000000000005" + "20000000",                      // 개정이 2
             "0103000000000005" + "20000000" + "20020000"          // 하위 권한 수는 3 인데 둘만 있다
     })
-    @DisplayName("SID 형식이 아니면 데이터 오류다 — 짧음, 개정이 1 이 아님, 하위 권한 수와 길이가 어긋남")
+    @DisplayName("SID 형식이 아니면 데이터 오류다 — 짧음, 하위 권한 0개, 개정이 1 이 아님, 하위 권한 수와 길이가 어긋남")
     void SID_형식이_아니면_데이터_오류다(String hex) {
         // given
         byte[] sid = HexFormat.of().parseHex(hex);

@@ -32,6 +32,9 @@ import java.util.Set;
  *
  * <p>member DN 이 사람인지 그룹인지는 미리 읽어둔 DN 집합으로 판별한다.
  * DN 마다 추가 조회를 하면 조직 규모에 비례해 왕복이 폭증한다.
+ *
+ * <p>소속의 길은 하나 더 있다 — AD 는 사용자의 기본 그룹 소속을 그 그룹의 {@code member} 에 적지 않으므로, 직원의 {@code primaryGroupID} 가 읽은
+ * 그룹의 {@code objectSid} RID 와 같으면 그 그룹의 직원 멤버로 더한다(점검 M10, 설계 2026-10-05 §3.2, {@link ActiveDirectoryPrimaryGroup}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -157,22 +160,23 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      * 직원 id 를 모은다. 읽지 않은 그룹(Domain Users 513 등)을 가리키는 RID 는 어느 그룹에도 맞지 않아 아무 소속도 더하지 않는다.
      */
     private static Map<String, List<String>> 기본그룹_멤버를_모은다(Iterable<RawEntry> 그룹들, Map<String, Long> 기본그룹RID_직원별) {
-        Map<Long, String> 그룹아이디_RID별 = new HashMap<>();
+        Map<Long, RawEntry> 그룹_RID별 = new HashMap<>();
         for (RawEntry entry : 그룹들) {
             if (entry.rid() == null) {
                 continue;
             }
-            String 먼저 = 그룹아이디_RID별.putIfAbsent(entry.rid(), entry.id());
+            RawEntry 먼저 = 그룹_RID별.putIfAbsent(entry.rid(), entry);
             if (먼저 != null) {
-                throw new DirectoryDataException("RID %d 를 가진 그룹이 둘입니다 — 한 도메인에서 RID 는 유일해야 합니다: '%s', '%s'(dn=%s)"
-                        .formatted(entry.rid(), 먼저, entry.id(), entry.dn()));
+                throw new DirectoryDataException(("속성 '%s' 의 RID %d 를 가진 그룹이 둘입니다 — 한 도메인에서 RID 는 유일해야 합니다. "
+                        + "그룹 검색 베이스가 여러 도메인을 걸치는지(글로벌 카탈로그 등) 확인하세요: '%s'(dn=%s), '%s'(dn=%s)")
+                        .formatted(ActiveDirectoryPrimaryGroup.OBJECT_SID, entry.rid(), 먼저.id(), 먼저.dn(), entry.id(), entry.dn()));
             }
         }
         Map<String, List<String>> 기본그룹_멤버 = new HashMap<>();
         기본그룹RID_직원별.forEach((userId, rid) -> {
-            String groupId = 그룹아이디_RID별.get(rid);
-            if (groupId != null) {
-                기본그룹_멤버.computeIfAbsent(groupId, k -> new ArrayList<>()).add(userId);
+            RawEntry 그룹 = 그룹_RID별.get(rid);
+            if (그룹 != null) {
+                기본그룹_멤버.computeIfAbsent(그룹.id(), k -> new ArrayList<>()).add(userId);
             }
         });
         return 기본그룹_멤버;

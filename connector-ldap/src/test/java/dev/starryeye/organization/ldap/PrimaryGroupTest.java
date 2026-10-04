@@ -119,12 +119,15 @@ class PrimaryGroupTest extends EmbeddedLdapSupport {
         var strategy = new GroupOfNamesStrategy(properties);
         var template = LdapConfig로_만든_템플릿(properties);
 
-        // when, then
+        // when, then — 속성 이름과 두 그룹의 id·DN 을 모두 댄다. 운영자가 어느 엔트리를 고칠지 알아야 한다
         assertThatThrownBy(() -> strategy.read(template))
                 .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("objectSid")
                 .hasMessageContaining("1105")
-                .hasMessageContaining("DEV")
-                .hasMessageContaining("OPS");
+                .hasMessageContaining("'DEV'")
+                .hasMessageContaining("'OPS'")
+                .hasMessageContaining("cn=DEV,ou=groups," + BASE_DN)
+                .hasMessageContaining("cn=OPS,ou=groups," + BASE_DN);
     }
 
     @Test

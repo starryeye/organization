@@ -85,7 +85,8 @@ public class LdapProperties {
         private String rootDn = "ou=company";
         /**
          * 조직 검색 필터(RFC 4515). AD 의 기본 컨테이너({@code CN=Users} — OU 가 아니다)도 조직으로 읽으려면
-         * {@code (|(objectClass=organizationalUnit)(objectClass=container))}
+         * {@code (|(objectClass=organizationalUnit)(&(objectClass=container)(cn=Users)))}. 맨 {@code (objectClass=container)} 를 더하면
+         * {@code root-dn} 이 도메인 루트일 때 {@code CN=System}·GPO 같은 시스템 컨테이너까지 조직이 된다
          */
         private String orgUnitFilter = "(objectClass=organizationalUnit)";
         /** 조직 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(ou)도 쓸 수 있지만 개명이 삭제+생성이다 */

@@ -9,19 +9,24 @@ import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchRequest;
 import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
 import com.unboundid.ldap.sdk.Control;
 import com.unboundid.ldap.sdk.LDAPException;
+import com.unboundid.ldap.sdk.ResultCode;
 import com.unboundid.ldap.sdk.SearchResultReference;
+import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
 import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 검색이 referral(검색 결과 참조, RFC 4511 §4.5.3)을 만났을 때(점검 S21, 설계 2026-10-05 §4.2).
@@ -105,6 +110,10 @@ class ReferralTest extends EmbeddedLdapSupport {
                 member: uid=u4,ou=people,dc=example,dc=com
                 member: uid=u5,ou=people,dc=example,dc=com
 
+                dn: ou=elsewhere,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: elsewhere
+
                 dn: ou=company,dc=example,dc=com
                 objectClass: organizationalUnit
                 ou: company
@@ -144,6 +153,11 @@ class ReferralTest extends EmbeddedLdapSupport {
         config.addInMemoryOperationInterceptor(new InMemoryOperationInterceptor() {
             @Override
             public void processSearchRequest(InMemoryInterceptedSearchRequest request) throws LDAPException {
+                if (request.getRequest().getBaseDN().startsWith("ou=outside")) {
+                    // 검색 베이스 자체가 참조다 — 실제 서버는 엔트리 없이 결과 코드 10(referral)으로 답한다(RFC 4511 §4.1.10)
+                    throw new LDAPException(ResultCode.REFERRAL, "검색 베이스가 이 서버의 이름 공간 밖이다", null,
+                            new String[]{"ldap://other-dc.example.com/ou=outside,dc=example,dc=com"});
+                }
                 if (request.getRequest().getFilter().toString().contains("inetOrgPerson")) {
                     직원검색수.incrementAndGet();
                     request.sendSearchReference(new SearchResultReference(
@@ -216,5 +230,52 @@ class ReferralTest extends EmbeddedLdapSupport {
         assertThat(snapshot.users()).containsOnlyKeys("d1", "d2", "d3");
         assertThat(직원검색수).hasValue(2);
         assertThat(참조_경고()).hasSize(1).first().asString().contains("ou=company");
+    }
+
+    @Test
+    @DisplayName("검색이 referral 만 받고 엔트리를 하나도 못 받으면 데이터 오류로 실패한다 — 빈 결과로 읽으면 전원이 빠진 회차가 된다")
+    void 참조만_받고_엔트리가_없으면_실패한다() {
+        // given — 직원 검색 베이스 아래에는 직원이 없고 참조만 온다
+        var properties = 이름기반();
+        properties.getGroupOfNames().setUserSearchBase("ou=elsewhere");
+
+        // when, then
+        assertThatThrownBy(() -> new GroupOfNamesStrategy(properties).read(ldapTemplate))
+                .isExactlyInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("ou=elsewhere")
+                .hasMessageContaining("(objectClass=inetOrgPerson)")
+                .hasMessageContaining("referral")
+                .hasMessageContaining("Unprocessed Continuation Reference");
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    @DisplayName("검색 베이스 자체가 referral(결과 코드 10)이면 페이징 검색도 한 번 묻고 데이터 오류로 실패한다 — 이 DC 의 이름 공간 밖이다")
+    void 베이스가_참조면_페이징_검색도_실패한다() {
+        // given — 페이징(기본 500). 응답에 페이징 컨트롤이 없다
+        var properties = 이름기반();
+        properties.getGroupOfNames().setUserSearchBase("ou=outside");
+
+        // when, then
+        assertThatThrownBy(() -> new GroupOfNamesStrategy(properties).read(ldapTemplate))
+                .isExactlyInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("ou=outside")
+                .hasMessageContaining("referral");
+        assertThat(참조_경고()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("검색 베이스 자체가 referral 이면 페이징 없는 검색도 데이터 오류로 실패한다")
+    void 베이스가_참조면_페이징_없는_검색도_실패한다() {
+        // given
+        var properties = 이름기반();
+        properties.setPageSize(0);
+        properties.getGroupOfNames().setUserSearchBase("ou=outside");
+
+        // when, then
+        assertThatThrownBy(() -> new GroupOfNamesStrategy(properties).read(ldapTemplate))
+                .isExactlyInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("ou=outside")
+                .hasMessageContaining("referral");
     }
 }

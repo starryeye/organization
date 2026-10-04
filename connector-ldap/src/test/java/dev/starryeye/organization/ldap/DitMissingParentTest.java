@@ -61,6 +61,11 @@ class DitMissingParentTest extends EmbeddedLdapSupport {
                 uid: lee
                 cn: lee
                 sn: lee
+
+                dn: cn=System,dc=example,dc=com
+                objectClass: container
+                cn: System
+                ou: System
                 """;
     }
 
@@ -126,18 +131,18 @@ class DitMissingParentTest extends EmbeddedLdapSupport {
     }
 
     @Test
-    @DisplayName("OU 필터에 컨테이너를 더하면 CN=Users 도 조직이 되어 그 아래 직원이 소속을 찾는다(점검 S22 의 설정 쪽 답)")
+    @DisplayName("OU 필터에 CN=Users 컨테이너를 더하면 그것도 조직이 되어 그 아래 직원이 소속을 찾고, 시스템 컨테이너(CN=System)는 조직이 되지 않는다(점검 S22 의 설정 쪽 답)")
     void 필터에_컨테이너를_더하면_소속을_찾는다() {
-        // given
+        // given — README 의 권장값. 맨 container 를 더하면 도메인 루트 아래 CN=System 같은 시스템 컨테이너도 조직이 된다
         var properties = 이름기반();
         properties.getDit().setRootDn("");
-        properties.getDit().setOrgUnitFilter("(|(objectClass=organizationalUnit)(objectClass=container))");
+        properties.getDit().setOrgUnitFilter("(|(objectClass=organizationalUnit)(&(objectClass=container)(cn=Users)))");
 
         // when
         var snapshot = new DitStrategy(properties).read(ldapTemplate);
 
         // then
-        assertThat(snapshot.groups()).containsKeys("DEV001", "Users");
+        assertThat(snapshot.groups()).containsKeys("DEV001", "Users").doesNotContainKey("System");
         assertThat(snapshot.groups().get("Users").members()).containsExactly(MemberRef.user("lee"));
         assertThat(snapshot.groups().get("DEV001").members()).containsExactly(MemberRef.user("kim"));
         assertThat(logAppender.list).as("소속을 모두 찾았으니 건너뛴 것이 없고 경고도 없다")

@@ -42,15 +42,15 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
      *
      * <p><b>재시도를 다 쓰면 마지막 실패를 그대로 던진다.</b> 기본값은 {@code
      * RetryExhaustedException} 인데, 그 메시지가 {@code "Retries exhausted: 3/3"} 이라
-     * 동기화 이력에 그 문장만 남는다. 실제로 벌어진 일이 <b>디렉터리가 잘린 목록을 줬다</b>
-     * ({@code SizeLimitExceededException}) 여도 이력만 보는 운영자는 알 수 없다 — 이력은
+     * 동기화 이력에 그 문장만 남는다. 실제로 벌어진 일이 <b>디렉터리가 응답하지 않았다</b>
+     * (응답 시간 초과·연결 끊김) 여도 이력만 보는 운영자는 알 수 없다 — 이력은
      * 무엇이 잘못됐는지 말해야 하는 자리다.
      *
      * <p><b>{@link DirectoryDataException} 은 재시도하지 않는다.</b> 서버 장애나 네트워크 끊김 같은 일시적
      * 문제가 아니라 디렉터리의 데이터나 설정이 어긋난 것이다 — 정수가 아닌 계정 상태 값, 엔트리가 하나도 남지 않는 식별 속성,
      * 해석할 수 없는 DN, 멤버가 하나도 대조되지 않는 설정({@link MemberMatchingFailedException}). 같은
      * 데이터를 다시 읽으면 같은 결과다. 그런데도 재시도에 맡기면 큰 디렉터리를 {@code maxRetries + 1} 번
-     * 통째로 다시 읽고(대조 실패라면 매 회차 member 값마다 {@code log.warn} 을 수십만 줄 찍는다), 그 끝에 나온
+     * 통째로 다시 읽고(건너뛴 엔트리 요약 경고도 시도마다 한 줄씩 다시 남는다), 그 끝에 나온
      * 실패를 "일시적 장애" 로 보이게 한다 — 이력을 보는 운영자가 데이터나 설정을 고쳐야 할 문제를 재시도가 알아서
      * 해결해 줄 문제로 오인하게 만든다. 인증·권한·이름·크기 한도·필터 오류도 같다 — {@link #다시_읽어도_같은가}.
      */
