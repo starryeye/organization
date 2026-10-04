@@ -61,6 +61,29 @@ public class AdminQueryUseCase {
         return search.searchGroupsByDisplayName(prefix, cursor, limit);
     }
 
+    /**
+     * {@code externalId} 로 직원을 정확히 찾는다(설계 2026-10-04 §5) — 권한을 묻는 앱이 IdP 의 사용자 id 로 우리 id 를 얻는 길이다.
+     * GSI3 는 최종 일관성이라 후보일 뿐이다. 후보를 본 테이블에서 다시 읽어 {@code externalId} 가 아직 같은 것만 남긴다. 한 페이지다.
+     */
+    public Mono<Page<UserSummary>> findEmployeesByExternalId(String externalId) {
+        return state.findUserIdsByExternalId(externalId)
+                .concatMap(state::findUser)
+                .filter(user -> externalId.equals(user.externalId()))
+                .map(user -> new UserSummary(user.id(), user.userName(), user.displayName(), user.active()))
+                .collectList()
+                .map(items -> new Page<>(items, null));
+    }
+
+    /** 같은 것을 조직으로. */
+    public Mono<Page<GroupSummary>> findOrganizationsByExternalId(String externalId) {
+        return state.findGroupIdsByExternalId(externalId)
+                .concatMap(state::findGroupHeader)
+                .filter(header -> externalId.equals(header.externalId()))
+                .map(header -> new GroupSummary(header.id(), header.displayName()))
+                .collectList()
+                .map(items -> new Page<>(items, null));
+    }
+
     // ---------- 직원 상세 ----------
 
     public Mono<EmployeeDetail> employeeDetail(String employeeId) {

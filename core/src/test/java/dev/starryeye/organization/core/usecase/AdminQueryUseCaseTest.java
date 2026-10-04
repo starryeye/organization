@@ -8,9 +8,12 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.query.AccessPath;
+import dev.starryeye.organization.core.query.GroupSummary;
+import dev.starryeye.organization.core.query.UserSummary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 
 import java.time.Duration;
 import java.util.List;
@@ -559,5 +562,109 @@ class AdminQueryUseCaseTest {
         // then
         assertThat(byName.items()).extracting("employeeId").containsExactly("gd.hong");
         assertThat(byAccount.items()).extracting("employeeId").containsExactly("gd.hong");
+    }
+
+    @Test
+    @DisplayName("externalId 로 직원을 정확히 찾는다 — IdP 의 사용자 id 로 우리 id 를 얻는 길")
+    void externalId_로_직원을_찾는다() {
+        // given
+        state.users.put("u-1", new DirectoryUser("u-1", "okta-00u1", "kim", "김", null, true));
+        state.users.put("u-2", new DirectoryUser("u-2", "okta-00u2", "lee", "이", null, true));
+
+        // when
+        var page = useCase.findEmployeesByExternalId("okta-00u1").block();
+
+        // then
+        assertThat(page.items()).extracting(UserSummary::employeeId).containsExactly("u-1");
+        assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("externalId 로 조직을 정확히 찾는다")
+    void externalId_로_조직을_찾는다() {
+        // given
+        state.groups.put("g-1", new DirectoryGroup("g-1", "okta-00g1", "개발", Set.of()));
+        state.groups.put("g-2", new DirectoryGroup("g-2", "okta-00g2", "영업", Set.of()));
+
+        // when
+        var page = useCase.findOrganizationsByExternalId("okta-00g1").block();
+
+        // then
+        assertThat(page.items()).extracting(GroupSummary::orgCode).containsExactly("g-1");
+        assertThat(page.items()).extracting(GroupSummary::displayName).containsExactly("개발");
+        assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("externalId 가 같은 직원이 없으면 빈 한 페이지를 준다")
+    void externalId_가_없으면_빈_페이지다() {
+        // given
+        state.users.put("u-1", new DirectoryUser("u-1", "okta-00u1", "kim", "김", null, true));
+        state.groups.put("g-1", new DirectoryGroup("g-1", "okta-00g1", "개발", Set.of()));
+
+        // when
+        var employees = useCase.findEmployeesByExternalId("okta-없음").block();
+        var organizations = useCase.findOrganizationsByExternalId("okta-없음").block();
+
+        // then
+        assertThat(employees.items()).isEmpty();
+        assertThat(employees.nextCursor()).isNull();
+        assertThat(organizations.items()).isEmpty();
+        assertThat(organizations.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("externalId 는 대소문자를 가린다 — 다른 대소문자의 직원은 찾지 않는다")
+    void externalId_는_대소문자를_가린다() {
+        // given
+        state.users.put("u-1", new DirectoryUser("u-1", "Okta-00U1", "kim", "김", null, true));
+
+        // when
+        var page = useCase.findEmployeesByExternalId("okta-00u1").block();
+
+        // then
+        assertThat(page.items()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("GSI3 가 돌려준 옛 후보(지워졌거나 externalId 를 바꾼 직원)는 본 테이블로 다시 확인해 걸러낸다")
+    void 직원_조회는_GSI3_옛_후보를_걸러낸다() {
+        // given — GSI3 가 "okta-00u1" 로 u-1(맞음), u-2(그 뒤 externalId 를 바꿈), ghost(그 뒤 지워짐)를 돌려준다
+        var stale = new FakeStateRepository() {
+            @Override
+            public Flux<String> findUserIdsByExternalId(String externalId) {
+                return Flux.just("u-1", "u-2", "ghost");
+            }
+        };
+        stale.users.put("u-1", new DirectoryUser("u-1", "okta-00u1", "kim", "김", null, true));
+        stale.users.put("u-2", new DirectoryUser("u-2", "okta-바뀜", "lee", "이", null, true));
+        var useCase = new AdminQueryUseCase(stale, new FakeSearchRepository(stale), checker);
+
+        // when
+        var page = useCase.findEmployeesByExternalId("okta-00u1").block();
+
+        // then
+        assertThat(page.items()).extracting(UserSummary::employeeId).containsExactly("u-1");
+    }
+
+    @Test
+    @DisplayName("GSI3 가 돌려준 옛 후보(지워졌거나 externalId 를 바꾼 조직)는 본 테이블로 다시 확인해 걸러낸다")
+    void 조직_조회는_GSI3_옛_후보를_걸러낸다() {
+        // given — GSI3 가 "okta-00g1" 로 g-1(맞음), g-2(그 뒤 externalId 를 바꿈), ghost(그 뒤 지워짐)를 돌려준다
+        var stale = new FakeStateRepository() {
+            @Override
+            public Flux<String> findGroupIdsByExternalId(String externalId) {
+                return Flux.just("g-1", "g-2", "ghost");
+            }
+        };
+        stale.groups.put("g-1", new DirectoryGroup("g-1", "okta-00g1", "개발", Set.of()));
+        stale.groups.put("g-2", new DirectoryGroup("g-2", "okta-바뀜", "영업", Set.of()));
+        var useCase = new AdminQueryUseCase(stale, new FakeSearchRepository(stale), checker);
+
+        // when
+        var page = useCase.findOrganizationsByExternalId("okta-00g1").block();
+
+        // then
+        assertThat(page.items()).extracting(GroupSummary::orgCode).containsExactly("g-1");
     }
 }

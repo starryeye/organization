@@ -34,7 +34,7 @@ import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
  * 튜플을 직접 지워 상태를 어긋나게 만들고, 세 번째가 그 위에 상위 조직을 더 쌓는다.
  *
  * <p>아이디는 서버가 정한다(설계 2026-10-04 §3.1). 관리자 조회의 경로·튜플은 첫 테스트가 응답에서 받아 둔 id({@link #홍길동}, {@link #백엔드팀})로
- * 한다 — 조직 코드(externalId)로 찾는 길은 아직 없다.
+ * 한다. 앱이 IdP 의 사용자 id(externalId)로 우리 id 를 얻는 길은 {@link #externalId_로_직원을_찾는다()} 가 확인한다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -139,5 +139,26 @@ class AdminQueryEndToEndTest {
     void 파라미터가_없으면_400이다() {
         // when, then
         client.get().uri("/admin/employees").exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("IdP 의 사용자 id(externalId)로 SCIM 이 발급한 id 를 정확히 찾는다")
+    void externalId_로_직원을_찾는다() {
+        // given — IdP 가 externalId 를 실어 직원을 만든다
+        String 이순신 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "externalId":"00u1abcdEXT","userName":"ss.lee","displayName":"이순신","active":true}""")
+                .exchange());
+
+        // when, then — 같은 externalId 로 정확히 한 줄이 나오고 그 employeeId 가 발급된 id 다
+        client.get().uri("/admin/employees?externalId=00u1abcdEXT")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items.length()").isEqualTo(1)
+                .jsonPath("$.items[0].employeeId").isEqualTo(이순신)
+                .jsonPath("$.items[0].userName").isEqualTo("ss.lee")
+                .jsonPath("$.nextCursor").doesNotExist();
     }
 }
