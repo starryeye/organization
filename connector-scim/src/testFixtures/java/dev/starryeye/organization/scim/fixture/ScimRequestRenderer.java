@@ -21,10 +21,9 @@ import java.util.List;
  * 같은 조직도를 SCIM 요청 시퀀스로 옮긴다. LDIF 렌더러와 짝이다 — 두 커넥터가 같은 조직도로
  * 같은 결과에 도달해야 한다.
  *
- * <p><b>조직코드는 {@code externalId} 로 간다.</b> {@code ScimMapper} 가 조직코드를
- * {@code externalId → id} 순으로 채택하기 때문이다(설계 §4.3). 직원 쪽은 반대로
- * {@code userName} 이 아이디의 원천이다. 이 두 규칙이 어긋나면 요청은 2xx 로 성공하는데
- * 튜플만 안 생긴다 — 가장 알아채기 어려운 실패라서 여기 한 곳에 모아 둔다.
+ * <p><b>서버가 id 를 발급하므로</b> 요청은 조직도 아이디로 만들고, 보낼 때 {@link ScimIdBook} 이 POST 응답의
+ * id 로 번역한다. 조직도 아이디는 조직의 {@code externalId}, 직원의 {@code userName} 으로 간다 — 생성 요청이
+ * 그 리소스의 조직도 아이디를 {@link ScimRequest#차트아이디()} 로 들고 있어야 응답의 id 를 묶을 수 있다.
  *
  * <p>멤버에는 {@code type} 을 항상 명시한다. 생략하면 서버가 현재상태로 <b>추정</b>하고,
  * 그 추정이 맞았는지 아닌지가 테스트 결과에 섞여 들어온다. 추정 경로 자체를 시험하는
@@ -42,9 +41,8 @@ public final class ScimRequestRenderer {
      * 최초 싱크. 직원을 먼저, 그다음 조직을 <b>깊은 곳부터</b> 만든다.
      *
      * <p>깊은 곳부터인 이유: 조직은 하위 조직을 멤버로 참조하므로, 얕은 곳부터 만들면 아직
-     * 없는 조직을 가리키는 멤버가 생긴다. 서버는 그것을 받아주지만(SCIM 은 늦게 도착하는
-     * 리소스를 허용한다) 그 상태는 이 시나리오가 재려는 것이 아니다 — 참조 순서가 어긋난
-     * 경우를 보고 싶으면 그것만 따로 시험하는 편이 낫다.
+     * 없는 조직을 가리키는 멤버가 생긴다. 서버가 id 를 발급하므로 {@link ScimIdBook} 은 아직 만들지
+     * 않은 조직의 서버 id 를 모른다 — 하위 조직이 먼저 만들어져 있어야 부모 본문의 멤버 값이 서버 id 가 된다.
      *
      * <p><b>아이디로 한 번 더 정렬한다.</b> {@code DirectorySnapshot} 은 {@code Map.copyOf} 로
      * 굳으므로 순회 순서가 JVM 실행마다 달라진다. 5천 건짜리 재생 시퀀스가 실행마다 순서를
@@ -66,7 +64,7 @@ public final class ScimRequestRenderer {
     // ---------- 직원 ----------
 
     public static ScimRequest 직원생성(DirectoryUser user) {
-        return ScimRequest.post(USERS, scimUser(user), "직원 생성 " + user.id());
+        return ScimRequest.post(USERS, scimUser(user), "직원 생성 " + user.id(), user.id());
     }
 
     /** PUT 은 전체 교체다. 보내지 않은 필드는 지워진다 — PATCH 와 갈라 보는 시나리오가 여기 붙는다. */
@@ -99,7 +97,7 @@ public final class ScimRequestRenderer {
     // ---------- 조직 ----------
 
     public static ScimRequest 조직생성(DirectoryGroup group) {
-        return ScimRequest.post(GROUPS, scimGroup(group), "조직 생성 " + group.id());
+        return ScimRequest.post(GROUPS, scimGroup(group), "조직 생성 " + group.id(), group.id());
     }
 
     public static ScimRequest 조직교체(DirectoryGroup group) {
@@ -110,6 +108,18 @@ public final class ScimRequestRenderer {
         return ScimRequest.patch(GROUPS + "/" + orgCode,
                 patch(new ScimOperation("add", "members", List.of(scimMember(member)))),
                 "멤버 추가 " + orgCode + " ← " + member.id());
+    }
+
+    /**
+     * 한 번에 여럿을 더한다. Entra 가 조직 멤버를 더하는 모양이다 — 서버가 id 를 발급하므로 조직을 멤버 없이
+     * 먼저 만들고 직원을 만든 다음 이 PATCH 로 멤버를 채운다.
+     */
+    public static ScimRequest 멤버들추가(String orgCode, List<MemberRef> members) {
+        return ScimRequest.patch(GROUPS + "/" + orgCode,
+                patch(new ScimOperation("add", "members", members.stream()
+                        .map(ScimRequestRenderer::scimMember)
+                        .toList())),
+                "멤버 " + members.size() + "명 추가 " + orgCode);
     }
 
     /**
@@ -152,8 +162,8 @@ public final class ScimRequestRenderer {
     // ---------- 본문 조립 ----------
 
     private static ScimUser scimUser(DirectoryUser user) {
-        // userName 이 곧 아이디의 원천이다(ScimMapper). id 를 따로 실어 보내지 않는 것은
-        // 서버가 발급하는 값을 클라이언트가 정하는 모양이 되지 않게 하기 위해서다.
+        // 조직도 아이디는 userName 으로 간다. id 를 따로 실어 보내지 않는 것은 서버가 발급하는
+        // 값을 클라이언트가 정하는 모양이 되지 않게 하기 위해서다(본문의 id 는 서버가 무시한다).
         return new ScimUser(
                 List.of(ScimSchemas.USER),
                 null,

@@ -10,22 +10,28 @@ package dev.starryeye.organization.scim.fixture;
  *               의존하지 않게 하려는 것이다 — 하네스가 자기 클라이언트 타입으로 변환한다
  * @param 설명 실패했을 때 어느 요청이 깨졌는지 알아보기 위한 것. 5천 건 중 하나를 찾는 데
  *           인덱스 번호만으로는 부족하다
+ * @param 차트아이디 생성(POST) 요청이 만드는 리소스의 조직도 아이디. 서버가 id 를 발급하므로 하네스는 응답의
+ *                id 를 이 값에 묶어 두었다가({@link ScimIdBook}) 뒤 요청의 경로·멤버 값을 바꾼다. 그 밖의 요청은 null
  */
-public record ScimRequest(String method, String path, Object body, String 설명) {
+public record ScimRequest(String method, String path, Object body, String 설명, String 차트아이디) {
 
     public static ScimRequest post(String path, Object body, String 설명) {
-        return new ScimRequest("POST", path, body, 설명);
+        return new ScimRequest("POST", path, body, 설명, null);
+    }
+
+    public static ScimRequest post(String path, Object body, String 설명, String 차트아이디) {
+        return new ScimRequest("POST", path, body, 설명, 차트아이디);
     }
 
     public static ScimRequest put(String path, Object body, String 설명) {
-        return new ScimRequest("PUT", path, body, 설명);
+        return new ScimRequest("PUT", path, body, 설명, null);
     }
 
     public static ScimRequest patch(String path, Object body, String 설명) {
-        return new ScimRequest("PATCH", path, body, 설명);
+        return new ScimRequest("PATCH", path, body, 설명, null);
     }
 
     public static ScimRequest delete(String path, String 설명) {
-        return new ScimRequest("DELETE", path, null, 설명);
+        return new ScimRequest("DELETE", path, null, 설명, null);
     }
 }

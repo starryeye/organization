@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -7,6 +8,7 @@ import dev.starryeye.organization.core.fixture.SyncVerifier;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
 import org.junit.jupiter.api.DisplayName;
@@ -59,6 +61,9 @@ class ScimScaleSyncCostTest {
     @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
 
+    /** 서버가 발급한 id 와 조직도 아이디의 대응 — 조직 본문의 멤버 값을 서버 id 로 바꾸고, 기대 조직도도 같은 id 로 맞춘다. */
+    private final ScimIdBook 번역부 = new ScimIdBook();
+
     @Test
     @DisplayName("조직도 전체 최초 싱크가 실제로 끝나고, 하네스 검증까지 통과한다")
     void 최초싱크_실비를_잰다() {
@@ -72,7 +77,7 @@ class ScimScaleSyncCostTest {
         long 싱크 = System.currentTimeMillis() - t0;
 
         long t1 = System.currentTimeMillis();
-        var 검증 = new SyncVerifier(state, checker).검증한다(chart).block(Duration.ofMinutes(10));
+        var 검증 = new SyncVerifier(state, checker).검증한다(번역부.번역한다(chart)).block(Duration.ofMinutes(10));
         long 검증시간 = System.currentTimeMillis() - t1;
 
         System.out.printf("%n=== SCIM 최초 싱크 실비 ===%n"
@@ -95,12 +100,18 @@ class ScimScaleSyncCostTest {
         // 기본 5초로는 부족하다 — 5,000명 조직도에 쓰는 요청은 부하가 걸린 머신에서 5초를 넘기고,
         // 그러면 기준 상태 적재가 끊겨 뒤의 시나리오가 전부 실패한다. 다른 스케일 테스트와 같은 2분이다
         WebTestClient 느긋한 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build();
-        for (ScimRequest request : requests) {
-            var spec = 느긋한.post().uri(request.path())
+        for (ScimRequest 원래요청 : requests) {
+            ScimRequest request = 번역부.번역한다(원래요청);
+            var 결과 = 느긋한.post().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(request.body());
-            int status = spec.exchange().returnResult(Void.class)
-                    .getStatus().value();
+                    .bodyValue(request.body())
+                    .exchange()
+                    .expectBody(JsonNode.class)
+                    .returnResult();
+            int status = 결과.getStatus().value();
+            if (status == 201 && request.차트아이디() != null) {
+                번역부.기록한다(request.차트아이디(), 결과.getResponseBody().get("id").asText());
+            }
             if (status != 201) {
                 실패++;
                 if (실패 <= 5) {

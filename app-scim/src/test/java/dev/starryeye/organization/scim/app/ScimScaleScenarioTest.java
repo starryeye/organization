@@ -13,6 +13,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
 import org.junit.jupiter.api.DisplayName;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -57,6 +59,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ScimScaleScenarioTest {
 
     private static OrgChart 기대 = OrgChartFixture.오천명();
+
+    /** 서버가 발급한 id 와 조직도 아이디의 대응. 요청은 보낼 때, 기대값·Check 는 볼 때 번역한다. */
+    private static final ScimIdBook 번역부 = new ScimIdBook();
 
     @Container
     static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
@@ -102,20 +107,20 @@ class ScimScaleScenarioTest {
         String 겸직 = 기대.landmarks().겸직직원();
 
         // when
-        JsonNode detail = 조회한다("/admin/employees/" + 겸직);
+        JsonNode detail = 조회한다("/admin/employees/" + 번역부.서버(겸직));
 
-        // then — 경로가 두 갈래, 각 경로의 Check 가 전부 true
+        // then — 경로가 두 갈래, 각 경로의 Check 가 전부 true. admin 이 돌려주는 조직은 서버 id 다
         Set<String> 경로조직 = new LinkedHashSet<>();
         detail.get("paths").forEach(path -> {
             경로조직.add(path.get("orgCode").asText());
             assertThat(path.hasNonNull("openFgaCheck")).isTrue();
             assertThat(path.get("openFgaCheck").asBoolean()).isTrue();
         });
-        assertThat(경로조직).isEqualTo(기대.기대소속(겸직));
+        assertThat(경로조직).isEqualTo(서버아이디들(기대.기대소속(겸직)));
 
         // 대형 조직 멤버를 커서로 끝까지 — 한 명도 빠지거나 겹치면 안 된다
         String 대형조직 = 기대.landmarks().대형조직();
-        assertThat(멤버를_끝까지_읽는다(대형조직)).isEqualTo(직속직원들(대형조직));
+        assertThat(멤버를_끝까지_읽는다(대형조직)).isEqualTo(서버아이디들(직속직원들(대형조직)));
     }
 
     @Test
@@ -250,7 +255,7 @@ class ScimScaleScenarioTest {
 
         // then — 튜플 식별자는 아이디와 조직코드뿐이다
         검증한다();
-        assertThat(조회한다("/admin/employees/" + 직원).get("displayName").asText())
+        assertThat(조회한다("/admin/employees/" + 번역부.서버(직원)).get("displayName").asText())
                 .isEqualTo("개명한 이름");
     }
 
@@ -290,7 +295,7 @@ class ScimScaleScenarioTest {
         // then
         검증한다();
         소속들.forEach(org -> assertThat(성립하는가(RelationTuple.member(겸직, org))).isFalse());
-        client.get().uri("/admin/employees/" + 겸직).exchange().expectStatus().isNotFound();
+        client.get().uri("/admin/employees/" + 번역부.서버(겸직)).exchange().expectStatus().isNotFound();
     }
 
     // ---------- S10~S16: 조직 변경 ----------
@@ -313,7 +318,7 @@ class ScimScaleScenarioTest {
         // then — "멤버지만 권한 없음". 이 상태가 음성 후보 집합의 존재 이유다
         검증한다();
         assertThat(성립하는가(RelationTuple.member(비활성, 팀))).isFalse();
-        assertThat(멤버를_끝까지_읽는다(팀)).contains(비활성);
+        assertThat(멤버를_끝까지_읽는다(팀)).contains(번역부.서버(비활성));
     }
 
     @Test
@@ -393,9 +398,9 @@ class ScimScaleScenarioTest {
         검증한다();
         소속직원.forEach(id -> {
             assertThat(성립하는가(RelationTuple.member(id, 팀))).isFalse();
-            client.get().uri("/admin/employees/" + id).exchange().expectStatus().isOk();
+            client.get().uri("/admin/employees/" + 번역부.서버(id)).exchange().expectStatus().isOk();
         });
-        client.get().uri("/admin/organizations/" + 팀).exchange().expectStatus().isNotFound();
+        client.get().uri("/admin/organizations/" + 번역부.서버(팀)).exchange().expectStatus().isNotFound();
     }
 
     @Test
@@ -515,16 +520,22 @@ class ScimScaleScenarioTest {
 
     /** 상태코드만 받는다 — 경합에서는 실패도 정상 응답이라 단정하지 않는다. */
     private int 상태코드를_받는다(ScimRequest request) {
+        ScimRequest 번역 = 번역부.번역한다(request);
         return client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
-                .patch().uri(request.path())
+                .patch().uri(번역.path())
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(request.body())
+                .bodyValue(번역.body())
                 .exchange()
                 .returnResult(Void.class)
                 .getStatus().value();
     }
 
-    private void 보낸다(ScimRequest request, int 기대상태) {
+    /**
+     * 조직도 아이디로 만든 요청을 서버 id 로 번역해 보낸다. 생성(POST)이 201 이면 응답의 id 를 그 조직도 아이디에 묶어
+     * 둔다 — 뒤 요청의 경로·멤버 값과 기대값·Check 가 이것으로 서버 id 가 된다.
+     */
+    private void 보낸다(ScimRequest 원래요청, int 기대상태) {
+        ScimRequest request = 번역부.번역한다(원래요청);
         // 기본 5초로는 부족하다 — 5,000명 조직도에 쓰는 요청은 부하가 걸린 머신에서 5초를 넘기고,
         // 그러면 기준 상태 적재가 끊겨 뒤의 시나리오가 전부 실패한다. 다른 스케일 테스트와 같은 2분이다
         WebTestClient 느긋한 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build();
@@ -538,7 +549,11 @@ class ScimScaleScenarioTest {
             case "DELETE" -> 느긋한.delete().uri(request.path());
             default -> throw new IllegalArgumentException("알 수 없는 메서드: " + request.method());
         };
-        spec.exchange().expectStatus().isEqualTo(기대상태);
+        var 응답 = spec.exchange().expectStatus().isEqualTo(기대상태);
+        if (기대상태 == 201 && request.차트아이디() != null) {
+            JsonNode 본문 = 응답.expectBody(JsonNode.class).returnResult().getResponseBody();
+            번역부.기록한다(request.차트아이디(), 본문.get("id").asText());
+        }
     }
 
     /**
@@ -546,11 +561,16 @@ class ScimScaleScenarioTest {
      * 같이 속으므로, 같은 사실을 서로 다른 경로로 물어야 갈림을 볼 수 있다.
      */
     private void 검증한다() {
-        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 번역부.번역한다(기대));
     }
 
     private boolean 성립하는가(RelationTuple tuple) {
-        return ScaleVerification.성립하는가(checker, tuple);
+        return ScaleVerification.성립하는가(checker, 번역부.번역한다(tuple));
+    }
+
+    /** 조직도 아이디들의 서버 id. admin 이 돌려주는 값과 맞대어 볼 때 쓴다. */
+    private Set<String> 서버아이디들(Set<String> 차트아이디들) {
+        return 차트아이디들.stream().map(번역부::서버).collect(Collectors.toSet());
     }
 
     private Set<String> 직속직원들(String orgCode) {
@@ -561,14 +581,16 @@ class ScimScaleScenarioTest {
         return ids;
     }
 
+    /** 조직도 아이디의 조직 멤버를 끝까지 읽어, admin 이 돌려주는 대로 <b>서버 id</b> 로 모은다. */
     private Set<String> 멤버를_끝까지_읽는다(String orgCode) {
+        String 서버조직 = 번역부.서버(orgCode);
         Set<String> 멤버 = new LinkedHashSet<>();
         String cursor = null;
         int 페이지수 = 0;
         do {
             JsonNode page = cursor == null
-                    ? 조회한다("/admin/organizations/" + orgCode + "/members?limit=100")
-                    : 조회한다("/admin/organizations/" + orgCode + "/members?limit=100&cursor={c}",
+                    ? 조회한다("/admin/organizations/" + 서버조직 + "/members?limit=100")
+                    : 조회한다("/admin/organizations/" + 서버조직 + "/members?limit=100&cursor={c}",
                             cursor);
             page.get("items").forEach(item -> 멤버.add(item.get("employeeId").asText()));
             cursor = page.hasNonNull("nextCursor") ? page.get("nextCursor").asText() : null;

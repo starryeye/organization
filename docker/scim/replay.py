@@ -8,6 +8,9 @@ LDAP 은 원천 디렉터리를 띄우면 앱이 알아서 읽어 가지만, SCI
 **순차로 보낸다.** IdP 의 실제 프로비저닝이 그렇고, 동시에 쏘면 재려던 것 대신 동시성
 처리를 재게 된다 — 그건 별도 시나리오(S3)의 몫이다.
 
+서버가 id 를 발급하므로 POST 응답의 id 로 뒤 요청의 경로·멤버 값을 바꾼다. 시드의 생성 요청이
+"차트아이디"(조직도 아이디)를 들고 있고, 스크립트가 그 아이디에 응답의 id 를 묶어 둔다.
+
   ./gradlew :connector-scim:generateScimSeed
   docker compose up -d openfga dynamodb-local
   ./gradlew :app-scim:bootRun
@@ -24,7 +27,20 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8082"
 SEED = pathlib.Path(__file__).with_name("initial-sync.ndjson")
 
 
+def translate(request, ids):
+    """조직도 아이디로 쓰인 경로·조직 멤버 값을 서버가 발급한 id 로 바꾼다. 모르는 아이디는 그대로 둔다."""
+    path = request["path"]
+    for prefix in ("/scim/v2/Users/", "/scim/v2/Groups/"):
+        if path.startswith(prefix):
+            path = prefix + ids.get(path[len(prefix):], path[len(prefix):])
+    body = request["body"]
+    if isinstance(body, dict) and isinstance(body.get("members"), list):
+        body = dict(body, members=[dict(m, value=ids.get(m["value"], m["value"])) for m in body["members"]])
+    return dict(request, path=path, body=body)
+
+
 def send(request):
+    """(상태코드, 응답 본문) 을 돌려준다. 본문이 JSON 이 아니면 None."""
     body = json.dumps(request["body"]).encode("utf-8")
     req = urllib.request.Request(
         BASE + request["path"],
@@ -34,9 +50,16 @@ def send(request):
     )
     try:
         with urllib.request.urlopen(req) as response:
-            return response.status
+            return response.status, parse(response.read())
     except urllib.error.HTTPError as e:
-        return e.code
+        return e.code, parse(e.read())
+
+
+def parse(raw):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 def main():
@@ -47,9 +70,13 @@ def main():
     print(f"{len(requests)}건을 {BASE} 로 보낸다")
 
     실패 = []
+    ids = {}  # 조직도 아이디 → 서버가 발급한 id
     시작 = time.time()
     for i, request in enumerate(requests, 1):
-        status = send(request)
+        request = translate(request, ids)
+        status, 응답 = send(request)
+        if status == 201 and request.get("차트아이디") and isinstance(응답, dict) and 응답.get("id"):
+            ids[request["차트아이디"]] = 응답["id"]
         if status != 201:
             실패.append((request["설명"], status))
             if len(실패) <= 5:

@@ -17,6 +17,7 @@ import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
+import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
 import org.junit.jupiter.api.DisplayName;
@@ -60,9 +61,8 @@ class ScimLimitsAndRecoveryScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();
 
-    /** 멤버십이 아예 없는 고아 튜플. 동기화로는 만들 수도 지울 수도 없는 상태다. */
-    private static final RelationTuple 고아 =
-            RelationTuple.directMember("ghost.user", 기대.landmarks().대상팀());
+    /** 서버가 발급한 id 와 조직도 아이디의 대응. 요청은 보낼 때, 기대값·Check 는 볼 때 번역한다. */
+    private static final ScimIdBook 번역부 = new ScimIdBook();
 
     @Container
     static final GenericContainer<?> OPENFGA = ScaleContainers.openFga();
@@ -95,17 +95,27 @@ class ScimLimitsAndRecoveryScaleTest {
 
     // ---------- S17: 한계 ----------
 
+    /**
+     * 멤버십이 아예 없는 고아 튜플. 동기화로는 만들 수도 지울 수도 없는 상태다.
+     * 조직은 <b>서버가 발급한 id</b> 의 대상팀이다 — 조직도 아이디 그대로 심으면 있지도 않은 조직에 붙어 SCIM 쓰기가
+     * 닿지 않으니, 안 지워진다는 단정이 아무것도 시험하지 못한다. 그래서 기준 상태를 만든 뒤에 만든다.
+     */
+    private RelationTuple 고아() {
+        return 번역부.번역한다(RelationTuple.directMember("ghost.user", 기대.landmarks().대상팀()));
+    }
+
     @Test
     @Order(2)
     @DisplayName("S17-a. 멤버십 없는 고아 튜플은 어떤 SCIM 쓰기로도 지워지지 않는다")
     void S17a_고아_튜플은_안_지워진다() {
         // given — 동기화가 만들 수 없는 상태를 일부러 만든다.
         // ghost.user 는 DynamoDB 에 없고 어느 조직의 멤버도 아니다.
+        RelationTuple 고아 = 고아();
         새_프로브().직접_심는다(고아);
         assertThat(성립하는가(고아)).as("전제: 고아 튜플이 심어졌다").isTrue();
 
         // when — 그 조직을 실제로 건드리는 SCIM 쓰기를 여러 번 한다
-        String 조직 = 고아.object().substring("group:".length());
+        String 조직 = 기대.landmarks().대상팀();
         보낸다(ScimRequestRenderer.멤버추가(조직,
                 dev.starryeye.organization.core.model.MemberRef.user(
                         기대.landmarks().L2직속직원())), 204);
@@ -129,7 +139,7 @@ class ScimLimitsAndRecoveryScaleTest {
     void S19_아카이빙() {
         // given — 어긋남을 하나 심는다. 있어야 할 튜플을 직접 지운다
         String 직원 = 기대.landmarks().L5직속직원();
-        RelationTuple 지운것 = RelationTuple.directMember(직원, 기대.직속조직(직원));
+        RelationTuple 지운것 = 번역부.번역한다(RelationTuple.directMember(직원, 기대.직속조직(직원)));
         새_프로브().직접_지운다(지운것);
         assertThat(성립하는가(지운것)).as("전제: 어긋남이 만들어졌다").isFalse();
 
@@ -153,7 +163,7 @@ class ScimLimitsAndRecoveryScaleTest {
         // 고아 튜플도 없다 — 후보가 멤버십에서 나오므로 물어보지 않았기 때문이다
         assertThat(snapshot.tuples())
                 .as("고아 튜플이 후보에 없으므로 스냅샷에도 없어야 한다")
-                .doesNotContain(고아);
+                .doesNotContain(고아());
 
         // 지운 것 하나만 빠진 나머지는 그대로 담겼다
         assertThat(snapshot.tuples().size())
@@ -169,6 +179,7 @@ class ScimLimitsAndRecoveryScaleTest {
         // given — S19 가 남긴 어긋남(지워진 튜플)과 S17 의 고아 튜플이 그대로 있다
         String 직원 = 기대.landmarks().L5직속직원();
         RelationTuple 지웠던것 = RelationTuple.directMember(직원, 기대.직속조직(직원));
+        RelationTuple 고아 = 고아();
         assertThat(성립하는가(지웠던것)).isFalse();
         assertThat(성립하는가(고아)).isTrue();
 
@@ -270,7 +281,7 @@ class ScimLimitsAndRecoveryScaleTest {
         // 지워지기라도 하는데, 이것은 재적재해도 우리 DynamoDB 기준으로 다시 쓰므로
         // 틀린 채로 굳는다.
         var 뒤집힌결과 = OrgChartEditor.편집한다(기대).겸직을_더한다(직원, 팀).완성();
-        var 하네스 = new SyncVerifier(state, checker).검증한다(뒤집힌결과).block(Duration.ofMinutes(10));
+        var 하네스 = new SyncVerifier(state, checker).검증한다(번역부.번역한다(뒤집힌결과)).block(Duration.ofMinutes(10));
         assertThat(하네스).isNotNull();
         assertThat(하네스.어긋났는가())
                 .as("하네스가 순서 뒤집힘을 잡게 됐다면 무엇이 바뀐 것인지 확인하라: "
@@ -292,7 +303,12 @@ class ScimLimitsAndRecoveryScaleTest {
         보낸다(request, 201);
     }
 
-    private void 보낸다(ScimRequest request, int 기대상태) {
+    /**
+     * 조직도 아이디로 만든 요청을 서버 id 로 번역해 보낸다. 생성(POST)이 201 이면 응답의 id 를 그 조직도 아이디에 묶어
+     * 둔다 — 뒤 요청의 경로·멤버 값과 기대값·Check 가 이것으로 서버 id 가 된다.
+     */
+    private void 보낸다(ScimRequest 원래요청, int 기대상태) {
+        ScimRequest request = 번역부.번역한다(원래요청);
         // 기본 5초로는 부족하다 — 5,000명 조직도에 쓰는 요청은 부하가 걸린 머신에서 5초를 넘기고,
         // 그러면 기준 상태 적재가 끊겨 뒤의 시나리오가 전부 실패한다. 다른 스케일 테스트와 같은 2분이다
         WebTestClient 느긋한 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build();
@@ -306,14 +322,19 @@ class ScimLimitsAndRecoveryScaleTest {
             case "DELETE" -> 느긋한.delete().uri(request.path());
             default -> throw new IllegalArgumentException("알 수 없는 메서드: " + request.method());
         };
-        spec.exchange().expectStatus().isEqualTo(기대상태);
+        var 응답 = spec.exchange().expectStatus().isEqualTo(기대상태);
+        if (기대상태 == 201 && request.차트아이디() != null) {
+            JsonNode 본문 = 응답.expectBody(JsonNode.class).returnResult().getResponseBody();
+            번역부.기록한다(request.차트아이디(), 본문.get("id").asText());
+        }
     }
 
     private void 검증한다() {
-        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 번역부.번역한다(기대));
     }
 
+    /** 조직도 아이디로 쓴 튜플을 서버 id 로 바꿔 묻는다. 이미 서버 id 인 튜플은 그대로다. */
     private boolean 성립하는가(RelationTuple tuple) {
-        return ScaleVerification.성립하는가(checker, tuple);
+        return ScaleVerification.성립하는가(checker, 번역부.번역한다(tuple));
     }
 }

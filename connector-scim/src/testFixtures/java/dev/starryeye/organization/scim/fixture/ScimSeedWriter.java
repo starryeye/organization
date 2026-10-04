@@ -18,8 +18,9 @@ import java.util.List;
  * 누군가 IdP 역할로 요청을 보내 줘야 한다. 자동화 테스트는 그 역할을 테스트 코드가 하는데,
  * 실제 앱을 띄워 두고 만져 보려면 밖에서 쏠 수단이 필요하다.
  *
- * <p>NDJSON 한 줄이 요청 하나다 — {@code {"method":..,"path":..,"body":..}}.
+ * <p>NDJSON 한 줄이 요청 하나다 — {@code {"method":..,"path":..,"body":..,"설명":..,"차트아이디":..}}.
  * 스트리밍으로 읽어 순차로 보내면 되고, 중간에 끊긴 지점부터 이어 보내기도 쉽다.
+ * 서버가 id 를 발급하므로 생성 요청은 {@code 차트아이디} 를 싣는다 — 재생 스크립트가 응답의 id 를 거기에 묶어 뒤 요청의 경로·멤버 값을 바꾼다.
  *
  * <p>실행: {@code ./gradlew :connector-scim:generateScimSeed}
  */
@@ -44,6 +45,9 @@ public final class ScimSeedWriter {
             line.put("path", request.path());
             line.set("body", JSON.valueToTree(request.body()));
             line.put("설명", request.설명());
+            if (request.차트아이디() != null) {
+                line.put("차트아이디", request.차트아이디());
+            }
             sb.append(JSON.writeValueAsString(line)).append('\n');
         }
         Files.writeString(출력, sb.toString(), StandardCharsets.UTF_8);

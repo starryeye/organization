@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
@@ -7,7 +8,6 @@ import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
-import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
@@ -49,7 +49,8 @@ import static org.awaitility.Awaitility.await;
  * <p>한 명을 넣고 빼는 PATCH 가 조직 파티션을 훑지 않는다는 것을 <b>읽은 양</b>으로 단정한다 — DynamoDB Local 의 속도는 AWS 와 달라
  * 시간으로는 아무것도 증명하지 못한다. 조직은 저장소에 직접 심는다 — 멤버 줄만 있으면 된다. 바뀌지 않는 멤버의 직원 레코드와
  * 튜플은 이 경로가 보지 않으므로 심지 않는다. 10만 명 전체 교체는 HTTP 본문 한도(256KB)를 넘으므로 유스케이스를 직접 부른다.
- * ③-2 의 읽는 양(점검 P1·P2, 들어오는 멤버, POST 상위 조직)도 같은 10만 명 조직으로 잰다.
+ * ③-2 의 읽는 양(점검 P1·P2, 들어오는 멤버, 상위 조직에 하위 조직 붙이기)도 같은 10만 명 조직으로 잰다.
+ * 서버가 id 를 발급하므로 POST 로 만든 조직은 응답의 id 로만 가리킨다 — 저장소에 직접 심은 조직(ALL·HQ 등)만 고른 아이디를 쓴다.
  * 조직 삭제(점검 C6)도 같은 조직으로 잰다 — 마지막 순서다. 리스 TTL 을 15초로 줄여 삭제가 갱신 없이는 끝나지 못하게 한다.
  */
 @Testcontainers
@@ -300,27 +301,26 @@ class ScimGroupMemberPatchScaleTest {
 
     @Test
     @Order(8)
-    @DisplayName("10만 명 조직이 먼저 적어 둔 조직을 POST 해도 상위 조직을 통째로 읽지 않는다")
-    void 큰_상위_조직_밑의_POST는_헤더만_읽는다() {
-        // given — ALL(10만 명)이 아직 없는 LATE 를 하위 조직으로 적어 두었다
-        GroupHeader 전사 = state.findGroupHeader(조직).block();
-        state.saveGroupChange(전사, 전사, Set.of(MemberRef.group("LATE")), Set.of()).block();
+    @DisplayName("10만 명 조직에 새 조직을 하위 조직으로 붙여도 상위 조직을 통째로 읽지 않는다")
+    void 큰_상위_조직_밑에_조직을_붙인다() {
+        // given — 서버가 id 를 발급하므로 IdP 는 만든 조직의 id 로만 붙일 수 있다. LATE 를 먼저 만든다(ALL 과는 아직 무관하다)
+        String 늦은조직 = 조직을_만든다("""
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"externalId":"LATE","displayName":"늦게 온 조직"}
+                """);
         counter.reset();
         checks.reset();
         long 시작 = System.currentTimeMillis();
 
-        // when
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"externalId":"LATE","displayName":"늦게 온 조직"}
-                        """)
-                .exchange().expectStatus().isCreated();
+        // when — 10만 명 조직 ALL 에 LATE 를 하위 조직으로 붙인다
+        보낸다("""
+                [{"op":"add","path":"members","value":[{"value":"%s","type":"Group"}]}]
+                """.formatted(늦은조직));
 
         // then
-        읽은양을_찍는다("10만 명 상위 조직 밑 POST", 시작);
+        읽은양을_찍는다("10만 명 상위 조직에 하위 조직 붙이기", 시작);
         assertThat(counter.scannedItems.get()).as("상위 조직 파티션을 훑지 않는다").isLessThanOrEqualTo(50);
         assertThat(counter.getItems.get()).isLessThanOrEqualTo(20);
-        assertThat(check("group:LATE", "child", "group:" + 조직)).isTrue();
+        assertThat(check("group:" + 늦은조직, "child", "group:" + 조직)).isTrue();
     }
 
     @Test
@@ -368,18 +368,25 @@ class ScimGroupMemberPatchScaleTest {
         counter.reset();
         long 시작 = System.currentTimeMillis();
 
-        // when — 본부 HQ 를 하위로 둔 최상위 ROOT 를 만든다
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"externalId":"ROOT","displayName":"최상위",
-                         "members":[{"value":"HQ","type":"Group"}]}
-                        """)
-                .exchange().expectStatus().isCreated();
+        // when — 본부 HQ 를 하위로 둔 최상위 ROOT 를 만든다. HQ 는 저장소에 직접 심은 조직이라 고른 아이디 그대로 가리킨다
+        String 최상위 = 조직을_만든다("""
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"externalId":"ROOT","displayName":"최상위",
+                 "members":[{"value":"HQ","type":"Group"}]}
+                """);
 
-        // then
+        // then — ROOT 는 서버가 발급한 id 로 묻는다
         읽은양을_찍는다("맨 위 조직 POST", 시작);
         assertThat(counter.queries.get()).isLessThanOrEqualTo(10);
-        assertThat(check("group:HQ", "child", "group:ROOT")).isTrue();
+        assertThat(check("group:HQ", "child", "group:" + 최상위)).isTrue();
+    }
+
+    /** 조직을 POST 로 만들고(201) 서버가 발급한 id 를 돌려준다. */
+    private String 조직을_만든다(String 본문) {
+        JsonNode 응답 = client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(본문)
+                .exchange().expectStatus().isCreated()
+                .expectBody(JsonNode.class).returnResult().getResponseBody();
+        return 응답.get("id").asText();
     }
 
     private void 직원을_만든다(String userName, HttpStatus 기대) {

@@ -2,6 +2,7 @@ package dev.starryeye.organization.core.fixture;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 
@@ -9,9 +10,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 /**
  * 생성된 조직도 하나. <b>이것이 진실이고</b> LDIF·SCIM 렌더러가 각자의 형식으로 뽑아낸다.
@@ -37,6 +42,24 @@ public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Memb
     /** 기억이 없는 최초 조직도. */
     public OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
         this(snapshot, landmarks, Set.of());
+    }
+
+    /**
+     * 직원·조직 아이디를 {@code 바꾼다} 로 바꾼 조직도 — SCIM 서버 발급 id 와 대조할 때 쓴다(설계 2026-10-04 §3.1).
+     * 멤버·랜드마크·지워진 멤버십까지 바꾼다. 아이디 말고 다른 속성(userName·externalId·표시명)은 그대로다.
+     */
+    public OrgChart 아이디를_바꾼다(UnaryOperator<String> 바꾼다) {
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        snapshot.users().values().forEach(user -> users.put(바꾼다.apply(user.id()), user.withId(바꾼다.apply(user.id()))));
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        snapshot.groups().values().forEach(group -> groups.put(바꾼다.apply(group.id()), new DirectoryGroup(
+                바꾼다.apply(group.id()), group.externalId(), group.displayName(),
+                group.members().stream().map(member -> new MemberRef(member.type(), 바꾼다.apply(member.id())))
+                        .collect(Collectors.toSet()))));
+        Set<Membership> 바뀐멤버십 = 지워진멤버십.stream()
+                .map(m -> new Membership(바꾼다.apply(m.조직()), new MemberRef(m.멤버().type(), 바꾼다.apply(m.멤버().id()))))
+                .collect(Collectors.toSet());
+        return new OrgChart(new DirectorySnapshot(users, groups), landmarks.아이디를_바꾼다(바꾼다), 바뀐멤버십);
     }
 
     /** 지금 조직도의 멤버십 전부. 에디터가 편집 전후를 비교하는 데 쓴다. */
