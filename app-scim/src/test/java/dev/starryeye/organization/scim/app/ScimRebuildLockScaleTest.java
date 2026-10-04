@@ -1,6 +1,5 @@
 package dev.starryeye.organization.scim.app;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.StoreBootstrapper;
@@ -212,14 +211,14 @@ class ScimRebuildLockScaleTest {
         // 거기서는 재적재 중 503 이 나오는 것 자체가 검증 대상이라 재시도하면 그 단언이 무너진다.
         int 최대시도 = 5;
         int 상태 = -1;
-        JsonNode 응답 = null;
+        String 응답 = null;
         for (int 시도 = 1; 시도 <= 최대시도; 시도++) {
             var 결과 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
                     .post().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(request.body())
                     .exchange()
-                    .expectBody(JsonNode.class)
+                    .expectBody(String.class)
                     .returnResult();
             상태 = 결과.getStatus().value();
             응답 = 결과.getResponseBody();
@@ -236,9 +235,7 @@ class ScimRebuildLockScaleTest {
             }
         }
         assertThat(상태).as("기준선 적재 중 503 이 반복돼 재시도로도 회복되지 않았다").isEqualTo(기대상태);
-        if (상태 == 201 && request.차트아이디() != null) {
-            번역부.기록한다(request.차트아이디(), 응답.get("id").asText());
-        }
+        번역부.기록한다(request, 상태, 응답);
     }
 
     private void 검증한다() {

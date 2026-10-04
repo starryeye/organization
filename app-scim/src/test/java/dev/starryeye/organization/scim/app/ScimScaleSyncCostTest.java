@@ -1,6 +1,5 @@
 package dev.starryeye.organization.scim.app;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -106,12 +105,10 @@ class ScimScaleSyncCostTest {
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(request.body())
                     .exchange()
-                    .expectBody(JsonNode.class)
+                    .expectBody(String.class)
                     .returnResult();
             int status = 결과.getStatus().value();
-            if (status == 201 && request.차트아이디() != null) {
-                번역부.기록한다(request.차트아이디(), 결과.getResponseBody().get("id").asText());
-            }
+            번역부.기록한다(request, status, 결과.getResponseBody());
             if (status != 201) {
                 실패++;
                 if (실패 <= 5) {

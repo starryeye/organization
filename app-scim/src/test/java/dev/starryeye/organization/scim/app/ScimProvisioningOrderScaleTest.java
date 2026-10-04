@@ -1,10 +1,10 @@
 package dev.starryeye.organization.scim.app;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.ChartExpectation;
+import dev.starryeye.organization.core.fixture.Membership;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.ScaleTest;
@@ -12,6 +12,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -41,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,7 +90,7 @@ class ScimProvisioningOrderScaleTest {
 
     @Test
     @Order(1)
-    @DisplayName("S1-a. 조직을 먼저 멤버 없이 만들면 튜플이 하나도 없는 조직만 생긴다")
+    @DisplayName("S1-a. 조직을 먼저 멤버 없이 만들면 빈 조직만 생기고 하위 조직 간선도 없다")
     void S1a_조직만_먼저() {
         // given — 깊은 곳부터, 멤버 없이. 직원도 조직 사이의 참조도 아직 없다
         List<ScimRequest> 조직요청 = 조직요청들();
@@ -96,8 +98,9 @@ class ScimProvisioningOrderScaleTest {
         // when
         조직요청.forEach(request -> 보낸다(request, 201));
 
-        // then — 조직 전부가 멤버 없이 만들어졌고 직원은 없다. 아직 생기지 않은 멤버십(직원 소속과 하위 조직 참조)의 튜플은
-        // 하나도 없어야 한다 — 조직이 만들어진다고 권한이 생기지는 않는다. 롤업 표본은 직원이 없어 비고, ④ 는 이 단계에서 할 일이 없다.
+        // then — 조직 전부가 멤버 없이 만들어졌고 직원은 없다. 조직 사이의 child 간선은 하나도 없어야 한다 — 조직이 만들어진다고
+        // 권한이 생기지는 않는다. 직원 소속 튜플은 여기서 묻지 않는다: 직원이 아직 없어 서버 id 가 없으므로 어떤 답이 와도 의미가 없다(S1-b 가 잰다).
+        // 롤업 표본은 직원이 없어 비고, ④ 는 이 단계에서 할 일이 없다.
         검증한다(ChartExpectation.of(번역부.번역한다(조직만_있는_조직도())));
     }
 
@@ -108,15 +111,14 @@ class ScimProvisioningOrderScaleTest {
         // given — S1-a 의 빈 조직들 위에, 직원 요청과 조직마다의 멤버 추가 PATCH 를 준비한다
         List<ScimRequest> 직원요청 = 직원요청들();
         List<ScimRequest> 멤버요청 = 멤버요청들();
-        String 대표 = 기대.landmarks().L5직속직원();
 
         // when — 직원이 먼저 도착한다. 아직 어느 조직의 멤버도 아니다
         long t0 = System.currentTimeMillis();
         직원요청.forEach(request -> 보낸다(request, 201));
 
-        // then — 직원 레코드만 있으니 튜플이 없다
-        assertThat(성립하는가(RelationTuple.directMember(대표, 기대.직속조직(대표))))
-                .as("멤버로 더하기 전에는 %s 의 직속 튜플이 없어야 한다", 대표).isFalse();
+        // then — 직원 전부와 빈 조직들이 있고, 모든 멤버십의 튜플이 없다. 직원과 조직이 모두 서버 id 를 받았으므로
+        // "없어야 한다" 는 후보 하나하나가 서버 id 로 묻는 진짜 Check 다
+        검증한다(ChartExpectation.of(번역부.번역한다(조직과_직원만_있는_조직도())));
 
         // when — IdP 가 조직마다 멤버(직원과 하위 조직)를 PATCH 로 더한다
         멤버요청.forEach(request -> 보낸다(request, 204));
@@ -207,9 +209,8 @@ class ScimProvisioningOrderScaleTest {
             default -> throw new IllegalArgumentException("알 수 없는 메서드: " + request.method());
         };
         var 응답 = spec.exchange().expectStatus().isEqualTo(기대상태);
-        if (기대상태 == 201 && request.차트아이디() != null) {
-            JsonNode 본문 = 응답.expectBody(JsonNode.class).returnResult().getResponseBody();
-            번역부.기록한다(request.차트아이디(), 본문.get("id").asText());
+        if (기대상태 == 201) {
+            번역부.기록한다(request, 기대상태, 응답.expectBody(String.class).returnResult().getResponseBody());
         }
     }
 
@@ -222,14 +223,30 @@ class ScimProvisioningOrderScaleTest {
     }
 
     /**
-     * 조직만 만들어진 상태 — 모든 조직이 멤버 없이 있고 직원은 없다. 아직 생기지 않은 멤버십은 "지워진 멤버십" 칸에 넣는다:
-     * 하네스는 그 칸의 멤버십을 "튜플이 없어야 한다" 고 묻는다.
+     * 조직만 만들어진 상태 — 모든 조직이 멤버 없이 있고 직원은 없다. 아직 없는 <b>조직 사이의 간선</b>을 "지워진 멤버십" 칸에 넣는다:
+     * 하네스는 그 칸의 멤버십을 "튜플이 없어야 한다" 고 묻는다. 직원 소속은 넣지 않는다 — 직원이 아직 없어 서버 id 가 없고,
+     * 조직도 아이디 그대로 묻는 Check 는 서버가 무엇을 했든 false 라 아무것도 증명하지 못한다.
      */
     private static OrgChart 조직만_있는_조직도() {
+        Set<Membership> 아직_없는_간선 = 기대.멤버십들().stream()
+                .filter(멤버십 -> 멤버십.멤버().type() == MemberType.GROUP)
+                .collect(Collectors.toSet());
+        return new OrgChart(new DirectorySnapshot(Map.of(), 빈조직들()), 기대.landmarks(), 아직_없는_간선);
+    }
+
+    /**
+     * 직원이 도착했지만 아직 어느 조직에도 안 들어간 상태 — 직원 전부와 빈 조직들. 원래의 모든 멤버십을 "지워진 멤버십" 칸에 넣어
+     * "튜플이 없어야 한다" 고 묻는다. 직원과 조직이 모두 만들어져 서버 id 를 받았으므로 후보 전부가 서버 id 로 묻는 진짜 음성이다.
+     */
+    private static OrgChart 조직과_직원만_있는_조직도() {
+        return new OrgChart(new DirectorySnapshot(기대.snapshot().users(), 빈조직들()), 기대.landmarks(), 기대.멤버십들());
+    }
+
+    private static Map<String, DirectoryGroup> 빈조직들() {
         Map<String, DirectoryGroup> 빈조직들 = new LinkedHashMap<>();
         기대.snapshot().groups().values().forEach(group -> 빈조직들.put(group.id(),
                 new DirectoryGroup(group.id(), group.externalId(), group.displayName(), Set.of())));
-        return new OrgChart(new DirectorySnapshot(Map.of(), 빈조직들), 기대.landmarks(), 기대.멤버십들());
+        return 빈조직들;
     }
 
     private boolean 성립하는가(RelationTuple tuple) {

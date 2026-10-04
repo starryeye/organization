@@ -550,9 +550,8 @@ class ScimScaleScenarioTest {
             default -> throw new IllegalArgumentException("알 수 없는 메서드: " + request.method());
         };
         var 응답 = spec.exchange().expectStatus().isEqualTo(기대상태);
-        if (기대상태 == 201 && request.차트아이디() != null) {
-            JsonNode 본문 = 응답.expectBody(JsonNode.class).returnResult().getResponseBody();
-            번역부.기록한다(request.차트아이디(), 본문.get("id").asText());
+        if (기대상태 == 201) {
+            번역부.기록한다(request, 기대상태, 응답.expectBody(String.class).returnResult().getResponseBody());
         }
     }
 
