@@ -223,9 +223,12 @@ public class IncrementalSyncUseCase {
     /**
      * 직원 생성(POST). {@code userName} 중복을 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §4). 아이디는 서버가 발급한 UUID 라 겹칠 일이 없어 보지 않는다
      * (설계 2026-10-04 §3.2) — 지운 직원의 아이디가 다시 쓰이지 않아 남은 권한을 물려받지 않는다(점검 M7).
+     *
+     * <p>생성에는 "자기 자신"이 없다 — 이미 있는 직원은 모두 남이므로 중복 확인에서 아무도 빼지 않는다(자기 아이디를 넘기면 같은 아이디로 다시 온 POST 가 기존
+     * 직원을 덮어쓴다).
      */
     public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
-        return withLock(lease -> userName을_확인한다(user.userName(), user.id())
+        return withLock(lease -> userName을_확인한다(user.userName(), null)
                 .then(Mono.defer(() -> upsertUserInternal(user, Optional.empty(), lease))));
     }
 
@@ -249,7 +252,7 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신을
+     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신({@code selfId}, 생성이면 null)을
      * 뺀 뒤, 후보마다 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 {@code userName} 일 때만 충돌이다 — GSI 에 잠깐 남은
      * 옛 값(방금 지웠거나 이름을 바꾼 직원) 때문에 잘못 거절하지 않는다. 남는 틈은 방금 저장돼 아직 GSI 에 없는 직원뿐이다(설계 §10).
      */
@@ -326,15 +329,18 @@ public class IncrementalSyncUseCase {
                 }));
     }
 
-    /** 조직 생성(POST). {@code externalId} 가 있으면 다른 조직과 겹치는지 <b>락 안에서</b> 확인한다(설계 2026-10-04 §3.2). 겹치면 {@link DirectoryConflictException}. */
+    /**
+     * 조직 생성(POST). {@code externalId} 가 있으면 다른 조직과 겹치는지 <b>락 안에서</b> 확인한다(설계 2026-10-04 §3.2). 겹치면 {@link DirectoryConflictException}.
+     * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다 — 같은 아이디·같은 {@code externalId} 로 다시 온 POST 도 409 이고 기존 조직을 덮어쓰지 않는다.
+     */
     public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
-        return withLock(lease -> externalId를_확인한다(group.externalId(), group.id())
+        return withLock(lease -> externalId를_확인한다(group.externalId(), null)
                 .then(Mono.defer(() -> upsertGroupInternal(group, lease))));
     }
 
     /**
-     * 조직 {@code externalId} 가 다른 조직과 겹치는지 — {@link #userName을_확인한다} 와 같은 방식이다. GSI3 로 후보를 찾고 자기 자신을 뺀 뒤 본 테이블을
-     * 강한 일관성으로 다시 읽어 여전히 같은 값일 때만 충돌이다. 빈 값은 보지 않는다. RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의
+     * 조직 {@code externalId} 가 다른 조직과 겹치는지 — {@link #userName을_확인한다} 와 같은 방식이다. GSI3 로 후보를 찾고 자기 자신({@code selfId}, 생성이면 null)을
+     * 뺀 뒤 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 값일 때만 충돌이다. 빈 값은 보지 않는다. RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의
      * 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 §3.2).
      */
     private Mono<Void> externalId를_확인한다(String externalId, String selfId) {

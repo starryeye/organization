@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import org.junit.jupiter.api.BeforeEach;
@@ -137,6 +138,61 @@ class IncrementalSyncWriteDecisionTest {
 
         // then — 본 테이블로 다시 읽으면 ghost 는 없고 lee 의 userName 은 lee 다
         assertThat(state.users.get("kim").userName()).isEqualTo("park");
+    }
+
+    /** GSI3 가 "cn=NEW"·"cn=MOVED" 로 찾으면 지워진 ghost 와 externalId 를 바꾼 DEV001(지금은 cn=DEV001)을 돌려주게 한다. */
+    private void GSI3에_옛_조직이_남게_준비한다() {
+        준비한다(new FakeStateRepository() {
+            @Override
+            public Flux<String> findGroupIdsByExternalId(String externalId) {
+                return Set.of("cn=NEW", "cn=MOVED").contains(externalId)
+                        ? Flux.just("ghost", "DEV001") : super.findGroupIdsByExternalId(externalId);
+            }
+        });
+    }
+
+    @Test
+    @DisplayName("조직 생성 — GSI3 에만 남은 옛 후보(지워졌거나 externalId 를 바꾼 조직)는 중복으로 보지 않는다")
+    void GSI3에만_남은_후보는_조직_생성에서_무시한다() {
+        // given
+        GSI3에_옛_조직이_남게_준비한다();
+
+        // when
+        var result = useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block();
+
+        // then — 본 테이블로 다시 읽으면 ghost 는 없고 DEV001 의 externalId 는 cn=DEV001 이다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.groups.get("NEW").externalId()).isEqualTo("cn=NEW");
+    }
+
+    @Test
+    @DisplayName("조직 변경 — GSI3 에만 남은 옛 후보는 externalId 를 바꿀 때 중복으로 보지 않는다")
+    void GSI3에만_남은_후보는_조직_변경에서_무시한다() {
+        // given
+        GSI3에_옛_조직이_남게_준비한다();
+        state.groups.put("DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀", Set.of()));
+
+        // when
+        useCase.changeGroup("DEV002", GroupChange.replacement("cn=MOVED", "백엔드팀", Set.of())).block();
+
+        // then
+        assertThat(state.groups.get("DEV002").externalId()).isEqualTo("cn=MOVED");
+    }
+
+    @Test
+    @DisplayName("조직 변경 — externalId 를 바꾸지 않으면 중복을 확인하지 않는다, 이미 겹친 조직도 이름을 바꿀 수 있다")
+    void externalId를_안_바꾸면_중복을_확인하지_않는다() {
+        // given — 두 조직이 이미 같은 externalId 를 쓰고 있다(GSI3 지연 틈·LDAP 동기화로 생길 수 있는 상태)
+        state.groups.put("DUP-A", new DirectoryGroup("DUP-A", "cn=DUP", "가", Set.of()));
+        state.groups.put("DUP-B", new DirectoryGroup("DUP-B", "cn=DUP", "나", Set.of()));
+
+        // when
+        useCase.changeGroup("DUP-A", GroupChange.replacement("cn=DUP", "가(개명)", Set.of())).block();
+        useCase.changeGroup("DUP-B", GroupChange.delta().renamed("나(개명)")).block();
+
+        // then — 409 로 막히면 IdP 가 재시도를 멈춰 이름 변경이 영영 반영되지 않는다
+        assertThat(state.groups.get("DUP-A").displayName()).isEqualTo("가(개명)");
+        assertThat(state.groups.get("DUP-B").displayName()).isEqualTo("나(개명)");
     }
 
     @Test

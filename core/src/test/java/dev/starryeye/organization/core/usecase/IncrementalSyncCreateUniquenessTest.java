@@ -57,6 +57,20 @@ class IncrementalSyncCreateUniquenessTest {
     }
 
     @Test
+    @DisplayName("같은 id·같은 userName 으로 다시 만들어도 409 다 — 생성에는 자기 자신이 없어 기존 직원을 덮어쓰지 않는다")
+    void 같은_id_같은_userName_재생성은_409다() {
+        // given
+        useCase.createUser(직원("u-1", "kim@corp.com")).block();
+
+        // when
+        var 다시 = useCase.createUser(new DirectoryUser("u-1", null, "kim@corp.com", "덮어쓴 이름", null, true));
+
+        // then
+        assertThatThrownBy(다시::block).isInstanceOf(DirectoryConflictException.class).hasMessageContaining("userName");
+        assertThat(state.users.get("u-1").displayName()).isEqualTo("kim@corp.com");
+    }
+
+    @Test
     @DisplayName("지운 직원과 같은 userName 으로 다시 만들 수 있다 — 지운 직원의 userName 은 중복이 아니다")
     void 지운_직원과_같은_userName_으로_다시_만들_수_있다() {
         // given
@@ -102,6 +116,20 @@ class IncrementalSyncCreateUniquenessTest {
         assertThat(없음1.fullyApplied()).isTrue();
         assertThat(없음2.fullyApplied()).isTrue();
         assertThat(state.groups).containsOnlyKeys("g-1", "g-3", "g-4");
+    }
+
+    @Test
+    @DisplayName("같은 id·같은 externalId 로 다시 만들어도 409 다 — 생성에는 자기 자신이 없어 기존 조직을 덮어쓰지 않는다")
+    void 같은_id_같은_externalId_재생성은_409다() {
+        // given
+        useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "개발본부", Set.of())).block();
+
+        // when
+        var 다시 = useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "덮어쓴 조직", Set.of()));
+
+        // then
+        assertThatThrownBy(다시::block).isInstanceOf(DirectoryConflictException.class).hasMessageContaining("externalId");
+        assertThat(state.groups.get("g-1").displayName()).isEqualTo("개발본부");
     }
 
     @Test
