@@ -11,6 +11,8 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.util.UUID;
+
 import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
 @RequiredArgsConstructor
@@ -22,8 +24,9 @@ public class ScimUserHandler {
     public Mono<ServerResponse> create(ServerRequest request) {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .map(ScimMapper::toDirectoryUser)
-                // 아이디·userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §3·§4)
+                // id 는 서버가 발급한다 — RFC 7643 §3.1(설계 2026-10-04 §3.1). 본문의 id 는 쓰지 않는다
+                .map(scim -> ScimMapper.toDirectoryUser(scim, UUID.randomUUID().toString()))
+                // userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §4)
                 .flatMap(user -> sync.createUser(user)
                         .flatMap(result -> respond(HttpStatus.CREATED, user.id(), result, projection))));
     }
@@ -41,9 +44,9 @@ public class ScimUserHandler {
         String id = request.pathVariable("id");
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .map(ScimMapper::toDirectoryUser)
-                // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 userName 이 달라도 리소스를 옮기지 않는다.
-                .flatMap(user -> sync.changeUser(id, before -> user.withId(id))
+                // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 id·userName 이 달라도 리소스를 옮기지 않는다.
+                .map(scim -> ScimMapper.toDirectoryUser(scim, id))
+                .flatMap(user -> sync.changeUser(id, before -> user)
                         .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id))))
                 .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
     }

@@ -20,7 +20,9 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -65,11 +67,56 @@ class ScimUserHandlerTest {
                 .expectStatus().isCreated()
                 .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
-                .jsonPath("$.id").isEqualTo("kim")
+                .jsonPath("$.id").value(id -> {
+                    assertThat(UUID.fromString((String) id)).hasToString((String) id);
+                    assertThat(state.users).containsOnlyKeys((String) id);
+                })
+                .jsonPath("$.externalId").isEqualTo("emp-1001")
                 .jsonPath("$.userName").isEqualTo("kim")
                 .jsonPath("$.active").isEqualTo(true);
+    }
 
-        assertThat(state.users).containsKey("kim");
+    @Test
+    @DisplayName("직원 POST 는 서버가 발급한 UUID 를 id 로 돌려주고, 그 id 로 다시 읽힌다 — 본문의 id 는 무시한다")
+    void POST는_서버가_id_를_발급한다() {
+        // given
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"id":"client-chosen","userName":"kim@corp.com","displayName":"김철수"}
+                """;
+
+        // when
+        String id = client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange().expectStatus().isCreated()
+                .expectBody(Map.class).returnResult().getResponseBody().get("id").toString();
+
+        // then
+        assertThat(UUID.fromString(id).toString()).isEqualTo(id);
+        assertThat(state.users).containsOnlyKeys(id);
+        client.get().uri("/scim/v2/Users/" + id).exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.userName").isEqualTo("kim@corp.com");
+    }
+
+    @Test
+    @DisplayName("지운 직원과 같은 userName 으로 다시 만들면 새 id 를 받고 남은 권한을 물려받지 않는다")
+    void 지운_직원과_같은_userName_으로_다시_만들면_새_id_이고_남은_권한을_물려받지_않는다() {
+        // given — 지운 직원의 고아 튜플이 OpenFGA 에 남아 있다(감사 M7)
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"kim@corp.com","displayName":"김철수"}
+                """;
+        String id1 = 만든_아이디(client.post().uri("/scim/v2/Users")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body).exchange());
+        checker.allowed.add(RelationTuple.directMember(id1, "FIN"));
+        client.delete().uri("/scim/v2/Users/" + id1).exchange().expectStatus().isNoContent();
+
+        // when
+        String id2 = 만든_아이디(client.post().uri("/scim/v2/Users")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body).exchange());
+
+        // then
+        assertThat(id2).isNotEqualTo(id1);
+        assertThat(checker.check(RelationTuple.directMember(id1, "FIN")).block()).isTrue();
+        assertThat(checker.check(RelationTuple.directMember(id2, "FIN")).block()).isFalse();
+        assertThat(state.users).containsOnlyKeys(id2);
     }
 
     @Test
@@ -274,6 +321,30 @@ class ScimUserHandlerTest {
     }
 
     @Test
+    @DisplayName("PUT 은 본문의 id 와 userName 이 달라도 경로의 id 를 정본으로 삼는다")
+    void PUT은_경로의_id가_정본이다() {
+        // given
+        state.saveUser(new DirectoryUser("hong", null, "hong", "홍길동", null, true)).block();
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"id":"client-chosen",
+                 "userName":"hong.new","displayName":"홍길동","active":true}
+                """;
+
+        // when
+        client.put().uri("/scim/v2/Users/hong")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.id").isEqualTo("hong")
+                .jsonPath("$.userName").isEqualTo("hong.new");
+
+        // then
+        assertThat(state.users).containsOnlyKeys("hong");
+        assertThat(state.users.get("hong").userName()).isEqualTo("hong.new");
+    }
+
+    @Test
     @DisplayName("Entra 의 이메일+성 PATCH 가 200 이고 둘 다 반영된다")
     void Entra_PATCH_가_200() {
         // given
@@ -350,5 +421,10 @@ class ScimUserHandlerTest {
         client.delete().uri("/scim/v2/Users/ghost").exchange().expectStatus().isNotFound();
         assertThat(state.users).doesNotContainKey("ghost");
         assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    /** POST 응답의 서버 발급 id. */
+    private String 만든_아이디(WebTestClient.ResponseSpec 응답) {
+        return 응답.expectStatus().isCreated().expectBody(Map.class).returnResult().getResponseBody().get("id").toString();
     }
 }

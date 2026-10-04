@@ -26,12 +26,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ScimMapperTest {
 
+    /** 부르는 쪽(핸들러)이 정해 넘기는 id. 매퍼는 이 값을 그대로 쓴다. */
+    private static final String ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
     /** type 이 명시된 케이스는 이 resolver 를 타지 않는다. 타면 모두 User 로 답한다. */
     private static final MemberTypeResolver USER_ONLY = ids -> Mono.just(
             ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.USER)));
 
     @Test
-    @DisplayName("직원 아이디는 userName 에서 오고 표시명은 displayName 을 우선한다")
+    @DisplayName("직원 아이디는 넘겨받은 id 이고 표시명은 displayName 을 우선한다")
     void 유저를_도메인으로_변환한다() {
         // given
         var scim = new ScimUser(List.of(ScimSchemas.USER), null, "emp-1001", "kim",
@@ -39,10 +42,11 @@ class ScimMapperTest {
                 List.of(new ScimEmail("kim@example.com", "work", true)), true, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
-        assertThat(user.id()).isEqualTo("kim");
+        assertThat(user.id()).isEqualTo(ID);
+        assertThat(user.userName()).isEqualTo("kim");
         assertThat(user.externalId()).isEqualTo("emp-1001");
         assertThat(user.displayName()).isEqualTo("철수");
         assertThat(user.email()).isEqualTo("kim@example.com");
@@ -57,7 +61,7 @@ class ScimMapperTest {
                 new ScimName("김철수", null, null, null, null, null), null, List.of(), null, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
         assertThat(user.displayName()).isEqualTo("김철수");
@@ -71,7 +75,7 @@ class ScimMapperTest {
                 null, null, List.of(), null, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
         assertThat(user.active()).isTrue();
@@ -86,14 +90,14 @@ class ScimMapperTest {
                         new ScimEmail("b@example.com", "work", null)), true, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
         assertThat(user.email()).isEqualTo("a@example.com");
     }
 
     @Test
-    @DisplayName("조직코드는 externalId 에서 오고 조직명은 displayName 에서 온다")
+    @DisplayName("조직 아이디는 넘겨받은 id 이고 externalId 는 속성으로 담기며 조직명은 displayName 에서 온다")
     void 그룹을_도메인으로_변환한다() {
         // given
         var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV001", "개발본부",
@@ -101,55 +105,43 @@ class ScimMapperTest {
                         new ScimMember("park", "User", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block();
 
         // then
-        assertThat(group.id()).isEqualTo("DEV001");
+        assertThat(group.id()).isEqualTo(ID);
+        assertThat(group.externalId()).isEqualTo("DEV001");
         assertThat(group.displayName()).isEqualTo("개발본부");
         assertThat(group.members())
                 .containsExactlyInAnyOrder(MemberRef.group("DEV002"), MemberRef.user("park"));
     }
 
     @Test
-    @DisplayName("externalId 가 없으면 id 를 조직코드로 쓴다")
-    void externalId가_없으면_id를_쓴다() {
-        // given
-        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), "DEV009", null, "운영팀",
-                List.of(), null);
+    @DisplayName("본문의 id 는 쓰지 않고 넘겨받은 id 를 쓴다 — 직원")
+    void 직원은_본문의_id를_쓰지_않는다() {
+        // given — id 는 서버가 정하는 값이다(RFC 7643 §3.1)
+        var scim = new ScimUser(List.of(ScimSchemas.USER), "client-chosen", null, "kim",
+                null, null, List.of(), null, null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
-        assertThat(group.id()).isEqualTo("DEV009");
+        assertThat(user.id()).isEqualTo(ID);
     }
 
     @Test
-    @DisplayName("조직코드가 아예 없으면 UUID 를 발급한다")
-    void 조직코드가_없으면_UUID를_발급한다() {
+    @DisplayName("본문의 id 와 externalId 는 쓰지 않고 넘겨받은 id 를 쓴다 — 조직")
+    void 조직은_본문의_id를_쓰지_않는다() {
         // given
-        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, null, "임시팀", List.of(), null);
-
-        // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
-
-        // then
-        assertThat(group.id()).isNotBlank().hasSize(36);
-        assertThat(group.displayName()).isEqualTo("임시팀");
-    }
-
-    @Test
-    @DisplayName("한글 조직코드는 정규화를 거쳐도 보존된다")
-    void 한글_조직코드가_보존된다() {
-        // given
-        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "개발본부", "개발본부",
+        var scim = new ScimGroup(List.of(ScimSchemas.GROUP), "DEV009", "DEV001", "운영팀",
                 List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block();
 
         // then
-        assertThat(group.id()).isEqualTo("개발본부");
+        assertThat(group.id()).isEqualTo(ID);
+        assertThat(group.externalId()).isEqualTo("DEV001");
     }
 
     @Test
@@ -203,31 +195,33 @@ class ScimMapperTest {
     }
 
     @Test
-    @DisplayName("userName 에 금지 문자가 있으면 정규화돼 id 에 반영된다")
-    void userName의_금지_문자가_정규화된다() {
+    @DisplayName("userName 에 금지 문자가 있어도 id 는 넘겨받은 값이고 userName 은 그대로 담긴다")
+    void userName의_금지_문자는_id에_닿지_않는다() {
         // given — 공백, 콜론, 해시 등 IdNormalizer 가 제거하는 문자
         var scim = new ScimUser(List.of(ScimSchemas.USER), null, null, "kim lee:admin#1",
                 null, null, List.of(), null, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
-        assertThat(user.id()).isEqualTo("kim_lee_admin_1");
+        assertThat(user.id()).isEqualTo(ID);
+        assertThat(user.userName()).isEqualTo("kim lee:admin#1");
     }
 
     @Test
-    @DisplayName("externalId 에 금지 문자가 있으면 정규화돼 조직코드에 반영된다")
-    void externalId의_금지_문자가_정규화된다() {
+    @DisplayName("externalId 에 금지 문자가 있어도 id 는 넘겨받은 값이고 externalId 는 그대로 담긴다")
+    void externalId의_금지_문자는_id에_닿지_않는다() {
         // given — 공백, 콜론 등 IdNormalizer 가 제거하는 문자
         var scim = new ScimGroup(List.of(ScimSchemas.GROUP), null, "DEV 001:main", "개발본부",
                 List.of(), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block();
 
         // then
-        assertThat(group.id()).isEqualTo("DEV_001_main");
+        assertThat(group.id()).isEqualTo(ID);
+        assertThat(group.externalId()).isEqualTo("DEV 001:main");
     }
 
     @Test
@@ -239,7 +233,7 @@ class ScimMapperTest {
                         new ScimEmail("b@example.com", "work", true)), true, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
         assertThat(user.email()).isEqualTo("b@example.com");
@@ -253,7 +247,7 @@ class ScimMapperTest {
                 null, null, List.of(), null, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
 
         // then
         assertThat(user.displayName()).isEqualTo("kim.lee");
@@ -268,7 +262,7 @@ class ScimMapperTest {
                         new ScimMember("DEV002", "Group", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block();
 
         // then
         assertThat(group.members())
@@ -287,7 +281,7 @@ class ScimMapperTest {
                 List.of(new ScimMember("DEV002", null, null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, resolver).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, resolver).block();
 
         // then
         assertThat(group.members()).containsExactly(MemberRef.group("DEV002"));
@@ -306,7 +300,7 @@ class ScimMapperTest {
                 List.of(new ScimMember("kim", null, null), new ScimMember("lee", null, null), new ScimMember("DEV002", "Group", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, resolver).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, resolver).block();
 
         // then
         assertThat(물은것).containsExactly(Set.of("kim", "lee"));
@@ -324,7 +318,7 @@ class ScimMapperTest {
                         new ScimMember("DEV 002:sub", "Group", null)), null);
 
         // when
-        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, USER_ONLY).block();
+        DirectoryGroup group = ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block();
 
         // then
         assertThat(group.members()).containsExactlyInAnyOrder(
@@ -339,7 +333,7 @@ class ScimMapperTest {
                 null, null, List.of(), null, null);
 
         // when & then
-        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim))
+        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim, ID))
                 .isInstanceOf(ScimException.class)
                 .hasMessage("userName 은 필수입니다");
     }
@@ -352,7 +346,7 @@ class ScimMapperTest {
                 null, null, List.of(), null, null);
 
         // when & then
-        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim))
+        assertThatThrownBy(() -> ScimMapper.toDirectoryUser(scim, ID))
                 .isInstanceOf(ScimException.class)
                 .hasMessage("userName 은 필수입니다");
     }
@@ -365,7 +359,7 @@ class ScimMapperTest {
                 List.of(new ScimMember(null, "User", null)), null);
 
         // when & then
-        assertThatThrownBy(() -> ScimMapper.toDirectoryGroup(scim, USER_ONLY).block())
+        assertThatThrownBy(() -> ScimMapper.toDirectoryGroup(scim, ID, USER_ONLY).block())
                 .isInstanceOf(ScimException.class)
                 .hasMessage("members 원소에 value 가 없습니다");
     }
@@ -393,7 +387,7 @@ class ScimMapperTest {
                 new ScimName("홍길동", "홍", "길동", "철", "Mr.", "Jr."), null, null, true, null);
 
         // when
-        DirectoryUser user = ScimMapper.toDirectoryUser(scim);
+        DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
         ScimUser 응답 = ScimMapper.toScimUser(user);
 
         // then

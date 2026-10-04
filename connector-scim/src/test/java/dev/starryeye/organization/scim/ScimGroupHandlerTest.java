@@ -19,7 +19,9 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -63,18 +65,43 @@ class ScimGroupHandlerTest {
                 .expectStatus().isCreated()
                 .expectHeader().contentType(ScimRouter.SCIM_JSON)
                 .expectBody()
-                .jsonPath("$.id").isEqualTo("DEV001")
+                .jsonPath("$.id").value(id -> assertThat(UUID.fromString((String) id)).hasToString((String) id))
+                .jsonPath("$.externalId").isEqualTo("DEV001")
                 .jsonPath("$.displayName").isEqualTo("개발본부")
                 .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.GROUP);
 
-        assertThat(state.groups).containsKey("DEV001");
+        assertThat(state.groups.values()).extracting(DirectoryGroup::externalId).containsExactly("DEV001");
     }
 
     @Test
-    @DisplayName("이미 있는 조직코드로 생성하면 409 uniqueness 로 거절한다")
-    void 중복_생성은_409다() {
+    @DisplayName("조직 POST 는 서버가 발급한 UUID 를 id 로 돌려주고 externalId 는 속성으로 둔다 — 본문의 id 는 무시한다")
+    void POST는_서버가_id_를_발급한다() {
         // given
-        state.saveGroup(new DirectoryGroup("DEV001", "DEV001", "개발본부", Set.of())).block();
+        String body = """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"id":"client-chosen",
+                 "externalId":"DEV001","displayName":"개발본부","members":[]}
+                """;
+
+        // when
+        String id = client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange().expectStatus().isCreated()
+                .expectBody(Map.class).returnResult().getResponseBody().get("id").toString();
+
+        // then
+        assertThat(UUID.fromString(id).toString()).isEqualTo(id);
+        assertThat(state.groups).containsOnlyKeys(id);
+        assertThat(state.groups.get(id).externalId()).isEqualTo("DEV001");
+        client.get().uri("/scim/v2/Groups/" + id).exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.externalId").isEqualTo("DEV001")
+                .jsonPath("$.displayName").isEqualTo("개발본부");
+    }
+
+    @Test
+    @DisplayName("이미 같은 externalId 를 쓰는 조직이 있으면 생성은 409 uniqueness 로 거절한다")
+    void 중복_생성은_409다() {
+        // given — 아이디는 externalId 와 무관하다
+        state.saveGroup(new DirectoryGroup("0b1c4f7a-0000-4000-8000-000000000001", "DEV001", "개발본부", Set.of())).block();
         String body = """
                 {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                  "externalId":"DEV001","displayName":"개발본부"}
@@ -88,6 +115,8 @@ class ScimGroupHandlerTest {
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("uniqueness")
                 .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+
+        assertThat(state.groups).containsOnlyKeys("0b1c4f7a-0000-4000-8000-000000000001");
     }
 
     @Test

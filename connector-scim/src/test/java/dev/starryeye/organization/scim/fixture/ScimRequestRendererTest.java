@@ -35,6 +35,9 @@ class ScimRequestRendererTest {
     private static final OrgChart CHART = OrgChartFixture.오천명();
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /** 매퍼가 id 를 넘겨받게 되어 컴파일만 맞춘 고정값이다 — 렌더러 쪽 id 규칙은 Task 3 이 다시 쓴다. */
+    private static final String 고정_아이디 = "fixed-id";
+
     /**
      * 판정할 아이디가 넘어오면 실패한다(빈 집합이면 통과). 렌더러는 {@code type} 을 항상 명시하므로 서버가 현재상태를 추정할
      * 일이 없어야 한다 — 추정이 일어나면 테스트 결과에 추정의 정확도가 섞여 든다.
@@ -92,7 +95,7 @@ class ScimRequestRendererTest {
         CHART.snapshot().users().values().forEach(심은것 -> {
             // when
             var 읽힌것 = ScimMapper.toDirectoryUser(
-                    (ScimUser) ScimRequestRenderer.직원생성(심은것).body());
+                    (ScimUser) ScimRequestRenderer.직원생성(심은것).body(), 고정_아이디);
 
             // then — userName 이 아이디의 원천이라는 규칙이 여기서 검증된다
             assertThat(읽힌것.id()).isEqualTo(심은것.id());
@@ -109,7 +112,7 @@ class ScimRequestRendererTest {
         CHART.snapshot().groups().values().forEach(심은것 -> {
             // when
             var 읽힌것 = ScimMapper.toDirectoryGroup(
-                    (ScimGroup) ScimRequestRenderer.조직생성(심은것).body(), 추정금지).block();
+                    (ScimGroup) ScimRequestRenderer.조직생성(심은것).body(), 고정_아이디, 추정금지).block();
 
             // then — externalId 가 조직코드가 된다는 규칙(설계 §4.3)
             assertThat(읽힌것).isNotNull();

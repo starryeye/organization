@@ -38,10 +38,10 @@ public interface DirectoryStateRepository {
      * {@code userName} 을 {@code caseExact=false} 로 정한다. SCIM 생성의 409 중복 판정이 이 성질에
      * 기댄다: 대소문자만 다른 {@code userName} 으로 다시 만들려 하면 여기서 걸려야 한다.
      *
-     * <p>{@link DirectoryUser#id()} 는 생성 시점의 {@code userName} 에서 파생되고 그 뒤의
-     * {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은 {@code id} 다). 그래서 이름이
-     * 바뀐 뒤 같은 사람이 새 {@code userName} 으로 다시 생성 요청되면 {@link #findUser} 로는
-     * 못 찾고 같은 사람의 레코드가 둘 생긴다. 생성 시 중복 판정에 쓴다.
+     * <p>{@link DirectoryUser#id()} 는 서버가 발급한 값(SCIM 은 UUID)이거나 LDAP 의 불변 식별자이고,
+     * {@code userName} 은 속성일 뿐이라 id 는 {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은
+     * {@code id} 다). 그래서 이름이 바뀐 뒤 같은 사람이 새 {@code userName} 으로 다시 생성 요청되면
+     * {@link #findUser} 로는 못 찾고 같은 사람의 레코드가 둘 생긴다. 생성 시 중복 판정에 쓴다.
      */
     Flux<String> findUserIdsByUserName(String userName);
 

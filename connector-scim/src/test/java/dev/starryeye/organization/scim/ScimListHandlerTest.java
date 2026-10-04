@@ -20,6 +20,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.time.Duration;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -150,7 +151,10 @@ class ScimListHandlerTest {
                 .exchange()
                 .expectStatus().isCreated()
                 .expectBody()
-                .jsonPath("$.id").isEqualTo("choi")
+                .jsonPath("$.id").value(id -> {
+                    assertThat(UUID.fromString((String) id)).hasToString((String) id);
+                    assertThat(state.users.get((String) id).userName()).isEqualTo("choi");
+                })
                 .jsonPath("$.userName").doesNotExist();
     }
 
@@ -167,7 +171,7 @@ class ScimListHandlerTest {
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("invalidValue");
 
-        assertThat(state.users).doesNotContainKey("choi");
+        assertThat(state.users.values()).extracting(DirectoryUser::userName).doesNotContain("choi");
     }
 
     @Test
