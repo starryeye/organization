@@ -6,19 +6,24 @@ import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Batch;
 import dev.starryeye.organization.authz.OpenFgaRelationTupleWriter.Phase;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
+import dev.starryeye.organization.core.model.TupleWriteResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * apply() 가 실제로 OpenFGA 를 호출하기 전, 배치 짜기 자체를 고정한다(점검 S20, 설계 2026-10-05 §5).
@@ -74,7 +79,7 @@ class OpenFgaRelationTupleWriterBatchGroupingTest {
     }
 
     @Test
-    @DisplayName("한 대상이 한도보다 많이 바뀌면 그 대상만 여러 배치로 나뉘고, 모든 줄이 정확히 한 번 나간다")
+    @DisplayName("한 대상이 한도보다 많이 바뀌면 그 대상만 여러 배치로 나뉜다 — 지우기 조각은 직원 단계에, 쓰기 조각은 그 뒤 넘침 쓰기 단계에 들고, 모든 줄이 정확히 한 번 나간다")
     void 넘치는_대상만_나뉜다() {
         // given — 한도 3, kim 이 5줄(지우기 2 + 쓰기 3), lee 가 1줄
         var 쓰기 = Set.of(RelationTuple.directMember("kim", "A"), RelationTuple.directMember("kim", "B"),
@@ -84,9 +89,15 @@ class OpenFgaRelationTupleWriterBatchGroupingTest {
         // when
         var batches = writer(3).batchesFor(new TupleDelta(쓰기, 지우기));
 
-        // then
+        // then — 같은 단계면 조각들이 동시에 나가, 지우기 조각이 실패하고 쓰기 조각이 떨어진 kim 이 옛 소속과 새 소속을 함께 갖는다
         assertThat(batches).allSatisfy(batch -> assertThat(batch.size()).isLessThanOrEqualTo(3));
-        assertThat(batches).extracting(Batch::단계).containsOnly(Phase.직원);
+        assertThat(batches).extracting(Batch::단계).containsExactly(Phase.직원, Phase.직원, Phase.직원_넘침_쓰기);
+        assertThat(batches).filteredOn(b -> b.단계() == Phase.직원)
+                .allSatisfy(b -> assertThat(b.writes()).extracting(RelationTuple::user).doesNotContain("user:kim"));
+        assertThat(batches).filteredOn(b -> b.단계() == Phase.직원_넘침_쓰기).allSatisfy(b -> {
+            assertThat(b.deletes()).isEmpty();
+            assertThat(b.writes()).extracting(RelationTuple::user).containsOnly("user:kim");
+        });
         assertThat(batches.stream().flatMap(b -> b.writes().stream())).containsExactlyInAnyOrderElementsOf(쓰기);
         assertThat(batches.stream().flatMap(b -> b.deletes().stream())).containsExactlyInAnyOrderElementsOf(지우기);
         assertThat(batches).filteredOn(b -> b.tuples().stream().anyMatch(t -> t.user().equals("user:lee")))
@@ -199,6 +210,26 @@ class OpenFgaRelationTupleWriterBatchGroupingTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("겹친")
                 .hasMessageContaining("user:kim");
+    }
+
+    @Test
+    @DisplayName("겹치는 델타를 받은 apply 는 던지지 않고 오류 신호를 돌려준다 — 호출자의 오류 처리(onError)를 지난다")
+    void 겹치면_apply_는_오류_신호를_돌려준다() {
+        // given
+        var 겹침 = RelationTuple.directMember("kim", "DEV001");
+        var delta = new TupleDelta(Set.of(겹침), Set.of(겹침));
+        AtomicReference<Mono<TupleWriteResult>> 결과 = new AtomicReference<>();
+
+        // when
+        Throwable 던진것 = catchThrowable(() -> 결과.set(writer(100).apply(delta)));
+
+        // then
+        assertThat(던진것).isNull();
+        StepVerifier.create(결과.get())
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessageContaining("겹친"))
+                .verify();
     }
 
     @Test
