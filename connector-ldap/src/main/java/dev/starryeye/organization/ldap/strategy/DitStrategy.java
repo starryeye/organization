@@ -182,8 +182,8 @@ public class DitStrategy implements LdapMappingStrategy {
                             adapter.getStringAttribute(UserAttributes.CN),
                             userName),
                     adapter.getStringAttribute(config.getUserMailAttribute()),
-                    // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(dn, attributes, 지금),
+                    // 디렉터리가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
+                    !AccountStatus.막혔는가(dn, attributes, 지금),
                     LdapPersonName.from(attributes));
         };
     }
@@ -215,7 +215,7 @@ public class DitStrategy implements LdapMappingStrategy {
      * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
      * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
      * @param email       메일. 없으면 null
-     * @param active      AD 가 막은 계정이 아니면 true
+     * @param active      디렉터리가 막은 계정이 아니면 true
      * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
      */
     private record UserEntry(String dn, String id, String userName, String displayName, String email,

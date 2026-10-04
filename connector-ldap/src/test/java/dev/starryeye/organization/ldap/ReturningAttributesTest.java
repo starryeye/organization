@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 검색이 쓰는 속성만 요청한다(설계 2026-10-04 §4.3, 점검 P7). 요청 속성을 비워 두면 서버가 모든 사용자 속성을 보내고,
- * 운영 속성(entryUUID)은 이름을 대야만 온다.
+ * 운영 속성(entryUUID, pwdAccountLockedTime)은 이름을 대야만 온다.
  *
  * <p>서버가 실제로 받은 검색 요청을 인터셉터로 잡아 속성 목록을 본다. 직원 엔트리에는 어느 전략도 쓰지 않는
  * {@code thumbnailPhoto} 를 둬서, "필요한 것만" 이 이름으로 가려지게 한다. AD 범위 읽기({@code member;range=…})는
@@ -24,7 +24,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ReturningAttributesTest extends EmbeddedLdapSupport {
 
     private static final List<String> 직원_계정_상태_이름 = List.of(
-            "userAccountControl", "accountExpires", "sn", "givenName", "middleName", "generationQualifier");
+            "userAccountControl", "accountExpires", "pwdAccountLockedTime",
+            "sn", "givenName", "middleName", "generationQualifier");
 
     private final List<검색요청> 요청 = new CopyOnWriteArrayList<>();
 
