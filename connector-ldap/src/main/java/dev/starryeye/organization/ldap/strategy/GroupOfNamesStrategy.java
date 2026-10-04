@@ -111,7 +111,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     조직대조수++;
                     continue;
                 }
-                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다", entry.id(), memberDn);
+                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다 (dn={})", entry.id(), memberDn, entry.dn());
             }
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
@@ -218,8 +218,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 List<String> 전부 = RangedAttributeReader.전부_읽는다(한커넥션,
                         LdapDns.상대로(entry.dn(), properties.getBaseDn()),
                         config.getMemberAttribute());
-                log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개)",
-                        entry.id(), 전부.size(), entry.members().size());
+                log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개, dn={})",
+                        entry.id(), 전부.size(), entry.members().size(), entry.dn());
                 결과.put(entry.dn(), 전부);
             }
             return 결과;

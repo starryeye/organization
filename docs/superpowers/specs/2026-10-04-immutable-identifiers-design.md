@@ -49,7 +49,7 @@ README "인가 모델"·"조회 API — 식별자 셋".
   갈래는 없어진다.
 - **조직** — RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없다. 그래도 **`externalId` 가 있으면 겹칠 때 409** 다 — 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이 둘 생겨
   멤버가 갈린다. 지금도 조직코드(= `externalId`)로 같은 일을 막고 있다. 판정은 락 안에서 GSI3(`externalId`) + 본 테이블 재확인으로 한다(직원 `userName` 과 같은 방식).
-  `externalId` 가 없는 조직은 중복 판정이 없다. `externalId` 를 **바꾸는** PUT·PATCH 도 같은 확인을 한다(직원 `userName` 변경과 같다).
+  `externalId` 가 없는 조직은 중복 판정이 없다. `externalId` 를 **바꾸는** PUT 도 같은 확인을 한다(직원 `userName` 변경과 같다). 조직 PATCH 는 `externalId` 를 바꿀 수 없다 — 경로로 지정하면 400 `invalidPath`, 경로 없는 PATCH 는 `externalId` 를 조용히 무시한다(기존 동작).
 - **구현 중 정한 것** — 조직 `externalId` 는 대소문자를 가린다(RFC 7643 `caseExact: true`). 직원의 `externalId` 는 중복을 판정하지 않는다(재시도 중복은 `userName`
   이 막는다). 같은 `externalId` 를 가진 직원이 둘이면 `?externalId=` 가 여러 줄을 돌려준다(§5).
 
@@ -114,7 +114,7 @@ README "인가 모델"·"조회 API — 식별자 셋".
 
 ## 6. 옮기기 (운영 배포 전 — 이관 코드는 만들지 않는다)
 
-- **app-scim** — 기존 데이터의 아이디는 `userName` 에서 온 값이라 쓸 수 없다. `POST /admin/sync/rebuild?mode=wipe` 뒤 IdP 에서 프로비저닝을 처음부터 다시 한다(테이블·store 를
+- **app-scim** — 기존 데이터의 아이디는 `userName` 에서 온 값이라 쓸 수 없다. `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` 뒤 IdP 에서 프로비저닝을 처음부터 다시 한다(테이블·store 를
   새로 만들어도 된다).
 - **app-ldap** — 첫 동기화에서 모든 id 가 바뀌어 옛 튜플 전부가 지울 대상이 되고 삭제 가드가 멈춘다. 한 번 `POST /admin/sync/full?force=true` 로 넘긴다(또는 테이블·store 를 새로).
 - README 에 절차를 적는다.
@@ -183,6 +183,8 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - **권한을 묻는 앱은 조회가 필요하다.** 로그인한 사용자를 우리 id 로 바꾸려면 관리 API(`userName`·`externalId`) 또는 SCIM 목록 필터를 불러야 한다. 토큰 클레임과의 자동 연결은
   하지 않는다.
 - **고아 튜플은 그대로 남는다.** 새 입사자가 물려받지 않을 뿐, 지운 직원의 옛 id 로 남은 튜플은 SCIM 재적재(`mode=tuples`)가 지운다.
+  - 5xx 뒤에 재시도된 POST 는 새 UUID 를 만든다(PUT·PATCH 와 달리 같은 최종 상태를 목표로 하지 않는다). 첫 번째 id 로 이미 써 둔 튜플은 고아가 되어 `mode=tuples`
+    재적재만 지운다. 첫 번째 id 는 어떤 상태·응답에도 없으므로 권한이 새는 것은 아니다. Entra 가 조직을 빈 채로 만들어 드문 경우다.
 - **`objectGUID` 와 `member;range=` 는 실제 AD 로 확인하지 못했다** — 바이트 변환은 단위 테스트, 이진 선언은 JNDI 환경 값으로만 본다. 검색이 `member` 를 이름을 대 요청할 때
   AD 가 `member;range=…` 로 나눠 주는 동작도 임베디드 서버로는 볼 수 없다.
 - **전송량·힙 감소는 추정이다** — 임베디드 서버는 속성이 몇 개뿐이라 AD 크기를 재지 못한다. 요청 속성 목록만 단정한다.
@@ -192,6 +194,8 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - **`userName`·조직 `externalId` 중복 판정은 GSI 후보를 본 테이블로 다시 확인한다** — 막 저장돼 GSI 에 아직 없는 리소스와는 겹칠 수 있다(직원 `userName` 의 기존 틈과 같다).
 - **SCIM 에서 "아직 없는 리소스를 먼저 참조"하는 경로는 이제 생기지 않는다** — IdP 는 받은 `id` 로만 가리킨다. 상위 조직이 새 조직을 먼저 적어 두는 처리(`상위_조직들`)는 SCIM 에서 비게 된다(코드는 남는다).
 - **`entryUUID` 규모 테스트는 groupOfNames 만 본다** — DIT 의 `entryUUID` 는 e2e(`LdapDitImmutableIdEndToEndTest`)까지만 있다.
+- **기존 app-ldap e2e(삭제 가드, 멈춘 뒤 OpenFGA Read 복구, 보관, 어긋남)는 이름 기반 id 로 돈다** — `entryUUID` 로 끝에서 끝까지 확인한 것은 동기화와 개명뿐이다. 나머지 경로는
+  id 의 모양을 보지 않는다(id 중립).
 - **관리 API 의 `?externalId=` 조회도 같은 GSI3 지연이 있다** — 방금 만든 리소스는 잠깐(보통 1초 미만) 안 나올 수 있다. 중복 판정과 같은 인덱스를 쓴다.
 
 ## 12. 범위 밖

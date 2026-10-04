@@ -614,15 +614,23 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
-    @DisplayName("externalId 는 대소문자를 가린다 — 다른 대소문자의 직원은 찾지 않는다")
+    @DisplayName("externalId 는 대소문자를 가린다 — 후보로 올라온 다른 대소문자의 직원도 본 테이블 재확인에서 걸러진다")
     void externalId_는_대소문자를_가린다() {
-        // given
-        state.users.put("u-1", new DirectoryUser("u-1", "Okta-00U1", "kim", "김", null, true));
+        // given — 후보 목록이 대소문자만 다른 u-1 을 돌려준다(GSI 가 대소문자를 가리지 않는다고 가정한 최악의 경우).
+        // 가짜 저장소가 알아서 걸러 주면 이 테스트는 유스케이스가 아니라 가짜를 보게 된다
+        var 후보가_넓은 = new FakeStateRepository() {
+            @Override
+            public Flux<String> findUserIdsByExternalId(String externalId) {
+                return Flux.just("u-1");
+            }
+        };
+        후보가_넓은.users.put("u-1", new DirectoryUser("u-1", "Okta-00U1", "kim", "김", null, true));
+        var useCase = new AdminQueryUseCase(후보가_넓은, new FakeSearchRepository(후보가_넓은), checker);
 
         // when
         var page = useCase.findEmployeesByExternalId("okta-00u1").block();
 
-        // then
+        // then — 후보에는 올라왔지만 externalId 가 정확히 같지 않아 결과에서 빠진다
         assertThat(page.items()).isEmpty();
     }
 

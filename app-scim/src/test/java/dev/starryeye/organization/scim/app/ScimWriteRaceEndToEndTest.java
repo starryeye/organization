@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.core.fixture.Containers;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import org.junit.jupiter.api.DisplayName;
@@ -289,8 +290,10 @@ class ScimWriteRaceEndToEndTest {
                     () -> 요청한다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code)),
                     () -> 요청한다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code))));
 
-            // then — 하나만 만들어졌고, 그 하나가 externalId 로 찾아진다
+            // then — 하나만 만들어졌고(409 는 scimType uniqueness), 그 하나가 externalId 로 찾아진다
             assertThat(응답들.stream().map(응답::상태).toList()).as("라운드 %d", r).containsExactlyInAnyOrder(201, 409);
+            String 거절된본문 = 응답들.stream().filter(결과 -> 결과.상태() == 409).findFirst().orElseThrow().본문();
+            assertThat(new ObjectMapper().readTree(거절된본문).path("scimType").asText()).as("라운드 %d", r).isEqualTo("uniqueness");
             String 만들어진 = 만든_아이디(응답들.stream().filter(결과 -> 결과.상태() == 201).findFirst().orElseThrow().본문());
             JsonNode found = client.get().uri("/scim/v2/Groups?filter={f}", "externalId eq \"" + code + "\"")
                     .exchange().expectStatus().isOk()

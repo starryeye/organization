@@ -113,17 +113,21 @@ class ScimProvisioningOrderScaleTest {
         List<ScimRequest> 멤버요청 = 멤버요청들();
 
         // when — 직원이 먼저 도착한다. 아직 어느 조직의 멤버도 아니다
-        long t0 = System.currentTimeMillis();
+        long 직원시작 = System.nanoTime();
         직원요청.forEach(request -> 보낸다(request, 201));
+        long 직원도착나노 = System.nanoTime() - 직원시작;
 
         // then — 직원 전부와 빈 조직들이 있고, 모든 멤버십의 튜플이 없다. 직원과 조직이 모두 서버 id 를 받았으므로
         // "없어야 한다" 는 후보 하나하나가 서버 id 로 묻는 진짜 Check 다
         검증한다(ChartExpectation.of(번역부.번역한다(조직과_직원만_있는_조직도())));
 
         // when — IdP 가 조직마다 멤버(직원과 하위 조직)를 PATCH 로 더한다
+        long 멤버시작 = System.nanoTime();
         멤버요청.forEach(request -> 보낸다(request, 204));
-        System.out.printf("%n=== S1. 조직 먼저 순서 — 직원 %d명 도착 + 멤버 PATCH %d건: %.1f초%n",
-                직원요청.size(), 멤버요청.size(), (System.currentTimeMillis() - t0) / 1000.0);
+        long 멤버나노 = System.nanoTime() - 멤버시작;
+        // 가운데의 하네스 검증은 요청이 아니므로 시간에 넣지 않는다 — 두 요청 구간만 더한다
+        System.out.printf("%n=== S1. 조직 먼저 순서 — 직원 %d명 도착 + 멤버 PATCH %d건(검증 제외): %.1f초%n",
+                직원요청.size(), 멤버요청.size(), (직원도착나노 + 멤버나노) / 1_000_000_000.0);
 
         // then — 멤버로 더해지는 그때 튜플이 전부 만들어진다
         검증한다();

@@ -37,10 +37,14 @@ import java.util.TreeSet;
  */
 public final class ChartExpectation {
 
-    private static final Comparator<MemberRef> 멤버순 =
-            Comparator.comparing(MemberRef::type).thenComparing(MemberRef::id);
-
     private final OrgChart chart;
+    /**
+     * 아이디 정렬은 <b>처음 조직도의 아이디({@link OrgChart#원래아이디})</b>로 한다 — 서버가 발급한 무작위 id 로 바뀐 조직도에서
+     * 바뀐 id 순으로 정렬하면 실행마다 후보·실패 메시지의 순서와 BatchCheck 묶음이 달라진다({@link RollupSampling} 과 같다).
+     * 바꾸지 않은 조직도는 {@code 원래아이디} 가 아이디 자신이라 예전과 똑같이 정렬된다. 같은 값이면 바뀐 아이디 순으로 가른다.
+     */
+    private final Comparator<String> 아이디순;
+    private final Comparator<MemberRef> 멤버순;
     /** 하위 조직 → 그 조직을 하위로 가진 조직들. 조직도에 있는 조직끼리만. */
     private final Map<String, Set<String>> 부모들;
     private final Set<RelationTuple> 있어야할튜플;
@@ -48,6 +52,8 @@ public final class ChartExpectation {
 
     private ChartExpectation(OrgChart chart, boolean 끊긴참조허용) {
         this.chart = chart;
+        this.아이디순 = Comparator.comparing(chart::원래아이디).thenComparing(Comparator.naturalOrder());
+        this.멤버순 = Comparator.comparing(MemberRef::type).thenComparing(MemberRef::id, 아이디순);
         DirectorySnapshot snapshot = chart.snapshot();
         if (!끊긴참조허용) {
             List<String> 끊긴것 = 끊긴참조들(snapshot);
@@ -111,7 +117,7 @@ public final class ChartExpectation {
             return Set.of();
         }
         Set<String> 기대소속 = 기대소속(userId);
-        Set<String> 음성 = new TreeSet<>();
+        Set<String> 음성 = new TreeSet<>(아이디순);
         for (String 직속 : 직속조직들(userId)) {
             음성.addAll(자손들(직속));
             for (String 부모 : 부모들.getOrDefault(직속, Set.of())) {
@@ -135,7 +141,7 @@ public final class ChartExpectation {
     }
 
     private Set<String> 직속조직들(String userId) {
-        Set<String> orgs = new TreeSet<>();
+        Set<String> orgs = new TreeSet<>(아이디순);
         for (DirectoryGroup group : chart.snapshot().groups().values()) {
             if (group.members().contains(MemberRef.user(userId))) {
                 orgs.add(group.id());
@@ -146,7 +152,7 @@ public final class ChartExpectation {
 
     /** 직속 + <b>모든 부모</b>를 따라 올라간 조상. {@link OrgChart#부모} 는 첫 부모만 주므로 쓰지 않는다. */
     private Set<String> 기대소속(String userId) {
-        Set<String> found = new TreeSet<>();
+        Set<String> found = new TreeSet<>(아이디순);
         Deque<String> 남은것 = new ArrayDeque<>(직속조직들(userId));
         while (!남은것.isEmpty()) {
             String current = 남은것.pop();
@@ -158,7 +164,7 @@ public final class ChartExpectation {
     }
 
     private Set<String> 자손들(String orgCode) {
-        Set<String> found = new TreeSet<>();
+        Set<String> found = new TreeSet<>(아이디순);
         Deque<String> 남은것 = new ArrayDeque<>(자식조직들(orgCode));
         while (!남은것.isEmpty()) {
             String current = 남은것.pop();
@@ -175,7 +181,7 @@ public final class ChartExpectation {
         if (group == null) {
             return Set.of();
         }
-        Set<String> children = new TreeSet<>();
+        Set<String> children = new TreeSet<>(아이디순);
         for (MemberRef member : group.members()) {
             if (member.type() == MemberType.GROUP && chart.snapshot().groups().containsKey(member.id())) {
                 children.add(member.id());
@@ -186,7 +192,7 @@ public final class ChartExpectation {
 
     // ---------- 만들 때 한 번 ----------
 
-    private static List<String> 끊긴참조들(DirectorySnapshot snapshot) {
+    private List<String> 끊긴참조들(DirectorySnapshot snapshot) {
         List<String> 끊긴것 = new ArrayList<>();
         for (DirectoryGroup group : 정렬한_조직(snapshot)) {
             for (MemberRef member : 정렬한_멤버(group)) {
@@ -201,14 +207,14 @@ public final class ChartExpectation {
         return 끊긴것;
     }
 
-    private static void 순환이_없어야_한다(DirectorySnapshot snapshot) {
+    private void 순환이_없어야_한다(DirectorySnapshot snapshot) {
         Map<String, Integer> 색 = new HashMap<>();   // 없음=미방문, 1=방문중, 2=끝남
         for (DirectoryGroup group : 정렬한_조직(snapshot)) {
             훑는다(group.id(), snapshot, 색, new ArrayList<>());
         }
     }
 
-    private static void 훑는다(String node, DirectorySnapshot snapshot, Map<String, Integer> 색,
+    private void 훑는다(String node, DirectorySnapshot snapshot, Map<String, Integer> 색,
                             List<String> 경로) {
         Integer 현재 = 색.get(node);
         if (현재 != null && 현재 == 2) {
@@ -243,7 +249,7 @@ public final class ChartExpectation {
         return 부모들;
     }
 
-    private static Set<RelationTuple> 있어야할튜플을_모은다(DirectorySnapshot snapshot) {
+    private Set<RelationTuple> 있어야할튜플을_모은다(DirectorySnapshot snapshot) {
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         for (DirectoryGroup group : 정렬한_조직(snapshot)) {
             for (MemberRef member : 정렬한_멤버(group)) {
@@ -260,7 +266,7 @@ public final class ChartExpectation {
         return tuples;
     }
 
-    private static Set<RelationTuple> 후보를_모은다(OrgChart chart) {
+    private Set<RelationTuple> 후보를_모은다(OrgChart chart) {
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         for (DirectoryGroup group : 정렬한_조직(chart.snapshot())) {
             for (MemberRef member : 정렬한_멤버(group)) {
@@ -268,7 +274,7 @@ public final class ChartExpectation {
             }
         }
         chart.지워진멤버십().stream()
-                .sorted(Comparator.comparing(Membership::조직).thenComparing(Membership::멤버, 멤버순))
+                .sorted(Comparator.comparing(Membership::조직, 아이디순).thenComparing(Membership::멤버, 멤버순))
                 .forEach(m -> tuples.add(튜플로(m.조직(), m.멤버())));
         return tuples;
     }
@@ -279,12 +285,12 @@ public final class ChartExpectation {
                 : RelationTuple.child(member.id(), groupId);
     }
 
-    private static List<DirectoryGroup> 정렬한_조직(DirectorySnapshot snapshot) {
+    private List<DirectoryGroup> 정렬한_조직(DirectorySnapshot snapshot) {
         return snapshot.groups().values().stream()
-                .sorted(Comparator.comparing(DirectoryGroup::id)).toList();
+                .sorted(Comparator.comparing(DirectoryGroup::id, 아이디순)).toList();
     }
 
-    private static List<MemberRef> 정렬한_멤버(DirectoryGroup group) {
+    private List<MemberRef> 정렬한_멤버(DirectoryGroup group) {
         return group.members().stream().sorted(멤버순).toList();
     }
 }

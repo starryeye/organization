@@ -307,7 +307,8 @@ displayName  홍길동
 
 - `GET /admin/employees?userName=gd.hong` — 계정명으로 찾는다. 접두사 검색이라 더 긴 계정명도 함께 올라오므로 `userName`이 같은 줄을 고른다
 - `GET /admin/employees?externalId=<IdP의 사용자 id>` — 정확히 일치한다. SCIM이면 IdP가 보낸 `externalId`(Okta의 사용자 id, Entra에서
-  `objectId`를 `externalId`로 매핑했다면 그 값)이고, LDAP이면 서버가 준 절대 DN이다
+  `objectId`를 `externalId`로 매핑했다면 그 값)이고, LDAP이면 서버가 준 절대 DN이다. **LDAP은 관리 API가 보여 주는 DN을 그대로 쓴다** — 저장된
+  값은 서버가 준 DN을 `LdapName`으로 다시 쓴 문자열이라, 앱이 따로 적은 표기(공백·이스케이프·대소문자)는 맞지 않을 수 있다
 
 `Check(user:<얻은 employeeId>, member, group:<조직 id>)`로 묻는다. app-scim은 `GET /scim/v2/Users?filter=userName eq "…"`·
 `filter=externalId eq "…"`로도 찾을 수 있다.
@@ -382,8 +383,9 @@ e2e 로 확인했다).
 
 **`userName` 은 `user-login-attribute`(기본 `uid`)의 원본 값이다.** 정규화하지 않는다 — `uid: hong gd` 는 `hong gd` 그대로다. 그 속성이
 없으면 식별 값으로 대신한다. 표시명은 이렇게 채운다 — 직원은 `user-name-attribute`(기본 `displayName`) → `cn` → `userName`, 조직은
-`group-name-attribute`(기본 `description`) → DN 의 첫 RDN 값(`cn`/`ou`)이다. 끝까지 id 로 가지 않으므로 UUID 가 표시명으로 보이는 일이
-없다. `externalId` 는 두 전략 모두 서버가 준 절대 DN 이다.
+`group-name-attribute`(기본 `description`) → DN 의 첫 RDN 값(`cn`/`ou`)이다. 보통의 엔트리는 이 사슬에서 이름이 나오므로 UUID 가 표시명으로
+보이지 않는다. 다만 `userName` 은 로그인 속성이 없으면 id 로 대신하므로, 로그인 속성·표시명 속성·`cn` 이 모두 없는 직원 엔트리는 UUID 가 그대로
+표시명이 된다. `externalId` 는 두 전략 모두 서버가 준 절대 DN 이다.
 
 **검색은 쓰는 속성만 이름을 대 요청한다.** 운영 속성인 `entryUUID` 는 이름을 대야 오기도 하고, AD 사용자 하나에는 `memberOf`·
 `proxyAddresses`·`thumbnailPhoto` 등이 10~20KB 붙어 10만 명이면 한 회차에 1~2GB 였다(추정). 요청하는 속성은 직원의 식별·로그인·표시명·메일
@@ -485,13 +487,14 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못한다.
 **`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 무작위 UUID(v4, 소문자 하이픈)를 새로 만들어 응답으로 돌려주고,
 요청 본문의 `id` 는 무시한다. IdP 는 이 `id` 를 저장해 PATCH·PUT·DELETE 의 경로와 조직의 `members[].value` 에 쓴다. PUT 도 경로의 `id` 가
 기준이다. 이 `id` 가 곧 `employeeId`·`orgCode` 이고 튜플에 실린다. 그래서 지운 직원과 같은 `userName` 으로 다시 만들어도 새 `id` 라 옛 `id` 로
-남은 권한을 물려받지 않고, 이름을 바꾼 직원의 옛 `userName` 을 새 입사자가 쓸 수 있다. **아직 없는 리소스는 참조할 수 없다** — IdP 는 받은
-`id` 로만 가리키므로, 조직도 직원도 먼저 만들어 `id` 를 받은 뒤에 멤버를 PATCH 하는 순서가 된다. 조직의 `externalId`(IdP 가 정하는 값)는 속성으로만
+남은 권한을 물려받지 않고, 이름을 바꾼 직원의 옛 `userName` 을 새 입사자가 쓸 수 있다. **IdP 는 아직 받지 못한 `id` 를 알 수 없다** — 그래서
+실제로는 자기가 만들어 `id` 를 받은 리소스만 가리키고, 조직도 직원도 먼저 만든 뒤에 멤버를 PATCH 하는 순서가 된다(서버가 모르는 `id` 를 멤버로
+받으면 막지는 않는다 — 멤버 줄만 저장하고, 그 직원이 실제로 있기 전에는 튜플을 만들지 않는다. 아래 `members[].value` 문단). 조직의 `externalId`(IdP 가 정하는 값)는 속성으로만
 남고 id 를 만들지 않는다.
 
 **`userName` 은 POST·PUT·PATCH 모두에서 대소문자를 무시하고 유일하다**(RFC 7643 `uniqueness: server`, `caseExact: false`). 겹치면
 409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
-PUT·PATCH 도 같다. RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이
+PUT 도 같다(조직 PATCH 는 `externalId` 를 바꿀 수 없다 — 경로로 지정하면 400 `invalidPath`). RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이
 둘 생겨 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
 보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본
 테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만) 저장된 직원과 대소문자만 다른 이름, 방금 저장된 조직과 같은 `externalId` 는 드물게 통과할 수 있다.
@@ -648,7 +651,7 @@ IdP가 연결을 끊어도 그 변경은 커밋까지 마치고 락을 반납한
 ./gradlew scaleTest   # 규모 테스트만 — 머지 전에 돌린다
 ```
 
-**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 12개 클래스(`@ScaleTest`
+**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 16개 클래스(`@ScaleTest`
 가 붙은 것)가 전체 시간의 대부분(약 9분)을 차지해서다. 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
 않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
 테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.
