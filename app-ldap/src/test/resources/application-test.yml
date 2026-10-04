@@ -17,10 +17,12 @@ ldap:
   bind-dn: cn=admin,dc=example,dc=com
   bind-password: adminpassword
   strategy: group-of-names
+  # 기존 e2e·규모 테스트는 이름 기반으로 돈다. 기본값(entryUUID)은 LdapImmutableIdEndToEndTest·LdapEntryUuidScaleTest 가 본다(설계 §8)
   group-of-names:
     user-search-base: ou=people
     user-object-class: inetOrgPerson
     user-id-attribute: uid
+    user-login-attribute: uid
     user-name-attribute: displayName
     user-mail-attribute: mail
     group-search-base: ou=groups
@@ -28,6 +30,16 @@ ldap:
     group-id-attribute: cn
     group-name-attribute: description
     member-attribute: member
+  dit:
+    root-dn: ou=company
+    org-unit-object-class: organizationalUnit
+    group-id-attribute: ou
+    group-name-attribute: description
+    user-object-class: inetOrgPerson
+    user-id-attribute: uid
+    user-login-attribute: uid
+    user-name-attribute: displayName
+    user-mail-attribute: mail
 
 dynamodb:
   region: ap-northeast-2

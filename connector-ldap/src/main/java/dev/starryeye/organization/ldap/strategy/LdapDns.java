@@ -71,6 +71,23 @@ final class LdapDns {
     }
 
     /**
+     * DN 의 가장 왼쪽 RDN 의 값 — 엔트리가 자기 이름으로 삼는 값이다. 값은 이스케이프를 푼 원본이고(대소문자도 그대로),
+     * 다중값 RDN 은 첫 쌍의 값이다. 이진({@code #hex}) 값은 사람이 읽을 수 없으므로 RDN 문자열 그대로 돌려 준다.
+     * 빈 DN 에는 첫 RDN 이 없어 null 이다.
+     *
+     * <p>조직 이름 속성이 없을 때 표시명을 대신한다. 문자열로 첫 쉼표까지 자르면 이스케이프된 쉼표({@code cn=R\,D})에서 값이 잘린다.
+     */
+    static String 첫_RDN_값(String dn) {
+        LdapName name = 파싱한다(dn);
+        if (name.isEmpty()) {
+            return null;
+        }
+        // LdapName 은 0 이 뿌리 쪽이다 — 사람이 읽는 맨 앞 RDN 은 마지막 인덱스다
+        Rdn rdn = name.getRdn(name.size() - 1);
+        return rdn.getValue() instanceof String 값 ? 값 : rdn.toString();
+    }
+
+    /**
      * 대조용 키. 같은 엔트리를 가리키는 두 DN 은 표기가 달라도 같은 키가 된다.
      * 값은 소문자로 맞춘다 — LDAP 의 이름 속성은 대개 대소문자를 가리지 않는다.
      */

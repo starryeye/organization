@@ -21,8 +21,28 @@ public abstract class EmbeddedLdapSupport {
     protected static final String BIND_DN = "cn=admin," + BASE_DN;
     protected static final String BIND_PASSWORD = "adminpassword";
 
-    private InMemoryDirectoryServer server;
+    /** 개명(ModifyDN)·속성 추가처럼 서버를 바꾸는 시나리오가 쓴다. */
+    protected InMemoryDirectoryServer server;
     protected LdapTemplate ldapTemplate;
+
+    /**
+     * 이름 기반 식별 속성(직원 {@code uid}, groupOfNames 조직 {@code cn}, DIT 조직 {@code ou}, 로그인 {@code uid})을 못박은 설정.
+     * 기본값은 불변 id({@code entryUUID})로 바뀌었다(설계 2026-10-04 §4.1). 식별자가 주제가 아니고 이름 기반 기대값에 기대는 테스트가
+     * 기본값 대신 이것을 쓴다. 접속 정보는 담지 않는다.
+     */
+    public static LdapProperties 이름기반() {
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        var g = properties.getGroupOfNames();
+        g.setUserIdAttribute("uid");
+        g.setUserLoginAttribute("uid");
+        g.setGroupIdAttribute("cn");
+        var d = properties.getDit();
+        d.setUserIdAttribute("uid");
+        d.setUserLoginAttribute("uid");
+        d.setGroupIdAttribute("ou");
+        return properties;
+    }
 
     /** 각 테스트가 자기 조직도 LDIF 를 준다 */
     protected abstract String ldif();

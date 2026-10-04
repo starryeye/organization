@@ -59,6 +59,7 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
                 dn: uid=kim,ou=people,dc=example,dc=com
                 objectClass: inetOrgPerson
                 uid: kim
+                sAMAccountName: kim.cs
                 employeeNumber: 1001
                 cn: Kim Chulsoo
                 sn: Kim
@@ -70,6 +71,7 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
                 dn: uid=park,ou=people,dc=example,dc=com
                 objectClass: inetOrgPerson
                 uid: park
+                sAMAccountName: park.ms
                 employeeNumber: 1002
                 cn: Park Minsu
                 sn: Park
@@ -101,6 +103,7 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
                 dn: uid=choi,ou=DEV001,ou=company,dc=example,dc=com
                 objectClass: inetOrgPerson
                 uid: choi
+                sAMAccountName: choi.jw
                 employeeNumber: 2001
                 cn: Choi Jiwoo
                 sn: Choi
@@ -190,6 +193,7 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         // given
         var properties = groupOfNames설정();
         properties.getGroupOfNames().setUserIdAttribute("employeeNumber");
+        properties.getGroupOfNames().setUserLoginAttribute("sAMAccountName");
         properties.getGroupOfNames().setUserNameAttribute("title");
         properties.getGroupOfNames().setGroupNameAttribute("businessCategory");
         var strategy = new GroupOfNamesStrategy(properties);
@@ -197,10 +201,11 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         // when
         var snapshot = strategy.read(ldapTemplate);
 
-        // then
+        // then — 로그인 속성도 설정한 이름으로 요청하고, 그 값이 userName 이 된다
         assertThat(snapshot.users()).containsOnlyKeys("1001", "1002");
+        assertThat(snapshot.users().get("1001").userName()).isEqualTo("kim.cs");
         assertThat(요청한_속성("inetOrgPerson"))
-                .contains("employeeNumber", "title", "mail", "cn")
+                .contains("employeeNumber", "sAMAccountName", "title", "mail", "cn")
                 .doesNotContain("uid", "displayName");
         assertThat(요청한_속성("groupOfNames"))
                 .contains("cn", "businessCategory", "member")
@@ -213,6 +218,7 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         // given
         var properties = dit설정();
         properties.getDit().setUserIdAttribute("employeeNumber");
+        properties.getDit().setUserLoginAttribute("sAMAccountName");
         properties.getDit().setUserNameAttribute("title");
         properties.getDit().setGroupNameAttribute("businessCategory");
         var strategy = new DitStrategy(properties);
@@ -220,14 +226,50 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         // when
         var snapshot = strategy.read(ldapTemplate);
 
-        // then
+        // then — 로그인 속성도 설정한 이름으로 요청하고, 그 값이 userName 이 된다
         assertThat(snapshot.users()).containsOnlyKeys("2001");
+        assertThat(snapshot.users().get("2001").userName()).isEqualTo("choi.jw");
         assertThat(요청한_속성("inetOrgPerson"))
-                .contains("employeeNumber", "title", "mail", "cn")
+                .contains("employeeNumber", "sAMAccountName", "title", "mail", "cn")
                 .doesNotContain("uid", "displayName");
         assertThat(요청한_속성("organizationalUnit"))
                 .contains("ou", "businessCategory")
                 .doesNotContain("description");
+    }
+
+    @Test
+    @DisplayName("groupOfNames 기본 설정은 운영 속성 entryUUID 를 이름으로 요청한다 — 이름을 대야만 온다")
+    void groupOfNames_기본값은_entryUUID_를_이름으로_요청한다() {
+        // given — 식별 속성을 지정하지 않은 기본 설정
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 직원·그룹 모두 id 가 서버가 만든 entryUUID 라 이름을 대 요청한다
+        assertThat(요청한_속성("inetOrgPerson")).contains("entryUUID", "uid").doesNotContain("thumbnailPhoto");
+        assertThat(요청한_속성("groupOfNames")).contains("entryUUID", "description", "member").doesNotContain("cn");
+        assertThat(snapshot.users()).hasSize(2).allSatisfy((id, 직원) -> assertThat(id).hasSize(36));
+    }
+
+    @Test
+    @DisplayName("DIT 기본 설정도 운영 속성 entryUUID 를 이름으로 요청한다")
+    void DIT_기본값도_entryUUID_를_이름으로_요청한다() {
+        // given
+        var properties = new LdapProperties();
+        properties.setBaseDn(BASE_DN);
+        properties.setStrategy("dit");
+        var strategy = new DitStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(요청한_속성("inetOrgPerson")).contains("entryUUID", "uid").doesNotContain("thumbnailPhoto");
+        assertThat(요청한_속성("organizationalUnit")).contains("entryUUID", "description").doesNotContain("ou");
+        assertThat(snapshot.users()).hasSize(1).allSatisfy((id, 직원) -> assertThat(id).hasSize(36));
     }
 
     @Test

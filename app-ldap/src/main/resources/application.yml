@@ -35,24 +35,28 @@ ldap:
   connect-timeout: 10s
   read-timeout: 150s
   strategy: group-of-names
+  # id 는 서버가 엔트리마다 만들어 이름이 바뀌어도 유지하는 불변 값이다(entryUUID — OpenLDAP·389DS 등). AD 는 objectGUID,
+  # 로그인 속성은 sAMAccountName 을 권한다. uid/cn/ou 같은 이름 기반 id 도 쓸 수 있지만 개명이 삭제+생성이 된다
   group-of-names:
     user-search-base: ou=people
     user-object-class: inetOrgPerson
-    user-id-attribute: uid
+    user-id-attribute: entryUUID
+    user-login-attribute: uid
     user-name-attribute: displayName
     user-mail-attribute: mail
     group-search-base: ou=groups
     group-object-class: groupOfNames
-    group-id-attribute: cn
+    group-id-attribute: entryUUID
     group-name-attribute: description
     member-attribute: member
   dit:
     root-dn: ou=company
     org-unit-object-class: organizationalUnit
-    group-id-attribute: ou
+    group-id-attribute: entryUUID
     group-name-attribute: description
     user-object-class: inetOrgPerson
-    user-id-attribute: uid
+    user-id-attribute: entryUUID
+    user-login-attribute: uid
     user-name-attribute: displayName
     user-mail-attribute: mail
 

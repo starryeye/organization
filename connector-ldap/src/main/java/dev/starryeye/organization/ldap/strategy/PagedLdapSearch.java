@@ -15,7 +15,7 @@ import java.util.Map;
 
 /**
  * {@code LdapTemplate}에는 {@code LdapQuery} 기반 검색에 paged results control(RFC 2696)을
- * 걸 수 있는 오버로드가 없다. 그래서 {@code LdapQuery}에서 base/filter/scope 를 뽑아
+ * 걸 수 있는 오버로드가 없다. 그래서 {@code LdapQuery}에서 base/filter/scope/attributes 를 뽑아
  * {@code SearchControls} 기반 오버로드로 넘기고, {@link PagedResultsDirContextProcessor}로
  * 쿠키를 이어가며 서버가 "더 있음"을 알리는 동안 반복한다.
  *

@@ -14,6 +14,8 @@ import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQueryBuilder;
 
+import javax.naming.directory.Attributes;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -107,7 +109,7 @@ public class DitStrategy implements LdapMappingStrategy {
                 continue;
             }
             users.put(userId, new DirectoryUser(
-                    userId, entry.dn(), userId, entry.displayName(), entry.email(), entry.active(),
+                    userId, entry.dn(), entry.userName(), entry.displayName(), entry.email(), entry.active(),
                     entry.name()));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
@@ -136,11 +138,8 @@ public class DitStrategy implements LdapMappingStrategy {
      * 겹친 이름은 뺀다.
      */
     static String[] 직원_속성(LdapProperties.Dit config) {
-        return PagedLdapSearch.속성목록(
-                config.getUserIdAttribute(), config.getUserNameAttribute(), config.getUserMailAttribute(), "cn",
-                AdAccountStatus.USER_ACCOUNT_CONTROL, AdAccountStatus.ACCOUNT_EXPIRES,
-                LdapPersonName.SN, LdapPersonName.GIVEN_NAME, LdapPersonName.MIDDLE_NAME,
-                LdapPersonName.GENERATION_QUALIFIER);
+        return UserAttributes.요청(config.getUserIdAttribute(), config.getUserLoginAttribute(),
+                config.getUserNameAttribute(), config.getUserMailAttribute());
     }
 
     /**
@@ -153,11 +152,10 @@ public class DitStrategy implements LdapMappingStrategy {
             String dn = adapter.getDn().toString();
             return new OrgEntry(
                     dn,
-                    IdNormalizer.normalize(필수(adapter, dn, config.getGroupIdAttribute())),
-                    // 폴백은 정규화된 code 가 아니라 원본 속성이다 — 금지 문자가 있으면 code 에는
-                    // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
-                    firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()),
-                            adapter.getStringAttribute(config.getGroupIdAttribute())));
+                    IdNormalizer.normalize(LdapIdentifiers.필수(adapter.getAttributes(), config.getGroupIdAttribute(), dn)),
+                    // 이름 속성이 없으면 DN 의 첫 RDN 값이다(설계 2026-10-04 §4.2) — id 는 entryUUID 라 사람이 읽을 수 없고,
+                    // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다
+                    firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()), LdapDns.첫_RDN_값(dn)));
         };
     }
 
@@ -165,31 +163,24 @@ public class DitStrategy implements LdapMappingStrategy {
     private ContextMapper<UserEntry> userMapper(LdapProperties.Dit config, Instant 지금) {
         return context -> {
             DirContextAdapter adapter = (DirContextAdapter) context;
+            Attributes attributes = adapter.getAttributes();
             String dn = adapter.getDn().toString();
+            String 식별값 = LdapIdentifiers.필수(attributes, config.getUserIdAttribute(), dn);
+            // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
+            String userName = firstNonBlank(adapter.getStringAttribute(config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
                     dn,
-                    IdNormalizer.normalize(필수(adapter, dn, config.getUserIdAttribute())),
-                    // 마지막 폴백도 정규화된 userId 가 아니라 원본 uid 다 (위 조직명과 같은 이유)
+                    IdNormalizer.normalize(식별값),
+                    userName,
+                    // 마지막 폴백도 정규화된 userId 가 아니라 원본 userName 이다 (위 조직명과 같은 이유)
                     firstNonBlank(adapter.getStringAttribute(config.getUserNameAttribute()),
-                            adapter.getStringAttribute("cn"),
-                            adapter.getStringAttribute(config.getUserIdAttribute())),
+                            adapter.getStringAttribute(UserAttributes.CN),
+                            userName),
                     adapter.getStringAttribute(config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(dn, adapter.getAttributes(), 지금),
-                    LdapPersonName.from(adapter.getAttributes()));
+                    !AdAccountStatus.막혔는가(dn, attributes, 지금),
+                    LdapPersonName.from(attributes));
         };
-    }
-
-    /**
-     * 식별 속성. 없으면 그 엔트리는 조직코드도 직원 아이디도 가질 수 없다 — 같은 디렉터리를 다시 읽어도 생기지
-     * 않으므로 재시도하지 않는 종류로 던진다.
-     */
-    private static String 필수(DirContextAdapter adapter, String dn, String 이름) {
-        String 값 = adapter.getStringAttribute(이름);
-        if (값 == null || 값.isBlank()) {
-            throw new DirectoryDataException("필수 속성 '" + 이름 + "' 가 없습니다: dn=" + dn);
-        }
-        return 값;
     }
 
     private static String firstNonBlank(String... candidates) {
@@ -205,8 +196,8 @@ public class DitStrategy implements LdapMappingStrategy {
      * 조직 엔트리에서 뽑은 값.
      *
      * @param dn   서버가 준 DN(검색 베이스에 상대적). 조직 계층을 되짚는 키이자 externalId 다
-     * @param code 정규화된 조직코드
-     * @param name 조직명. 없으면 원본 식별 속성 값이다
+     * @param code 정규화된 조직 id(기본은 entryUUID)
+     * @param name 조직명. 없으면 DN 의 첫 RDN 값이다
      */
     private record OrgEntry(String dn, String code, String name) {
     }
@@ -214,10 +205,15 @@ public class DitStrategy implements LdapMappingStrategy {
     /**
      * 직원 엔트리에서 뽑은 값.
      *
-     * @param id          정규화된 직원 아이디
-     * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 원본 식별 속성 값이다
+     * @param dn          서버가 준 DN(검색 베이스에 상대적). 소속 조직을 되짚는 키이자 externalId 다
+     * @param id          정규화된 직원 id(기본은 entryUUID)
+     * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
+     * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
+     * @param email       메일. 없으면 null
+     * @param active      AD 가 막은 계정이 아니면 true
+     * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
      */
-    private record UserEntry(String dn, String id, String displayName, String email, boolean active,
-                             PersonName name) {
+    private record UserEntry(String dn, String id, String userName, String displayName, String email,
+                             boolean active, PersonName name) {
     }
 }

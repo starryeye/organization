@@ -28,7 +28,7 @@ class LdapTimeoutTest {
     @DisplayName("기본 타임아웃은 연결 10초·읽기 150초다")
     void 기본값() {
         // when
-        var timeouts = LdapConfig.jndiTimeouts(new LdapProperties());
+        var timeouts = LdapConfig.jndiEnvironment(new LdapProperties());
 
         // then
         assertThat(timeouts)
@@ -45,7 +45,7 @@ class LdapTimeoutTest {
         properties.setReadTimeout(Duration.ofSeconds(7));
 
         // when
-        var timeouts = LdapConfig.jndiTimeouts(properties);
+        var timeouts = LdapConfig.jndiEnvironment(properties);
 
         // then
         assertThat(timeouts)

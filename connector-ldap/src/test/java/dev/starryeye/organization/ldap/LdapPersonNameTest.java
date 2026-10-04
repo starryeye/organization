@@ -53,8 +53,7 @@ class LdapPersonNameTest extends EmbeddedLdapSupport {
     @DisplayName("groupOfNames 전략이 givenName·sn·middleName·generationQualifier 를 이름으로 읽는다")
     void groupOfNames_가_이름을_읽는다() {
         // given — GroupOfNamesAccountStatusTest 와 같은 설정으로 전략을 만든다
-        var properties = new LdapProperties();
-        properties.setBaseDn("dc=example,dc=com");
+        var properties = 이름기반();
         properties.getGroupOfNames().setUserSearchBase("ou=people");
         properties.getGroupOfNames().setGroupSearchBase("ou=groups");
 

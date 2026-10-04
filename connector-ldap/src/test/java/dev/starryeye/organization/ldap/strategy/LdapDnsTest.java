@@ -137,4 +137,47 @@ class LdapDnsTest {
                 .as("최상위면 부모가 없다")
                 .isEmpty();
     }
+
+    @Test
+    @DisplayName("첫 RDN 값은 가장 왼쪽 RDN 의 값이다 — 대소문자는 그대로, 베이스는 보지 않는다")
+    void 첫_RDN_값을_읽는다() {
+        // given, when, then
+        assertThat(LdapDns.첫_RDN_값("cn=Platform Team,ou=groups," + BASE)).isEqualTo("Platform Team");
+        assertThat(LdapDns.첫_RDN_값("OU=Sales Team,OU=company," + BASE)).isEqualTo("Sales Team");
+        assertThat(LdapDns.첫_RDN_값("ou=company")).isEqualTo("company");
+    }
+
+    @Test
+    @DisplayName("첫 RDN 값에서 이스케이프된 쉼표는 값의 일부다 — 이스케이프를 풀어 사람이 읽는 값으로 돌려 준다")
+    void 첫_RDN_값의_이스케이프를_푼다() {
+        // given
+        String dn = "CN=Hong\\, Gildong,OU=Seoul," + BASE;
+
+        // when
+        String 값 = LdapDns.첫_RDN_값(dn);
+
+        // then
+        assertThat(값).isEqualTo("Hong, Gildong");
+    }
+
+    @Test
+    @DisplayName("첫 RDN 값이 이진(#hex)이면 RDN 문자열 그대로 돌려 준다 — 표시명 대체가 예외로 끊기지 않는다")
+    void 이진_RDN_은_RDN_문자열이다() {
+        // given
+        String dn = "cn=#04024869,ou=groups," + BASE;
+
+        // when
+        String 값 = LdapDns.첫_RDN_값(dn);
+
+        // then
+        assertThat(값).isEqualToIgnoringCase("cn=#04024869");
+    }
+
+    @Test
+    @DisplayName("빈 DN 에는 첫 RDN 이 없다")
+    void 빈_DN_에는_첫_RDN_이_없다() {
+        // given, when, then
+        assertThat(LdapDns.첫_RDN_값("")).isNull();
+        assertThat(LdapDns.첫_RDN_값(null)).isNull();
+    }
 }
