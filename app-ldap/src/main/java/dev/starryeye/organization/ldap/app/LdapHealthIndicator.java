@@ -20,8 +20,13 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>이 앱의 파이프라인은 LDAP 읽기에서 시작한다. DynamoDB 와 OpenFGA 만 보고 UP 을
  * 보고하면 <b>정작 첫 단추가 끊겼는데 건강하다고 답하는</b> 상태가 된다. 하루 1회
  * 스케줄이라 다음 실행까지 24시간이 비므로, 그 사이 이상을 알아챌 수단이 헬스체크뿐이다.
+ *
+ * <p><b>빈 이름이 {@code ldapHealthIndicator} 다.</b> Spring Boot 는 {@code LdapOperations} 빈이 있으면 블로킹 기본 LDAP 인디케이터를 더하는데,
+ * {@code ldapHealthIndicator}·{@code ldapHealthContributor} 라는 빈이 있으면 물러난다. 둘 다 헬스 이름이 {@code ldap} 이라, 다른 이름(예:
+ * {@code ldap})으로 두면 나중에 등록되는 Boot 의 것이 이것을 덮어 인증 실패 뒤 쉼과 프로브 상한이 돌지 않는다. 헬스 이름은 빈 이름에서
+ * {@code HealthIndicator} 를 뗀 {@code ldap} 그대로다.
  */
-@Component("ldap")
+@Component("ldapHealthIndicator")
 @RequiredArgsConstructor
 public class LdapHealthIndicator implements ReactiveHealthIndicator {
 
@@ -60,13 +65,20 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
      */
     @Override
     public Mono<Health> health() {
-        인증실패 기억 = 마지막_인증실패.get();
-        if (기억 != null && clock.instant().isBefore(기억.시각().plus(인증_실패_뒤_쉼))) {
-            return Mono.just(Health.down(기억.오류())
-                    .withDetail("다음 확인", 기억.시각().plus(인증_실패_뒤_쉼).toString())
-                    .withDetail("이유", "인증 실패 뒤 서비스 계정 잠금을 막으려고 바인드를 쉰다")
-                    .build());
-        }
+        // 쉼은 구독할 때 판정한다 — health() 를 부른 때가 아니다
+        return Mono.defer(() -> {
+            인증실패 기억 = 마지막_인증실패.get();
+            if (기억 != null && clock.instant().isBefore(기억.시각().plus(인증_실패_뒤_쉼))) {
+                return Mono.just(Health.down(기억.오류())
+                        .withDetail("다음 확인", 기억.시각().plus(인증_실패_뒤_쉼).toString())
+                        .withDetail("이유", "인증 실패 뒤 서비스 계정 잠금을 막으려고 바인드를 쉰다")
+                        .build());
+            }
+            return 바인드한다();
+        });
+    }
+
+    private Mono<Health> 바인드한다() {
         return Mono.fromCallable(() -> {
                     contextSource.getReadOnlyContext().close();
                     return true;

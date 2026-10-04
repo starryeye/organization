@@ -7,6 +7,7 @@ import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.Status;
 import org.springframework.ldap.CommunicationException;
 import org.springframework.ldap.core.support.LdapContextSource;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -167,8 +168,32 @@ class LdapHealthIndicatorTest {
         시계.옮긴다(Duration.ofMinutes(29));
         Health 쉬는_동안 = indicator.health().block();
 
-        // then
+        // then — 기억한 인증 오류와 다음 확인 시각을 싣는다
         assertThat(쉬는_동안.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(쉬는_동안.getDetails())
+                .containsEntry("다음 확인", "2026-10-05T00:30:00Z")
+                .hasEntrySatisfying("error", error -> assertThat(error).asString()
+                        .contains(org.springframework.ldap.AuthenticationException.class.getName()));
+        assertThat(source.호출수).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("쉼은 health() 를 부를 때가 아니라 구독할 때 판정한다 — 인증 실패 전에 만든 프로브도 실패 뒤에 구독하면 바인드하지 않는다")
+    void 쉼은_구독할_때_판정한다() {
+        // given — 인증 실패를 기억하기 전에 프로브를 만들어 둔다
+        var 시계 = new 움직이는_시계();
+        var source = new 가짜ContextSource(() -> {
+            throw new org.springframework.ldap.AuthenticationException(new javax.naming.AuthenticationException("49"));
+        });
+        var indicator = new LdapHealthIndicator(source, 설정(), 시계);
+        Mono<Health> 먼저_만든_프로브 = indicator.health();
+        indicator.health().block();
+
+        // when
+        Health 답 = 먼저_만든_프로브.block();
+
+        // then
+        assertThat(답.getStatus()).isEqualTo(Status.DOWN);
         assertThat(source.호출수).hasValue(1);
     }
 

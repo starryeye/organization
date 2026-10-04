@@ -35,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ul>
  *   <li>사람 필터({@code (&(objectCategory=person)(objectClass=user))})가 컴퓨터 계정을 직원에서 뺀다(점검 M12) — AD 에서 컴퓨터는
  *       {@code objectClass=user} 이기도 해서 {@code objectClass} 만으로는 사람과 갈리지 않는다.
- *   <li>기본 그룹 소속이 권한이 된다(점검 M10) — kim 은 {@code member} 에 없고 {@code primaryGroupID} 가 DEV 그룹의 RID 일 뿐이다.
+ *   <li>기본 그룹 소속이 권한이 된다(점검 M10) — kim 은 {@code member} 에 없고 {@code primaryGroupID} 가 DEV 그룹의 RID 일 뿐이다. 반대로
+ *       park 은 {@code member} 에도 없고 기본 그룹도 읽지 않은 그룹(513)이라 DEV 에 속하지 않는다 — RID 가 맞을 때만 더한다는 대조군이다.
  *   <li>{@code member} 에 컴퓨터가 있어도 직원이 되지 않는다 — 사람도 그룹도 아닌 값이라 건너뛴다.
  * </ul>
  *
@@ -52,11 +53,13 @@ class LdapActiveDirectoryShapeEndToEndTest {
     private static final String 그룹 = "DEV";
     /** DEV 그룹의 RID. kim 의 {@code primaryGroupID} 가 이것이다. */
     private static final long 그룹_RID = 1105;
-    /** 어느 그룹도 읽지 않은 RID — AD 의 Domain Users(513). lee 의 기본 그룹이지만 읽은 그룹이 아니어서 소속을 더하지 않는다. */
+    /** 어느 그룹도 읽지 않은 RID — AD 의 Domain Users(513). lee·park 의 기본 그룹이지만 읽은 그룹이 아니어서 소속을 더하지 않는다. */
     private static final long 읽지_않은_그룹_RID = 513;
 
     private static final String 김 = "kim";
     private static final String 이 = "lee";
+    /** member 에도 없고 기본 그룹도 513 이다 — 어느 길로도 DEV 에 속하지 않는다 */
+    private static final String 박 = "park";
     private static final String 컴퓨터 = "DEV-PC01$";
 
     @Container
@@ -93,8 +96,9 @@ class LdapActiveDirectoryShapeEndToEndTest {
     @Autowired RelationTupleChecker checker;
 
     /**
-     * 사람 둘(kim, lee)과 컴퓨터 하나, 그룹 DEV 하나. 컴퓨터는 사람과 같은 OU 에 있어 검색 범위 밖이라 빠지는 것이 아니고 {@code objectClass} 도
+     * 사람 셋(kim, lee, park)과 컴퓨터 하나, 그룹 DEV 하나. 컴퓨터는 사람과 같은 OU 에 있어 검색 범위 밖이라 빠지는 것이 아니고 {@code objectClass} 도
      * {@code user} 다 — 필터의 {@code objectCategory} 만이 가른다. DEV 의 {@code member} 는 lee 와 컴퓨터뿐이고, kim 은 {@code primaryGroupID} 로만 속한다.
+     * park 은 어느 길로도 속하지 않는다.
      *
      * <p>임베디드 서버는 스키마를 읽지 않아 {@code objectCategory} 를 적힌 그대로 비교한다. 실제 AD 는 이 값을 스키마 클래스의 DN 으로 저장하고
      * 필터의 짧은 이름({@code person})을 풀어 맞춘다 — 여기서는 짧은 이름을 그대로 저장해 같은 필터가 같은 결과를 내게 한다.
@@ -117,6 +121,7 @@ class LdapActiveDirectoryShapeEndToEndTest {
 
                 %s
                 %s
+                %s
                 dn: %s
                 objectClass: top
                 objectClass: person
@@ -137,12 +142,15 @@ class LdapActiveDirectoryShapeEndToEndTest {
                 member: %s
 
                 """.formatted(
-                사람(김, 그룹_RID), 사람(이, 읽지_않은_그룹_RID),
+                사람(김, 그룹_RID), 사람(이, 읽지_않은_그룹_RID), 사람(박, 읽지_않은_그룹_RID),
                 직원DN(컴퓨터), 컴퓨터,
                 그룹DN(그룹), 그룹, 그룹_SID, 직원DN(이), 직원DN(컴퓨터));
     }
 
-    /** AD 의 사용자 엔트리 모양 — {@code objectClass=user}, {@code objectCategory=person}, {@code primaryGroupID}. 뒤에 빈 줄이 붙는다. */
+    /**
+     * AD 의 사용자 엔트리 모양 — {@code objectClass=user}, {@code objectCategory=person}, {@code primaryGroupID}. 끝은 줄바꿈 하나다 — 엔트리 사이의
+     * 빈 줄은 이것을 넣는 {@link #ldif} 템플릿의 줄바꿈이 만든다.
+     */
     private static String 사람(String uid, long 기본그룹_RID) {
         return """
                 dn: %s
@@ -171,25 +179,26 @@ class LdapActiveDirectoryShapeEndToEndTest {
     @Test
     @DisplayName("AD 모양 디렉터리: 사람 필터로 컴퓨터 계정을 빼고, 기본 그룹 소속을 권한으로 반영한다(점검 M12·M10)")
     void AD_모양_디렉터리를_동기화한다() {
-        // given — 위 픽스처: member 는 lee 와 컴퓨터, kim 은 primaryGroupID 로만 DEV 에 속한다
+        // given — 위 픽스처: member 는 lee 와 컴퓨터, kim 은 primaryGroupID 로만 DEV 에 속하고, park 은 어느 길로도 속하지 않는다
 
         // when
         var 동기화 = SyncJobClient.끝까지(client, "/admin/sync/full")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
 
-        // then — 직원은 사람 둘뿐이다: 컴퓨터는 objectClass=user 여도 objectCategory 가 computer 라 뺀다(M12)
+        // then — 직원은 사람 셋뿐이다: 컴퓨터는 objectClass=user 여도 objectCategory 가 computer 라 뺀다(M12)
         var 상태 = state.loadAll().block(Duration.ofSeconds(30));
         assertThat(상태).isNotNull();
-        assertThat(상태.users()).containsOnlyKeys(김, 이);
+        assertThat(상태.users()).containsOnlyKeys(김, 이, 박);
         assertThat(상태.groups()).containsOnlyKeys(그룹);
 
         // then — DEV 의 멤버는 member 의 lee 와 기본 그룹의 kim 이다(M10). member 의 컴퓨터는 직원이 아니라 건너뛴다
         assertThat(상태.groups().get(그룹).members())
                 .containsExactlyInAnyOrder(MemberRef.user(김), MemberRef.user(이));
 
-        // then — 권한이 된다: member 로 속한 lee 와 기본 그룹으로만 속한 kim 모두
+        // then — 권한이 된다: member 로 속한 lee 와 기본 그룹으로만 속한 kim 모두. RID 가 맞지 않는 park 은 아니다
         assertThat(소속인가(checker, 김, 그룹)).isTrue();
         assertThat(소속인가(checker, 이, 그룹)).isTrue();
+        assertThat(소속인가(checker, 박, 그룹)).isFalse();
 
         // then — 쓴 튜플은 DEV 의 직속 직원 둘뿐이다
         동기화.jsonPath("$.writtenCount").isEqualTo(2);
