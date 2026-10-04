@@ -83,7 +83,9 @@ public class DitStrategy implements LdapMappingStrategy {
             }
             codeByRdnPath.put(LdapDns.대조키(entry.dn()), code);
             membersByCode.putIfAbsent(code, new LinkedHashSet<>());
-            groups.put(code, new DirectoryGroup(code, entry.dn(), entry.name(), Set.of()));
+            // externalId 는 서버가 준 절대 DN 이다(설계 2026-10-04 §4.2) — groupOfNames 와 같다. 안쪽 키·로그는 베이스 상대 DN 그대로 쓴다
+            groups.put(code, new DirectoryGroup(
+                    code, LdapDns.절대로(entry.dn(), properties.getBaseDn()), entry.name(), Set.of()));
         }
 
         // 조직 계층: 각 조직의 부모 dn 을 조직코드로 되짚어 하위 조직 멤버로 등록한다.
@@ -109,8 +111,8 @@ public class DitStrategy implements LdapMappingStrategy {
                 continue;
             }
             users.put(userId, new DirectoryUser(
-                    userId, entry.dn(), entry.userName(), entry.displayName(), entry.email(), entry.active(),
-                    entry.name()));
+                    userId, LdapDns.절대로(entry.dn(), properties.getBaseDn()), entry.userName(), entry.displayName(),
+                    entry.email(), entry.active(), entry.name()));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
@@ -198,7 +200,7 @@ public class DitStrategy implements LdapMappingStrategy {
     /**
      * 조직 엔트리에서 뽑은 값.
      *
-     * @param dn   서버가 준 DN(검색 베이스에 상대적). 조직 계층을 되짚는 키이자 externalId 다
+     * @param dn   서버가 준 DN(검색 베이스에 상대적). 조직 계층을 되짚는 키다. externalId 는 여기에 베이스를 붙인 절대 DN 이다
      * @param code 정규화된 조직 id(기본은 entryUUID)
      * @param name 조직명. 없으면 DN 의 첫 RDN 값이다
      */
@@ -208,7 +210,7 @@ public class DitStrategy implements LdapMappingStrategy {
     /**
      * 직원 엔트리에서 뽑은 값.
      *
-     * @param dn          서버가 준 DN(검색 베이스에 상대적). 소속 조직을 되짚는 키이자 externalId 다
+     * @param dn          서버가 준 DN(검색 베이스에 상대적). 소속 조직을 되짚는 키다. externalId 는 여기에 베이스를 붙인 절대 DN 이다
      * @param id          정규화된 직원 id(기본은 entryUUID)
      * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
      * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다

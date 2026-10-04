@@ -40,6 +40,11 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static dev.starryeye.organization.ldap.app.ImmutableIdEndToEndSupport.entryUUID;
+import static dev.starryeye.organization.ldap.app.ImmutableIdEndToEndSupport.기준선을_읽는다;
+import static dev.starryeye.organization.ldap.app.ImmutableIdEndToEndSupport.소속인가;
+import static dev.starryeye.organization.ldap.app.ImmutableIdEndToEndSupport.이름_기반이면_삭제_가드에_걸리는_픽스처다;
+import static dev.starryeye.organization.ldap.app.ImmutableIdEndToEndSupport.튜플을_건드리지_않고_성공했다;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -65,7 +70,7 @@ class LdapImmutableIdEndToEndTest {
     private static final String 프론트팀 = "DEV003";
 
     private static final String 본부_직원 = "kim";
-    /** 개명할 조직 DEV002 의 직속 직원들. 기준선 튜플 14건 중 8건이 이 조직 것이라 지우면 가드(30%)를 넘는다. */
+    /** 개명할 조직 DEV002 의 직속 직원들. 기준선 튜플 14건 중 8건이 이 조직 것이라, 이름 기반 id 였다면 삭제 가드의 임계를 넘는다. */
     private static final List<String> 백엔드팀_직원들 = List.of("park", "lee", "choi", "jung", "kang", "cho", "yoon", "jang");
     private static final List<String> 프론트팀_직원들 = List.of("lim", "han", "oh");
 
@@ -103,7 +108,7 @@ class LdapImmutableIdEndToEndTest {
     @Autowired DirectoryStateRepository state;
     @Autowired TupleSnapshotRepository snapshots;
     @Autowired RelationTupleChecker checker;
-    /** 앱이 쓰는 그 가드다 — 임계 비율·최소 기준선은 테스트 프로필(30%, 10건)에서 온다. */
+    /** 앱이 쓰는 그 가드다 — 임계 비율·최소 기준선은 테스트 프로필 설정에서 온다. */
     @Autowired DeletionGuard deletionGuard;
 
     /**
@@ -176,19 +181,6 @@ class LdapImmutableIdEndToEndTest {
         return "cn=" + cn + ",ou=groups," + BASE_DN;
     }
 
-    /** 서버가 엔트리마다 만들어 개명에도 유지하는 운영 속성. */
-    private static String entryUUID(String dn) {
-        try {
-            var entry = LDAP.getEntry(dn, "entryUUID");
-            assertThat(entry).as("엔트리 %s", dn).isNotNull();
-            String 값 = entry.getAttributeValue("entryUUID");
-            assertThat(값).as("%s 의 entryUUID", dn).isNotBlank();
-            return 값;
-        } catch (LDAPException e) {
-            throw new IllegalStateException("entryUUID 조회 실패: " + dn, e);
-        }
-    }
-
     /**
      * ModifyDN 으로 개명하고, 그 DN 을 가리키던 {@code member} 값을 새 DN 으로 옮긴다. 임베디드 서버는 참조를 따라 고치지 않는다 —
      * 실제 디렉터리가 참조 무결성 기능(OpenLDAP refint 등)으로 하는 일을 여기서 한다. 새 DN 을 돌려준다.
@@ -205,22 +197,18 @@ class LdapImmutableIdEndToEndTest {
         return 새DN;
     }
 
-    private boolean 소속인가(String userId, String groupId) {
-        return Boolean.TRUE.equals(checker.check(RelationTuple.member(userId, groupId)).block(Duration.ofSeconds(30)));
-    }
-
     @Test
     @Order(1)
     @DisplayName("기본값(entryUUID)으로 전체 동기화하면 직원·조직 id 가 entryUUID 이고 userName 은 uid 다")
     void entryUUID_로_동기화한다() {
         // given — 서버가 엔트리마다 만든 id
-        String 본부_id = entryUUID(조직DN(본부));
-        String 백엔드팀_id = entryUUID(조직DN(백엔드팀));
-        String 프론트팀_id = entryUUID(조직DN(프론트팀));
-        String 김_id = entryUUID(직원DN(본부_직원));
-        String 박_id = entryUUID(직원DN("park"));
+        String 본부_id = entryUUID(LDAP, 조직DN(본부));
+        String 백엔드팀_id = entryUUID(LDAP, 조직DN(백엔드팀));
+        String 프론트팀_id = entryUUID(LDAP, 조직DN(프론트팀));
+        String 김_id = entryUUID(LDAP, 직원DN(본부_직원));
+        String 박_id = entryUUID(LDAP, 직원DN("park"));
         Set<String> 직원_ids = Stream.of(List.of(본부_직원), 백엔드팀_직원들, 프론트팀_직원들).flatMap(List::stream)
-                .map(uid -> entryUUID(직원DN(uid))).collect(Collectors.toSet());
+                .map(uid -> entryUUID(LDAP, 직원DN(uid))).collect(Collectors.toSet());
 
         // when
         SyncJobClient.끝까지(client, "/admin/sync/full")
@@ -241,37 +229,33 @@ class LdapImmutableIdEndToEndTest {
         assertThat(상태.groups().get(백엔드팀_id).displayName()).isEqualTo(백엔드팀);
 
         // then — 권한은 entryUUID 로 성립하고, 롤업이 이어진다
-        assertThat(소속인가(박_id, 백엔드팀_id)).isTrue();
-        assertThat(소속인가(박_id, 본부_id)).isTrue();
-        assertThat(소속인가(박_id, 프론트팀_id)).isFalse();
-        assertThat(소속인가(김_id, 백엔드팀_id)).isFalse();
+        assertThat(소속인가(checker, 박_id, 백엔드팀_id)).isTrue();
+        assertThat(소속인가(checker, 박_id, 본부_id)).isTrue();
+        assertThat(소속인가(checker, 박_id, 프론트팀_id)).isFalse();
+        assertThat(소속인가(checker, 김_id, 백엔드팀_id)).isFalse();
         // 이름은 id 가 아니므로 이름으로 묻는 권한은 없다
-        assertThat(소속인가("park", 백엔드팀)).isFalse();
-        assertThat(snapshots.findLatest().block(Duration.ofSeconds(30)).tuples()).hasSize(14);
+        assertThat(소속인가(checker, "park", 백엔드팀)).isFalse();
+        assertThat(기준선을_읽는다(snapshots)).hasSize(14);
     }
 
     @Test
     @Order(2)
-    @DisplayName("OU·그룹·uid 개명 뒤 동기화는 같은 id 의 이름 변경이다 — 삭제 가드에 걸리지 않고 권한이 그대로다")
+    @DisplayName("그룹·uid 개명 뒤 동기화는 같은 id 의 이름 변경이다 — 삭제 가드에 걸리지 않고 권한이 그대로다")
     void 개명은_삭제_가드에_걸리지_않는다() throws Exception {
         // given — 첫 동기화가 남긴 기준선과 id
-        String 백엔드팀_id = entryUUID(조직DN(백엔드팀));
-        String 박_id = entryUUID(직원DN("park"));
-        String 림_id = entryUUID(직원DN("lim"));
-        String 본부_id = entryUUID(조직DN(본부));
-        String 프론트팀_id = entryUUID(조직DN(프론트팀));
+        String 백엔드팀_id = entryUUID(LDAP, 조직DN(백엔드팀));
+        String 박_id = entryUUID(LDAP, 직원DN("park"));
+        String 림_id = entryUUID(LDAP, 직원DN("lim"));
+        String 본부_id = entryUUID(LDAP, 조직DN(본부));
+        String 프론트팀_id = entryUUID(LDAP, 조직DN(프론트팀));
         var 개명_전 = state.loadAll().block(Duration.ofSeconds(30));
-        Set<RelationTuple> 기준선 = snapshots.findLatest().block(Duration.ofSeconds(30)).tuples();
+        assertThat(개명_전).as("상태가 비어 있다 — 첫 동기화(Order 1)가 먼저 성공해야 한다").isNotNull();
+        Set<RelationTuple> 기준선 = 기준선을_읽는다(snapshots);
 
         // given — 이름 기반 id 였다면 이 개명(조직 DEV002 와 직원 lim)은 그 id 를 가진 튜플을 모두 지우고 새로 쓰는 일이다.
         // 지울 튜플이 기준선의 임계 비율을 넘어야 이 픽스처가 가드를 시험한다: 앱의 가드가 그 삭제를 중단시키는지 직접 묻는다
-        long 이름_기반이면_지울_수 = 기준선.stream()
-                .filter(tuple -> tuple.mentions(RelationTuple.groupRef(백엔드팀_id)) || tuple.mentions(RelationTuple.userRef(림_id)))
-                .count();
-        assertThat(deletionGuard.evaluate((int) 이름_기반이면_지울_수, 기준선.size(), "기준 스냅샷").aborted())
-                .as("이름 기반이면 지울 튜플 %d건 / 기준선 %d건 — 가드(임계 30%%, 최소 기준선 10건)를 넘는 픽스처여야 한다",
-                        이름_기반이면_지울_수, 기준선.size())
-                .isTrue();
+        이름_기반이면_삭제_가드에_걸리는_픽스처다(deletionGuard, 기준선, "조직 DEV002 와 직원 lim",
+                RelationTuple.groupRef(백엔드팀_id), RelationTuple.userRef(림_id));
 
         // when — 조직 cn 과 직원 uid 를 ModifyDN 으로 개명하고 동기화한다
         String 새조직DN = 개명한다(조직DN(백엔드팀), "cn=BACKEND");
@@ -279,14 +263,11 @@ class LdapImmutableIdEndToEndTest {
         var 동기화 = SyncJobClient.끝까지(client, "/admin/sync/full");
 
         // then — 가드에 걸리지 않고, 튜플은 하나도 쓰거나 지우지 않는다
-        동기화.jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.deletedCount").isEqualTo(0)
-                .jsonPath("$.writtenCount").isEqualTo(0)
-                .jsonPath("$.message").isEqualTo("변경 없음");
+        튜플을_건드리지_않고_성공했다(동기화);
 
         // then — 서버는 개명에서 entryUUID 를 유지했고, 조직·직원 id 는 그대로다(새 id 도, 사라진 id 도 없다)
-        assertThat(entryUUID(새조직DN)).isEqualTo(백엔드팀_id);
-        assertThat(entryUUID(새직원DN)).isEqualTo(림_id);
+        assertThat(entryUUID(LDAP, 새조직DN)).isEqualTo(백엔드팀_id);
+        assertThat(entryUUID(LDAP, 새직원DN)).isEqualTo(림_id);
         var 상태 = state.loadAll().block(Duration.ofSeconds(30));
         assertThat(상태).isNotNull();
         assertThat(상태.groups()).containsOnlyKeys(개명_전.groups().keySet());
@@ -302,11 +283,11 @@ class LdapImmutableIdEndToEndTest {
         assertThat(직원.displayName()).isEqualTo("직원 lim");
 
         // then — 권한이 그대로다: 직속 직원의 member Check 와 롤업, 그리고 튜플 스냅샷
-        assertThat(소속인가(박_id, 백엔드팀_id)).isTrue();
-        assertThat(소속인가(박_id, 본부_id)).isTrue();
-        assertThat(소속인가(림_id, 프론트팀_id)).isTrue();
-        assertThat(소속인가(림_id, 본부_id)).isTrue();
-        assertThat(소속인가(박_id, 프론트팀_id)).isFalse();
-        assertThat(snapshots.findLatest().block(Duration.ofSeconds(30)).tuples()).isEqualTo(기준선);
+        assertThat(소속인가(checker, 박_id, 백엔드팀_id)).isTrue();
+        assertThat(소속인가(checker, 박_id, 본부_id)).isTrue();
+        assertThat(소속인가(checker, 림_id, 프론트팀_id)).isTrue();
+        assertThat(소속인가(checker, 림_id, 본부_id)).isTrue();
+        assertThat(소속인가(checker, 박_id, 프론트팀_id)).isFalse();
+        assertThat(기준선을_읽는다(snapshots)).isEqualTo(기준선);
     }
 }

@@ -315,7 +315,7 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
         // then
         assertThat(entryUUID("ou=Operations,ou=company," + BASE_DN)).as("서버는 개명에서 entryUUID 를 유지한다").isEqualTo(전);
         assertThat(snapshot.groups()).containsKey(전);
-        assertThat(snapshot.groups().get(전).externalId()).startsWith("ou=Operations");
+        assertThat(snapshot.groups().get(전).externalId()).isEqualTo("ou=Operations,ou=company," + BASE_DN);
         assertThat(snapshot.groups().get(entryUUID(전사)).members()).contains(MemberRef.group(전));
     }
 
@@ -331,8 +331,8 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
         var snapshot = new DitStrategy(DIT_기본값_그대로(), 고정시계).read(ldapTemplate);
 
         // then — 하위 엔트리의 DN 도 바뀌었지만 id 는 그대로이고, 새 이름 위에서 소속이 이어진다
-        assertThat(snapshot.groups().get(조직_전).externalId()).startsWith("ou=PLATFORM");
-        assertThat(snapshot.users().get(직원_전).externalId()).startsWith("uid=choi,ou=PLATFORM");
+        assertThat(snapshot.groups().get(조직_전).externalId()).isEqualTo("ou=PLATFORM,ou=company," + BASE_DN);
+        assertThat(snapshot.users().get(직원_전).externalId()).isEqualTo("uid=choi,ou=PLATFORM,ou=company," + BASE_DN);
         assertThat(snapshot.groups().get(조직_전).members()).contains(MemberRef.user(직원_전));
         assertThat(snapshot.groups().get(entryUUID(전사)).members()).contains(MemberRef.group(조직_전));
     }

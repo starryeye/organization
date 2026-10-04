@@ -17,7 +17,8 @@ ldap:
   bind-dn: cn=admin,dc=example,dc=com
   bind-password: adminpassword
   strategy: group-of-names
-  # 기존 e2e·규모 테스트는 이름 기반으로 돈다. 기본값(entryUUID)은 LdapImmutableIdEndToEndTest·LdapEntryUuidScaleTest 가 본다(설계 §8)
+  # 기존 e2e·규모 테스트는 이름 기반으로 돈다. 기본값(entryUUID)은 LdapImmutableIdEndToEndTest(groupOfNames)·
+  # LdapDitImmutableIdEndToEndTest(DIT)·LdapEntryUuidScaleTest 가 본다(설계 §8) — 그 클래스들이 아래 식별 속성을 되돌린다
   group-of-names:
     user-search-base: ou=people
     user-object-class: inetOrgPerson
@@ -30,6 +31,7 @@ ldap:
     group-id-attribute: cn
     group-name-attribute: description
     member-attribute: member
+  # DIT 의 기본값(entryUUID) 시험은 LdapDitImmutableIdEndToEndTest 다 — 위와 같이 그 클래스가 식별 속성을 되돌린다
   dit:
     root-dn: ou=company
     org-unit-object-class: organizationalUnit

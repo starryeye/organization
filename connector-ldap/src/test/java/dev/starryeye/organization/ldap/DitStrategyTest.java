@@ -118,6 +118,23 @@ class DitStrategyTest extends EmbeddedLdapSupport {
     }
 
     @Test
+    @DisplayName("externalId 는 서버가 준 절대 DN 이다 — 직원·조직·루트 OU 모두, groupOfNames 와 같다")
+    void externalId_는_절대_DN_이다() {
+        // given
+        var strategy = new DitStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 베이스 DN(dc=example,dc=com)까지 붙은 DN 이다
+        assertThat(snapshot.users().get("choi").externalId())
+                .isEqualTo("uid=choi,ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com");
+        assertThat(snapshot.groups().get("DEV002").externalId())
+                .isEqualTo("ou=DEV002,ou=DEV001,ou=company,dc=example,dc=com");
+        assertThat(snapshot.groups().get("company").externalId()).isEqualTo("ou=company,dc=example,dc=com");
+    }
+
+    @Test
     @DisplayName("조직명은 description 에서 읽고 없으면 조직코드로 대체한다")
     void 조직명이_없으면_조직코드로_대체한다() {
         // given — OPS001 에는 description 이 없다
