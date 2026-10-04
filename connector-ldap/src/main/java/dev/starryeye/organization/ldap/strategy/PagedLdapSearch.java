@@ -2,6 +2,7 @@ package dev.starryeye.organization.ldap.strategy;
 
 import dev.starryeye.organization.ldap.LdapTemplates;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ldap.PartialResultException;
 import org.springframework.ldap.control.PagedResultsDirContextProcessor;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.ContextMapperCallbackHandler;
@@ -61,7 +62,7 @@ final class PagedLdapSearch {
         ContextMapperCallbackHandler<T> handler = new ContextMapperCallbackHandler<>(mapper);
         검색의_참조 참조 = new 검색의_참조(base, filter);
         if (pageSize <= 0) {
-            참조.넘긴다(() -> template.search(base, filter, controls, handler));
+            참조.검색하되_참조는_경고한다(() -> template.search(base, filter, controls, handler));
             return handler.getList();
         }
         return LdapTemplates.한_커넥션에서(template, paged -> {
@@ -69,7 +70,7 @@ final class PagedLdapSearch {
             boolean hasMore;
             do {
                 PagedResultsDirContextProcessor 이번 = processor;
-                참조.넘긴다(() -> paged.search(base, filter, controls, handler, 이번));
+                참조.검색하되_참조는_경고한다(() -> paged.search(base, filter, controls, handler, 이번));
                 hasMore = processor.hasMore();
                 if (hasMore) {
                     processor = new PagedResultsDirContextProcessor(pageSize, processor.getCookie());
@@ -94,10 +95,11 @@ final class PagedLdapSearch {
             this.filter = filter;
         }
 
-        void 넘긴다(Runnable 검색) {
+        void 검색하되_참조는_경고한다(Runnable 검색) {
             try {
                 검색.run();
-            } catch (org.springframework.ldap.PartialResultException e) {
+            } catch (PartialResultException e) {
+                // Spring 이 JNDI 의 javax.naming.PartialResultException 을 옮긴 예외다(ignorePartialResultException=false 일 때) — javax.naming 쪽이 아니다
                 if (!알렸다) {
                     알렸다 = true;
                     log.warn("LDAP 검색이 referral 을 만나 그 부분을 읽지 않았다 — 따라가지 않는다. 검색 범위가 다른 도메인·위임 서브트리를 걸치는지 확인하라: base={}, filter={}, {}",

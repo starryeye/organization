@@ -10,6 +10,7 @@ import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
 import com.unboundid.ldap.sdk.Control;
 import com.unboundid.ldap.sdk.LDAPException;
 import com.unboundid.ldap.sdk.SearchResultReference;
+import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,12 +29,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>따라가지 않는다 — 다른 DC 의 주소·자격 증명·DNS 가 필요하다. 다만 Spring 이 {@code PartialResultException} 을 DEBUG 로 삼키면
  * 검색 범위가 위임 서브트리·자식 도메인을 걸칠 때 그 부분이 늘 빠지는데 운영자는 모른다. 경고 한 줄을 남기고, 이미 받은 엔트리와 다음 페이지는 잃지 않는다.
  *
- * <p>UnboundID 인터셉터는 <b>검색 요청 단계</b>에서만 참조를 보낼 수 있다. 페이지 하나가 요청 하나이므로 몇 번째 요청에 끼울지 정한다.
+ * <p>UnboundID 인터셉터는 <b>검색 요청 단계</b>에서만 참조를 보낼 수 있다. 페이지 하나가 요청 하나이므로, 직원 검색의 <b>요청마다</b> 참조를 끼운다 —
+ * 첫 페이지·가운데·마지막 페이지 모두 참조를 만난다. 그래야 검색당 한 줄(검색 하나의 모든 페이지가 한 줄)과 "페이지를 다시 받지 않음"을 단정할 수 있다.
+ * 직원 검색은 필터로 알아본다 — 두 전략의 직원 검색은 베이스가 달라도 필터가 같다.
  */
 class ReferralTest extends EmbeddedLdapSupport {
 
+    /** 서버가 받은 직원 검색 요청 수 — 페이지 하나가 요청 하나다. 페이지를 다시 받으면 기대보다 늘어난다 */
     private final AtomicInteger 직원검색수 = new AtomicInteger();
-    private volatile int 참조를_보낼_요청 = 1;
     private ListAppender<ILoggingEvent> 로그;
 
     @Override
@@ -101,6 +104,38 @@ class ReferralTest extends EmbeddedLdapSupport {
                 member: uid=u3,ou=people,dc=example,dc=com
                 member: uid=u4,ou=people,dc=example,dc=com
                 member: uid=u5,ou=people,dc=example,dc=com
+
+                dn: ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: company
+
+                dn: ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: DEV001
+
+                dn: uid=d1,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: d1
+                cn: D1
+                sn: D
+                displayName: 부서직원1
+                mail: d1@example.com
+
+                dn: uid=d2,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: d2
+                cn: D2
+                sn: D
+                displayName: 부서직원2
+                mail: d2@example.com
+
+                dn: uid=d3,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: d3
+                cn: D3
+                sn: D
+                displayName: 부서직원3
+                mail: d3@example.com
                 """;
     }
 
@@ -109,8 +144,8 @@ class ReferralTest extends EmbeddedLdapSupport {
         config.addInMemoryOperationInterceptor(new InMemoryOperationInterceptor() {
             @Override
             public void processSearchRequest(InMemoryInterceptedSearchRequest request) throws LDAPException {
-                if (request.getRequest().getBaseDN().startsWith("ou=people")
-                        && 직원검색수.incrementAndGet() == 참조를_보낼_요청) {
+                if (request.getRequest().getFilter().toString().contains("inetOrgPerson")) {
+                    직원검색수.incrementAndGet();
                     request.sendSearchReference(new SearchResultReference(
                             new String[]{"ldap://child.example.com/ou=people,dc=child,dc=example,dc=com"}, new Control[0]));
                 }
@@ -147,22 +182,39 @@ class ReferralTest extends EmbeddedLdapSupport {
 
         // then
         assertThat(snapshot.users()).containsOnlyKeys("u1", "u2", "u3", "u4", "u5");
+        assertThat(직원검색수).hasValue(1);
         assertThat(참조_경고()).hasSize(1).first().asString().contains("ou=people");
     }
 
     @Test
-    @DisplayName("뒤 페이지 요청에 referral 이 와도 모든 페이지의 엔트리를 잃지 않고 경고는 검색당 한 줄이다")
-    void 뒤_페이지의_참조도_엔트리를_잃지_않는다() {
-        // given — 두 명씩 세 페이지, 두 번째 페이지 요청에 참조
-        참조를_보낼_요청 = 2;
+    @DisplayName("모든 페이지 요청에 referral 이 와도 엔트리를 잃지 않고, 페이지를 다시 받지 않으며, 경고는 검색당 한 줄이다")
+    void 모든_페이지의_참조에도_엔트리를_잃지_않고_경고는_검색당_한_줄이다() {
+        // given — 두 명씩 세 페이지(2·2·1), 세 요청 모두에 참조
         var properties = 이름기반();
         properties.setPageSize(2);
 
         // when
         var snapshot = new GroupOfNamesStrategy(properties).read(ldapTemplate);
 
-        // then
+        // then — 요청이 정확히 셋이다: 쿠키를 잃어 페이지를 다시 받았다면 늘어난다(users 는 같은 키로 덮여 그것을 숨긴다)
         assertThat(snapshot.users()).containsOnlyKeys("u1", "u2", "u3", "u4", "u5");
-        assertThat(참조_경고()).hasSize(1);
+        assertThat(직원검색수).hasValue(3);
+        assertThat(참조_경고()).hasSize(1).first().asString().contains("ou=people");
+    }
+
+    @Test
+    @DisplayName("DIT 전략의 검색도 같은 길을 탄다 — 모든 페이지에 referral 이 와도 엔트리를 잃지 않고 경고는 한 줄이다")
+    void DIT도_참조를_만나도_엔트리를_잃지_않는다() {
+        // given — 두 명씩 두 페이지(2·1), 두 요청 모두에 참조
+        var properties = 이름기반();
+        properties.setPageSize(2);
+
+        // when
+        var snapshot = new DitStrategy(properties).read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("d1", "d2", "d3");
+        assertThat(직원검색수).hasValue(2);
+        assertThat(참조_경고()).hasSize(1).first().asString().contains("ou=company");
     }
 }
