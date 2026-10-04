@@ -45,6 +45,15 @@ public interface DirectoryStateRepository {
      */
     Flux<String> findUserIdsByUserName(String userName);
 
+    /**
+     * {@code externalId} 가 같은 직원 아이디. GSI3(최종 일관성)라 막 저장된 직원이 늦게 보일 수 있다 — 부르는 쪽이 본 테이블로 다시 확인한다.
+     * 빈 값이면 비어 있다. {@code externalId} 는 대소문자를 가린다(RFC 7643 caseExact).
+     */
+    Flux<String> findUserIdsByExternalId(String externalId);
+
+    /** 같은 것을 조직으로. SCIM 조직 생성·변경의 중복 판정(설계 2026-10-04 §3.2)과 관리 API 가 쓴다. */
+    Flux<String> findGroupIdsByExternalId(String externalId);
+
     Mono<DirectoryGroup> findGroup(String groupId);
 
     /**

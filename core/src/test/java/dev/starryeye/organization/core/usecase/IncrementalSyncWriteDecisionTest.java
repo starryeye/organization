@@ -55,14 +55,14 @@ class IncrementalSyncWriteDecisionTest {
     }
 
     @Test
-    @DisplayName("직원 생성 — 이미 있는 아이디면 충돌이고 아무것도 쓰지 않는다")
-    void 있는_아이디면_충돌이다() {
+    @DisplayName("직원 생성 — 같은 userName 이면 충돌이고 아무것도 쓰지 않는다")
+    void 같은_userName이면_충돌이다() {
         // when, then
-        assertThatThrownBy(() -> useCase.createUser(직원("kim", "kim2", true)).block())
+        assertThatThrownBy(() -> useCase.createUser(직원("park", "kim", true)).block())
                 .isInstanceOf(DirectoryConflictException.class)
-                .hasMessage("이미 존재하는 직원입니다: kim");
+                .hasMessage("이미 같은 userName 을 쓰는 직원이 있습니다: userName=kim, id=kim");
         assertThat(writer.appliedDeltas).isEmpty();
-        assertThat(state.users.get("kim").userName()).isEqualTo("kim");
+        assertThat(state.users).doesNotContainKey("park");
         assertThat(lock.released).hasValue(1);
     }
 
@@ -197,12 +197,13 @@ class IncrementalSyncWriteDecisionTest {
     }
 
     @Test
-    @DisplayName("조직 생성 — 이미 있으면 충돌이고, 없으면 만든다")
+    @DisplayName("조직 생성 — 다른 조직과 externalId 가 같으면 충돌이고, 겹치지 않으면 만든다")
     void 조직_생성() {
         // when, then
-        assertThatThrownBy(() -> useCase.createGroup(new DirectoryGroup("DEV001", "cn=DEV001", "개발본부", Set.of())).block())
+        assertThatThrownBy(() -> useCase.createGroup(new DirectoryGroup("DEV009", "cn=DEV001", "개발본부", Set.of())).block())
                 .isInstanceOf(DirectoryConflictException.class)
-                .hasMessage("이미 존재하는 조직입니다: DEV001");
+                .hasMessage("이미 같은 externalId 를 쓰는 조직이 있습니다: externalId=cn=DEV001, id=DEV001");
+        assertThat(state.groups).doesNotContainKey("DEV009");
 
         var result = useCase.createGroup(new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀",
                 Set.of(MemberRef.user("kim")))).block();

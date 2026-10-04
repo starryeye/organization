@@ -189,6 +189,12 @@ class LdapInterruptedSyncScaleTest {
         @Override public Flux<String> findUserIdsByUserName(String userName) {
             return 실제.findUserIdsByUserName(userName);
         }
+        @Override public Flux<String> findUserIdsByExternalId(String externalId) {
+            return 실제.findUserIdsByExternalId(externalId);
+        }
+        @Override public Flux<String> findGroupIdsByExternalId(String externalId) {
+            return 실제.findGroupIdsByExternalId(externalId);
+        }
         @Override public Mono<DirectoryGroup> findGroup(String groupId) { return 실제.findGroup(groupId); }
         @Override public Mono<GroupHeader> findGroupHeader(String groupId) { return 실제.findGroupHeader(groupId); }
         @Override public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) { return 실제.saveUser(before, after); }
