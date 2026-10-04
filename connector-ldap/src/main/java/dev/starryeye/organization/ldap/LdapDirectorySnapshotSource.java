@@ -52,18 +52,33 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
      * 데이터를 다시 읽으면 같은 결과다. 그런데도 재시도에 맡기면 큰 디렉터리를 {@code maxRetries + 1} 번
      * 통째로 다시 읽고(대조 실패라면 매 회차 member 값마다 {@code log.warn} 을 수십만 줄 찍는다), 그 끝에 나온
      * 실패를 "일시적 장애" 로 보이게 한다 — 이력을 보는 운영자가 데이터나 설정을 고쳐야 할 문제를 재시도가 알아서
-     * 해결해 줄 문제로 오인하게 만든다.
+     * 해결해 줄 문제로 오인하게 만든다. 인증·권한·이름·크기 한도·필터 오류도 같다 — {@link #다시_읽어도_같은가}.
      */
     @Override
     public Mono<DirectorySnapshot> fetchAll() {
         return Mono.fromCallable(() -> strategy.read(template))
                 .subscribeOn(Schedulers.boundedElastic())
                 .retryWhen(Retry.backoff(properties.getMaxRetries(), RETRY_BACKOFF)
-                        .filter(throwable -> !(throwable instanceof DirectoryDataException))
+                        .filter(throwable -> !다시_읽어도_같은가(throwable))
                         .doBeforeRetry(signal -> log.warn("LDAP 읽기 실패, 재시도 {}회차",
                                 signal.totalRetries() + 1, signal.failure()))
                         .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
                 .doOnNext(snapshot -> log.info("LDAP 에서 직원 {}명, 조직 {}개를 읽었다",
                         snapshot.users().size(), snapshot.groups().size()));
+    }
+
+    /**
+     * 다시 읽어도 같은 실패인가(설계 2026-10-05 §4.1, 점검 S23). 데이터·설정이 어긋났거나({@link DirectoryDataException}), LDAP 표준(RFC 4511) 결과 코드가
+     * "요청 자체가 틀렸다" 는 것이다 — 49 인증 실패, 50 권한 없음, 32 없는 이름(검색 베이스 오타), 34 DN 문법, 4 크기 한도, 그리고 보내기 전에 거절된 필터 문법.
+     * Spring LDAP 이 결과 코드를 예외 종류로 옮겨 준다. 그 밖은 — 모르는 종류까지 — 일시 장애로 보고 재시도한다: 일시 장애 한 번에 하루치 동기화를 잃지 않는다.
+     */
+    static boolean 다시_읽어도_같은가(Throwable 실패) {
+        return 실패 instanceof DirectoryDataException
+                || 실패 instanceof org.springframework.ldap.AuthenticationException
+                || 실패 instanceof org.springframework.ldap.NoPermissionException
+                || 실패 instanceof org.springframework.ldap.NameNotFoundException
+                || 실패 instanceof org.springframework.ldap.InvalidNameException
+                || 실패 instanceof org.springframework.ldap.SizeLimitExceededException
+                || 실패 instanceof org.springframework.ldap.InvalidSearchFilterException;
     }
 }

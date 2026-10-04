@@ -7,10 +7,13 @@ import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
 import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.ldap.core.LdapTemplate;
 
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -66,6 +69,23 @@ class LdapDirectorySnapshotSourceTest {
         public DirectorySnapshot read(LdapTemplate template) {
             호출수.incrementAndGet();
             throw new DirectoryDataException("속성 'userAccountControl' 의 값 'abc' 가 정수가 아닙니다(테스트)");
+        }
+    }
+
+    /** 주어진 예외를 늘 던지는 전략. 호출 횟수를 세어 재시도가 걸렸는지 본다. */
+    private static class 늘_실패하는_전략 implements LdapMappingStrategy {
+
+        private final RuntimeException 실패;
+        final AtomicInteger 호출수 = new AtomicInteger();
+
+        늘_실패하는_전략(RuntimeException 실패) {
+            this.실패 = 실패;
+        }
+
+        @Override
+        public DirectorySnapshot read(LdapTemplate template) {
+            호출수.incrementAndGet();
+            throw 실패;
         }
     }
 
@@ -178,5 +198,40 @@ class LdapDirectorySnapshotSourceTest {
 
         // then — 최초 1회뿐. 재시도에 맡기면 큰 디렉터리를 통째로 몇 번 더 읽고 "일시적 장애" 로 보인다
         assertThat(strategy.호출수).hasValue(1);
+    }
+
+    static Stream<RuntimeException> 다시_읽어도_같은_실패() {
+        return Stream.of(
+                new org.springframework.ldap.AuthenticationException(new javax.naming.AuthenticationException("[LDAP: error code 49 - Invalid Credentials]")),
+                new org.springframework.ldap.NoPermissionException(new javax.naming.NoPermissionException("error code 50")),
+                new org.springframework.ldap.NameNotFoundException(new javax.naming.NameNotFoundException("error code 32")),
+                new org.springframework.ldap.InvalidNameException(new javax.naming.InvalidNameException("error code 34")),
+                new org.springframework.ldap.SizeLimitExceededException(new javax.naming.SizeLimitExceededException("error code 4")),
+                new org.springframework.ldap.InvalidSearchFilterException(new javax.naming.directory.InvalidSearchFilterException("bad filter")));
+    }
+
+    @ParameterizedTest
+    @MethodSource("다시_읽어도_같은_실패")
+    @DisplayName("요청 자체가 틀린 실패(RFC 4511 결과 코드 49·50·32·34·4, 필터 문법)는 재시도하지 않는다(점검 S23)")
+    void 다시_읽어도_같은_실패는_재시도하지_않는다(RuntimeException 실패) {
+        // given
+        var 전략 = new 늘_실패하는_전략(실패);
+        var source = new LdapDirectorySnapshotSource(안_쓰는_템플릿, 전략, 설정(3));
+
+        // when, then
+        assertThatThrownBy(() -> source.fetchAll().block()).isSameAs(실패);
+        assertThat(전략.호출수).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("연결 끊김 같은 일시 장애와 모르는 실패는 지금처럼 재시도한다")
+    void 일시_장애는_재시도한다() {
+        // given
+        var 전략 = new 늘_실패하는_전략(new org.springframework.ldap.CommunicationException(new javax.naming.CommunicationException("connection reset")));
+        var source = new LdapDirectorySnapshotSource(안_쓰는_템플릿, 전략, 설정(3));
+
+        // when, then
+        assertThatThrownBy(() -> source.fetchAll().block()).isInstanceOf(org.springframework.ldap.CommunicationException.class);
+        assertThat(전략.호출수).hasValue(4);
     }
 }

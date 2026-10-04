@@ -8,8 +8,13 @@ import org.springframework.boot.actuate.health.Status;
 import org.springframework.ldap.CommunicationException;
 import org.springframework.ldap.core.support.LdapContextSource;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.naming.directory.DirContext;
@@ -60,6 +65,31 @@ class LdapHealthIndicatorTest {
         }
     }
 
+    /** 테스트가 시각을 옮기는 시계. */
+    private static final class 움직이는_시계 extends Clock {
+
+        private Instant 지금 = Instant.parse("2026-10-05T00:00:00Z");
+
+        void 옮긴다(Duration 만큼) {
+            지금 = 지금.plus(만큼);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return 지금;
+        }
+    }
+
     @Test
     @DisplayName("LDAP 이 응답하지 않으면 함께 매달리지 않고 DOWN 을 보고한다")
     void 매달리지_않고_DOWN을_보고한다() {
@@ -72,7 +102,7 @@ class LdapHealthIndicatorTest {
                 Thread.currentThread().interrupt();
             }
         });
-        var indicator = new LdapHealthIndicator(source, 설정());
+        var indicator = new LdapHealthIndicator(source, 설정(), Clock.systemUTC());
 
         // when — 프로브 상한(2초)보다 넉넉히 기다린다
         Health health = indicator.health().block(Duration.ofSeconds(10));
@@ -90,7 +120,7 @@ class LdapHealthIndicatorTest {
         var source = new 가짜ContextSource(() -> {
             throw new CommunicationException(new javax.naming.CommunicationException("연결 거부(테스트)"));
         });
-        var indicator = new LdapHealthIndicator(source, 설정());
+        var indicator = new LdapHealthIndicator(source, 설정(), Clock.systemUTC());
 
         // when
         Health health = indicator.health().block(Duration.ofSeconds(10));
@@ -106,7 +136,7 @@ class LdapHealthIndicatorTest {
         // given
         var source = new 가짜ContextSource(() -> {
         });
-        var indicator = new LdapHealthIndicator(source, 설정());
+        var indicator = new LdapHealthIndicator(source, 설정(), Clock.systemUTC());
 
         // when
         Health health = indicator.health().block(Duration.ofSeconds(10));
@@ -120,5 +150,67 @@ class LdapHealthIndicatorTest {
                 .containsEntry("strategy", "group-of-names");
         // 검색이 아니라 바인드만 한다 — 디렉터리 크기와 무관한 비용이어야 한다
         assertThat(source.호출수).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("인증 실패 뒤 30분 동안은 다시 바인드하지 않고 DOWN 을 답한다 — 프로브가 서비스 계정을 잠그지 않게(점검 S23)")
+    void 인증_실패_뒤에는_바인드를_쉰다() {
+        // given
+        var 시계 = new 움직이는_시계();
+        var source = new 가짜ContextSource(() -> {
+            throw new org.springframework.ldap.AuthenticationException(new javax.naming.AuthenticationException("49"));
+        });
+        var indicator = new LdapHealthIndicator(source, 설정(), 시계);
+        indicator.health().block();
+
+        // when
+        시계.옮긴다(Duration.ofMinutes(29));
+        Health 쉬는_동안 = indicator.health().block();
+
+        // then
+        assertThat(쉬는_동안.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(source.호출수).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("30분이 지나면 한 번 다시 바인드하고, 비밀번호를 고쳤으면 UP 으로 돌아온다")
+    void 쉼이_끝나면_다시_확인한다() {
+        // given
+        var 시계 = new 움직이는_시계();
+        var 실패 = new AtomicBoolean(true);
+        var source = new 가짜ContextSource(() -> {
+            if (실패.get()) {
+                throw new org.springframework.ldap.AuthenticationException(new javax.naming.AuthenticationException("49"));
+            }
+        });
+        var indicator = new LdapHealthIndicator(source, 설정(), 시계);
+        indicator.health().block();
+        실패.set(false);
+
+        // when
+        시계.옮긴다(Duration.ofMinutes(30));
+        Health 다시 = indicator.health().block();
+
+        // then
+        assertThat(다시.getStatus()).isEqualTo(Status.UP);
+        assertThat(source.호출수).hasValue(2);
+    }
+
+    @Test
+    @DisplayName("인증이 아닌 실패(연결 끊김)는 쉬지 않고 매번 다시 확인한다")
+    void 인증이_아닌_실패는_쉬지_않는다() {
+        // given
+        var 시계 = new 움직이는_시계();
+        var source = new 가짜ContextSource(() -> {
+            throw new org.springframework.ldap.CommunicationException(new javax.naming.CommunicationException("reset"));
+        });
+        var indicator = new LdapHealthIndicator(source, 설정(), 시계);
+        indicator.health().block();
+
+        // when
+        indicator.health().block();
+
+        // then
+        assertThat(source.호출수).hasValue(2);
     }
 }
