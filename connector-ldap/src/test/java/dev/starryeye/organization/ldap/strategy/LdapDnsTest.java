@@ -161,6 +161,22 @@ class LdapDnsTest {
     }
 
     @Test
+    @DisplayName("다중값 RDN 의 첫 RDN 값은 적힌 순서가 아니라 속성 이름 순으로 맨 앞 쌍의 값이다")
+    void 다중값_RDN_의_첫_값은_이름_순_맨_앞이다() {
+        // given — cn 이 ou 보다 앞선다. 적힌 순서만 다르고 같은 엔트리다
+        String 이쪽순서 = "cn=hgd+ou=Seoul," + BASE;
+        String 저쪽순서 = "ou=Seoul+cn=hgd," + BASE;
+
+        // when
+        String 이쪽 = LdapDns.첫_RDN_값(이쪽순서);
+        String 저쪽 = LdapDns.첫_RDN_값(저쪽순서);
+
+        // then
+        assertThat(이쪽).isEqualTo("hgd");
+        assertThat(저쪽).isEqualTo("hgd");
+    }
+
+    @Test
     @DisplayName("첫 RDN 값이 이진(#hex)이면 RDN 문자열 그대로 돌려 준다 — 표시명 대체가 예외로 끊기지 않는다")
     void 이진_RDN_은_RDN_문자열이다() {
         // given

@@ -204,7 +204,7 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
     @DisplayName("직원의 uid 를 바꿔도 같은 id 다 — userName 만 새 uid 가 된다")
     void 직원_개명은_같은_id_다() throws LDAPException {
         // given
-        String 전 = entryUUID(로그인_없는_직원);
+        String 로그인_없는_직원_id = entryUUID(로그인_없는_직원);
         String 홍_전 = entryUUID(홍);
 
         // when
@@ -213,7 +213,7 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
 
         // then — uid 가 바뀌었을 뿐 다른 사람이 되지 않았다
         assertThat(entryUUID("uid=hong.gd,ou=people," + BASE_DN)).isEqualTo(홍_전);
-        assertThat(snapshot.users()).containsKey(홍_전).containsKey(전);
+        assertThat(snapshot.users()).containsKey(홍_전).containsKey(로그인_없는_직원_id);
         assertThat(snapshot.users().get(홍_전).userName()).isEqualTo("hong.gd");
         assertThat(snapshot.users().get(홍_전).displayName()).isEqualTo("홍길동");
     }
@@ -388,6 +388,77 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
         var 영업 = snapshot.groups().get(entryUUID(이름_없는_OU));
         assertThat(영업).isNotNull();
         assertThat(영업.displayName()).isEqualTo("Sales Team");
+    }
+
+    @Test
+    @DisplayName("직원에게 표시명·cn 이 없으면 표시명은 userName 이다 — id(UUID)가 표시명으로 보이면 안 된다 — groupOfNames")
+    void 표시명의_마지막_대체는_userName_이다() throws Exception {
+        // given — uid 만 있는 직원(스키마가 없어 허용된다). 기본 설정이라 id 는 entryUUID 다
+        server.add("dn: uid=bare,ou=people," + BASE_DN, "objectClass: inetOrgPerson", "uid: bare");
+        var strategy = new GroupOfNamesStrategy(기본값_그대로(), 고정시계);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 표시명은 uid 원본이고 entryUUID 가 아니다
+        String id = entryUUID("uid=bare,ou=people," + BASE_DN);
+        var 직원 = snapshot.users().get(id);
+        assertThat(직원).isNotNull();
+        assertThat(직원.displayName()).isEqualTo("bare").isNotEqualTo(id);
+    }
+
+    @Test
+    @DisplayName("DIT 도 직원에게 표시명·cn 이 없으면 표시명은 userName 이다 — id(UUID)가 표시명으로 보이면 안 된다")
+    void DIT_표시명의_마지막_대체는_userName_이다() throws Exception {
+        // given — uid 만 있는 직원. 기본 설정이라 id 는 entryUUID 다
+        server.add("dn: uid=bare,ou=DEV001,ou=company," + BASE_DN, "objectClass: inetOrgPerson", "uid: bare");
+        var strategy = new DitStrategy(DIT_기본값_그대로(), 고정시계);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        String id = entryUUID("uid=bare,ou=DEV001,ou=company," + BASE_DN);
+        var 직원 = snapshot.users().get(id);
+        assertThat(직원).isNotNull();
+        assertThat(직원.displayName()).isEqualTo("bare").isNotEqualTo(id);
+    }
+
+    @Test
+    @DisplayName("DIT 의 root-dn 이 비어 있어도(컨텍스트 베이스가 루트 OU) 이름 속성이 없는 루트 OU 의 표시명은 그 OU 의 RDN 값이다")
+    void DIT_루트_OU_의_표시명도_RDN_값이다() throws Exception {
+        // given — 컨텍스트 베이스가 description 없는 ou=Sales Team 이고 root-dn 이 "" 라, 루트 OU 의 상대 DN 이 빈 문자열이다
+        var properties = DIT_기본값_그대로();
+        properties.setBaseDn(이름_없는_OU);
+        properties.getDit().setRootDn("");
+        var strategy = new DitStrategy(properties, 고정시계);
+
+        // when
+        var snapshot = strategy.read(LdapConfig로_만든_템플릿(properties));
+
+        // then — 상대 DN 이 비어도 표시명이 null 이 되지 않는다
+        var 루트 = snapshot.groups().get(entryUUID(이름_없는_OU));
+        assertThat(루트).isNotNull();
+        assertThat(루트.displayName()).isEqualTo("Sales Team");
+    }
+
+    @Test
+    @DisplayName("다른 조직을 멤버로 가진 조직은 하위 조직을 그 조직의 entryUUID 로 가리킨다")
+    void 하위_조직은_조직_id_로_이어진다() throws Exception {
+        // given — 그룹 DEV002 와 직원 kim 을 멤버로 가진 상위 그룹
+        server.add("dn: cn=Division,ou=groups," + BASE_DN, "objectClass: groupOfNames", "cn: Division",
+                "description: 본부", "member: " + 개발2팀, "member: " + 김);
+        var strategy = new GroupOfNamesStrategy(기본값_그대로(), 고정시계);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then — 하위 조직의 id 는 entryUUID 이고, 상위 조직의 멤버에 조직 멤버로 들어 있다
+        String 하위 = entryUUID(개발2팀);
+        String 상위 = entryUUID("cn=Division,ou=groups," + BASE_DN);
+        assertThat(snapshot.groups()).containsKeys(상위, 하위);
+        assertThat(snapshot.groups().get(상위).members())
+                .containsExactlyInAnyOrder(MemberRef.group(하위), MemberRef.user(entryUUID(김)));
     }
 
     @Test

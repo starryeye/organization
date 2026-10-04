@@ -154,8 +154,10 @@ public class DitStrategy implements LdapMappingStrategy {
                     dn,
                     IdNormalizer.normalize(LdapIdentifiers.필수(adapter.getAttributes(), config.getGroupIdAttribute(), dn)),
                     // 이름 속성이 없으면 DN 의 첫 RDN 값이다(설계 2026-10-04 §4.2) — id 는 entryUUID 라 사람이 읽을 수 없고,
-                    // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다
-                    firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()), LdapDns.첫_RDN_값(dn)));
+                    // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다.
+                    // 상대 DN 이 아니라 절대 DN 에서 뽑는다 — root-dn 이 비어 있으면 루트 OU 의 상대 DN 이 빈 문자열이다
+                    firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()),
+                            LdapDns.첫_RDN_값(LdapDns.절대로(dn, properties.getBaseDn()))));
         };
     }
 
@@ -172,7 +174,8 @@ public class DitStrategy implements LdapMappingStrategy {
                     dn,
                     IdNormalizer.normalize(식별값),
                     userName,
-                    // 마지막 폴백도 정규화된 userId 가 아니라 원본 userName 이다 (위 조직명과 같은 이유)
+                    // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
+                    // 금지 문자가 밑줄로 바뀐 채 표시명 칸에 그대로 새어 나온다 (위 조직명과 같은 이유)
                     firstNonBlank(adapter.getStringAttribute(config.getUserNameAttribute()),
                             adapter.getStringAttribute(UserAttributes.CN),
                             userName),

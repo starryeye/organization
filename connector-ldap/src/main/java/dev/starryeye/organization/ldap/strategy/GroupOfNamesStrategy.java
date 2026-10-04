@@ -153,8 +153,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     IdNormalizer.normalize(식별값),
                     dn,
                     userName,
-                    // 마지막 폴백은 정규화된 id 가 아니라 원본 userName 이다 — 금지 문자가 있으면 id 에는 밑줄이 들어가고,
-                    // 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
+                    // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
+                    // 금지 문자가 밑줄로 바뀐 채 사람이 읽는 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getUserNameAttribute()),
                             value(attributes, UserAttributes.CN),
                             userName),
