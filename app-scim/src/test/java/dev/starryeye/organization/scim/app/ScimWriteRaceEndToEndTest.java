@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -34,6 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>시나리오마다 {@link #라운드} 번 반복해 한 번의 타이밍 운에 기대지 않는다. 요청들은 출발선을 맞춰 동시에 보내고, 락을 못
  * 잡은 503 은 IdP 처럼 200ms 쉬었다 다시 보낸다.
+ *
+ * <p>아이디는 서버가 정한다(설계 2026-10-04 §3.1). 직원·조직을 만들 때 응답의 id 를 받아 경로·멤버 값·Check 에 쓴다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -68,16 +71,21 @@ class ScimWriteRaceEndToEndTest {
         }
     }
 
+    /** 응답의 상태와 본문. 생성 응답의 본문에서 서버 id 를 받는다. */
+    private record 응답(int 상태, String 본문) {
+    }
+
     /** 요청 하나. 503 이면 IdP 처럼 200ms 쉬었다 다시 보낸다 — ScimRebuildLockScaleTest.보낸다 와 같은 관례. */
-    private int 보낸다(HttpMethod method, String uri, String body) {
-        int status = 503;
+    private 응답 요청한다(HttpMethod method, String uri, String body) {
+        응답 결과 = new 응답(503, "");
         for (int 시도 = 0; 시도 < 10; 시도++) {
             WebTestClient.RequestBodySpec spec = client.method(method).uri(uri);
-            status = (body == null ? spec.exchange()
+            var 받은 = (body == null ? spec.exchange()
                     : spec.contentType(MediaType.APPLICATION_JSON).bodyValue(body).exchange())
-                    .returnResult(Void.class).getStatus().value();
-            if (status != 503) {
-                return status;
+                    .expectBody(String.class).returnResult();
+            결과 = new 응답(받은.getStatus().value(), 받은.getResponseBody() == null ? "" : 받은.getResponseBody());
+            if (결과.상태() != 503) {
+                return 결과;
             }
             try {
                 Thread.sleep(200);
@@ -86,27 +94,31 @@ class ScimWriteRaceEndToEndTest {
                 break;
             }
         }
-        return status;
+        return 결과;
     }
 
-    /** 요청들을 출발선을 맞춰 동시에 보내고 상태코드를 요청 순서대로 돌려준다. */
-    private List<Integer> 동시에(List<Callable<Integer>> 요청들) throws Exception {
+    private int 보낸다(HttpMethod method, String uri, String body) {
+        return 요청한다(method, uri, body).상태();
+    }
+
+    /** 요청들을 출발선을 맞춰 동시에 보내고 결과를 요청 순서대로 돌려준다. */
+    private <T> List<T> 동시에(List<Callable<T>> 요청들) throws Exception {
         var pool = Executors.newFixedThreadPool(요청들.size());
         var 출발 = new CountDownLatch(1);
         try {
-            List<Future<Integer>> futures = new ArrayList<>();
-            for (Callable<Integer> 요청 : 요청들) {
+            List<Future<T>> futures = new ArrayList<>();
+            for (Callable<T> 요청 : 요청들) {
                 futures.add(pool.submit(() -> {
                     출발.await();
                     return 요청.call();
                 }));
             }
             출발.countDown();
-            List<Integer> statuses = new ArrayList<>();
-            for (Future<Integer> future : futures) {
-                statuses.add(future.get(1, TimeUnit.MINUTES));
+            List<T> results = new ArrayList<>();
+            for (Future<T> future : futures) {
+                results.add(future.get(1, TimeUnit.MINUTES));
             }
-            return statuses;
+            return results;
         } finally {
             pool.shutdownNow();
         }
@@ -118,9 +130,9 @@ class ScimWriteRaceEndToEndTest {
                  "userName":"%s","displayName":"%s","active":true}""".formatted(userName, userName);
     }
 
-    private static String 조직본문(String code, String... userNames) {
-        String members = String.join(",", Arrays.stream(userNames)
-                .map(name -> "{\"value\":\"%s\",\"type\":\"User\"}".formatted(name)).toList());
+    private static String 조직본문(String code, String... 직원아이디들) {
+        String members = String.join(",", Arrays.stream(직원아이디들)
+                .map(id -> "{\"value\":\"%s\",\"type\":\"User\"}".formatted(id)).toList());
         return """
                 {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                  "externalId":"%s","displayName":"%s","members":[%s]}""".formatted(code, code, members);
@@ -131,12 +143,20 @@ class ScimWriteRaceEndToEndTest {
                 {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[%s]}""".formatted(operations);
     }
 
-    private void 직원을_만든다(String userName) {
-        assertThat(보낸다(HttpMethod.POST, "/scim/v2/Users", 직원본문(userName))).isEqualTo(201);
+    /** 직원을 만들고 서버가 발급한 id 를 돌려준다. */
+    private String 직원을_만든다(String userName) {
+        return 생성한다("/scim/v2/Users", 직원본문(userName));
     }
 
-    private void 조직을_만든다(String code, String... userNames) {
-        assertThat(보낸다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code, userNames))).isEqualTo(201);
+    /** 조직을 만들고 서버가 발급한 id 를 돌려준다. 멤버는 직원의 서버 id 다. */
+    private String 조직을_만든다(String code, String... 직원아이디들) {
+        return 생성한다("/scim/v2/Groups", 조직본문(code, 직원아이디들));
+    }
+
+    private String 생성한다(String uri, String body) {
+        응답 결과 = 요청한다(HttpMethod.POST, uri, body);
+        assertThat(결과.상태()).as(결과.본문()).isEqualTo(201);
+        return 만든_아이디(결과.본문());
     }
 
     private JsonNode 조회한다(String uri) {
@@ -149,10 +169,9 @@ class ScimWriteRaceEndToEndTest {
     void 서로_다른_속성_PATCH() throws Exception {
         for (int r = 0; r < 라운드; r++) {
             // given
-            String id = "race1-" + r;
-            String 조직 = "R1G" + r;
-            직원을_만든다(id);
-            조직을_만든다(조직, id);
+            String id = 직원을_만든다("race1-" + r);
+            String 조직 = 조직을_만든다("R1G" + r, id);
+            assertThat(check("user:" + id, "member", "group:" + 조직)).as("라운드 %d — 시작 때는 소속이 있다", r).isTrue();
             String uri = "/scim/v2/Users/" + id;
 
             // when
@@ -180,10 +199,9 @@ class ScimWriteRaceEndToEndTest {
     void 비활성화와_이름_변경() throws Exception {
         for (int r = 0; r < 라운드; r++) {
             // given
-            String id = "race2-" + r;
-            String 조직 = "R2G" + r;
-            직원을_만든다(id);
-            조직을_만든다(조직, id);
+            String id = 직원을_만든다("race2-" + r);
+            String 조직 = 조직을_만든다("R2G" + r, id);
+            assertThat(check("user:" + id, "member", "group:" + 조직)).as("라운드 %d — 시작 때는 소속이 있다", r).isTrue();
             String uri = "/scim/v2/Users/" + id;
 
             // when
@@ -205,10 +223,9 @@ class ScimWriteRaceEndToEndTest {
     void 삭제와_변경() throws Exception {
         for (int r = 0; r < 라운드; r++) {
             // given
-            String id = "race3-" + r;
-            String 조직 = "R3G" + r;
-            직원을_만든다(id);
-            조직을_만든다(조직, id);
+            String id = 직원을_만든다("race3-" + r);
+            String 조직 = 조직을_만든다("R3G" + r, id);
+            assertThat(check("user:" + id, "member", "group:" + 조직)).as("라운드 %d — 시작 때는 소속이 있다", r).isTrue();
             String uri = "/scim/v2/Users/" + id;
 
             // when
@@ -253,6 +270,13 @@ class ScimWriteRaceEndToEndTest {
         }
     }
 
+    /**
+     * 서버가 id 를 정하므로 두 POST 는 서로 다른 id 를 받는다 — 겹침을 판정하는 것은 <b>같은 {@code externalId}</b> 다(설계 2026-10-04 §3.2).
+     * 생성은 쓰기 락(전역 하나)을 잡은 안에서 {@code externalId} 로 GSI3 를 읽고 본 테이블로 다시 확인하므로, 락이 두 POST 를 한 줄로 세우고
+     * 뒤의 것이 앞의 것을 본다. 위 userName 시나리오와 같이 DynamoDB Local 의 GSI 가 즉시 반영된다는 점에 기댄다 — 실제 DynamoDB 의 GSI 는
+     * 결과적 일관성이라 첫 POST 직후의 두 번째는 통과할 수 있다(설계 §3.2 가 받아들인 한계). 본 테이블 재확인은 낡은 후보를 걸러낼 뿐 없는 후보를
+     * 찾아 주지 못한다.
+     */
     @Test
     @DisplayName("같은 조직을 동시에 만들면 하나만 201 이고 하나는 409 다")
     void 같은_조직_동시_생성() throws Exception {
@@ -261,13 +285,18 @@ class ScimWriteRaceEndToEndTest {
             String code = "DUP" + r;
 
             // when
-            List<Integer> statuses = 동시에(List.of(
-                    () -> 보낸다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code)),
-                    () -> 보낸다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code))));
+            List<응답> 응답들 = 동시에(List.of(
+                    () -> 요청한다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code)),
+                    () -> 요청한다(HttpMethod.POST, "/scim/v2/Groups", 조직본문(code))));
 
-            // then
-            assertThat(statuses).as("라운드 %d", r).containsExactlyInAnyOrder(201, 409);
-            client.get().uri("/scim/v2/Groups/" + code).exchange().expectStatus().isOk();
+            // then — 하나만 만들어졌고, 그 하나가 externalId 로 찾아진다
+            assertThat(응답들.stream().map(응답::상태).toList()).as("라운드 %d", r).containsExactlyInAnyOrder(201, 409);
+            String 만들어진 = 만든_아이디(응답들.stream().filter(결과 -> 결과.상태() == 201).findFirst().orElseThrow().본문());
+            JsonNode found = client.get().uri("/scim/v2/Groups?filter={f}", "externalId eq \"" + code + "\"")
+                    .exchange().expectStatus().isOk()
+                    .expectBody(JsonNode.class).returnResult().getResponseBody();
+            assertThat(found.get("totalResults").asInt()).as("라운드 %d", r).isEqualTo(1);
+            assertThat(found.get("Resources").get(0).get("id").asText()).as("라운드 %d", r).isEqualTo(만들어진);
         }
     }
 
@@ -276,10 +305,8 @@ class ScimWriteRaceEndToEndTest {
     void 비활성화와_조직_추가() throws Exception {
         for (int r = 0; r < 라운드; r++) {
             // given
-            String id = "race6-" + r;
-            String 조직 = "R6G" + r;
-            직원을_만든다(id);
-            조직을_만든다(조직);
+            String id = 직원을_만든다("race6-" + r);
+            String 조직 = 조직을_만든다("R6G" + r);
 
             // when
             List<Integer> statuses = 동시에(List.of(

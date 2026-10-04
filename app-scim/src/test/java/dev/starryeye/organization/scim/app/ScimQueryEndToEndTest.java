@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.core.fixture.Containers;
+import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -17,11 +18,18 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.util.List;
+import java.util.UUID;
+
+import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * SCIM 목록·필터 조회(RFC 7644 §3.4.2)를 Okta·Entra 가 실제로 보내는 요청 모양대로
  * 실제 DynamoDB Local 위에서 확인한다.
  *
- * <p>테스트는 순서에 의존한다 — 준비 단계가 만든 직원·조직 위에서 이후 조회들이 이어진다.
+ * <p>테스트는 순서에 의존한다 — 준비 단계가 만든 직원·조직 위에서 이후 조회들이 이어진다. 아이디는 서버가 정하므로(설계 2026-10-04 §3.1)
+ * 준비 단계가 응답의 id 를 {@link #아이디들} 에 받아 두고, 조회 결과의 id 는 거기서 꺼내 맞춘다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -43,33 +51,41 @@ class ScimQueryEndToEndTest {
                 () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
     }
 
+    /** 준비 단계가 만든 리소스의 이름(kim, park, dev) → 서버 id. 테스트 인스턴스는 메서드마다 새로 만들어지므로 정적이다. */
+    private static final ScimIdBook 아이디들 = new ScimIdBook();
+
     @Autowired WebTestClient client;
 
-    private void 생성한다(String uri, String body) {
-        client.post().uri(uri)
+    /** 만들고, 응답의 서버 id 를 이름으로 적어 둔다. */
+    private void 생성한다(String 이름, String uri, String body) {
+        아이디들.기록한다(이름, 만든_아이디(client.post().uri(uri)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
-                .exchange()
-                .expectStatus().isCreated();
+                .exchange()));
     }
 
     @Test
     @Order(1)
     @DisplayName("직원 둘과 조직 하나를 SCIM 으로 만든다")
     void 준비한다() {
-        생성한다("/scim/v2/Users", """
+        // given, when — 조직의 멤버 값은 IdP 가 받은 직원 id 다
+        생성한다("kim", "/scim/v2/Users", """
                 {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                  "externalId":"ext-kim","userName":"Kim.Lee","displayName":"이김","active":true}
                 """);
-        생성한다("/scim/v2/Users", """
+        생성한다("park", "/scim/v2/Users", """
                 {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                  "externalId":"ext-park","userName":"park","displayName":"박","active":true}
                 """);
-        생성한다("/scim/v2/Groups", """
+        생성한다("dev", "/scim/v2/Groups", """
                 {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                  "externalId":"grp-dev","displayName":"Dev Team",
-                 "members":[{"value":"Kim.Lee","type":"User"}]}
-                """);
+                 "members":[{"value":"%s","type":"User"}]}
+                """.formatted(아이디들.서버("kim")));
+
+        // then — 셋 모두 서버가 발급한 UUID 를 받았다(201 은 만든_아이디가 확인한다)
+        List.of("kim", "park", "dev").forEach(이름 ->
+                assertThat(UUID.fromString(아이디들.서버(이름))).hasToString(아이디들.서버(이름)));
     }
 
     @Test
@@ -90,25 +106,29 @@ class ScimQueryEndToEndTest {
     @Order(3)
     @DisplayName("Okta — 필터 없는 목록은 userName 소문자 순이다")
     void Okta_목록() {
+        // given, when, then — 순서는 userName 소문자 기준이고, 아이디는 서버가 발급한 값이다
         client.get().uri("/scim/v2/Users?startIndex=1&count=100")
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.totalResults").isEqualTo(2)
-                .jsonPath("$.Resources[0].id").isEqualTo("Kim.Lee")
-                .jsonPath("$.Resources[1].id").isEqualTo("park");
+                .jsonPath("$.Resources[0].userName").isEqualTo("Kim.Lee")
+                .jsonPath("$.Resources[0].id").isEqualTo(아이디들.서버("kim"))
+                .jsonPath("$.Resources[1].userName").isEqualTo("park")
+                .jsonPath("$.Resources[1].id").isEqualTo(아이디들.서버("park"));
     }
 
     @Test
     @Order(4)
     @DisplayName("Okta — 조직명 필터는 멤버까지 담는다")
     void Okta_조직_필터() {
+        // given, when, then
         client.get().uri("/scim/v2/Groups?filter={f}&startIndex=1&count=100", "displayName eq \"dev team\"")
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.totalResults").isEqualTo(1)
-                .jsonPath("$.Resources[0].members[0].value").isEqualTo("Kim.Lee");
+                .jsonPath("$.Resources[0].members[0].value").isEqualTo(아이디들.서버("kim"));
     }
 
     @Test
@@ -127,15 +147,16 @@ class ScimQueryEndToEndTest {
     @Order(6)
     @DisplayName("Entra — excludedAttributes=members 면 조직 목록과 단건 모두 멤버를 담지 않는다")
     void Entra_멤버_제외() {
+        // given, when, then
         client.get().uri("/scim/v2/Groups?excludedAttributes=members&filter={f}", "displayName eq \"Dev Team\"")
                 .exchange().expectStatus().isOk()
                 .expectBody()
-                .jsonPath("$.Resources[0].id").isEqualTo("grp-dev")
+                .jsonPath("$.Resources[0].id").isEqualTo(아이디들.서버("dev"))
                 .jsonPath("$.Resources[0].members").doesNotExist();
-        client.get().uri("/scim/v2/Groups/grp-dev?excludedAttributes=members")
+        client.get().uri("/scim/v2/Groups/" + 아이디들.서버("dev") + "?excludedAttributes=members")
                 .exchange().expectStatus().isOk()
                 .expectBody()
-                .jsonPath("$.id").isEqualTo("grp-dev")
+                .jsonPath("$.id").isEqualTo(아이디들.서버("dev"))
                 .jsonPath("$.members").doesNotExist();
     }
 
@@ -174,16 +195,17 @@ class ScimQueryEndToEndTest {
     @Order(9)
     @DisplayName("한 명씩 페이지를 넘기면 실제 저장소의 책갈피로 이어 읽어 각자 한 번씩 나온다")
     void 책갈피로_이어_읽는다() {
+        // given, when, then — 책갈피는 userName 순서를 따라가고, 각 쪽에 나오는 id 는 서버가 발급한 값이다
         client.get().uri("/scim/v2/Users?startIndex=1&count=1")
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.totalResults").isEqualTo(2)
-                .jsonPath("$.Resources[0].id").isEqualTo("Kim.Lee");
+                .jsonPath("$.Resources[0].id").isEqualTo(아이디들.서버("kim"));
         client.get().uri("/scim/v2/Users?startIndex=2&count=1")
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.totalResults").isEqualTo(2)
-                .jsonPath("$.Resources[0].id").isEqualTo("park");
+                .jsonPath("$.Resources[0].id").isEqualTo(아이디들.서버("park"));
     }
 
     @Test

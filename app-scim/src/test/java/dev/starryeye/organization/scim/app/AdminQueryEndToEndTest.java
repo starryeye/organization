@@ -21,6 +21,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.List;
 
+import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
+
 /**
  * 관리자 조회 API(admin-api)가 app-scim 배선 위에서 실제로 동작하는지 확인한다.
  *
@@ -30,6 +32,9 @@ import java.util.List;
  *
  * <p>테스트는 순서에 의존한다({@link Order}). 첫 테스트가 만든 직원·조직 위에서 두 번째가
  * 튜플을 직접 지워 상태를 어긋나게 만들고, 세 번째가 그 위에 상위 조직을 더 쌓는다.
+ *
+ * <p>아이디는 서버가 정한다(설계 2026-10-04 §3.1). 관리자 조회의 경로·튜플은 첫 테스트가 응답에서 받아 둔 id({@link #홍길동}, {@link #백엔드팀})로
+ * 한다 — 조직 코드(externalId)로 찾는 길은 아직 없다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -51,6 +56,10 @@ class AdminQueryEndToEndTest {
                 () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
     }
 
+    /** 순서 1 이 만든 직원·조직의 서버 id. 테스트 인스턴스는 메서드마다 새로 만들어지므로 정적이다. */
+    private static String 홍길동;
+    private static String 백엔드팀;
+
     @Autowired WebTestClient client;
     @Autowired StoreBootstrapper bootstrapper;
 
@@ -59,29 +68,29 @@ class AdminQueryEndToEndTest {
     @DisplayName("SCIM 으로 만든 직원을 표시명으로 검색하고 상세에서 경로를 본다")
     void 검색하고_상세를_본다() {
         // given — SCIM 으로 직원과 조직을 만든다
-        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+        홍길동 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                          "userName":"gd.hong","displayName":"홍길동","active":true}""")
-                .exchange().expectStatus().isCreated();
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .exchange());
+        백엔드팀 = 만든_아이디(client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                          "externalId":"DEV002","displayName":"백엔드팀",
-                         "members":[{"value":"gd.hong"}]}""")
-                .exchange().expectStatus().isCreated();
+                         "members":[{"value":"%s"}]}""".formatted(홍길동))
+                .exchange());
 
         // when, then — 표시명 접두사 검색
         client.get().uri("/admin/employees?displayName=홍")
                 .exchange().expectStatus().isOk()
-                .expectBody().jsonPath("$.items[0].employeeId").isEqualTo("gd.hong");
+                .expectBody().jsonPath("$.items[0].employeeId").isEqualTo(홍길동);
 
         // then — 상세에서 파생값과 실제 판정이 모두 true 로 일치한다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.displayName").isEqualTo("홍길동")
-                .jsonPath("$.paths[0].orgCode").isEqualTo("DEV002")
+                .jsonPath("$.paths[0].orgCode").isEqualTo(백엔드팀)
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
                 .jsonPath("$.paths[0].openFgaCheck").isEqualTo(true);
     }
@@ -93,10 +102,10 @@ class AdminQueryEndToEndTest {
         // given — 이 API 의 존재 이유다. 튜플만 직접 지워 상태와 어긋나게 만든다
         bootstrapper.client().deleteTuples(List.of(
                 new ClientTupleKeyWithoutCondition()
-                        .user("user:gd.hong").relation("direct_member")._object("group:DEV002"))).get();
+                        .user("user:" + 홍길동).relation("direct_member")._object("group:" + 백엔드팀))).get();
 
         // when, then — 상태는 그대로이므로 파생값은 true 인데 실제 판정은 false 다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
@@ -108,20 +117,20 @@ class AdminQueryEndToEndTest {
     @DisplayName("조직 상세가 상위 계층과 직속 소속을 준다")
     void 조직_상세를_준다() {
         // given — 상위 조직을 만들어 계층을 만든다
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+        String 플랫폼개발본부 = 만든_아이디(client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                          "externalId":"DEV001","displayName":"플랫폼개발본부",
-                         "members":[{"value":"DEV002","type":"Group"}]}""")
-                .exchange().expectStatus().isCreated();
+                         "members":[{"value":"%s","type":"Group"}]}""".formatted(백엔드팀))
+                .exchange());
 
         // when, then
-        client.get().uri("/admin/organizations/DEV002")
+        client.get().uri("/admin/organizations/" + 백엔드팀)
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.displayName").isEqualTo("백엔드팀")
-                .jsonPath("$.ancestors[0].orgCode").isEqualTo("DEV001")
-                .jsonPath("$.members.items[0].employeeId").isEqualTo("gd.hong");
+                .jsonPath("$.ancestors[0].orgCode").isEqualTo(플랫폼개발본부)
+                .jsonPath("$.members.items[0].employeeId").isEqualTo(홍길동);
     }
 
     @Test

@@ -20,6 +20,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.List;
 
+import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -75,46 +76,46 @@ class ScimDriftHealingEndToEndTest {
     @Test
     @DisplayName("경합이 남긴 퇴사자 튜플을 그 직원을 가리키는 다음 SCIM 쓰기가 걷어낸다")
     void 어긋난_튜플이_치유된다() {
-        // given — kim 을 만들고 DEV001 에 넣은 뒤 비활성으로 바꾼다
-        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+        // given — kim 을 만들고 DEV001 에 넣은 뒤 비활성으로 바꾼다. 아이디는 서버가 정하므로 응답에서 받는다
+        String kim = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                          "userName":"kim","displayName":"김철수","active":true}
                         """)
-                .exchange().expectStatus().isCreated();
+                .exchange());
 
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+        String dev001 = 만든_아이디(client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                          "externalId":"DEV001","displayName":"개발본부",
-                         "members":[{"value":"kim","type":"User"}]}
-                        """)
-                .exchange().expectStatus().isCreated();
+                         "members":[{"value":"%s","type":"User"}]}
+                        """.formatted(kim))
+                .exchange());
 
-        client.put().uri("/scim/v2/Users/kim").contentType(MediaType.APPLICATION_JSON)
+        client.put().uri("/scim/v2/Users/" + kim).contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                          "userName":"kim","displayName":"김철수","active":false}
                         """)
                 .exchange().expectStatus().isOk();
 
-        assertThat(check("user:kim", "member", "group:DEV001")).isFalse();
+        assertThat(check("user:" + kim, "member", "group:" + dev001)).isFalse();
 
-        // given — 경합이 남겼을 튜플을 직접 심는다.
+        // given — 경합이 남겼을 튜플을 직접 심는다. 서버가 쓰는 id 에 심어야 이 서버가 보는 튜플이 된다.
         // DynamoDB 에는 kim 이 DEV001 멤버로 남아 있고(비활성), OpenFGA 에만 튜플이 산다.
-        잔여튜플을_심는다("user:kim", "direct_member", "group:DEV001");
-        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+        잔여튜플을_심는다("user:" + kim, "direct_member", "group:" + dev001);
+        assertThat(check("user:" + kim, "member", "group:" + dev001)).isTrue();
 
         // when — kim 을 가리키는 조직 쓰기가 한 번 온다(IdP 의 재전송 같은)
-        client.patch().uri("/scim/v2/Groups/DEV001").contentType(MediaType.APPLICATION_JSON)
+        client.patch().uri("/scim/v2/Groups/" + dev001).contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-                         "Operations":[{"op":"add","path":"members","value":[{"value":"kim","type":"User"}]}]}
-                        """)
+                         "Operations":[{"op":"add","path":"members","value":[{"value":"%s","type":"User"}]}]}
+                        """.formatted(kim))
                 .exchange().expectStatus().isNoContent();
 
         // then — 상태 기준선이었다면 델타가 비어 그대로 남는다
-        assertThat(check("user:kim", "member", "group:DEV001"))
+        assertThat(check("user:" + kim, "member", "group:" + dev001))
                 .as("비활성 직원의 잘못 남은 권한은 다음 터치에 사라져야 한다")
                 .isFalse();
     }
