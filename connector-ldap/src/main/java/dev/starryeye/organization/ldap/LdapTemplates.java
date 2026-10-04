@@ -49,7 +49,9 @@ public final class LdapTemplates {
 
     public static LdapTemplate configured(ContextSource contextSource) {
         LdapTemplate template = new LdapTemplate(contextSource);
-        template.setIgnorePartialResultException(true);
+        // referral 로 생긴 PartialResultException 을 Spring 이 DEBUG 로 삼키지 않게 한다 — 검색 범위가 위임 서브트리·자식 도메인을 걸치면 그 부분이 늘
+        // 빠지는데 운영자는 모른다(점검 S21). PagedLdapSearch 가 받아 경고 한 줄을 남기고 계속한다(설계 2026-10-05 §4.2)
+        template.setIgnorePartialResultException(false);
         // 기본값(true)으로 두면 서버가 관리 한도(sizeLimit)로 결과를 자른 뒤 예외 없이 조용히
         // 응답한다 — 잘린 목록이 대량 퇴사처럼 보여 실제 소속을 지워버릴 수 있다. false 로 두면
         // 그 경우 예외가 올라와 FAILED 로 기록되므로, 페이징을 우회하는 잘림도 안전망으로 잡는다.

@@ -1,13 +1,14 @@
 package dev.starryeye.organization.ldap.strategy;
 
+import dev.starryeye.organization.ldap.LdapTemplates;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ldap.control.PagedResultsDirContextProcessor;
 import org.springframework.ldap.core.ContextMapper;
+import org.springframework.ldap.core.ContextMapperCallbackHandler;
 import org.springframework.ldap.core.LdapTemplate;
-import dev.starryeye.organization.ldap.LdapTemplates;
 import org.springframework.ldap.query.LdapQuery;
 
 import javax.naming.directory.SearchControls;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,42 +38,73 @@ import java.util.Map;
  * (아직 검색을 수행하지 않은) processor 는 생성자에 어떤 쿠키를 넘기든 {@code hasMore()}가
  * 항상 {@code true}를 반환하므로, 다음 페이지용 processor 를 먼저 만들고 그걸 검사하면
  * 무한 루프에 빠진다 — 매 반복 새 커넥션을 열다 로컬 포트가 고갈되어서야 멈춘다.
+ *
+ * <p><b>referral(검색 결과 참조, RFC 4511 §4.5.3)은 따라가지 않되 검색마다 경고 한 줄을 남긴다(점검 S21).</b> JNDI 는 참조를 만나면
+ * 열거 끝에 {@code PartialResultException} 을 던지고, Spring 은 기본으로 그것을 DEBUG 로 삼킨다({@link LdapTemplates#configured} 가 끈다).
+ * 그래서 결과를 {@code ContextMapperCallbackHandler} 하나에 직접 모은다 — 예외가 나도 그 전까지 받은 엔트리는 핸들러에 담겨 있고, 페이징
+ * 쿠키는 Spring 이 {@code finally} 에서 읽으므로 다음 페이지도 이어진다.
  */
+@Slf4j
 final class PagedLdapSearch {
 
     private PagedLdapSearch() {
-    }
-
-    static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, ContextMapper<T> mapper) {
-        if (pageSize <= 0) {
-            return template.search(query, mapper);
-        }
-        return 한_커넥션에서_페이징한다(template, query, pageSize, mapper);
     }
 
     // 이 전략(GroupOfNames·DIT)의 매퍼는 전부 ContextMapper 다 — DN 이 필요하기 때문이다
     // (AttributesMapper 에는 DN 이 오지 않는다). 이전에는 AttributesMapper 오버로드도
     // 있었지만 마지막 호출자가 사라져 지웠다; 되살릴 때는 DN 없는 매퍼를 다시 불러들이는
     // 문이 된다는 점을 염두에 둔다.
-    private static <T> List<T> 한_커넥션에서_페이징한다(LdapTemplate template, LdapQuery query,
-                                              int pageSize, ContextMapper<T> mapper) {
+    static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, ContextMapper<T> mapper) {
         String base = query.base().toString();
         String filter = query.filter().encode();
         SearchControls controls = controlsOf(query);
-
+        ContextMapperCallbackHandler<T> handler = new ContextMapperCallbackHandler<>(mapper);
+        검색의_참조 참조 = new 검색의_참조(base, filter);
+        if (pageSize <= 0) {
+            참조.넘긴다(() -> template.search(base, filter, controls, handler));
+            return handler.getList();
+        }
         return LdapTemplates.한_커넥션에서(template, paged -> {
-            List<T> results = new ArrayList<>();
             PagedResultsDirContextProcessor processor = new PagedResultsDirContextProcessor(pageSize);
             boolean hasMore;
             do {
-                results.addAll(paged.search(base, filter, controls, mapper, processor));
+                PagedResultsDirContextProcessor 이번 = processor;
+                참조.넘긴다(() -> paged.search(base, filter, controls, handler, 이번));
                 hasMore = processor.hasMore();
                 if (hasMore) {
                     processor = new PagedResultsDirContextProcessor(pageSize, processor.getCookie());
                 }
             } while (hasMore);
-            return results;
+            return handler.getList();
         });
+    }
+
+    /**
+     * 검색 하나에서 만난 referral. 따라가지 않는다(설계 2026-10-05 §4.2) — 다른 DC 의 주소·자격 증명·DNS 가 필요하고 AD 도메인 루트에서는
+     * DNS 파티션까지 읽는다. 대신 검색마다 경고 한 줄을 남긴다(페이지마다 참조가 와도 한 줄). 실패로 만들지 않는다 — AD 에서 도메인 루트를
+     * 검색 베이스로 쓰면 참조가 늘 온다.
+     */
+    private static final class 검색의_참조 {
+        private final String base;
+        private final String filter;
+        private boolean 알렸다;
+
+        검색의_참조(String base, String filter) {
+            this.base = base;
+            this.filter = filter;
+        }
+
+        void 넘긴다(Runnable 검색) {
+            try {
+                검색.run();
+            } catch (org.springframework.ldap.PartialResultException e) {
+                if (!알렸다) {
+                    알렸다 = true;
+                    log.warn("LDAP 검색이 referral 을 만나 그 부분을 읽지 않았다 — 따라가지 않는다. 검색 범위가 다른 도메인·위임 서브트리를 걸치는지 확인하라: base={}, filter={}, {}",
+                            base, filter, e.getMessage());
+                }
+            }
+        }
     }
 
     /**
@@ -97,6 +129,8 @@ final class PagedLdapSearch {
         // 쓰는 속성만 요청한다 — 비워 두면 서버가 모든 사용자 속성을 준다(AD 10만 명이면 회차마다 1~2GB, 설계 2026-10-04 §4.3).
         // 운영 속성(entryUUID)은 이름을 대야만 온다
         controls.setReturningAttributes(query.attributes());
+        // ContextMapper 오버로드는 Spring 이 이것을 켜 주지만 핸들러 오버로드는 켜지 않는다 — 없으면 매퍼가 DirContextAdapter 를 못 받는다
+        controls.setReturningObjFlag(true);
         return controls;
     }
 }
