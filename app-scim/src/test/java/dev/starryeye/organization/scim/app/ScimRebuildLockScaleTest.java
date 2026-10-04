@@ -12,6 +12,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import dev.starryeye.organization.scim.fixture.ScimRequest;
 import dev.starryeye.organization.scim.fixture.ScimRequestRenderer;
 import org.junit.jupiter.api.DisplayName;
@@ -60,6 +61,9 @@ import static org.mockito.Mockito.verify;
 class ScimRebuildLockScaleTest {
 
     private static final OrgChart 기대 = OrgChartFixture.오천명();
+
+    /** 서버가 발급한 id 와 조직도 아이디의 대응. 요청은 보낼 때, 기대값·Check 는 볼 때 번역한다. */
+    private static final ScimIdBook 번역부 = new ScimIdBook();
 
     private static final Duration 리스_TTL = Duration.ofSeconds(2);
     private static final Duration 갱신_주기 = Duration.ofMillis(500);
@@ -113,7 +117,8 @@ class ScimRebuildLockScaleTest {
     void S18b_재적재_중_쓰기와_리스() {
         // given — 앞선 기준 적재에서 쓰기가 renew 를 불렀을 수 있다. 이 시나리오의 호출만 센다
         clearInvocations(lock);
-        RelationTuple 기존권한 = RelationTuple.member(기대.landmarks().L6직속직원(), 기대.landmarks().회사());
+        RelationTuple 기존권한 = 번역부.번역한다(
+                RelationTuple.member(기대.landmarks().L6직속직원(), 기대.landmarks().회사()));
 
         // when — 재적재를 건다. 202 는 락을 잡은 뒤에만 오므로 이 뒤의 쓰기는 재적재와 겹친다
         long t0 = System.currentTimeMillis();
@@ -183,7 +188,7 @@ class ScimRebuildLockScaleTest {
      * 성공하든 503 이든 기대 조직도가 흔들리지 않아야 재적재 전후를 같은 잣대로 잰다.
      */
     private int 쓰기를_시도한다() {
-        ScimRequest request = ScimRequestRenderer.직원활성(기대.landmarks().L6직속직원());
+        ScimRequest request = 번역부.번역한다(ScimRequestRenderer.직원활성(기대.landmarks().L6직속직원()));
         return client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
                 .patch().uri(request.path())
                 .contentType(MediaType.APPLICATION_JSON)
@@ -193,7 +198,12 @@ class ScimRebuildLockScaleTest {
                 .getStatus().value();
     }
 
-    private void 보낸다(ScimRequest request, int 기대상태) {
+    /**
+     * 조직도 아이디로 만든 요청을 서버 id 로 번역해 보낸다. 생성(POST)이 201 이면 응답의 id 를 그 조직도 아이디에 묶어
+     * 둔다 — 뒤 요청의 경로·멤버 값과 기대값·Check 가 이것으로 서버 id 가 된다.
+     */
+    private void 보낸다(ScimRequest 원래요청, int 기대상태) {
+        ScimRequest request = 번역부.번역한다(원래요청);
         // 기준선 적재 전용 503 재시도. 이 구간(기준_상태를_만든다)은 아직 락 경합이 시작되기
         // 전이라 503 이 나온다면 그건 경합이 아니라 DynamoDB Local 의 순간 지연이 500ms 락
         // 타임아웃을 넘긴 것뿐이다 — 실제 SCIM IdP 도 503 을 "나중에 다시" 신호로 보고 재시도
@@ -201,14 +211,17 @@ class ScimRebuildLockScaleTest {
         // 거기서는 재적재 중 503 이 나오는 것 자체가 검증 대상이라 재시도하면 그 단언이 무너진다.
         int 최대시도 = 5;
         int 상태 = -1;
+        String 응답 = null;
         for (int 시도 = 1; 시도 <= 최대시도; 시도++) {
-            상태 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
+            var 결과 = client.mutate().responseTimeout(Duration.ofMinutes(2)).build()
                     .post().uri(request.path())
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(request.body())
                     .exchange()
-                    .returnResult(Void.class)
-                    .getStatus().value();
+                    .expectBody(String.class)
+                    .returnResult();
+            상태 = 결과.getStatus().value();
+            응답 = 결과.getResponseBody();
             if (상태 != 503) {
                 break;
             }
@@ -222,9 +235,10 @@ class ScimRebuildLockScaleTest {
             }
         }
         assertThat(상태).as("기준선 적재 중 503 이 반복돼 재시도로도 회복되지 않았다").isEqualTo(기대상태);
+        번역부.기록한다(request, 상태, 응답);
     }
 
     private void 검증한다() {
-        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 기대);
+        ScaleVerification.두_경로로_검증한다(state, checker, bootstrapper, 번역부.번역한다(기대));
     }
 }

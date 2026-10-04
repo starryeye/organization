@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 
+import java.util.Arrays;
+
 /**
  * 관리자 조회. 기존 {@code /admin/sync} 와 같은 표면이 되도록 {@code @RestController} 와
  * {@link ResponseStatusException} 을 쓴다.
@@ -36,16 +38,18 @@ public class AdminQueryController {
     public Mono<Page<UserSummary>> searchEmployees(
             @RequestParam(required = false) String userName,
             @RequestParam(required = false) String displayName,
+            @RequestParam(required = false) String externalId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "" + DEFAULT_LIMIT) int limit) {
 
         int size = validLimit(limit);
-        if (present(userName) == present(displayName)) {
+        if (count(userName, displayName, externalId) != 1) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "userName 과 displayName 중 정확히 하나를 지정해야 한다");
+                    "userName·displayName·externalId 중 정확히 하나를 지정해야 한다");
         }
-        Mono<Page<UserSummary>> result = present(userName)
-                ? useCase.searchEmployeesByUserName(userName, cursor, size)
+        // externalId 는 정확히 일치하는 한 페이지다 — cursor·limit 은 쓰지 않는다
+        Mono<Page<UserSummary>> result = present(externalId) ? useCase.findEmployeesByExternalId(externalId)
+                : present(userName) ? useCase.searchEmployeesByUserName(userName, cursor, size)
                 : useCase.searchEmployeesByDisplayName(displayName, cursor, size);
         return result.onErrorMap(IllegalArgumentException.class, this::badRequest);
     }
@@ -61,15 +65,19 @@ public class AdminQueryController {
     @GetMapping("/organizations")
     public Mono<Page<GroupSummary>> searchOrganizations(
             @RequestParam(required = false) String displayName,
+            @RequestParam(required = false) String externalId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "" + DEFAULT_LIMIT) int limit) {
 
         int size = validLimit(limit);
-        if (!present(displayName)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "displayName 이 필요하다");
+        if (count(displayName, externalId) != 1) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "displayName·externalId 중 정확히 하나를 지정해야 한다");
         }
-        return useCase.searchOrganizations(displayName, cursor, size)
-                .onErrorMap(IllegalArgumentException.class, this::badRequest);
+        Mono<Page<GroupSummary>> result = present(externalId)
+                ? useCase.findOrganizationsByExternalId(externalId)
+                : useCase.searchOrganizations(displayName, cursor, size);
+        return result.onErrorMap(IllegalArgumentException.class, this::badRequest);
     }
 
     @GetMapping("/organizations/{orgCode}")
@@ -94,6 +102,11 @@ public class AdminQueryController {
 
     private static boolean present(String value) {
         return value != null && !value.isBlank();
+    }
+
+    /** 값이 있는(비어 있지 않은) 검색 파라미터의 개수. */
+    private static long count(String... values) {
+        return Arrays.stream(values).filter(AdminQueryController::present).count();
     }
 
     private int validLimit(int limit) {

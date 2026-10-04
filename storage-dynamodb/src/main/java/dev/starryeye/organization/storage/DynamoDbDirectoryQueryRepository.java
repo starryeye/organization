@@ -20,9 +20,9 @@ import java.util.function.Function;
 /**
  * SCIM 목록·필터 조회의 읽기 (S-1 설계 §5.3).
  *
- * <p>{@code userName}·조직명은 GSI1 의 소문자 정렬키({@link Keys#indexKey})로, {@code externalId} 는 GSI3 로
- * 찾는다. GSI3 는 키만 담으므로 찾은 {@code PK} 로 본 테이블을 강한 일관성으로 다시 읽는다 — 인덱스가 늦어도
- * 낡은 속성을 돌려주지 않는다.
+ * <p>{@code userName}·조직명은 GSI1 의 소문자 정렬키({@link Keys#indexKey})로 찾는다. {@code externalId} 는 상태 저장소가 GSI3 로 찾는다
+ * ({@link DirectoryStateRepository#findUserIdsByExternalId}) — GSI3 는 키만 담으므로 찾은 아이디로 본 테이블을 강한 일관성으로
+ * 다시 읽는다. 인덱스가 늦어도 낡은 속성을 돌려주지 않는다.
  *
  * <p>목록은 GSI1 파티션({@code USER_INDEX}/{@code GROUP_INDEX})을 정렬키 순서로 {@code limit} 건씩 읽는다.
  * 위치는 {@link Cursor} 로 감싼 LastEvaluatedKey 다. 파티션 전체를 읽는 것은 {@link #countUsers}·
@@ -47,8 +47,7 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
 
     @Override
     public Flux<DirectoryUser> findUsersByExternalId(String externalId) {
-        return byExternalId(externalId, Keys.USER_PREFIX)
-                .concatMap(pk -> state.findUser(Keys.parseUserPk(pk)));
+        return state.findUserIdsByExternalId(externalId).concatMap(state::findUser);
     }
 
     @Override
@@ -58,8 +57,7 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
 
     @Override
     public Flux<GroupHeader> findGroupHeadersByExternalId(String externalId) {
-        return byExternalId(externalId, Keys.GROUP_PREFIX)
-                .concatMap(pk -> state.findGroupHeader(Keys.parseGroupPk(pk)));
+        return state.findGroupIdsByExternalId(externalId).concatMap(state::findGroupHeader);
     }
 
     @Override
@@ -114,23 +112,6 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
                         ":pk", Attrs.s(partition), ":sk", Attrs.s(Keys.indexKey(value))))
                 .build();
         return Paginator.queryAll(client, request);
-    }
-
-    /** GSI3 에서 {@code externalId} 가 같은 아이템 중 {@code prefix} 종류의 META 만 골라 PK 를 준다. */
-    private Flux<String> byExternalId(String externalId, String prefix) {
-        if (externalId == null || externalId.isEmpty()) {
-            return Flux.empty();
-        }
-        QueryRequest request = QueryRequest.builder()
-                .tableName(properties.getTableName())
-                .indexName(Keys.GSI3)
-                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
-                .expressionAttributeNames(Map.of("#pk", Keys.GSI3PK, "#sk", Keys.GSI3SK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(externalId), ":prefix", Attrs.s(prefix)))
-                .build();
-        return Paginator.queryAll(client, request)
-                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
-                .map(item -> Attrs.str(item, Keys.PK));
     }
 
     /**

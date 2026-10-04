@@ -75,7 +75,7 @@ public final class ScimRouter {
         if (error instanceof LockUnavailableException lockUnavailable) {
             return write(HttpStatus.SERVICE_UNAVAILABLE, null, lockUnavailable.getMessage());
         }
-        // 아이디·userName 이 이미 있다 — RFC 7644 §3.12 의 409 uniqueness. 판단은 락 안에서 했다(SCIM 쓰기 락 설계 §3·§4).
+        // userName 이 이미 있거나 조직 externalId 가 겹친다 — RFC 7644 §3.12 의 409 uniqueness. 판단은 락 안에서 했다(SCIM 쓰기 락 설계 §3·§4).
         if (error instanceof DirectoryConflictException conflict) {
             return write(HttpStatus.CONFLICT, "uniqueness", conflict.getMessage());
         }

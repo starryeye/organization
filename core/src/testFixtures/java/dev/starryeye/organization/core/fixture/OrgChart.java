@@ -2,6 +2,7 @@ package dev.starryeye.organization.core.fixture;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 
@@ -9,9 +10,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 /**
  * 생성된 조직도 하나. <b>이것이 진실이고</b> LDIF·SCIM 렌더러가 각자의 형식으로 뽑아낸다.
@@ -27,16 +32,58 @@ import java.util.Set;
  * 있는 멤버십만 묻기 때문에, 이것이 없으면 "지웠어야 할 권한이 남았는가" 를 못 묻는다.
  * {@link OrgChartEditor#완성()} 이 편집 전후를 비교해 쌓는다. 2인자 생성자는 기억이 없는
  * 최초 조직도용이다.
+ *
+ * <p><b>{@link #원래아이디들} 은 {@link #아이디를_바꾼다} 가 남기는 역방향 표다</b> (바뀐 아이디 → 처음 조직도 아이디).
+ * 서버가 발급한 무작위 id 로 바뀐 조직도에서도 "처음에 누구였는지" 로 정렬·표본을 고를 수 있게 하려는 것이다 —
+ * 무작위 id 순으로 고르면 실행마다 표본이 달라진다. 바꾸지 않은 조직도는 비어 있다.
  */
-public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Membership> 지워진멤버십) {
+public record OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Membership> 지워진멤버십,
+                       Map<String, String> 원래아이디들) {
 
     public OrgChart {
         지워진멤버십 = 지워진멤버십 == null ? Set.of() : Set.copyOf(지워진멤버십);
+        원래아이디들 = 원래아이디들 == null ? Map.of() : Map.copyOf(원래아이디들);
     }
 
     /** 기억이 없는 최초 조직도. */
     public OrgChart(DirectorySnapshot snapshot, Landmarks landmarks) {
-        this(snapshot, landmarks, Set.of());
+        this(snapshot, landmarks, Set.of(), Map.of());
+    }
+
+    /** 아이디를 바꾸지 않은 조직도. */
+    public OrgChart(DirectorySnapshot snapshot, Landmarks landmarks, Set<Membership> 지워진멤버십) {
+        this(snapshot, landmarks, 지워진멤버십, Map.of());
+    }
+
+    /** 이 조직도의 {@code id} 가 처음 조직도에서 가졌던 아이디. 바꾸지 않았거나 모르는 아이디면 {@code id} 그대로다. */
+    public String 원래아이디(String id) {
+        return 원래아이디들.getOrDefault(id, id);
+    }
+
+    /**
+     * 직원·조직 아이디를 {@code 바꾼다} 로 바꾼 조직도 — SCIM 서버 발급 id 와 대조할 때 쓴다(설계 2026-10-04 §3.1).
+     * 멤버·랜드마크·지워진 멤버십까지 바꾼다. 아이디 말고 다른 속성(userName·externalId·표시명)은 그대로다.
+     */
+    public OrgChart 아이디를_바꾼다(UnaryOperator<String> 바꾼다) {
+        // 바꿀 때마다 "바뀐 아이디 → 처음 아이디" 를 적는다. 이미 한 번 바뀐 조직도면 처음 아이디까지 거슬러 올라간다
+        Map<String, String> 원래 = new LinkedHashMap<>();
+        UnaryOperator<String> 기록하며 = id -> {
+            String 새 = 바꾼다.apply(id);
+            원래.put(새, 원래아이디(id));
+            return 새;
+        };
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        snapshot.users().values().forEach(user ->
+                users.put(기록하며.apply(user.id()), user.withId(기록하며.apply(user.id()))));
+        Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
+        snapshot.groups().values().forEach(group -> groups.put(기록하며.apply(group.id()), new DirectoryGroup(
+                기록하며.apply(group.id()), group.externalId(), group.displayName(),
+                group.members().stream().map(member -> new MemberRef(member.type(), 기록하며.apply(member.id())))
+                        .collect(Collectors.toSet()))));
+        Set<Membership> 바뀐멤버십 = 지워진멤버십.stream()
+                .map(m -> new Membership(기록하며.apply(m.조직()), new MemberRef(m.멤버().type(), 기록하며.apply(m.멤버().id()))))
+                .collect(Collectors.toSet());
+        return new OrgChart(new DirectorySnapshot(users, groups), landmarks.아이디를_바꾼다(기록하며), 바뀐멤버십, 원래);
     }
 
     /** 지금 조직도의 멤버십 전부. 에디터가 편집 전후를 비교하는 데 쓴다. */

@@ -56,15 +56,20 @@ public class LdapProperties {
     public static class GroupOfNames {
         private String userSearchBase = "ou=people";
         private String userObjectClass = "inetOrgPerson";
-        /** 직원 아이디. employeeNumber 등으로 교체 가능 */
-        private String userIdAttribute = "uid";
+        /**
+         * 직원 id. 불변 id(설계 2026-10-04 §4.1) — 서버가 엔트리마다 만들어 이름이 바뀌어도 유지하는 {@code entryUUID} 가 기본이다.
+         * AD 는 {@code objectGUID}. 이름 기반(uid/employeeNumber)도 쓸 수 있지만 개명이 삭제+생성이다.
+         */
+        private String userIdAttribute = "entryUUID";
+        /** 직원 userName 으로 쓸 로그인 속성. 원본 값 그대로 쓴다. AD 는 {@code sAMAccountName}. 값이 없으면 식별 값으로 대신한다 */
+        private String userLoginAttribute = "uid";
         private String userNameAttribute = "displayName";
         private String userMailAttribute = "mail";
         private String groupSearchBase = "ou=groups";
         private String groupObjectClass = "groupOfNames";
-        /** 조직코드 */
-        private String groupIdAttribute = "cn";
-        /** 조직명. LDAP 그룹에는 표시명 표준 속성이 없어 description 을 쓴다 */
+        /** 조직 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(cn)도 쓸 수 있지만 개명이 삭제+생성이다 */
+        private String groupIdAttribute = "entryUUID";
+        /** 조직명. LDAP 그룹에는 표시명 표준 속성이 없어 description 을 쓴다. 없으면 DN 의 첫 RDN 값으로 대신한다 */
         private String groupNameAttribute = "description";
         private String memberAttribute = "member";
     }
@@ -74,12 +79,15 @@ public class LdapProperties {
     public static class Dit {
         private String rootDn = "ou=company";
         private String orgUnitObjectClass = "organizationalUnit";
-        /** 조직코드 */
-        private String groupIdAttribute = "ou";
-        /** 조직명. 없으면 조직코드로 대체 */
+        /** 조직 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(ou)도 쓸 수 있지만 개명이 삭제+생성이다 */
+        private String groupIdAttribute = "entryUUID";
+        /** 조직명. 없으면 DN 의 첫 RDN 값으로 대신한다 */
         private String groupNameAttribute = "description";
         private String userObjectClass = "inetOrgPerson";
-        private String userIdAttribute = "uid";
+        /** 직원 id. 불변 id(설계 2026-10-04 §4.1). AD 는 {@code objectGUID}. 이름 기반(uid)도 쓸 수 있지만 개명이 삭제+생성이다 */
+        private String userIdAttribute = "entryUUID";
+        /** 직원 userName 으로 쓸 로그인 속성. 원본 값 그대로 쓴다. AD 는 {@code sAMAccountName}. 값이 없으면 식별 값으로 대신한다 */
+        private String userLoginAttribute = "uid";
         private String userNameAttribute = "displayName";
         private String userMailAttribute = "mail";
     }

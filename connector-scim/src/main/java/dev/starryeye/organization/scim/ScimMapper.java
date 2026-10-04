@@ -13,23 +13,21 @@ import dev.starryeye.organization.scim.dto.ScimMember;
 import dev.starryeye.organization.scim.dto.ScimMeta;
 import dev.starryeye.organization.scim.dto.ScimName;
 import dev.starryeye.organization.scim.dto.ScimUser;
-import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * SCIM DTO 와 도메인 모델을 오간다.
  *
- * <p>조직코드({@link DirectoryGroup#id()})와 조직명({@link DirectoryGroup#displayName()})은
- * 의도적으로 분리돼 있다. 코드는 튜플에 쓰이는 식별자이고 이름은 개편 때마다 바뀌는 속성이다.
- * SCIM Group 에는 둘을 나눌 칸이 없어 {@code externalId} 를 코드로 채택한다(설계 §4.3).
+ * <p>아이디({@link DirectoryUser#id()}·{@link DirectoryGroup#id()})와 속성({@code userName}·{@code externalId}·
+ * {@code displayName})은 의도적으로 분리돼 있다. 아이디는 튜플에 쓰이는 식별자이고 나머지는 바뀔 수 있는 속성이다.
+ * 아이디는 서버가 발급해 부르는 쪽이 넘기고(RFC 7643 §3.1, 설계 2026-10-04 §3.1), 본문의 {@code id} 는 쓰지 않는다.
+ * {@code externalId} 는 속성으로만 둔다.
  */
-@Slf4j
 public final class ScimMapper {
 
     private ScimMapper() {
@@ -37,12 +35,13 @@ public final class ScimMapper {
 
     // ---------- SCIM → 도메인 ----------
 
-    public static DirectoryUser toDirectoryUser(ScimUser scim) {
+    /** {@code id} 는 부르는 쪽이 정한다 — POST 는 서버가 발급한 UUID, PUT 은 경로의 id(설계 2026-10-04 §3.1). 본문의 {@code id} 는 쓰지 않는다. */
+    public static DirectoryUser toDirectoryUser(ScimUser scim, String id) {
         if (scim.userName() == null || scim.userName().isBlank()) {
             throw ScimException.invalidSyntax("userName 은 필수입니다");
         }
         return new DirectoryUser(
-                IdNormalizer.normalize(scim.userName()),
+                id,
                 scim.externalId(),
                 scim.userName(),
                 firstNonBlank(scim.displayName(), formatted(scim), scim.userName()),
@@ -71,35 +70,24 @@ public final class ScimMapper {
     }
 
     /**
-     * {@code type} 이 빠진 멤버가 있으면 {@code resolver} 로 현재상태를 조회해야 하므로
+     * {@code id} 는 {@link #toDirectoryUser} 와 같다 — 부르는 쪽이 정하고 본문의 {@code id}·{@code externalId} 는 쓰지 않는다.
+     * <p>{@code type} 이 빠진 멤버가 있으면 {@code resolver} 로 현재상태를 조회해야 하므로
      * 반환값이 {@link Mono} 다. 빠진 아이디는 본문에서 먼저 모아 한 번에 판정한다(설계 2026-10-03 §3.2).
      * {@code type} 이 모두 명시돼 있으면 조회는 일어나지 않는다.
      */
-    public static Mono<DirectoryGroup> toDirectoryGroup(ScimGroup scim, MemberTypeResolver resolver) {
+    public static Mono<DirectoryGroup> toDirectoryGroup(ScimGroup scim, String id, MemberTypeResolver resolver) {
         return Mono.defer(() -> {
-            String code = organizationCode(scim);
             List<ScimMember> members = scim.members() == null ? List.of() : scim.members();
             Set<String> 모름 = new LinkedHashSet<>();
             for (ScimMember member : members) {
-                String id = memberId(member);
+                String memberId = memberId(member);
                 if (member.type() == null || member.type().isBlank()) {
-                    모름.add(id);
+                    모름.add(memberId);
                 }
             }
             return resolver.resolveAll(모름)
-                    .map(종류 -> new DirectoryGroup(code, scim.externalId(), scim.displayName(), toMemberRefs(members, 종류)));
+                    .map(종류 -> new DirectoryGroup(id, scim.externalId(), scim.displayName(), toMemberRefs(members, 종류)));
         });
-    }
-
-    private static String organizationCode(ScimGroup scim) {
-        String source = firstNonBlank(scim.externalId(), scim.id());
-        if (source != null) {
-            return IdNormalizer.normalize(source);
-        }
-        String generated = UUID.randomUUID().toString();
-        log.warn("SCIM Group 에 externalId 도 id 도 없어 조직코드를 발급합니다: displayName='{}', 발급된 코드='{}'",
-                scim.displayName(), generated);
-        return generated;
     }
 
     /** value 가 없으면 {@code invalidSyntax}. 정규화 규칙은 아래 {@link #toMemberRefs} 자바독 참고. */

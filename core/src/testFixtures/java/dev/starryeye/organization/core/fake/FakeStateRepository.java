@@ -117,6 +117,20 @@ public class FakeStateRepository implements DirectoryStateRepository {
     }
 
     @Override
+    public Flux<String> findUserIdsByExternalId(String externalId) {
+        return Flux.defer(() -> Flux.fromIterable(List.copyOf(users.values()))
+                .filter(user -> externalId != null && externalId.equals(user.externalId()))
+                .map(DirectoryUser::id));
+    }
+
+    @Override
+    public Flux<String> findGroupIdsByExternalId(String externalId) {
+        return Flux.defer(() -> Flux.fromIterable(List.copyOf(groups.values()))
+                .filter(group -> externalId != null && externalId.equals(group.externalId()))
+                .map(DirectoryGroup::id));
+    }
+
+    @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
         return Mono.fromRunnable(() -> findGroupCalls.add(groupId))
                 .then(Mono.justOrEmpty(groups.get(groupId)));

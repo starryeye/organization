@@ -11,6 +11,8 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.util.UUID;
+
 import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
 @RequiredArgsConstructor
@@ -22,8 +24,9 @@ public class ScimUserHandler {
     public Mono<ServerResponse> create(ServerRequest request) {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .map(ScimMapper::toDirectoryUser)
-                // 아이디·userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §3·§4)
+                // id 는 서버가 발급한다 — RFC 7643 §3.1(설계 2026-10-04 §3.1). 본문의 id 는 쓰지 않는다
+                .map(scim -> ScimMapper.toDirectoryUser(scim, UUID.randomUUID().toString()))
+                // userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §4)
                 .flatMap(user -> sync.createUser(user)
                         .flatMap(result -> respond(HttpStatus.CREATED, user.id(), result, projection))));
     }
@@ -41,9 +44,9 @@ public class ScimUserHandler {
         String id = request.pathVariable("id");
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .map(ScimMapper::toDirectoryUser)
-                // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 userName 이 달라도 리소스를 옮기지 않는다.
-                .flatMap(user -> sync.changeUser(id, before -> user.withId(id))
+                // PUT 은 경로의 id 를 정본으로 삼는다. 본문의 id·userName 이 달라도 리소스를 옮기지 않는다.
+                .map(scim -> ScimMapper.toDirectoryUser(scim, id))
+                .flatMap(user -> sync.changeUser(id, before -> user)
                         .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id))))
                 .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
     }
@@ -74,7 +77,8 @@ public class ScimUserHandler {
 
     /**
      * 부분 실패면 상태는 이미 커밋됐지만 응답은 5xx 로 돌려 IdP 가 재시도하게 한다(설계 §7.2).
-     * 재시도는 같은 최종 상태를 목표로 하므로 이미 반영된 부분은 다음 diff 에서 자연히 제외된다.
+     * PUT·PATCH 의 재시도는 같은 최종 상태를 목표로 하므로 이미 반영된 부분은 다음 diff 에서 자연히 제외된다.
+     * POST 는 쓸 튜플이 없다(새 UUID 를 가리키는 조직이 아직 없다). 응답을 잃어 다시 온 POST 는 같은 userName 이라 409 다.
      */
     private Mono<ServerResponse> respond(HttpStatus status, String id, IncrementalSyncResult result,
                                          ScimAttributeProjection projection) {

@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
@@ -12,6 +13,8 @@ import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.DirContextAdapter;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQueryBuilder;
+
+import javax.naming.directory.Attributes;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -47,17 +50,19 @@ public class DitStrategy implements LdapMappingStrategy {
         Instant 지금 = clock.instant();
         int pageSize = properties.getPageSize();
 
-        List<Entry> orgEntries = PagedLdapSearch.search(template,
+        List<OrgEntry> orgEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
+                        .attributes(OU_속성(config))
                         .where("objectClass").is(config.getOrgUnitObjectClass()),
-                pageSize, entryMapper());
+                pageSize, orgMapper(config));
 
-        List<Entry> userEntries = PagedLdapSearch.search(template,
+        List<UserEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getRootDn())
+                        .attributes(직원_속성(config))
                         .where("objectClass").is(config.getUserObjectClass()),
-                pageSize, entryMapper());
+                pageSize, userMapper(config, 지금));
 
         // 조직코드 → 상대 DN, 상대 DN → 조직코드 양방향 색인
         Map<String, String> codeByRdnPath = new LinkedHashMap<>();
@@ -71,24 +76,22 @@ public class DitStrategy implements LdapMappingStrategy {
         // 이어진다. 충돌한 엔트리는 스킵한다 — 그 dn 을 codeByRdnPath 에 넣지 않으므로
         // 산하 엔트리는 "부모를 찾지 못함"으로 자연히 스킵된다.
         Map<String, String> groupDnByCode = new LinkedHashMap<>();
-        for (Entry entry : orgEntries) {
-            String code = IdNormalizer.normalize(필수(entry, config.getGroupIdAttribute()));
+        for (OrgEntry entry : orgEntries) {
+            String code = entry.code();
             if (DuplicateIdGuard.isDuplicate("조직코드", code, entry.dn(), groupDnByCode)) {
                 continue;
             }
             codeByRdnPath.put(LdapDns.대조키(entry.dn()), code);
             membersByCode.putIfAbsent(code, new LinkedHashSet<>());
-            // 폴백은 정규화된 code 가 아니라 원본 속성이다 — 금지 문자가 있으면 code 에는
-            // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
-            String name = firstNonBlank(entry.attribute(config.getGroupNameAttribute()),
-                    entry.attribute(config.getGroupIdAttribute()));
-            groups.put(code, new DirectoryGroup(code, entry.dn(), name, Set.of()));
+            // externalId 는 서버가 준 절대 DN 이다(설계 2026-10-04 §4.2) — groupOfNames 와 같다. 안쪽 키·로그는 베이스 상대 DN 그대로 쓴다
+            groups.put(code, new DirectoryGroup(
+                    code, LdapDns.절대로(entry.dn(), properties.getBaseDn()), entry.name(), Set.of()));
         }
 
         // 조직 계층: 각 조직의 부모 dn 을 조직코드로 되짚어 하위 조직 멤버로 등록한다.
         // code 가 null 이면 이 엔트리는 위에서 코드 충돌로 스킵된 것이므로 함께 건너뛴다 —
         // 그러지 않으면 부모의 멤버 집합에 id 가 null 인 MemberRef 가 들어간다.
-        for (Entry entry : orgEntries) {
+        for (OrgEntry entry : orgEntries) {
             String code = codeByRdnPath.get(LdapDns.대조키(entry.dn()));
             if (code == null) {
                 continue;
@@ -102,22 +105,14 @@ public class DitStrategy implements LdapMappingStrategy {
         // 직원 소속: 사용자 엔트리의 부모 dn 이 곧 소속 조직이다
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
-        for (Entry entry : userEntries) {
-            String userId = IdNormalizer.normalize(필수(entry, config.getUserIdAttribute()));
+        for (UserEntry entry : userEntries) {
+            String userId = entry.id();
             if (DuplicateIdGuard.isDuplicate("직원 아이디", userId, entry.dn(), userDnById)) {
                 continue;
             }
             users.put(userId, new DirectoryUser(
-                    userId,
-                    entry.dn(),
-                    userId,
-                    // 마지막 폴백도 정규화된 userId 가 아니라 원본 uid 다 (위 조직명과 같은 이유)
-                    firstNonBlank(entry.attribute(config.getUserNameAttribute()), entry.attribute("cn"),
-                            entry.attribute(config.getUserIdAttribute())),
-                    entry.attribute(config.getUserMailAttribute()),
-                    // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(entry.dn(), entry.adapter().getAttributes(), 지금),
-                    LdapPersonName.from(entry.adapter().getAttributes())));
+                    userId, LdapDns.절대로(entry.dn(), properties.getBaseDn()), entry.userName(), entry.displayName(),
+                    entry.email(), entry.active(), entry.name()));
 
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
@@ -135,24 +130,62 @@ public class DitStrategy implements LdapMappingStrategy {
         return new DirectorySnapshot(users, groups);
     }
 
-    /** ContextMapper 를 쓰는 이유는 dn 이 필요하기 때문이다. AttributesMapper 에는 dn 이 오지 않는다. */
-    private ContextMapper<Entry> entryMapper() {
-        return context -> {
-            DirContextAdapter adapter = (DirContextAdapter) context;
-            return new Entry(adapter.getDn().toString(), adapter);
-        };
+    /** OU 검색이 요청하는 속성. {@link #orgMapper} 가 읽는 속성과 같아야 한다 — 요청하지 않은 속성은 오지 않는다. */
+    static String[] OU_속성(LdapProperties.Dit config) {
+        return PagedLdapSearch.속성목록(config.getGroupIdAttribute(), config.getGroupNameAttribute());
     }
 
     /**
-     * 식별 속성. 없으면 그 엔트리는 조직코드도 직원 아이디도 가질 수 없다 — 같은 디렉터리를 다시 읽어도 생기지
-     * 않으므로 재시도하지 않는 종류로 던진다.
+     * 직원 검색이 요청하는 속성. {@link #userMapper} 가 읽는 속성과 같아야 한다. 설정 값에서 만들고 비었거나
+     * 겹친 이름은 뺀다.
      */
-    private static String 필수(Entry entry, String 이름) {
-        String 값 = entry.attribute(이름);
-        if (값 == null || 값.isBlank()) {
-            throw new DirectoryDataException("필수 속성 '" + 이름 + "' 가 없습니다: dn=" + entry.dn());
-        }
-        return 값;
+    static String[] 직원_속성(LdapProperties.Dit config) {
+        return UserAttributes.요청(config.getUserIdAttribute(), config.getUserLoginAttribute(),
+                config.getUserNameAttribute(), config.getUserMailAttribute());
+    }
+
+    /**
+     * ContextMapper 를 쓰는 이유는 dn 이 필요하기 때문이다. AttributesMapper 에는 dn 이 오지 않는다.
+     * 원본 엔트리는 들고 가지 않고 필요한 값만 뽑는다 — 회차 끝까지 쥐는 것은 작은 레코드뿐이다.
+     */
+    private ContextMapper<OrgEntry> orgMapper(LdapProperties.Dit config) {
+        return context -> {
+            DirContextAdapter adapter = (DirContextAdapter) context;
+            String dn = adapter.getDn().toString();
+            return new OrgEntry(
+                    dn,
+                    IdNormalizer.normalize(LdapIdentifiers.필수(adapter.getAttributes(), config.getGroupIdAttribute(), dn)),
+                    // 이름 속성이 없으면 DN 의 첫 RDN 값이다(설계 2026-10-04 §4.2) — id 는 entryUUID 라 사람이 읽을 수 없고,
+                    // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다.
+                    // 상대 DN 이 아니라 절대 DN 에서 뽑는다 — root-dn 이 비어 있으면 루트 OU 의 상대 DN 이 빈 문자열이다
+                    firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()),
+                            LdapDns.첫_RDN_값(LdapDns.절대로(dn, properties.getBaseDn()))));
+        };
+    }
+
+    /** 계정 상태·이름은 여기서 계산한다. 동기화 시각 {@code 지금} 은 매퍼를 만들 때 한 번 잡은 값이다. */
+    private ContextMapper<UserEntry> userMapper(LdapProperties.Dit config, Instant 지금) {
+        return context -> {
+            DirContextAdapter adapter = (DirContextAdapter) context;
+            Attributes attributes = adapter.getAttributes();
+            String dn = adapter.getDn().toString();
+            String 식별값 = LdapIdentifiers.필수(attributes, config.getUserIdAttribute(), dn);
+            // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
+            String userName = firstNonBlank(adapter.getStringAttribute(config.getUserLoginAttribute()), 식별값);
+            return new UserEntry(
+                    dn,
+                    IdNormalizer.normalize(식별값),
+                    userName,
+                    // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
+                    // 금지 문자가 밑줄로 바뀐 채 표시명 칸에 그대로 새어 나온다 (위 조직명과 같은 이유)
+                    firstNonBlank(adapter.getStringAttribute(config.getUserNameAttribute()),
+                            adapter.getStringAttribute(UserAttributes.CN),
+                            userName),
+                    adapter.getStringAttribute(config.getUserMailAttribute()),
+                    // AD 가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
+                    !AdAccountStatus.막혔는가(dn, attributes, 지금),
+                    LdapPersonName.from(attributes));
+        };
     }
 
     private static String firstNonBlank(String... candidates) {
@@ -164,10 +197,28 @@ public class DitStrategy implements LdapMappingStrategy {
         return null;
     }
 
-    private record Entry(String dn, DirContextAdapter adapter) {
+    /**
+     * 조직 엔트리에서 뽑은 값.
+     *
+     * @param dn   서버가 준 DN(검색 베이스에 상대적). 조직 계층을 되짚는 키다. externalId 는 여기에 베이스를 붙인 절대 DN 이다
+     * @param code 정규화된 조직 id(기본은 entryUUID)
+     * @param name 조직명. 없으면 DN 의 첫 RDN 값이다
+     */
+    private record OrgEntry(String dn, String code, String name) {
+    }
 
-        String attribute(String name) {
-            return adapter.getStringAttribute(name);
-        }
+    /**
+     * 직원 엔트리에서 뽑은 값.
+     *
+     * @param dn          서버가 준 DN(검색 베이스에 상대적). 소속 조직을 되짚는 키다. externalId 는 여기에 베이스를 붙인 절대 DN 이다
+     * @param id          정규화된 직원 id(기본은 entryUUID)
+     * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
+     * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
+     * @param email       메일. 없으면 null
+     * @param active      AD 가 막은 계정이 아니면 true
+     * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
+     */
+    private record UserEntry(String dn, String id, String userName, String displayName, String email,
+                             boolean active, PersonName name) {
     }
 }

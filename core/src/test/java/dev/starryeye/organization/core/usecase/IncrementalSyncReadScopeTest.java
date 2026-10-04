@@ -226,8 +226,8 @@ class IncrementalSyncReadScopeTest {
     }
 
     @Test
-    @DisplayName("직원 생성·변경은 직원 META 를 한 번만 읽는다(점검 S28)")
-    void 직원_쓰기는_한_번만_읽는다() {
+    @DisplayName("직원 생성은 직원 META 를 읽지 않고(서버가 발급한 아이디라 겹침을 보지 않는다), 변경은 한 번만 읽는다(점검 S28)")
+    void 직원_생성은_읽지_않고_변경은_한_번만_읽는다() {
         // given
         state.findUserCalls.clear();
 
@@ -238,7 +238,7 @@ class IncrementalSyncReadScopeTest {
         useCase.changeUser("park", user -> user.withDisplayName("박 님")).block(Duration.ofSeconds(10));
 
         // then
-        assertThat(생성때).containsExactly("park");
+        assertThat(생성때).isEmpty();
         assertThat(state.findUserCalls).containsExactly("park");
     }
 }

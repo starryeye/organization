@@ -221,20 +221,15 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 직원 생성(POST). 아이디·userName 중복을 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §3·§4). 겹치면
-     * {@link DirectoryConflictException}.
+     * 직원 생성(POST). {@code userName} 중복을 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §4). 아이디는 서버가 발급한 UUID 라 겹칠 일이 없어 보지 않는다
+     * (설계 2026-10-04 §3.2) — 지운 직원의 아이디가 다시 쓰이지 않아 남은 권한을 물려받지 않는다(점검 M7).
      *
-     * <p>아이디 중복뿐 아니라 {@code userName} 중복도 막는다. 아이디는 생성 시점의 {@code userName} 에서 발급되고 그 뒤의
-     * {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은 id 다). 그래서 이름이 바뀐 사람을 IdP 가 <b>새 userName 으로</b>
-     * 다시 POST 하면 그 아이디로는 아무도 찾지 못해 같은 사람의 레코드가 둘 생긴다 — 튜플도 두 벌이 되고, 한쪽을 비활성화해도
-     * 다른 쪽 권한이 남는다.
+     * <p>생성에는 "자기 자신"이 없다 — 이미 있는 직원은 모두 남이므로 중복 확인에서 아무도 빼지 않는다(자기 아이디를 넘기면 같은 아이디로 다시 온 POST 가 기존
+     * 직원을 덮어쓴다).
      */
     public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
-        return withLock(lease -> state.findUser(user.id())
-                .flatMap(existing -> Mono.<IncrementalSyncResult>error(
-                        new DirectoryConflictException("이미 존재하는 직원입니다: " + user.id())))
-                .switchIfEmpty(Mono.defer(() -> userName을_확인한다(user.userName(), user.id())
-                        .then(Mono.defer(() -> upsertUserInternal(user, Optional.empty(), lease))))));
+        return withLock(lease -> userName을_확인한다(user.userName(), null)
+                .then(Mono.defer(() -> upsertUserInternal(user, Optional.empty(), lease))));
     }
 
     /**
@@ -257,7 +252,7 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신을
+     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신({@code selfId}, 생성이면 null)을
      * 뺀 뒤, 후보마다 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 {@code userName} 일 때만 충돌이다 — GSI 에 잠깐 남은
      * 옛 값(방금 지웠거나 이름을 바꾼 직원) 때문에 잘못 거절하지 않는다. 남는 틈은 방금 저장돼 아직 GSI 에 없는 직원뿐이다(설계 §10).
      */
@@ -334,12 +329,31 @@ public class IncrementalSyncUseCase {
                 }));
     }
 
-    /** 조직 생성(POST). 이미 있는지를 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §3). 있으면 {@link DirectoryConflictException}. */
+    /**
+     * 조직 생성(POST). {@code externalId} 가 있으면 다른 조직과 겹치는지 <b>락 안에서</b> 확인한다(설계 2026-10-04 §3.2). 겹치면 {@link DirectoryConflictException}.
+     * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다 — 같은 아이디·같은 {@code externalId} 로 다시 온 POST 도 409 이고 기존 조직을 덮어쓰지 않는다.
+     */
     public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
-        return withLock(lease -> state.findGroupHeader(group.id())
-                .flatMap(existing -> Mono.<IncrementalSyncResult>error(
-                        new DirectoryConflictException("이미 존재하는 조직입니다: " + group.id())))
-                .switchIfEmpty(Mono.defer(() -> upsertGroupInternal(group, lease))));
+        return withLock(lease -> externalId를_확인한다(group.externalId(), null)
+                .then(Mono.defer(() -> upsertGroupInternal(group, lease))));
+    }
+
+    /**
+     * 조직 {@code externalId} 가 다른 조직과 겹치는지 — {@link #userName을_확인한다} 와 같은 방식이다. GSI3 로 후보를 찾고 자기 자신({@code selfId}, 생성이면 null)을
+     * 뺀 뒤 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 값일 때만 충돌이다. 빈 값은 보지 않는다. RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의
+     * 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 §3.2).
+     */
+    private Mono<Void> externalId를_확인한다(String externalId, String selfId) {
+        if (externalId == null || externalId.isBlank()) {
+            return Mono.empty();
+        }
+        return state.findGroupIdsByExternalId(externalId)
+                .filter(id -> !id.equals(selfId))
+                .concatMap(state::findGroupHeader)
+                .filter(other -> externalId.equals(other.externalId()))
+                .next()
+                .flatMap(other -> Mono.error(new DirectoryConflictException(
+                        "이미 같은 externalId 를 쓰는 조직이 있습니다: externalId=%s, id=%s".formatted(externalId, other.id()))));
     }
 
     /**
@@ -360,6 +374,8 @@ public class IncrementalSyncUseCase {
      * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
+     *
+     * <p>{@code externalId} 가 바뀌면 다른 조직과 겹치는지 먼저 확인하고, 겹치면 아무것도 쓰지 않고 {@link DirectoryConflictException} 이다(설계 2026-10-04 §3.2).
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock(lease -> changeGroupInternal(groupId, change, lease));
@@ -367,32 +383,37 @@ public class IncrementalSyncUseCase {
 
     private Mono<IncrementalSyncResult> changeGroupInternal(String groupId, GroupChange change, LockLease lease) {
         return state.findGroupHeader(groupId)
-                .flatMap(header -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
+                .flatMap(header -> {
                     GroupHeader 바뀐헤더 = change.applyTo(header);
-                    Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
-                    DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
-                    // 그림에는 빠지는 멤버를 싣지 않는다 — 그 멤버의 직원을 읽지도, 그 줄을 Check 하지도 않는다(설계 2026-10-02 §4.2)
-                    DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
-                            차집합(전후.전(), 빠질것));
-                    DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
-                    Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
-                            .map(member -> tupleFor(member, groupId))
-                            .collect(Collectors.toCollection(LinkedHashSet::new));
+                    Mono<Void> 확인 = Objects.equals(header.externalId(), 바뀐헤더.externalId())
+                            ? Mono.empty()
+                            : externalId를_확인한다(바뀐헤더.externalId(), groupId);
+                    return 확인.then(Mono.defer(() -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
+                        Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
+                        DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
+                        // 그림에는 빠지는 멤버를 싣지 않는다 — 그 멤버의 직원을 읽지도, 그 줄을 Check 하지도 않는다(설계 2026-10-02 §4.2)
+                        DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
+                                차집합(전후.전(), 빠질것));
+                        DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
+                        Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
+                                .map(member -> tupleFor(member, groupId))
+                                .collect(Collectors.toCollection(LinkedHashSet::new));
 
-                    Commit commit = (result, beforeTuples, afterTuples) -> {
-                        DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
-                        Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
-                        Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
-                        return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것));
-                    };
+                        Commit commit = (result, beforeTuples, afterTuples) -> {
+                            DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
+                            Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
+                            Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
+                            return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것));
+                        };
 
-                    boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
-                    return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
-                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit)
-                            .flatMap(result -> 하위_조직을_뺀다
-                                    ? 보류를_다시_본다(lease).thenReturn(result)
-                                    : Mono.just(result));
-                }));
+                        boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
+                        return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
+                                RelationTuple.groupRef(groupId), 확인없이_지울것, lease, commit)
+                                .flatMap(result -> 하위_조직을_뺀다
+                                        ? 보류를_다시_본다(lease).thenReturn(result)
+                                        : Mono.just(result));
+                    })));
+                });
     }
 
     /**

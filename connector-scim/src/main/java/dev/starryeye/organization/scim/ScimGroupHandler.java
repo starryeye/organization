@@ -12,6 +12,8 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.util.UUID;
+
 import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
 @RequiredArgsConstructor
@@ -24,8 +26,9 @@ public class ScimGroupHandler {
     public Mono<ServerResponse> create(ServerRequest request) {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, memberTypes))
-                // 이미 있는지는 락 안에서 확인한다(SCIM 쓰기 락 설계 §3)
+                // id 는 서버가 발급한다 — RFC 7643 §3.1(설계 2026-10-04 §3.1). 본문의 id 는 쓰지 않는다
+                .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, UUID.randomUUID().toString(), memberTypes))
+                // 같은 externalId 의 조직이 이미 있는지는 락 안에서 확인한다(SCIM 쓰기 락 설계 §3)
                 .flatMap(group -> sync.createGroup(group)
                         .flatMap(result -> respond(HttpStatus.CREATED, group.id(), result, projection))));
     }
@@ -43,8 +46,8 @@ public class ScimGroupHandler {
         String id = request.pathVariable("id");
         return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, memberTypes))
-                // 경로의 조직코드가 정본이다. 본문의 externalId 가 달라도 리소스를 옮기지 않는다.
+                .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, id, memberTypes))
+                // 경로의 id 가 정본이다. 본문의 id·externalId 가 달라도 리소스를 옮기지 않는다.
                 .map(group -> GroupChange.replacement(group.externalId(), group.displayName(), group.members()))
                 .flatMap(change -> sync.changeGroup(id, change)
                         .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id))))
@@ -86,7 +89,9 @@ public class ScimGroupHandler {
 
     /**
      * 부분 실패면 상태는 이미 커밋됐지만 응답은 5xx 로 돌려 IdP 가 재시도하게 한다(설계 §7.2).
-     * 재시도는 같은 최종 상태를 목표로 하므로 이미 반영된 부분은 다음 diff 에서 자연히 제외된다.
+     * PUT·PATCH 의 재시도는 같은 최종 상태를 목표로 하므로 이미 반영된 부분은 다음 diff 에서 자연히 제외된다.
+     * POST 의 재시도는 새 리소스(새 UUID)를 만든다 — 실패한 새 조직은 저장하지 않으므로 externalId 가 같아도 409 가 아니고,
+     * 첫 번째 id 로 쓴 튜플은 재적재(mode=tuples)만 지운다. 응답만 잃은 성공한 POST 의 재시도는 externalId 가 있으면 409 다.
      */
     private Mono<ServerResponse> respond(HttpStatus status, String id, IncrementalSyncResult result,
                                          ScimAttributeProjection projection) {

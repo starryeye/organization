@@ -22,6 +22,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * 렌더러가 만든 요청을 서버 쪽 해석기에 그대로 통과시켜, 조직도가 다시 나오는지 본다.
@@ -86,16 +87,39 @@ class ScimRequestRendererTest {
     }
 
     @Test
-    @DisplayName("직원 생성 본문을 서버가 해석하면 조직도의 직원이 그대로 나온다")
+    @DisplayName("생성 요청만 조직도 아이디를 들고 간다 — 그 밖의 요청은 null 이다")
+    void 생성_요청만_차트아이디를_든다() {
+        // given
+        var 직원 = CHART.snapshot().users().get(CHART.landmarks().L6직속직원());
+        var 조직 = CHART.snapshot().groups().get(CHART.landmarks().대상팀());
+
+        // when
+        var 요청들 = List.of(
+                ScimRequestRenderer.직원생성(직원), ScimRequestRenderer.조직생성(조직),
+                ScimRequestRenderer.직원교체(직원), ScimRequestRenderer.직원비활성(직원.id()),
+                ScimRequestRenderer.직원삭제(직원.id()), ScimRequestRenderer.조직교체(조직),
+                ScimRequestRenderer.멤버추가(조직.id(), MemberRef.user("x")), ScimRequestRenderer.조직삭제(조직.id()));
+
+        // then
+        assertThat(요청들).extracting(ScimRequest::method, ScimRequest::차트아이디).containsExactly(
+                tuple("POST", 직원.id()), tuple("POST", 조직.id()),
+                tuple("PUT", null), tuple("PATCH", null),
+                tuple("DELETE", null), tuple("PUT", null),
+                tuple("PATCH", null), tuple("DELETE", null));
+    }
+
+    @Test
+    @DisplayName("직원 생성 요청을 서버가 해석하면 조직도의 직원이 그대로 나온다 — 조직도 아이디는 요청이 들고 간다")
     void 직원_본문이_왕복한다() {
         // given
         CHART.snapshot().users().values().forEach(심은것 -> {
             // when
-            var 읽힌것 = ScimMapper.toDirectoryUser(
-                    (ScimUser) ScimRequestRenderer.직원생성(심은것).body());
+            var 요청 = ScimRequestRenderer.직원생성(심은것);
+            var 읽힌것 = ScimMapper.toDirectoryUser((ScimUser) 요청.body(), 요청.차트아이디());
 
-            // then — userName 이 아이디의 원천이라는 규칙이 여기서 검증된다
+            // then — 서버가 id 를 발급하므로 아이디는 본문에서 오지 않고 요청이 따로 들고 간다
             assertThat(읽힌것.id()).isEqualTo(심은것.id());
+            assertThat(읽힌것.userName()).isEqualTo(심은것.userName());
             assertThat(읽힌것.displayName()).isEqualTo(심은것.displayName());
             assertThat(읽힌것.email()).isEqualTo(심은것.email());
             assertThat(읽힌것.active()).isEqualTo(심은것.active());
@@ -103,17 +127,18 @@ class ScimRequestRendererTest {
     }
 
     @Test
-    @DisplayName("조직 생성 본문을 서버가 해석하면 조직코드와 멤버십이 그대로 나온다")
+    @DisplayName("조직 생성 요청을 서버가 해석하면 조직코드와 멤버십이 그대로 나온다 — 조직도 아이디는 요청이 들고 가고 externalId 로도 간다")
     void 조직_본문이_왕복한다() {
         // given
         CHART.snapshot().groups().values().forEach(심은것 -> {
             // when
-            var 읽힌것 = ScimMapper.toDirectoryGroup(
-                    (ScimGroup) ScimRequestRenderer.조직생성(심은것).body(), 추정금지).block();
+            var 요청 = ScimRequestRenderer.조직생성(심은것);
+            var 읽힌것 = ScimMapper.toDirectoryGroup((ScimGroup) 요청.body(), 요청.차트아이디(), 추정금지).block();
 
-            // then — externalId 가 조직코드가 된다는 규칙(설계 §4.3)
+            // then — 조직도 아이디는 externalId 속성으로도 실려 간다(서버 id 는 따로 발급된다)
             assertThat(읽힌것).isNotNull();
             assertThat(읽힌것.id()).isEqualTo(심은것.id());
+            assertThat(읽힌것.externalId()).isEqualTo(심은것.id());
             assertThat(읽힌것.displayName()).isEqualTo(심은것.displayName());
             assertThat(읽힌것.members()).isEqualTo(심은것.members());
         });
@@ -151,6 +176,26 @@ class ScimRequestRendererTest {
         assertThat(after).isNotNull();
         assertThat(after.members()).containsAll(before.members()).contains(신입);
         assertThat(after.members()).hasSize(before.members().size() + 1);
+    }
+
+    @Test
+    @DisplayName("멤버 여럿 추가 PATCH 가 JSON 을 거쳐도 그 목록만큼만 늘어난다 — 직원과 하위 조직을 함께")
+    void 멤버들추가가_목록만큼_늘린다() throws Exception {
+        // given
+        DirectoryGroup before = CHART.snapshot().groups().get(CHART.landmarks().대상팀());
+        List<MemberRef> 신입들 = List.of(MemberRef.user("new.a"), MemberRef.user("new.b"), MemberRef.group("NEW_SUB"));
+
+        // when
+        var 요청 = ScimRequestRenderer.멤버들추가(before.id(), 신입들);
+        var after = 적용한다(before, JSON을_거친다(요청), 추정금지);
+
+        // then
+        assertThat(요청.method()).isEqualTo("PATCH");
+        assertThat(요청.path()).isEqualTo(ScimRequestRenderer.GROUPS + "/" + before.id());
+        assertThat(요청.차트아이디()).isNull();
+        assertThat(after).isNotNull();
+        assertThat(after.members()).containsAll(before.members()).containsAll(신입들);
+        assertThat(after.members()).hasSize(before.members().size() + 신입들.size());
     }
 
     @Test

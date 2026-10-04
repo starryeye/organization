@@ -1,6 +1,7 @@
 package dev.starryeye.organization.core.fixture;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -16,6 +17,8 @@ import java.util.Set;
  *
  * <p>나머지는 아이디 정렬 순으로 균등하게 집는다. 난수를 쓰지 않는 이유는 실패가 재현돼야
  * 하기 때문이다 — 어제 통과하고 오늘 깨지는 검증은 통과했다는 사실 자체를 못 믿는다.
+ * <b>정렬은 {@link OrgChart#원래아이디} 로 한다</b> — 서버가 발급한 무작위 id 로 바뀐 조직도에서 바뀐 id 순으로 정렬하면
+ * 실행마다 다른 직원이 뽑힌다. 아이디를 바꾸지 않은 조직도는 예전과 똑같이 뽑힌다.
  *
  * @param 추가표본수 대표들 외에 더 볼 직원 수. 0 이면 대표만 본다
  */
@@ -49,7 +52,8 @@ public record RollupSampling(int 추가표본수) {
         // 의미가 없고, 그 자리에서 터지면 정작 검증하려던 것이 가려진다.
         표본.retainAll(chart.snapshot().users().keySet());
 
-        List<String> 전체 = chart.snapshot().users().keySet().stream().sorted().toList();
+        List<String> 전체 = chart.snapshot().users().keySet().stream()
+                .sorted(Comparator.comparing(chart::원래아이디)).toList();
         if (추가표본수 >= 전체.size()) {
             표본.addAll(전체);
             return List.copyOf(표본);

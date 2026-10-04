@@ -46,8 +46,7 @@ class RequiredAttributeMissingTest extends EmbeddedLdapSupport {
     @DisplayName("groupOfNames — 직원 아이디 속성이 없으면 재시도하지 않는 종류로 실패한다")
     void groupOfNames는_데이터_오류로_실패한다() {
         // given
-        var properties = new LdapProperties();
-        properties.setBaseDn(BASE_DN);
+        var properties = 이름기반();
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=company");
         g.setGroupSearchBase("ou=groups");
@@ -63,8 +62,7 @@ class RequiredAttributeMissingTest extends EmbeddedLdapSupport {
     @DisplayName("DIT — 직원 아이디 속성이 없으면 재시도하지 않는 종류로 실패한다")
     void dit는_데이터_오류로_실패한다() {
         // given
-        var properties = new LdapProperties();
-        properties.setBaseDn(BASE_DN);
+        var properties = 이름기반();
         properties.setStrategy("dit");
         properties.getDit().setRootDn("ou=company");
 

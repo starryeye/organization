@@ -235,6 +235,33 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
     }
 
+    @Override
+    public Flux<String> findUserIdsByExternalId(String externalId) {
+        return pksByExternalId(externalId, Keys.USER_PREFIX).map(Keys::parseUserPk);
+    }
+
+    @Override
+    public Flux<String> findGroupIdsByExternalId(String externalId) {
+        return pksByExternalId(externalId, Keys.GROUP_PREFIX).map(Keys::parseGroupPk);
+    }
+
+    /** GSI3 에서 {@code externalId} 가 같은 아이템 중 {@code prefix} 종류의 META 만 골라 PK 를 준다. */
+    private Flux<String> pksByExternalId(String externalId, String prefix) {
+        if (externalId == null || externalId.isEmpty()) {
+            return Flux.empty();
+        }
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .indexName(Keys.GSI3)
+                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                .expressionAttributeNames(Map.of("#pk", Keys.GSI3PK, "#sk", Keys.GSI3SK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(externalId), ":prefix", Attrs.s(prefix)))
+                .build();
+        return Paginator.queryAll(client, request)
+                .filter(item -> Keys.META.equals(Attrs.str(item, Keys.SK)))
+                .map(item -> Attrs.str(item, Keys.PK));
+    }
+
     /** 직원 META 아이템을 읽는다. GSI1(ALL 프로젝션) 아이템도 같은 속성을 가져 조회 저장소가 함께 쓴다. */
     static DirectoryUser toUser(String userId, Map<String, AttributeValue> item) {
         return new DirectoryUser(

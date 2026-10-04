@@ -54,6 +54,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         List<UserEntry> userEntries = PagedLdapSearch.search(template,
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
+                        .attributes(직원_속성(config))
                         .where("objectClass").is(config.getUserObjectClass()),
                 pageSize, userMapper(config, 지금));
 
@@ -61,6 +62,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 PagedLdapSearch.search(template,
                         LdapQueryBuilder.query()
                                 .base(config.getGroupSearchBase())
+                                .attributes(그룹_속성(config))
                                 .where("objectClass").is(config.getGroupObjectClass()),
                         pageSize, groupMapper(config)));
 
@@ -73,7 +75,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
-                    entry.id(), entry.dn(), entry.id(), entry.displayName(), entry.email(), entry.active(),
+                    entry.id(), entry.dn(), entry.userName(), entry.displayName(), entry.email(), entry.active(),
                     entry.name()));
         }
 
@@ -109,13 +111,28 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     조직대조수++;
                     continue;
                 }
-                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다", entry.id(), memberDn);
+                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다 (dn={})", entry.id(), memberDn, entry.dn());
             }
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
         UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
         return new DirectorySnapshot(users, groups);
+    }
+
+    /**
+     * 직원 검색이 요청하는 속성. {@link #userMapper} 가 읽는 속성과 같아야 한다 — 요청하지 않은 속성은 오지 않는다.
+     * 설정 값에서 만들고 비었거나 겹친 이름은 뺀다.
+     */
+    static String[] 직원_속성(LdapProperties.GroupOfNames config) {
+        return UserAttributes.요청(config.getUserIdAttribute(), config.getUserLoginAttribute(),
+                config.getUserNameAttribute(), config.getUserMailAttribute());
+    }
+
+    /** 그룹 검색이 요청하는 속성. {@link #groupMapper} 가 읽는 속성과 같아야 한다. */
+    static String[] 그룹_속성(LdapProperties.GroupOfNames config) {
+        return PagedLdapSearch.속성목록(
+                config.getGroupIdAttribute(), config.getGroupNameAttribute(), config.getMemberAttribute());
     }
 
     /**
@@ -129,12 +146,18 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
+            String 식별값 = LdapIdentifiers.필수(attributes, config.getUserIdAttribute(), dn);
+            // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
+            String userName = firstNonBlank(value(attributes, config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
-                    IdNormalizer.normalize(required(adapter, config.getUserIdAttribute())),
+                    IdNormalizer.normalize(식별값),
                     dn,
+                    userName,
+                    // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
+                    // 금지 문자가 밑줄로 바뀐 채 사람이 읽는 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getUserNameAttribute()),
-                            value(attributes, "cn"),
-                            required(adapter, config.getUserIdAttribute())),
+                            value(attributes, UserAttributes.CN),
+                            userName),
                     value(attributes, config.getUserMailAttribute()),
                     // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
                     !AdAccountStatus.막혔는가(dn, attributes, 지금),
@@ -151,16 +174,16 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return context -> {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
-            String code = IdNormalizer.normalize(required(adapter, config.getGroupIdAttribute()));
+            String dn = 절대DN(adapter);
+            String code = IdNormalizer.normalize(LdapIdentifiers.필수(attributes, config.getGroupIdAttribute(), dn));
             RangedAttributeReader.Chunk 멤버 =
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
                     code,
-                    절대DN(adapter),
-                    // 폴백은 정규화된 code 가 아니라 원본이다 — 금지 문자가 있으면 code 에는
-                    // 밑줄이 들어가고, 그것이 사람이 읽는 표시명 칸에 그대로 새어 나온다
-                    firstNonBlank(value(attributes, config.getGroupNameAttribute()),
-                            required(adapter, config.getGroupIdAttribute())),
+                    dn,
+                    // 이름 속성이 없으면 DN 의 첫 RDN 값이다(설계 2026-10-04 §4.2) — id 는 entryUUID 라 사람이 읽을 수 없고,
+                    // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다
+                    firstNonBlank(value(attributes, config.getGroupNameAttribute()), LdapDns.첫_RDN_값(dn)),
                     null,
                     멤버.values(),
                     멤버.완료());
@@ -195,8 +218,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 List<String> 전부 = RangedAttributeReader.전부_읽는다(한커넥션,
                         LdapDns.상대로(entry.dn(), properties.getBaseDn()),
                         config.getMemberAttribute());
-                log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개)",
-                        entry.id(), 전부.size(), entry.members().size());
+                log.info("조직 '{}' 의 멤버를 {}개까지 이어받았다 (첫 조각 {}개, dn={})",
+                        entry.id(), 전부.size(), entry.members().size(), entry.dn());
                 결과.put(entry.dn(), 전부);
             }
             return 결과;
@@ -236,14 +259,6 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         }
     }
 
-    private String required(DirContextAdapter adapter, String name) {
-        String value = value(adapter.getAttributes(), name);
-        if (value == null) {
-            throw new DirectoryDataException("필수 속성 '" + name + "' 가 없습니다: dn=" + 절대DN(adapter));
-        }
-        return value;
-    }
-
     private static String value(Attributes attributes, String name) {
         try {
             Attribute attribute = attributes.get(name);
@@ -262,9 +277,19 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return null;
     }
 
-    /** 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다. */
-    private record UserEntry(String id, String dn, String displayName, String email, boolean active,
-                             PersonName name) {
+    /**
+     * 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다.
+     *
+     * @param id          정규화된 직원 id(기본은 entryUUID)
+     * @param dn          서버가 준 절대 DN. member 대조 키이자 externalId 다
+     * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
+     * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
+     * @param email       메일. 없으면 null
+     * @param active      AD 가 막은 계정이 아니면 true
+     * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
+     */
+    private record UserEntry(String id, String dn, String userName, String displayName, String email,
+                             boolean active, PersonName name) {
     }
 
     /**

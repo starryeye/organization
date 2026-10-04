@@ -1,6 +1,7 @@
 package dev.starryeye.organization.core.fixture;
 
 import java.util.List;
+import java.util.function.UnaryOperator;
 
 /**
  * 시나리오가 잡을 손잡이. 5,000명 안에서 "어느 팀" 을 매번 찾아 헤매지 않도록 이름을 붙여 둔다.
@@ -50,5 +51,29 @@ public record Landmarks(
 
     public Landmarks {
         빈조직들 = List.copyOf(빈조직들);
+    }
+
+    /** 모든 칸의 아이디를 {@code 바꾼다} 로 바꾼 랜드마크 — {@link OrgChart#아이디를_바꾼다} 가 쓴다. */
+    public Landmarks 아이디를_바꾼다(UnaryOperator<String> 바꾼다) {
+        return new Landmarks(
+                바꾼다.apply(회사),
+                바꾼다.apply(개발부문),
+                바꾼다.apply(제조부문),
+                바꾼다.apply(사업부문),
+                바꾼다.apply(신사업부문),
+                바꾼다.apply(경영지원부문),
+                바꾼다.apply(대형조직),
+                바꾼다.apply(L2직속직원),
+                바꾼다.apply(L3직속직원),
+                바꾼다.apply(L4직속직원),
+                바꾼다.apply(L5직속직원),
+                바꾼다.apply(L6직속직원),
+                바꾼다.apply(겸직직원),
+                바꾼다.apply(대상팀),
+                바꾼다.apply(대상파트),
+                바꾼다.apply(이동할팀),
+                바꾼다.apply(이동목적지실),
+                바꾼다.apply(삭제할실),
+                빈조직들.stream().map(바꾼다).toList());
     }
 }

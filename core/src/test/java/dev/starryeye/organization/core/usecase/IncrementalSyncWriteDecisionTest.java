@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,14 +56,14 @@ class IncrementalSyncWriteDecisionTest {
     }
 
     @Test
-    @DisplayName("직원 생성 — 이미 있는 아이디면 충돌이고 아무것도 쓰지 않는다")
-    void 있는_아이디면_충돌이다() {
+    @DisplayName("직원 생성 — 같은 userName 이면 충돌이고 아무것도 쓰지 않는다")
+    void 같은_userName이면_충돌이다() {
         // when, then
-        assertThatThrownBy(() -> useCase.createUser(직원("kim", "kim2", true)).block())
+        assertThatThrownBy(() -> useCase.createUser(직원("park", "kim", true)).block())
                 .isInstanceOf(DirectoryConflictException.class)
-                .hasMessage("이미 존재하는 직원입니다: kim");
+                .hasMessage("이미 같은 userName 을 쓰는 직원이 있습니다: userName=kim, id=kim");
         assertThat(writer.appliedDeltas).isEmpty();
-        assertThat(state.users.get("kim").userName()).isEqualTo("kim");
+        assertThat(state.users).doesNotContainKey("park");
         assertThat(lock.released).hasValue(1);
     }
 
@@ -139,6 +140,61 @@ class IncrementalSyncWriteDecisionTest {
         assertThat(state.users.get("kim").userName()).isEqualTo("park");
     }
 
+    /** GSI3 가 "cn=NEW"·"cn=MOVED" 로 찾으면 지워진 ghost 와 externalId 를 바꾼 DEV001(지금은 cn=DEV001)을 돌려주게 한다. */
+    private void GSI3에_옛_조직이_남게_준비한다() {
+        준비한다(new FakeStateRepository() {
+            @Override
+            public Flux<String> findGroupIdsByExternalId(String externalId) {
+                return Set.of("cn=NEW", "cn=MOVED").contains(externalId)
+                        ? Flux.just("ghost", "DEV001") : super.findGroupIdsByExternalId(externalId);
+            }
+        });
+    }
+
+    @Test
+    @DisplayName("조직 생성 — GSI3 에만 남은 옛 후보(지워졌거나 externalId 를 바꾼 조직)는 중복으로 보지 않는다")
+    void GSI3에만_남은_후보는_조직_생성에서_무시한다() {
+        // given
+        GSI3에_옛_조직이_남게_준비한다();
+
+        // when
+        var result = useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block();
+
+        // then — 본 테이블로 다시 읽으면 ghost 는 없고 DEV001 의 externalId 는 cn=DEV001 이다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.groups.get("NEW").externalId()).isEqualTo("cn=NEW");
+    }
+
+    @Test
+    @DisplayName("조직 변경 — GSI3 에만 남은 옛 후보는 externalId 를 바꿀 때 중복으로 보지 않는다")
+    void GSI3에만_남은_후보는_조직_변경에서_무시한다() {
+        // given
+        GSI3에_옛_조직이_남게_준비한다();
+        state.groups.put("DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀", Set.of()));
+
+        // when
+        useCase.changeGroup("DEV002", GroupChange.replacement("cn=MOVED", "백엔드팀", Set.of())).block();
+
+        // then
+        assertThat(state.groups.get("DEV002").externalId()).isEqualTo("cn=MOVED");
+    }
+
+    @Test
+    @DisplayName("조직 변경 — externalId 를 바꾸지 않으면 중복을 확인하지 않는다, 이미 겹친 조직도 이름을 바꿀 수 있다")
+    void externalId를_안_바꾸면_중복을_확인하지_않는다() {
+        // given — 두 조직이 이미 같은 externalId 를 쓰고 있다(GSI3 지연 틈·LDAP 동기화로 생길 수 있는 상태)
+        state.groups.put("DUP-A", new DirectoryGroup("DUP-A", "cn=DUP", "가", Set.of()));
+        state.groups.put("DUP-B", new DirectoryGroup("DUP-B", "cn=DUP", "나", Set.of()));
+
+        // when
+        useCase.changeGroup("DUP-A", GroupChange.replacement("cn=DUP", "가(개명)", Set.of())).block();
+        useCase.changeGroup("DUP-B", GroupChange.delta().renamed("나(개명)")).block();
+
+        // then — 409 로 막히면 IdP 가 재시도를 멈춰 이름 변경이 영영 반영되지 않는다
+        assertThat(state.groups.get("DUP-A").displayName()).isEqualTo("가(개명)");
+        assertThat(state.groups.get("DUP-B").displayName()).isEqualTo("나(개명)");
+    }
+
     @Test
     @DisplayName("변경 계산은 락을 잡은 뒤의 직원에 적용된다 — 그 사이 저장된 비활성화를 되돌리지 않는다(설계 §1.1)")
     void 사이에_저장된_비활성화를_되돌리지_않는다() {
@@ -197,12 +253,13 @@ class IncrementalSyncWriteDecisionTest {
     }
 
     @Test
-    @DisplayName("조직 생성 — 이미 있으면 충돌이고, 없으면 만든다")
+    @DisplayName("조직 생성 — 다른 조직과 externalId 가 같으면 충돌이고, 겹치지 않으면 만든다")
     void 조직_생성() {
         // when, then
-        assertThatThrownBy(() -> useCase.createGroup(new DirectoryGroup("DEV001", "cn=DEV001", "개발본부", Set.of())).block())
+        assertThatThrownBy(() -> useCase.createGroup(new DirectoryGroup("DEV009", "cn=DEV001", "개발본부", Set.of())).block())
                 .isInstanceOf(DirectoryConflictException.class)
-                .hasMessage("이미 존재하는 조직입니다: DEV001");
+                .hasMessage("이미 같은 externalId 를 쓰는 조직이 있습니다: externalId=cn=DEV001, id=DEV001");
+        assertThat(state.groups).doesNotContainKey("DEV009");
 
         var result = useCase.createGroup(new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀",
                 Set.of(MemberRef.user("kim")))).block();

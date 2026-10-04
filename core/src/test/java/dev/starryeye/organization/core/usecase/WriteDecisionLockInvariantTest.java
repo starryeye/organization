@@ -70,6 +70,8 @@ class WriteDecisionLockInvariantTest {
         @Override public Flux<DirectoryUser> findUsers(Set<String> ids) { return 본다Flux("findUsers " + ids, () -> super.findUsers(ids)); }
         @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 본다("findMemberTypes " + ids, () -> super.findMemberTypes(ids)); }
         @Override public Flux<String> findUserIdsByUserName(String n) { return 본다Flux("findUserIdsByUserName " + n, () -> super.findUserIdsByUserName(n)); }
+        @Override public Flux<String> findUserIdsByExternalId(String e) { return 본다Flux("findUserIdsByExternalId " + e, () -> super.findUserIdsByExternalId(e)); }
+        @Override public Flux<String> findGroupIdsByExternalId(String e) { return 본다Flux("findGroupIdsByExternalId " + e, () -> super.findGroupIdsByExternalId(e)); }
         @Override public Mono<DirectoryGroup> findGroup(String id) { return 본다("findGroup " + id, () -> super.findGroup(id)); }
         @Override public Mono<GroupHeader> findGroupHeader(String id) { return 본다("findGroupHeader " + id, () -> super.findGroupHeader(id)); }
         @Override public Mono<Set<MemberRef>> findMembers(String g, Set<MemberRef> c) { return 본다("findMembers " + g, () -> super.findMembers(g, c)); }
@@ -92,7 +94,11 @@ class WriteDecisionLockInvariantTest {
     }
 
     private static DirectoryUser 직원(String id) {
-        return new DirectoryUser(id, "uid=" + id, id, id + " 님", id + "@example.com", true);
+        return 직원(id, id);
+    }
+
+    private static DirectoryUser 직원(String id, String userName) {
+        return new DirectoryUser(id, "uid=" + id, userName, id + " 님", id + "@example.com", true);
     }
 
     /** 실패(충돌·예외)로 끝나도 읽기는 기록된다 — 그 판단 읽기도 락 안이어야 한다. */
@@ -105,7 +111,7 @@ class WriteDecisionLockInvariantTest {
     void 직원_입구() {
         // when
         돌린다(useCase.createUser(직원("park")));
-        돌린다(useCase.createUser(직원("kim")));                                    // 아이디 충돌
+        돌린다(useCase.createUser(직원("kim2", "kim")));                            // userName 충돌
         돌린다(useCase.changeUser("lee", u -> u.withUserName("KIM")));              // userName 충돌
         돌린다(useCase.changeUser("kim", u -> u.withDisplayName("새 이름")));
         돌린다(useCase.changeUser("ghost", u -> u));                               // 없음
@@ -122,9 +128,10 @@ class WriteDecisionLockInvariantTest {
     void 조직_입구() {
         // when
         돌린다(useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of(MemberRef.group("TEAM")))));
-        돌린다(useCase.createGroup(new DirectoryGroup("DEV001", "cn=DEV001", "개발본부", Set.of())));   // 충돌
+        돌린다(useCase.createGroup(new DirectoryGroup("DEV009", "cn=DEV001", "개발본부", Set.of())));   // externalId 충돌
         돌린다(useCase.changeGroup("DEV001", GroupChange.delta().adding(Set.of(MemberRef.user("lee")))));
         돌린다(useCase.changeGroup("DEV001", GroupChange.delta().replacing(Set.of(MemberRef.user("kim")))));
+        돌린다(useCase.changeGroup("DEV001", GroupChange.replacement("cn=TEAM", "개발본부", Set.of())));   // externalId 충돌
         돌린다(useCase.changeGroup("NONE", GroupChange.delta().removingId("kim")));                        // 없음
         돌린다(useCase.removeGroup("DEV001"));
         돌린다(useCase.removeGroup("NONE"));                                                               // 없음

@@ -29,6 +29,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.time.Duration;
 import java.util.List;
 
+import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -41,6 +42,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>순서에 의존한다({@link Order}) — 앞 테스트가 만든 조직도 위에서 뒤 테스트가 어긋남을
  * 만들고 복구하고, 마지막에 전부 비운다.
+ *
+ * <p>아이디는 서버가 정한다(설계 2026-10-04 §3.1). 첫 테스트가 조직도를 만들며 받은 id({@link #홍길동}, {@link #백엔드팀})로 관리 API 를 부르고
+ * 튜플을 직접 지우거나 심는다. 심은 찌꺼기도 서버 id 의 조직에 붙여야 재적재가 지우는지 시험할 수 있다.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -65,23 +69,28 @@ class ScimRebuildEndToEndTest {
                 () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
     }
 
+    /** 첫 테스트가 만든 직원·조직의 서버 id. 테스트 인스턴스는 메서드마다 새로 만들어지므로 정적이다. */
+    private static String 홍길동;
+    private static String 백엔드팀;
+
     @Autowired WebTestClient client;
     @Autowired StoreBootstrapper bootstrapper;
     @Autowired OpenFgaProperties openFgaProperties;
     @Autowired MutationLock lock;
 
+    /** 직원 하나와 그 직원이 든 조직 하나를 만들고, 응답의 서버 id 를 {@link #홍길동}·{@link #백엔드팀} 에 받아 둔다. */
     private void 조직도를_만든다() {
-        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+        홍길동 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                          "userName":"gd.hong","displayName":"홍길동","active":true}""")
-                .exchange().expectStatus().isCreated();
-        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .exchange());
+        백엔드팀 = 만든_아이디(client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                          "externalId":"DEV002","displayName":"백엔드팀",
-                         "members":[{"value":"gd.hong"}]}""")
-                .exchange().expectStatus().isCreated();
+                         "members":[{"value":"%s"}]}""".formatted(홍길동))
+                .exchange());
     }
 
     private boolean check(String user, String relation, String object) {
@@ -107,11 +116,12 @@ class ScimRebuildEndToEndTest {
         String 재적재_전_번호 = 장부_번호();
         bootstrapper.client().deleteTuples(List.of(
                 new ClientTupleKeyWithoutCondition()
-                        .user("user:gd.hong").relation("direct_member")._object("group:DEV002"))).get();
+                        .user("user:" + 홍길동).relation("direct_member")._object("group:" + 백엔드팀))).get();
         bootstrapper.client().writeTuples(List.of(
-                new ClientTupleKey().user("user:ghost").relation("direct_member")._object("group:DEV002"))).get();
+                new ClientTupleKey().user("user:ghost").relation("direct_member")._object("group:" + 백엔드팀))).get();
+        assertThat(check("user:ghost", "member", "group:" + 백엔드팀)).as("심은 찌꺼기가 서버 id 의 조직에서 통한다").isTrue();
 
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
@@ -123,13 +133,13 @@ class ScimRebuildEndToEndTest {
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
 
         // then — 어긋남이 사라졌다. 이것이 이 기능의 존재 이유다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.paths[0].shouldHaveAccess").isEqualTo(true)
                 .jsonPath("$.paths[0].openFgaCheck").isEqualTo(true);
         // 찌꺼기는 지워졌다 — 장부를 훑어 조직도가 요구하지 않는 줄을 지운다(설계 §3.1)
-        assertThat(check("user:ghost", "member", "group:DEV002")).isFalse();
+        assertThat(check("user:ghost", "member", "group:" + 백엔드팀)).isFalse();
         // 장부 번호는 그대로다 — 다른 앱이 번호를 적어 둬도 된다(설계 §7)
         assertThat(장부_번호()).isEqualTo(재적재_전_번호);
     }
@@ -139,10 +149,10 @@ class ScimRebuildEndToEndTest {
     @DisplayName("튜플 재적재는 조직도를 건드리지 않는다")
     void 튜플_재적재는_조직도를_남긴다() {
         // when, then — 상태가 곧 진실이므로 재적재가 그것을 지우면 안 된다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.displayName").isEqualTo("홍길동");
-        client.get().uri("/admin/organizations/DEV002")
+        client.get().uri("/admin/organizations/" + 백엔드팀)
                 .exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.displayName").isEqualTo("백엔드팀");
     }
@@ -201,7 +211,7 @@ class ScimRebuildEndToEndTest {
                 .exchange().expectStatus().isBadRequest();
 
         // 조직도는 그대로다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isOk();
     }
 
@@ -218,18 +228,21 @@ class ScimRebuildEndToEndTest {
     @Order(8)
     @DisplayName("wipe 는 장부와 조직도를 전부 비우고 감사 이력은 남긴다")
     void wipe가_조직도를_비운다() {
+        // given
+        assertThat(check("user:" + 홍길동, "member", "group:" + 백엔드팀)).isTrue();
+
         // when — 테이블명을 그대로 적어야만 실행된다
         SyncJobClient.끝까지(client, "/admin/sync/rebuild?mode=wipe&confirm=" + TABLE_NAME)
                 .jsonPath("$.trigger").isEqualTo("RESET")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED");
 
         // then — 장부가 비었다
-        assertThat(check("user:gd.hong", "member", "group:DEV002")).isFalse();
+        assertThat(check("user:" + 홍길동, "member", "group:" + 백엔드팀)).isFalse();
 
         // then — 직원도 조직도 사라졌다
-        client.get().uri("/admin/employees/gd.hong")
+        client.get().uri("/admin/employees/" + 홍길동)
                 .exchange().expectStatus().isNotFound();
-        client.get().uri("/admin/organizations/DEV002")
+        client.get().uri("/admin/organizations/" + 백엔드팀)
                 .exchange().expectStatus().isNotFound();
         client.get().uri("/admin/employees?displayName=홍")
                 .exchange().expectStatus().isOk()
@@ -247,15 +260,15 @@ class ScimRebuildEndToEndTest {
     @Order(9)
     @DisplayName("wipe 뒤에도 SCIM 쓰기는 열려 있다 — IdP 재푸시를 받아야 하기 때문이다")
     void wipe_뒤에_쓰기가_열려있다() {
-        // when — IdP 가 재프로비저닝으로 다시 밀어넣는 상황이다
-        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+        // given, when — IdP 가 재프로비저닝으로 다시 밀어넣는 상황이다
+        String 김철수 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
                          "userName":"cs.kim","displayName":"김철수","active":true}""")
-                .exchange().expectStatus().isCreated();
+                .exchange());
 
         // then — 락이 반납되지 않았다면 여기서 503 이 났을 것이다
-        client.get().uri("/admin/employees/cs.kim")
+        client.get().uri("/admin/employees/" + 김철수)
                 .exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.displayName").isEqualTo("김철수");
     }

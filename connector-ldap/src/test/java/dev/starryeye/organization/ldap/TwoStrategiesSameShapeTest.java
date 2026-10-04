@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 속성이 소속을 뜻하는 groupOfNames 구조를 둔다. 조직코드와 직원 아이디는 양쪽이 같은 값을 쓴다.
  *
  * <p><b>비교 대상은 {@link TupleMapper} 의 출력이지 원본 레코드가 아니다.</b> {@code externalId}
- * 는 DIT 가 상대 DN, groupOfNames 가 절대 DN 이라 값이 다르다 — 알려진 불일치이며 아무도 읽지
- * 않는다. 정말로 지켜져야 하는 계약은 "이후 로직이 전략을 구분하지 않아도 된다"이고, 그것을
+ * 는 두 전략 모두 서버가 준 절대 DN 이지만 두 트리의 DN 이 서로 달라 값이 다르다. 튜플은
+ * {@code externalId} 를 싣지 않으므로 이 차이는 비교에 들어오지 않는다. 정말로 지켜져야 하는 계약은 "이후 로직이 전략을 구분하지 않아도 된다"이고, 그것을
  * 결정하는 것은 튜플이다.
  *
  * <p>DIT 는 트리 위치가 곧 소속이라 직원이 한 조직에만 속할 수 있다. 그래서 이 픽스처는 DIT 로

@@ -307,6 +307,24 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("externalId 로 직원·조직 아이디를 찾는다 — 종류를 섞지 않는다")
+    void externalId_로_찾는다() {
+        // given
+        repository.saveUser(new DirectoryUser("u-1", "ext-1", "kim", "김", null, true)).block();
+        repository.saveGroup(new DirectoryGroup("g-1", "ext-1", "개발", Set.of())).block();
+
+        // when
+        var 직원 = repository.findUserIdsByExternalId("ext-1").collectList().block();
+        var 조직 = repository.findGroupIdsByExternalId("ext-1").collectList().block();
+        var 없음 = repository.findGroupIdsByExternalId("ext-9").collectList().block();
+
+        // then
+        assertThat(직원).containsExactly("u-1");
+        assertThat(조직).containsExactly("g-1");
+        assertThat(없음).isEmpty();
+    }
+
+    @Test
     @DisplayName("한글 조직명이 담긴 조직도 저장하고 복원한다")
     void 한글_조직명도_왕복한다() {
         // given

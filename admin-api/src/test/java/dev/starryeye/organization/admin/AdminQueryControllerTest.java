@@ -67,6 +67,53 @@ class AdminQueryControllerTest {
     }
 
     @Test
+    @DisplayName("externalId 로 직원을 정확히 찾는다 — IdP 의 사용자 id 로 우리 id 를 얻는 길")
+    void externalId_로_직원을_찾는다() {
+        // given
+        state.users.put("u-1", new DirectoryUser("u-1", "okta-00u1", "kim", "김", null, true));
+        state.users.put("u-2", new DirectoryUser("u-2", "okta-00u2", "lee", "이", null, true));
+
+        // when, then
+        client.get().uri("/admin/employees?externalId=okta-00u1")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items.length()").isEqualTo(1)
+                .jsonPath("$.items[0].employeeId").isEqualTo("u-1")
+                .jsonPath("$.items[0].userName").isEqualTo("kim")
+                .jsonPath("$.nextCursor").doesNotExist();
+    }
+
+    @Test
+    @DisplayName("externalId 가 맞는 직원이 없으면 200 과 빈 목록이다")
+    void externalId_가_없으면_200_빈_목록이다() {
+        // when, then
+        client.get().uri("/admin/employees?externalId=okta-없음")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items.length()").isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("직원 검색에 userName·displayName·externalId 중 둘 이상을 주면 400 이다")
+    void 직원_검색_파라미터가_둘_이상이면_400이다() {
+        // when, then — externalId 는 정확히 일치, 나머지는 접두사 검색이라 함께 쓸 수 없다
+        client.get().uri("/admin/employees?userName=gd&externalId=okta-00u1")
+                .exchange().expectStatus().isBadRequest();
+        client.get().uri("/admin/employees?displayName=홍&externalId=okta-00u1")
+                .exchange().expectStatus().isBadRequest();
+        client.get().uri("/admin/employees?userName=gd&displayName=홍&externalId=okta-00u1")
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
+    @DisplayName("externalId 가 비어 있으면 주지 않은 것으로 보아 400 이다")
+    void 빈_externalId_는_400이다() {
+        // when, then — 빈 externalId 는 판정하지 않는다
+        client.get().uri("/admin/employees?externalId=")
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
     @DisplayName("limit 이 범위를 벗어나면 400 이다")
     void limit_범위를_벗어나면_400이다() {
         // when, then
@@ -216,6 +263,39 @@ class AdminQueryControllerTest {
         // then — 모른다는 것과 어긋났다는 것은 다르다
         assertThat(registry.counter("authz_drift_detected").count()).isZero();
         assertThat(registry.counter("authz_check_failed").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("externalId 로 조직을 정확히 찾는다")
+    void externalId_로_조직을_찾는다() {
+        // given
+        state.groups.put("g-1", new DirectoryGroup("g-1", "okta-00g1", "개발", Set.of()));
+        state.groups.put("g-2", new DirectoryGroup("g-2", "okta-00g2", "영업", Set.of()));
+
+        // when, then
+        client.get().uri("/admin/organizations?externalId=okta-00g1")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items.length()").isEqualTo(1)
+                .jsonPath("$.items[0].orgCode").isEqualTo("g-1")
+                .jsonPath("$.items[0].displayName").isEqualTo("개발")
+                .jsonPath("$.nextCursor").doesNotExist();
+    }
+
+    @Test
+    @DisplayName("조직 검색에 displayName 과 externalId 를 둘 다 주면 400 이다")
+    void 조직_검색_파라미터가_둘이면_400이다() {
+        // when, then
+        client.get().uri("/admin/organizations?displayName=개발&externalId=okta-00g1")
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
+    @DisplayName("조직 검색 파라미터가 없으면 400 이다")
+    void 조직_검색_파라미터가_없으면_400이다() {
+        // when, then
+        client.get().uri("/admin/organizations")
+                .exchange().expectStatus().isBadRequest();
     }
 
     @Test
