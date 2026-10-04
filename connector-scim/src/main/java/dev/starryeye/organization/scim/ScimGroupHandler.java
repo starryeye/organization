@@ -90,7 +90,8 @@ public class ScimGroupHandler {
     /**
      * 부분 실패면 상태는 이미 커밋됐지만 응답은 5xx 로 돌려 IdP 가 재시도하게 한다(설계 §7.2).
      * PUT·PATCH 의 재시도는 같은 최종 상태를 목표로 하므로 이미 반영된 부분은 다음 diff 에서 자연히 제외된다.
-     * POST 의 재시도는 새 리소스(새 UUID)를 만든다 — 첫 번째 id 로 쓴 튜플은 재적재(mode=tuples)만 지운다.
+     * POST 의 재시도는 새 리소스(새 UUID)를 만든다 — 실패한 새 조직은 저장하지 않으므로 externalId 가 같아도 409 가 아니고,
+     * 첫 번째 id 로 쓴 튜플은 재적재(mode=tuples)만 지운다. 응답만 잃은 성공한 POST 의 재시도는 externalId 가 있으면 409 다.
      */
     private Mono<ServerResponse> respond(HttpStatus status, String id, IncrementalSyncResult result,
                                          ScimAttributeProjection projection) {
