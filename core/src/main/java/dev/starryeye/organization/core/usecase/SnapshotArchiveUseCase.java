@@ -1,5 +1,7 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -21,6 +23,7 @@ import reactor.core.publisher.Mono;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * SCIM 인스턴스의 하루 1회 스냅샷 아카이빙.
@@ -96,14 +99,23 @@ public class SnapshotArchiveUseCase {
      *
      * <p>BatchCheck 가 실패하면 아카이빙을 실패로 끝낸다. 의도한 튜플로 폴백하면 그 스냅샷이
      * 관찰인지 유도인지 구분되지 않아, 이 변경이 없애려던 혼동이 그대로 돌아온다(설계 §6).
+     *
+     * <p><b>있어야 할 튜플은 저장된 보류 목록을 따라 정한다(설계 2026-10-03 §4.6).</b> 목록 없이 계산하면 순증이 순환을 닫는 쪽을 보류하고 다른 쪽을 썼을 때
+     * 정렬순 DFS 가 반대쪽을 골라 둘 다 어긋남으로 센다. 다만 목록의 줄 중 튜플이 OpenFGA 에 있는 것은 튜플 그래프에 있는 연결이다(§4.1) — 쓴 뒤 목록에서
+     * 빼기 전에 멈춘 낡은 줄이라, 그대로 빼면 있는 튜플이 있어선 안 될 것으로 세어진다. 어차피 하는 Check 의 결과로 그런 줄을 걷고 계산한다(추가 Check 없음).
      */
     private Mono<SyncOutcome> archive() {
-        return state.loadAll().flatMap(directory -> {
-            var mapping = TupleMapper.toTuples(directory);
-            mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
+        return Mono.zip(state.loadAll(), state.findCutEdges().collect(Collectors.toSet())).flatMap(both -> {
+            DirectorySnapshot directory = both.getT1();
+            Set<GroupEdge> 보류 = both.getT2();
 
             Set<RelationTuple> candidates = TupleMapper.candidateTuples(directory);
             return checker.existing(candidates).flatMap(actual -> {
+                Set<GroupEdge> 아직_보류 = 보류.stream()
+                        .filter(edge -> !actual.contains(edge.tuple()))
+                        .collect(Collectors.toSet());
+                var mapping = TupleMapper.toTuples(directory, 아직_보류);
+                mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
                 어긋남을_남긴다(mapping.tuples(), actual);
 
                 Instant now = clock.instant();

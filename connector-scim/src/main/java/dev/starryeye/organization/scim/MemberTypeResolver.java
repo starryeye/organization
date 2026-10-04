@@ -3,6 +3,9 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.core.model.MemberType;
 import reactor.core.publisher.Mono;
 
+import java.util.Map;
+import java.util.Set;
+
 /**
  * SCIM {@code members[].type} 이 없을 때 그 멤버가 직원인지 하위 조직인지 판정한다.
  *
@@ -14,6 +17,9 @@ import reactor.core.publisher.Mono;
 @FunctionalInterface
 public interface MemberTypeResolver {
 
-    /** {@code id} 는 이미 {@code IdNormalizer} 를 통과한 값이어야 한다. */
-    Mono<MemberType> resolve(String id);
+    /**
+     * {@code ids} 의 종류를 한 번에 판정한다(설계 2026-10-03 §3.2, 점검 P1). 결과에는 모든 아이디가 있다 — 판정하지 못한 아이디는 직원으로 둔다.
+     * {@code ids} 는 이미 {@code IdNormalizer} 를 통과한 값이어야 한다. 비어 있으면 저장소를 읽지 않는다.
+     */
+    Mono<Map<String, MemberType>> resolveAll(Set<String> ids);
 }

@@ -134,7 +134,7 @@ public class AdminQueryUseCase {
      * 그 flatMap 콜백이 같은 스레드에서 곧바로 실행되어 계층 깊이만큼 자바 콜스택이 쌓인다 —
      * 깊은 사슬에서는 자체 예산(MAX_PATHS) 검사가 걸리기도 전에 StackOverflowError 가 날 수
      * 있다. 대신 {@link Flux#expand} 에 너비 우선 확장을 맡긴다 — 내부적으로 반복 처리되어
-     * 깊이가 스택을 쓰지 않는다. {@code IncrementalSyncUseCase.reaches()} 가 순환 검사에 같은
+     * 깊이가 스택을 쓰지 않는다. {@code OrgGraph.순환인가} 가 부모에서 위로 올라가는 순환 검사에 같은
      * 연산자를 쓰는 것과 같은 이유다.
      */
     private Mono<Reached> climb(String employeeId) {
@@ -369,8 +369,8 @@ public class AdminQueryUseCase {
      * 한 번의 순회(직원 하나의 계층 순회, 또는 조직 하나의 조상 순회)가 공유하는 작업 공간.
      * {@link Flux#expand} 의 여러 분기가 이 인스턴스를 함께 참조하지만, Reactive Streams
      * 규격상 한 Subscriber 에 대한 신호는 직렬화되어 도달하므로(동시 onNext 없음) 평범한
-     * {@link ArrayList}/{@link LinkedHashSet} 로도 안전하다 — {@link IncrementalSyncUseCase}
-     * 의 {@code CycleScan}/{@code visited} 와 같은 전제다.
+     * {@link ArrayList}/{@link LinkedHashSet} 로도 안전하다 — {@code OrgGraph}
+     * 의 부모 캐시/{@code visited} 와 같은 전제다.
      */
     private static final class Reached {
         private final Set<String> seen = new LinkedHashSet<>();

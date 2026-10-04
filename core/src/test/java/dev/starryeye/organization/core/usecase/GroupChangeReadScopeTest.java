@@ -75,7 +75,8 @@ class GroupChangeReadScopeTest {
         assertThat(state.findGroupCalls).as("조직 파티션을 통째로 읽지 않는다").isEmpty();
         assertThat(state.findMemberRefsCalls).isEmpty();
         assertThat(state.findMembersCalls).containsExactly(Set.of(MemberRef.user("newbie")));
-        assertThat(state.findUserCalls).isNotEmpty().allMatch("newbie"::equals);
+        assertThat(state.findUserCalls).as("직원을 한 명씩 읽지 않는다").isEmpty();
+        assertThat(state.findUsersCalls).containsExactly(Set.of("newbie"));
         assertThat(checker.checked).containsOnly(RelationTuple.directMember("newbie", 대형조직));
         assertThat(state.groups.get(대형조직).members()).hasSize(멤버수 + 1);
     }
@@ -109,8 +110,29 @@ class GroupChangeReadScopeTest {
         // then
         assertThat(state.findMemberRefsCalls).containsExactly(대형조직);
         assertThat(state.findGroupCalls).isEmpty();
-        assertThat(state.findUserCalls).isNotEmpty().allMatch("newbie"::equals);
+        assertThat(state.findUserCalls).as("직원을 한 명씩 읽지 않는다").isEmpty();
+        assertThat(state.findUsersCalls).containsExactly(Set.of("newbie"));
         assertThat(checker.checked).containsOnly(RelationTuple.directMember("newbie", 대형조직));
         assertThat(state.groups.get(대형조직).members()).isEqualTo(목표);
+    }
+
+    @Test
+    @DisplayName("들어오는 멤버가 많아도 직원을 한 번에 묶어 읽는다")
+    void 많이_넣어도_묶어_읽는다() {
+        // given — 아직 멤버가 아닌 직원 300명
+        Set<MemberRef> 새멤버 = new LinkedHashSet<>();
+        IntStream.range(0, 300).forEach(i -> {
+            state.users.put("n" + i, 직원("n" + i));
+            새멤버.add(MemberRef.user("n" + i));
+        });
+
+        // when
+        var result = useCase.changeGroup(대형조직, GroupChange.delta().adding(새멤버)).block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(state.findUserCalls).isEmpty();
+        assertThat(state.findUsersCalls).hasSize(1);
+        assertThat(state.findUsersCalls.get(0)).hasSize(300);
     }
 }

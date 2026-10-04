@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.tuple;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import org.junit.jupiter.api.DisplayName;
@@ -289,5 +290,75 @@ class TupleMapperTest {
                 new RelationTuple("user:kim", "direct_member", "group:DEV002"),
                 new RelationTuple("user:lee", "direct_member", "group:DEV002"));
         assertThat(result.warnings()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("순환으로 버린 연결을 결과에 돌려준다")
+    void 버린_연결을_돌려준다() {
+        // given — A ⊃ B, B ⊃ A
+        var snapshot = 스냅샷(
+                Set.of(),
+                Set.of(조직("A", "가", MemberRef.group("B")),
+                       조직("B", "나", MemberRef.group("A"))));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then — 사전순 DFS 가 A 에서 시작해 B → A 를 버린다
+        assertThat(result.tuples()).containsExactly(RelationTuple.child("B", "A"));
+        assertThat(result.cutEdges()).containsExactly(new GroupEdge("B", "A"));
+    }
+
+    @Test
+    @DisplayName("보류 목록의 연결을 먼저 빼고 계산한다 — 남은 그래프에 순환이 없으면 더 버리지 않는다")
+    void 보류_목록을_먼저_뺀다() {
+        // given
+        var snapshot = 스냅샷(
+                Set.of(),
+                Set.of(조직("A", "가", MemberRef.group("B")),
+                       조직("B", "나", MemberRef.group("A"))));
+
+        // when — "B 는 A 의 하위"(A ⊃ B)를 보류해 두었다
+        var result = TupleMapper.toTuples(snapshot, Set.of(new GroupEdge("A", "B")));
+
+        // then
+        assertThat(result.tuples()).containsExactly(RelationTuple.child("A", "B"));
+        assertThat(result.cutEdges()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("순환을 버리지 않는 변환은 모든 하위 조직 연결을 낸다 — SCIM 순증 쓰기용")
+    void 순환을_버리지_않는다() {
+        // given
+        var snapshot = 스냅샷(
+                Set.of(),
+                Set.of(조직("A", "가", MemberRef.group("B")),
+                       조직("B", "나", MemberRef.group("A"))));
+
+        // when
+        var result = TupleMapper.toTuplesKeepingCycles(snapshot);
+
+        // then
+        assertThat(result.tuples()).containsExactlyInAnyOrder(RelationTuple.child("B", "A"), RelationTuple.child("A", "B"));
+        assertThat(result.cutEdges()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("하위 조직 연결 튜플을 연결 값으로 되돌린다 — direct_member 는 연결이 아니다")
+    void 튜플을_연결로_되돌린다() {
+        // given — A ⊃ B 의 하위 조직 연결 튜플, 같은 연결 값, 직원 소속 튜플
+        var 하위조직_튜플 = RelationTuple.child("B", "A");
+        var 연결 = new GroupEdge("A", "B");
+        var 직원_튜플 = RelationTuple.directMember("kim", "A");
+
+        // when
+        var 튜플에서_되돌린_연결 = GroupEdge.of(하위조직_튜플);
+        var 연결에서_만든_튜플 = 연결.tuple();
+        var 직원_튜플에서_되돌린_연결 = GroupEdge.of(직원_튜플);
+
+        // then
+        assertThat(튜플에서_되돌린_연결).contains(연결);
+        assertThat(연결에서_만든_튜플).isEqualTo(하위조직_튜플);
+        assertThat(직원_튜플에서_되돌린_연결).isEmpty();
     }
 }

@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,12 +36,14 @@ class ScimRequestRendererTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /**
-     * 호출되면 실패한다. 렌더러는 {@code type} 을 항상 명시하므로 서버가 현재상태를 추정할
+     * 판정할 아이디가 넘어오면 실패한다(빈 집합이면 통과). 렌더러는 {@code type} 을 항상 명시하므로 서버가 현재상태를 추정할
      * 일이 없어야 한다 — 추정이 일어나면 테스트 결과에 추정의 정확도가 섞여 든다.
      */
-    private final MemberTypeResolver 추정금지 = id -> {
-        fail("멤버 type 이 빠져 현재상태 추정이 일어났습니다: " + id);
-        return Mono.empty();
+    private final MemberTypeResolver 추정금지 = ids -> {
+        if (!ids.isEmpty()) {
+            fail("멤버 type 이 빠져 현재상태 추정이 일어났습니다: " + ids);
+        }
+        return Mono.just(Map.of());
     };
 
     /** PATCH 를 {@link dev.starryeye.organization.core.model.GroupChange} 로 정리해 before 에 적용한다. 이 조직도엔 직원·하위 조직 id 가 겹치지 않아 모호한 빼기가 없다. */

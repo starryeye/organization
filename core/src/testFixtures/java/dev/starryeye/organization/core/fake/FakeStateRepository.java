@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.fake;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -39,17 +40,32 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** {@link #findUser} 가 불린 순서대로의 직원 아이디. {@link #findGroupCalls} 와 같은 목적. */
     public final List<String> findUserCalls = new ArrayList<>();
 
+    /** {@link #findUsers} 가 받은 아이디 묶음 — 멤버 직원을 묶어 읽는지 단언한다. */
+    public final List<Set<String>> findUsersCalls = new ArrayList<>();
+
+    /** {@link #findMemberTypes} 가 받은 아이디 묶음. */
+    public final List<Set<String>> findMemberTypesCalls = new ArrayList<>();
+
     /** {@link #findMembers} 가 받은 후보들. 무엇을 물었는지 단언하는 계측이다. */
     public final List<Set<MemberRef>> findMembersCalls = new ArrayList<>();
 
     /** {@link #findMemberRefs} 가 불린 순서대로의 조직 id. */
     public final List<String> findMemberRefsCalls = new ArrayList<>();
 
-    /** {@link #findChildGroupIds} 가 불린 순서대로의 조직 id. */
-    public final List<String> findChildGroupIdsCalls = new ArrayList<>();
+    /** {@link #findGroupIdsContaining} 이 받은 멤버의 아이디 — 순환 검사가 위로 몇 조직을 읽는지 단언한다. */
+    public final List<String> findGroupIdsContainingCalls = new ArrayList<>();
+
+    /** 쓰기 순서 — {@code saveGroup:<id>}, {@code saveGroupChange:<id>}, {@code 보류+}, {@code 보류-}. 보류 줄이 멤버 줄보다 먼저인지 단언한다. */
+    public final List<String> 쓴순서 = new ArrayList<>();
 
     /** {@link #deleteGroup} 가 불린 조직 id — 삭제 전용 경로가 조직을 몇 번 지우는지 본다. */
     public final List<String> deleteGroupCalls = new ArrayList<>();
+
+    /** 보류 목록(설계 2026-10-03 §4.1). {@link #replaceWith} 는 건드리지 않는다 — 실제 저장소도 그렇다. */
+    public final Set<GroupEdge> cutEdges = new LinkedHashSet<>();
+
+    /** {@link #findCutEdges} 가 불린 수 — 보류 목록을 언제 읽는지 단언한다. */
+    public int findCutEdgesCalls;
 
     private RuntimeException loadAllFailure;
 
@@ -62,6 +78,30 @@ public class FakeStateRepository implements DirectoryStateRepository {
     public Mono<DirectoryUser> findUser(String userId) {
         return Mono.fromRunnable(() -> findUserCalls.add(userId))
                 .then(Mono.justOrEmpty(users.get(userId)));
+    }
+
+    @Override
+    public Flux<DirectoryUser> findUsers(Set<String> userIds) {
+        return Flux.defer(() -> {
+            findUsersCalls.add(Set.copyOf(userIds));
+            return Flux.fromIterable(userIds).flatMap(id -> Mono.justOrEmpty(users.get(id)));
+        });
+    }
+
+    @Override
+    public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) {
+        return Mono.fromCallable(() -> {
+            findMemberTypesCalls.add(Set.copyOf(ids));
+            Map<String, MemberType> found = new LinkedHashMap<>();
+            for (String id : ids) {
+                if (groups.containsKey(id)) {
+                    found.put(id, MemberType.GROUP);
+                } else if (users.containsKey(id)) {
+                    found.put(id, MemberType.USER);
+                }
+            }
+            return found;
+        });
     }
 
     @Override
@@ -90,6 +130,7 @@ public class FakeStateRepository implements DirectoryStateRepository {
                         group.id(), group.externalId(), group.displayName()));
     }
 
+    /** 읽지 않고 그대로 넣는다 — 시드에 쓰여 읽기 계측({@link #findUserCalls})을 더럽히지 않게 포트 default 를 덮는다. */
     @Override
     public Mono<Void> saveUser(DirectoryUser user) {
         users.put(user.id(), user);
@@ -97,8 +138,14 @@ public class FakeStateRepository implements DirectoryStateRepository {
     }
 
     @Override
+    public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) {
+        return saveUser(after);
+    }
+
+    @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
         groups.put(group.id(), group);
+        쓴순서.add("saveGroup:" + group.id());
         return Mono.empty();
     }
 
@@ -127,9 +174,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
-        return Flux.fromIterable(groups.values())
-                .filter(group -> group.members().contains(ref))
-                .map(DirectoryGroup::id);
+        return Flux.defer(() -> {
+            findGroupIdsContainingCalls.add(ref.id());
+            return Flux.fromIterable(groups.values())
+                    .filter(group -> group.members().contains(ref))
+                    .map(DirectoryGroup::id);
+        });
     }
 
     @Override
@@ -150,29 +200,56 @@ public class FakeStateRepository implements DirectoryStateRepository {
         });
     }
 
+    /** 헤더를 읽지 않는다 — {@link #saveUser(DirectoryUser)} 와 같은 이유로 포트 default 를 덮는다. */
     @Override
-    public Flux<String> findChildGroupIds(String groupId) {
-        return Flux.defer(() -> {
-            findChildGroupIdsCalls.add(groupId);
-            return Flux.fromIterable(membersOf(groupId))
-                    .filter(ref -> ref.type() == MemberType.GROUP)
-                    .map(MemberRef::id);
-        });
+    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return saveGroupChange(null, header, added, removed);
     }
 
     @Override
-    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+    public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
         return Mono.fromRunnable(() -> {
-            Set<MemberRef> members = new LinkedHashSet<>(membersOf(header.id()));
+            쓴순서.add("saveGroupChange:" + after.id());
+            Set<MemberRef> members = new LinkedHashSet<>(membersOf(after.id()));
             members.removeAll(removed);
             members.addAll(added);
-            groups.put(header.id(), new DirectoryGroup(header.id(), header.externalId(), header.displayName(), members));
+            groups.put(after.id(), new DirectoryGroup(after.id(), after.externalId(), after.displayName(), members));
         });
     }
 
     private Set<MemberRef> membersOf(String groupId) {
         DirectoryGroup group = groups.get(groupId);
         return group == null ? Set.of() : group.members();
+    }
+
+    @Override
+    public Flux<GroupEdge> findCutEdges() {
+        return Flux.defer(() -> {
+            findCutEdgesCalls++;
+            return Flux.fromIterable(List.copyOf(cutEdges));
+        });
+    }
+
+    @Override
+    public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+        return Mono.fromRunnable(() -> {
+            if (!added.isEmpty()) {
+                쓴순서.add("보류+");
+            }
+            if (!removed.isEmpty()) {
+                쓴순서.add("보류-");
+            }
+            cutEdges.addAll(added);
+            cutEdges.removeAll(removed);
+        });
+    }
+
+    @Override
+    public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
+        return Mono.fromRunnable(() -> {
+            cutEdges.clear();
+            cutEdges.addAll(edges);
+        });
     }
 
     @Override

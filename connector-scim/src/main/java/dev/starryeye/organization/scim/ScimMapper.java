@@ -14,11 +14,11 @@ import dev.starryeye.organization.scim.dto.ScimMeta;
 import dev.starryeye.organization.scim.dto.ScimName;
 import dev.starryeye.organization.scim.dto.ScimUser;
 import lombok.extern.slf4j.Slf4j;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -72,12 +72,23 @@ public final class ScimMapper {
 
     /**
      * {@code type} 이 빠진 멤버가 있으면 {@code resolver} 로 현재상태를 조회해야 하므로
-     * 반환값이 {@link Mono} 다. {@code type} 이 모두 명시돼 있으면 조회는 일어나지 않는다.
+     * 반환값이 {@link Mono} 다. 빠진 아이디는 본문에서 먼저 모아 한 번에 판정한다(설계 2026-10-03 §3.2).
+     * {@code type} 이 모두 명시돼 있으면 조회는 일어나지 않는다.
      */
     public static Mono<DirectoryGroup> toDirectoryGroup(ScimGroup scim, MemberTypeResolver resolver) {
-        String code = organizationCode(scim);
-        return toMemberRefs(scim.members(), resolver)
-                .map(members -> new DirectoryGroup(code, scim.externalId(), scim.displayName(), members));
+        return Mono.defer(() -> {
+            String code = organizationCode(scim);
+            List<ScimMember> members = scim.members() == null ? List.of() : scim.members();
+            Set<String> 모름 = new LinkedHashSet<>();
+            for (ScimMember member : members) {
+                String id = memberId(member);
+                if (member.type() == null || member.type().isBlank()) {
+                    모름.add(id);
+                }
+            }
+            return resolver.resolveAll(모름)
+                    .map(종류 -> new DirectoryGroup(code, scim.externalId(), scim.displayName(), toMemberRefs(members, 종류)));
+        });
     }
 
     private static String organizationCode(ScimGroup scim) {
@@ -91,6 +102,14 @@ public final class ScimMapper {
         return generated;
     }
 
+    /** value 가 없으면 {@code invalidSyntax}. 정규화 규칙은 아래 {@link #toMemberRefs} 자바독 참고. */
+    private static String memberId(ScimMember member) {
+        if (member.value() == null || member.value().isBlank()) {
+            throw ScimException.invalidSyntax("members 원소에 value 가 없습니다");
+        }
+        return IdNormalizer.normalize(member.value());
+    }
+
     /**
      * {@code members[].value} 도 {@code userName}/{@code externalId} 과 똑같이 정규화한다.
      * 정규화하지 않으면 IdP 가 우리가 발급한 id 를 그대로 돌려주지 않을 때 그 멤버는
@@ -99,28 +118,18 @@ public final class ScimMapper {
      * 못해 경고만 남기고 건너뛰기 때문이다. IdP 는 아무 권한도 주지 못한 프로비저닝을
      * 성공으로 기록하게 된다.
      */
-    private static Mono<Set<MemberRef>> toMemberRefs(List<ScimMember> members, MemberTypeResolver resolver) {
-        if (members == null || members.isEmpty()) {
-            return Mono.just(Set.of());
+    private static Set<MemberRef> toMemberRefs(List<ScimMember> members, Map<String, MemberType> 종류) {
+        Set<MemberRef> refs = new LinkedHashSet<>();
+        for (ScimMember member : members) {
+            String id = memberId(member);
+            // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고, 앞에서 모아 현재상태로 판정한 결과를 쓴다.
+            if (member.type() == null || member.type().isBlank()) {
+                refs.add(new MemberRef(종류.getOrDefault(id, MemberType.USER), id));
+            } else {
+                refs.add(member.type().equalsIgnoreCase("Group") ? MemberRef.group(id) : MemberRef.user(id));
+            }
         }
-        return Flux.fromIterable(members)
-                .concatMap(member -> memberRef(member, resolver))
-                .collect(LinkedHashSet<MemberRef>::new, Set::add)
-                .map(refs -> refs);
-    }
-
-    private static Mono<MemberRef> memberRef(ScimMember member, MemberTypeResolver resolver) {
-        if (member.value() == null || member.value().isBlank()) {
-            return Mono.error(ScimException.invalidSyntax("members 원소에 value 가 없습니다"));
-        }
-        String id = IdNormalizer.normalize(member.value());
-        // SCIM 에서 type 은 선택 필드다. 없으면 추측하지 않고 현재상태로 판정한다.
-        if (member.type() == null || member.type().isBlank()) {
-            return resolver.resolve(id).map(type -> new MemberRef(type, id));
-        }
-        return Mono.just(member.type().equalsIgnoreCase("Group")
-                ? MemberRef.group(id)
-                : MemberRef.user(id));
+        return refs;
     }
 
     private static String formatted(ScimUser scim) {

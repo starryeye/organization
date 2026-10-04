@@ -34,6 +34,8 @@ import java.util.Set;
  * <p><b>장부를 버리지 않는다(설계 2026-09-29 §3).</b> 있어야 할 줄을 먼저 다 읽고, 전부 쓴 뒤, 장부를 훑어 없어야 할 줄만 지운다
  * ({@link TupleReconciler}). 읽기가 실패하면 장부에 아무것도 하지 않는다. 장부 번호(storeId)는 바뀌지 않는다.
  *
+ * <p><b>보류 목록도 맞춘다(설계 2026-10-03 §4.6).</b> 장부를 맞춘 뒤 보류 목록을 순환이라 버린 연결로 바꾸고, {@code WIPE} 는 조직도와 함께 비운다.
+ *
  * <p><b>{@code WIPE} 는 장부를 비운 뒤에만 조직도를 지운다.</b> 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고 FAILED 다 —
  * 조직도가 남아 있어야 다시 실행할 수 있다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만 살아남는다.
  *
@@ -86,15 +88,17 @@ public class ScimRebuildUseCase {
     private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
             desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
 
+    /** 장부를 맞춘 뒤 보류 목록을 버린 연결로 바꾼다 — 락 안이다. 멈춘 경우(빈 조직도)는 목록을 두고 간다. */
     private Mono<Mono<SyncOutcome>> reloadTuples() {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
             return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
-                    .map(reconciliation -> reconciliation.held()
-                            ? Mono.just(SyncOutcome.failed(reconciliation.heldReason()))
-                            : commitTuples(reconciliation));
+                    .flatMap(reconciliation -> reconciliation.held()
+                            ? Mono.just(Mono.just(SyncOutcome.failed(reconciliation.heldReason())))
+                            // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6)
+                            : state.replaceCutEdges(mapping.cutEdges()).thenReturn(commitTuples(reconciliation)));
         });
     }
 
@@ -127,7 +131,9 @@ public class ScimRebuildUseCase {
                         "장부에서 %d줄을 지우지 못해 조직도를 지우지 않았다. 다시 실행하면 남은 줄부터 지운다%s"
                                 .formatted(result.failures().size(), 멈춘_이유)));
             }
+            // 조직도와 함께 보류 목록도 비운다 — 연결의 멤버 줄이 사라졌으니 보류할 것도 없다
             return state.replaceWith(DirectorySnapshot.empty())
+                    .then(state.replaceCutEdges(Set.of()))
                     .thenReturn(SyncOutcome.succeeded(result, null))
                     .doOnSuccess(outcome -> log.warn(
                             "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"));

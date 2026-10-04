@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.tuple;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -28,10 +29,20 @@ public final class TupleMapper {
     }
 
     public static TupleMappingResult toTuples(DirectorySnapshot snapshot) {
+        return toTuples(snapshot, Set.of());
+    }
+
+    /**
+     * 보류 목록의 연결을 먼저 빼고 변환한다(설계 2026-10-03 §4.6). 남은 순환은 조직코드 사전순 DFS 로 버리고, 버린 연결을 결과의 {@code cutEdges} 에 담는다 —
+     * SCIM 재적재는 빈 목록으로 불러 그것으로 보류 목록을 다시 쓰고, 아카이빙은 저장된 목록을 넘긴다. LDAP 은 늘 빈 목록이다.
+     */
+    public static TupleMappingResult toTuples(DirectorySnapshot snapshot, Set<GroupEdge> 보류) {
         List<String> warnings = new ArrayList<>();
 
         Map<String, Set<String>> childEdges = collectChildEdges(snapshot, warnings);
-        Set<Edge> acyclic = removeCycles(childEdges, warnings);
+        childEdges.forEach((parent, children) -> children.removeIf(child -> 보류.contains(new GroupEdge(parent, child))));
+        Set<GroupEdge> cut = new LinkedHashSet<>();
+        Set<Edge> acyclic = removeCycles(childEdges, warnings, cut);
 
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         for (Edge edge : acyclic) {
@@ -39,7 +50,20 @@ public final class TupleMapper {
         }
         tuples.addAll(collectDirectMembers(snapshot, warnings));
 
-        return new TupleMappingResult(tuples, warnings);
+        return new TupleMappingResult(tuples, warnings, cut);
+    }
+
+    /**
+     * 순환을 버리지 않고 변환한다 — SCIM 순증 쓰기용(설계 2026-10-03 §4.3). 최소 그림 안의 DFS 는 조직코드 순서로 버릴 연결을 골라 한 홉 순환에서 두 연결을
+     * 모두 버릴 수 있다(점검 S4). 순증 쓰기는 이것으로 목표를 만들고 순환 판단은 저장소의 튜플 그래프로 "먼저 저장된 연결이 이긴다" 규칙 하나로 한다.
+     */
+    public static TupleMappingResult toTuplesKeepingCycles(DirectorySnapshot snapshot) {
+        List<String> warnings = new ArrayList<>();
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        collectChildEdges(snapshot, warnings).forEach((parent, children) ->
+                children.forEach(child -> tuples.add(RelationTuple.child(child, parent))));
+        tuples.addAll(collectDirectMembers(snapshot, warnings));
+        return new TupleMappingResult(tuples, warnings, Set.of());
     }
 
     /**
@@ -115,16 +139,16 @@ public final class TupleMapper {
 
     /**
      * DFS 색칠법으로 순환을 찾아 back edge 만 버린다.
-     * 시작점을 조직코드 사전순으로 고정했으므로 같은 입력이면 같은 간선이 버려진다.
+     * 시작점을 조직코드 사전순으로 고정했으므로 같은 입력이면 같은 간선이 버려진다. 버린 간선은 {@code cut} 에도 담는다.
      */
-    private static Set<Edge> removeCycles(Map<String, Set<String>> edges, List<String> warnings) {
+    private static Set<Edge> removeCycles(Map<String, Set<String>> edges, List<String> warnings, Set<GroupEdge> cut) {
         Set<Edge> kept = new LinkedHashSet<>();
         Map<String, Color> colors = new HashMap<>();
         edges.keySet().forEach(node -> colors.put(node, Color.WHITE));
 
         for (String start : edges.keySet()) {
             if (colors.get(start) == Color.WHITE) {
-                visit(start, edges, colors, kept, warnings);
+                visit(start, edges, colors, kept, warnings, cut);
             }
         }
         return kept;
@@ -134,17 +158,19 @@ public final class TupleMapper {
                               Map<String, Set<String>> edges,
                               Map<String, Color> colors,
                               Set<Edge> kept,
-                              List<String> warnings) {
+                              List<String> warnings,
+                              Set<GroupEdge> cut) {
         colors.put(node, Color.GRAY);
         for (String child : edges.getOrDefault(node, Set.of())) {
             Color childColor = colors.getOrDefault(child, Color.WHITE);
             if (childColor == Color.GRAY) {
                 warnings.add("조직 '%s' → '%s' 간선이 순환을 만들어 제외합니다".formatted(node, child));
+                cut.add(new GroupEdge(node, child));
                 continue;
             }
             kept.add(new Edge(child, node));
             if (childColor == Color.WHITE) {
-                visit(child, edges, colors, kept, warnings);
+                visit(child, edges, colors, kept, warnings, cut);
             }
         }
         colors.put(node, Color.BLACK);

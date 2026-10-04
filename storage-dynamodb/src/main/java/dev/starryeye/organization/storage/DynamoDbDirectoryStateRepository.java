@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -25,6 +26,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -85,6 +87,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String ACTIVE = "active";
     /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
+    /** 보류 목록 줄의 속성(설계 2026-10-03 §4.1). 키에도 담겨 있지만 줄만 보고 읽을 수 있게 둔다. */
+    private static final String CUT_PARENT = "parent";
+    private static final String CUT_CHILD = "child";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -113,18 +118,18 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     }
 
     /**
-     * 저장된 META 와 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
+     * 넘겨받은 저장본과 다를 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(GSI 설계 §3). 같은 값을 다시 쓰면 GSI1(ALL
      * 프로젝션)이 매번 {@code updatedAt} 때문에 다시 쓰여 {@code USER_INDEX} 한 파티션키로 몰렸다.
      *
-     * <p>저장본은 <b>강한 일관성</b>으로 한 건 읽는다 — SCIM 요청 하나의 쓰기 경로라 한 건 더 읽어도 싸다.
+     * <p>저장본을 다시 읽지 않는다(설계 2026-10-03 §3.5) — 부르는 쪽이 락 안에서 강한 일관성으로 읽었다. {@link #writeUser} 와 같은 이유로
+     * 이후 값을 한 번 인코딩했다가 되읽어 비교한다.
      */
     @Override
-    public Mono<Void> saveUser(DirectoryUser user) {
-        return findMeta(Keys.userPk(user.id()))
-                .map(this::storedUser)
-                .map(Optional::of)
-                .defaultIfEmpty(Optional.empty())
-                .flatMap(stored -> writeUser(user, stored.orElse(null)));
+    public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) {
+        if (before != null && before.equals(toUser(after.id(), userItem(after)))) {
+            return Mono.empty();
+        }
+        return putItem(stamped(userItem(after)));
     }
 
     /**
@@ -309,11 +314,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return storedGroupOf(group.id()).flatMap(stored -> writeGroup(group, stored.orElse(null)));
     }
 
-    /** 지금 멤버와 비교하지 않는다 — 부르는 쪽이 락 안에서 {@link #findMembers} 로 확인한 차이다(조직 멤버 PATCH 설계 §6). */
+    /**
+     * 지금 멤버와 비교하지 않는다 — 부르는 쪽이 락 안에서 {@link #findMembers} 로 확인한 차이다(조직 멤버 PATCH 설계 §6). META 도 다시 읽지 않고
+     * 넘겨받은 헤더와 비교한다(설계 2026-10-03 §3.5).
+     */
     @Override
-    public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
-        return storedGroupOf(header.id())
-                .flatMap(stored -> writeMembership(header, stored.orElse(null), List.copyOf(added), List.copyOf(removed)));
+    public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
+        Stored<GroupHeader> stored = before == null ? null : new Stored<>(before, true);
+        return writeMembership(after, stored, List.copyOf(added), List.copyOf(removed));
     }
 
     private Mono<Optional<Stored<GroupHeader>>> storedGroupOf(String groupId) {
@@ -372,6 +380,36 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .then());
     }
 
+    /** 직원 META 키를 {@link BatchRequests} 로 묶어 강한 일관성으로 읽는다(설계 2026-10-03 §3.1). */
+    @Override
+    public Flux<DirectoryUser> findUsers(Set<String> userIds) {
+        return Flux.fromIterable(userIds)
+                .map(id -> Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META)))
+                .buffer(BatchRequests.GET_LIMIT)
+                .flatMap(this::batchGet, QUERY_CONCURRENCY)
+                .map(item -> toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item));
+    }
+
+    /** 아이디마다 조직 META·직원 META 키를 함께 묻는다 — 키가 아이디의 두 배라 100개 묶음에 50명씩 든다(설계 2026-10-03 §3.1). */
+    @Override
+    public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) {
+        return Flux.fromIterable(ids)
+                .flatMapIterable(id -> List.of(
+                        Map.of(Keys.PK, Attrs.s(Keys.groupPk(id)), Keys.SK, Attrs.s(Keys.META)),
+                        Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META))))
+                .buffer(BatchRequests.GET_LIMIT)
+                .flatMap(this::batchGet, QUERY_CONCURRENCY)
+                .map(item -> Attrs.str(item, Keys.PK))
+                .collect(HashMap<String, MemberType>::new, (found, pk) -> {
+                    if (pk.startsWith(Keys.GROUP_PREFIX)) {
+                        found.put(Keys.parseGroupPk(pk), MemberType.GROUP);
+                    } else {
+                        found.putIfAbsent(Keys.parseUserPk(pk), MemberType.USER);
+                    }
+                })
+                .map(Map::copyOf);
+    }
+
     /**
      * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
      * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 {@link BatchRequests} 규칙(5번까지, 백오프)으로 다시 읽는다.
@@ -394,14 +432,6 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     @Override
     public Flux<MemberRef> findMemberRefs(String groupId) {
         return querySortKeys(Keys.groupPk(groupId), Keys.MEMBER_PREFIX).map(Keys::parseMemberSk);
-    }
-
-    /** 하위 조직 멤버 줄만 읽는다 — 순환 검사가 직원 줄까지 읽지 않게(조직 멤버 PATCH 설계 §1.4). */
-    @Override
-    public Flux<String> findChildGroupIds(String groupId) {
-        return querySortKeys(Keys.groupPk(groupId), Keys.memberSkPrefix(MemberType.GROUP))
-                .map(Keys::parseMemberSk)
-                .map(MemberRef::id);
     }
 
     private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
@@ -653,6 +683,47 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .build();
 
         return Paginator.queryAll(client, request).map(item -> parsePk.apply(Attrs.str(item, Keys.PK)));
+    }
+
+    // ---------- 보류 목록 ----------
+
+    /** 보류 목록 파티션 한 곳의 정렬키만 읽는다 — 보통 비어 있어 읽기 1번이다. */
+    @Override
+    public Flux<GroupEdge> findCutEdges() {
+        return querySortKeys(Keys.CYCLE_CUT_PK, Keys.CUT_EDGE_PREFIX).map(Keys::parseCutEdgeSk);
+    }
+
+    @Override
+    public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+        return Flux.fromIterable(added)
+                .flatMap(edge -> putItem(cutEdgeItem(edge)), QUERY_CONCURRENCY)
+                .thenMany(Flux.fromIterable(removed)
+                        .flatMap(edge -> deleteItem(Keys.CYCLE_CUT_PK, Keys.cutEdgeSk(edge)), QUERY_CONCURRENCY))
+                .then();
+    }
+
+    /**
+     * 지금 목록과 비교해 달라진 줄만 넣고 뺀다. {@link #replaceWith} 가 GSI1 로 직원·조직만 열거해 보류 줄을 건드리지 않으므로, 재적재는 이 메서드를
+     * 따로 부른다.
+     */
+    @Override
+    public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
+        return findCutEdges().collect(Collectors.toSet()).flatMap(지금 -> {
+            Set<GroupEdge> 뺄것 = new HashSet<>(지금);
+            뺄것.removeAll(edges);
+            Set<GroupEdge> 넣을것 = new HashSet<>(edges);
+            넣을것.removeAll(지금);
+            return changeCutEdges(넣을것, 뺄것);
+        });
+    }
+
+    private Map<String, AttributeValue> cutEdgeItem(GroupEdge edge) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.CYCLE_CUT_PK));
+        item.put(Keys.SK, Attrs.s(Keys.cutEdgeSk(edge)));
+        item.put(CUT_PARENT, Attrs.s(edge.parent()));
+        item.put(CUT_CHILD, Attrs.s(edge.child()));
+        return item;
     }
 
     // ---------- 공통 ----------

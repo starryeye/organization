@@ -3,8 +3,10 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import org.junit.jupiter.api.BeforeEach;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
@@ -696,7 +698,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("키가 예전 규칙으로 저장돼 있으면 값이 같아도 다시 써서 키를 고친다")
+    @DisplayName("전체 교체는 키가 예전 규칙으로 저장돼 있으면 값이 같아도 다시 써서 키를 고친다 — saveUser 는 넘겨받은 저장본과만 비교한다(설계 2026-10-03 §3.5)")
     void 예전_키는_값이_같아도_고친다() {
         // given — GSI1 정렬키가 소문자가 되기 전(원문 대소문자)의 저장본을 흉내낸다
         DirectoryUser kim = new DirectoryUser("Kim", "e1", "Kim", "김철수", null, true);
@@ -707,7 +709,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         clock.앞으로(Duration.ofHours(1));
 
         // when
-        repository.saveUser(kim).block();
+        repository.replaceWith(new DirectorySnapshot(Map.of("Kim", kim), Map.of())).block();
 
         // then
         assertThat(meta(Keys.userPk("Kim")).get(Keys.GSI1SK).s()).isEqualTo("kim");
@@ -1050,6 +1052,64 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(counter.puts()).isZero();
     }
 
+    // ---------- 묶음 읽기: 멤버 종류 판정·직원 (설계 2026-10-03 §3.1) ----------
+
+    @Test
+    @DisplayName("아이디마다 조직인지 직원인지 한 번에 판정한다 — 둘 다 있으면 조직, 없으면 결과에 없다")
+    void 종류를_한_번에_판정한다() {
+        // given
+        repository.saveGroup(조직("G1", "팀")).block();
+        repository.saveUser(직원("u1")).block();
+        repository.saveUser(직원("both")).block();
+        repository.saveGroup(조직("both", "겹치는 조직")).block();
+
+        // when
+        var 종류 = repository.findMemberTypes(Set.of("G1", "u1", "both", "ghost")).block();
+
+        // then
+        assertThat(종류).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "G1", MemberType.GROUP, "u1", MemberType.USER, "both", MemberType.GROUP));
+    }
+
+    @Test
+    @DisplayName("종류 판정과 직원 묶음 읽기는 BatchGet 으로 100개씩 읽는다 — GetItem 을 하지 않는다")
+    void 묶음으로_읽는다() {
+        // given — 직원 150명
+        Set<String> 아이디 = new LinkedHashSet<>();
+        for (int i = 0; i < 150; i++) {
+            repository.saveUser(직원("b" + i)).block();
+            아이디.add("b" + i);
+        }
+        GetCounter counter = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, clock);
+
+        // when
+        var 종류 = 세는.findMemberTypes(아이디).block();
+        long 판정_묶음 = counter.batchGets();
+        counter.reset();
+        var 직원들 = 세는.findUsers(Set.copyOf(아이디)).collectList().block();
+
+        // then — 판정은 키 300개(조직 META·직원 META) = 3묶음, 직원은 150개 = 2묶음
+        assertThat(종류).hasSize(150).containsValue(MemberType.USER).doesNotContainValue(MemberType.GROUP);
+        assertThat(판정_묶음).isEqualTo(3);
+        assertThat(직원들).hasSize(150).extracting(DirectoryUser::id).containsExactlyInAnyOrderElementsOf(아이디);
+        assertThat(counter.batchGets()).isEqualTo(2);
+        assertThat(counter.gets()).isZero();
+    }
+
+    @Test
+    @DisplayName("직원 묶음 읽기는 없는 아이디를 빼고 돌려준다")
+    void 없는_직원은_빠진다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+
+        // when
+        var 직원들 = repository.findUsers(Set.of("kim", "ghost")).collectList().block();
+
+        // then
+        assertThat(직원들).containsExactly(직원("kim"));
+    }
+
     // ---------- 조직 멤버 PATCH (설계 §6) ----------
 
     @Test
@@ -1135,21 +1195,6 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("하위 조직 id 는 하위 조직 멤버 줄만 읽는다")
-    void 하위_조직_id를_읽는다() {
-        // given
-        repository.saveGroup(조직("DEV", "개발본부",
-                MemberRef.user("kim"), MemberRef.group("TEAM1"), MemberRef.group("TEAM2"))).block();
-
-        // when
-        var ids = repository.findChildGroupIds("DEV").collectList().block();
-
-        // then
-        assertThat(ids).containsExactlyInAnyOrder("TEAM1", "TEAM2");
-        assertThat(repository.findChildGroupIds("NONE").collectList().block()).isEmpty();
-    }
-
-    @Test
     @DisplayName("멤버 변경 저장은 준 멤버 줄만 넣고 빼며 소속 줄도 함께 움직인다")
     void 멤버_변경을_저장한다() {
         // given
@@ -1219,5 +1264,85 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(repository.findGroupHeader("DEV").block().displayName()).isEqualTo("플랫폼본부");
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T02:00:00Z");
         assertThat(repository.findGroup("DEV").block().members()).containsExactly(MemberRef.user("kim"));
+    }
+
+    @Test
+    @DisplayName("이전 값을 넘기면 META 를 다시 읽지 않고, 같으면 쓰지 않고 다르면 쓴다(점검 S28)")
+    void 이전_값을_넘기면_다시_읽지_않는다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        var 저장본 = repository.findUser("kim").block();
+        GetCounter gets = new GetCounter();
+        WriteCounter writes = new WriteCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(writes.wrap(gets.wrap(client)), properties, clock);
+
+        // when — 같은 값
+        세는.saveUser(저장본, 직원("kim")).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(writes.puts()).isZero();
+
+        // when — 바뀐 값
+        세는.saveUser(저장본, 직원("kim").withDisplayName("새 이름")).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(writes.puts()).isEqualTo(1);
+        assertThat(repository.findUser("kim").block().displayName()).isEqualTo("새 이름");
+    }
+
+    @Test
+    @DisplayName("조직 변경도 이전 헤더를 넘기면 META 를 다시 읽지 않는다 — 멤버만 빼면 줄만 지우고 META 는 바뀐 것으로 찍는다")
+    void 조직_변경도_다시_읽지_않는다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발", MemberRef.user("kim"))).block();
+        var 헤더 = repository.findGroupHeader("DEV").block();
+        GetCounter gets = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(gets.wrap(client), properties, clock);
+
+        // when
+        세는.saveGroupChange(헤더, 헤더, Set.of(), Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(gets.gets()).isZero();
+        assertThat(repository.findMemberRefs("DEV").collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("보류 목록에 넣고 빼고 통째로 바꾼다")
+    void 보류_목록을_다룬다() {
+        // given
+        var ab = new GroupEdge("A", "B");
+        var cd = new GroupEdge("C", "D");
+        var ef = new GroupEdge("E", "F");
+
+        // when
+        repository.changeCutEdges(Set.of(ab, cd), Set.of()).block();
+        var 넣은뒤 = repository.findCutEdges().collectList().block();
+        repository.changeCutEdges(Set.of(), Set.of(ab)).block();
+        var 뺀뒤 = repository.findCutEdges().collectList().block();
+        repository.replaceCutEdges(Set.of(ef)).block();
+        var 바꾼뒤 = repository.findCutEdges().collectList().block();
+
+        // then
+        assertThat(넣은뒤).containsExactlyInAnyOrder(ab, cd);
+        assertThat(뺀뒤).containsExactly(cd);
+        assertThat(바꾼뒤).containsExactly(ef);
+    }
+
+    @Test
+    @DisplayName("보류 목록 줄은 직원·조직 열거에 섞이지 않는다")
+    void 보류_줄은_조직도에_섞이지_않는다() {
+        // given
+        repository.saveGroup(조직("A", "에이", MemberRef.group("B"))).block();
+        repository.changeCutEdges(Set.of(new GroupEdge("A", "B")), Set.of()).block();
+
+        // when
+        var 전체 = repository.loadAll().block();
+
+        // then
+        assertThat(전체.groups()).containsOnlyKeys("A");
+        assertThat(전체.users()).isEmpty();
     }
 }

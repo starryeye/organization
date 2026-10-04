@@ -22,8 +22,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>설계는 이것을 명시적으로 요구한다 — <i>"upsertUser 가 소속 조직의 전체 멤버를 확인하지
  * 않는 것이 중요하다 — 5000명 조직에 속해 있어도 후보는 kim 의 소속 수뿐이다"</i>. 최소
- * 스냅샷은 영향 조직을 멤버 목록째로 싣기 때문에, 좁히지 않으면 요청 하나가 조직 크기만큼
- * BatchCheck 를 내면서 전역 락을 쥐고 있게 된다.
+ * 스냅샷이 영향 조직을 멤버 목록째로 실으면, 좁히지 않을 때 요청 하나가 조직 크기만큼
+ * BatchCheck 를 내면서 전역 락을 쥐고 있게 된다. 지금은 상위 조직을 이 조직 하나만 멤버로 싣고
+ * (설계 2026-10-03 §3.4) 후보도 초점으로 좁힌다 — 둘이 겹으로 막아, 둘 다 빠져야 동료가 섞인다.
  *
  * <p>여기서 못박는 두 가지: <b>(1)</b> 무관한 조직 동료의 튜플을 확인하지 않는다,
  * <b>(2)</b> 그렇게 좁혀도 네 연산의 델타는 그대로다.
@@ -122,7 +123,7 @@ class IncrementalSyncCandidateScopeTest {
         assertThat(checker.checked)
                 .containsExactlyInAnyOrder(KIM_DEV001, PARK_DEV001, DEV001_HQ);
         assertThat(checker.checked)
-                .as("상위 조직을 멤버 목록째로 싣기 때문에 좁히지 않으면 여기 lee 가 섞인다")
+                .as("상위 조직은 이 조직 하나만 멤버로 싣고 후보도 초점으로 좁힌다 — 그래서 lee 가 섞이지 않는다")
                 .doesNotContain(LEE_HQ);
 
         assertThat(writer.deleted).containsExactly(KIM_DEV001);

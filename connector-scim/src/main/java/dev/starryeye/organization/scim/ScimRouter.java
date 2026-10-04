@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.usecase.DirectoryConflictException;
+import dev.starryeye.organization.core.usecase.GroupGraphTooLargeException;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.scim.dto.ScimError;
 import lombok.extern.slf4j.Slf4j;
@@ -77,6 +78,10 @@ public final class ScimRouter {
         // 아이디·userName 이 이미 있다 — RFC 7644 §3.12 의 409 uniqueness. 판단은 락 안에서 했다(SCIM 쓰기 락 설계 §3·§4).
         if (error instanceof DirectoryConflictException conflict) {
             return write(HttpStatus.CONFLICT, "uniqueness", conflict.getMessage());
+        }
+        // 조직 계층이 순환 검사 한도를 넘었다 — 같은 요청은 다시 보내도 늘 넘으므로 영구 거절(설계 2026-10-03 §4.2, 점검 P2). 500 이면 IdP 가 같은 실패를 되풀이한다.
+        if (error instanceof GroupGraphTooLargeException tooLarge) {
+            return write(HttpStatus.BAD_REQUEST, "invalidValue", tooLarge.getMessage());
         }
         // 본문 파싱 실패 등 SCIM 이 모르는 예외는 400 으로 번역한다.
         if (error instanceof DecodingException || error instanceof ServerWebInputException) {

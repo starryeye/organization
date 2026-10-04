@@ -7,8 +7,10 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,7 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -64,13 +67,15 @@ class WriteDecisionLockInvariantTest {
         }
 
         @Override public Mono<DirectoryUser> findUser(String id) { return 본다("findUser " + id, () -> super.findUser(id)); }
+        @Override public Flux<DirectoryUser> findUsers(Set<String> ids) { return 본다Flux("findUsers " + ids, () -> super.findUsers(ids)); }
+        @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 본다("findMemberTypes " + ids, () -> super.findMemberTypes(ids)); }
         @Override public Flux<String> findUserIdsByUserName(String n) { return 본다Flux("findUserIdsByUserName " + n, () -> super.findUserIdsByUserName(n)); }
         @Override public Mono<DirectoryGroup> findGroup(String id) { return 본다("findGroup " + id, () -> super.findGroup(id)); }
         @Override public Mono<GroupHeader> findGroupHeader(String id) { return 본다("findGroupHeader " + id, () -> super.findGroupHeader(id)); }
         @Override public Mono<Set<MemberRef>> findMembers(String g, Set<MemberRef> c) { return 본다("findMembers " + g, () -> super.findMembers(g, c)); }
         @Override public Flux<MemberRef> findMemberRefs(String g) { return 본다Flux("findMemberRefs " + g, () -> super.findMemberRefs(g)); }
-        @Override public Flux<String> findChildGroupIds(String g) { return 본다Flux("findChildGroupIds " + g, () -> super.findChildGroupIds(g)); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) { return 본다Flux("findGroupIdsContaining " + ref.id(), () -> super.findGroupIdsContaining(ref)); }
+        @Override public Flux<GroupEdge> findCutEdges() { return 본다Flux("findCutEdges", super::findCutEdges); }
     }
 
     @BeforeEach

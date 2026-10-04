@@ -14,8 +14,10 @@ import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
@@ -43,6 +45,7 @@ import reactor.core.publisher.Mono;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -181,12 +184,14 @@ class LdapInterruptedSyncScaleTest {
         }
 
         @Override public Mono<DirectoryUser> findUser(String userId) { return 실제.findUser(userId); }
+        @Override public Flux<DirectoryUser> findUsers(Set<String> userIds) { return 실제.findUsers(userIds); }
+        @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 실제.findMemberTypes(ids); }
         @Override public Flux<String> findUserIdsByUserName(String userName) {
             return 실제.findUserIdsByUserName(userName);
         }
         @Override public Mono<DirectoryGroup> findGroup(String groupId) { return 실제.findGroup(groupId); }
         @Override public Mono<GroupHeader> findGroupHeader(String groupId) { return 실제.findGroupHeader(groupId); }
-        @Override public Mono<Void> saveUser(DirectoryUser user) { return 실제.saveUser(user); }
+        @Override public Mono<Void> saveUser(DirectoryUser before, DirectoryUser after) { return 실제.saveUser(before, after); }
         @Override public Mono<Void> saveGroup(DirectoryGroup group) { return 실제.saveGroup(group); }
         @Override public Mono<Void> deleteUser(String userId) { return 실제.deleteUser(userId); }
         @Override public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) { return 실제.deleteGroup(groupId, members); }
@@ -197,10 +202,14 @@ class LdapInterruptedSyncScaleTest {
             return 실제.findMembers(groupId, candidates);
         }
         @Override public Flux<MemberRef> findMemberRefs(String groupId) { return 실제.findMemberRefs(groupId); }
-        @Override public Flux<String> findChildGroupIds(String groupId) { return 실제.findChildGroupIds(groupId); }
-        @Override public Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
-            return 실제.saveGroupChange(header, added, removed);
+        @Override public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
+            return 실제.saveGroupChange(before, after, added, removed);
         }
+        @Override public Flux<GroupEdge> findCutEdges() { return 실제.findCutEdges(); }
+        @Override public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
+            return 실제.changeCutEdges(added, removed);
+        }
+        @Override public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) { return 실제.replaceCutEdges(edges); }
         @Override public Mono<DirectorySnapshot> loadAll() { return 실제.loadAll(); }
     }
 }

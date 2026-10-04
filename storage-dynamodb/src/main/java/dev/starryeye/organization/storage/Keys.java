@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -98,6 +99,13 @@ public final class Keys {
      * 이 한 줄로 줄 세운다(설계 2026-09-30 §3.1).
      */
     public static final String LOCK_PK = "LOCK#MUTATION";
+
+    /**
+     * 보류 목록 파티션(설계 2026-10-03 §4.1) — 순환이라 쓰지 않은 하위 조직 연결. 앱마다 테이블이 달라 SCIM 테이블에만 생긴다. GSI 키가 없어 직원·조직
+     * 열거에 섞이지 않는다.
+     */
+    public static final String CYCLE_CUT_PK = "CYCLE_CUT";
+    public static final String CUT_EDGE_PREFIX = "EDGE#";
 
     private static final String TUPLE_SEPARATOR = "|";
 
@@ -246,6 +254,17 @@ public final class Keys {
         String body = sk.substring(TUPLE_PREFIX.length());
         String[] parts = body.split("\\" + TUPLE_SEPARATOR, 3);
         return new RelationTuple(parts[0], parts[1], parts[2]);
+    }
+
+    /** {@code EDGE#<부모>|<자식>}. 아이디에는 {@code |} 가 없다({@code IdNormalizer}). */
+    public static String cutEdgeSk(GroupEdge edge) {
+        return CUT_EDGE_PREFIX + edge.parent() + TUPLE_SEPARATOR + edge.child();
+    }
+
+    public static GroupEdge parseCutEdgeSk(String sk) {
+        String body = sk.substring(CUT_EDGE_PREFIX.length());
+        int separator = body.indexOf(TUPLE_SEPARATOR);
+        return new GroupEdge(body.substring(0, separator), body.substring(separator + 1));
     }
 
     public static String syncRunPk(Instant at) {

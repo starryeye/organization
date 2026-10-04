@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.IntStream;
 
@@ -166,9 +167,9 @@ class IncrementalSyncReadScopeTest {
                 .block(Duration.ofSeconds(10));
 
         // then
-        assertThat(state.findGroupCalls).as("존재는 헤더로, 하위 조직 id 는 하위 조직 줄로").doesNotContain(대형조직);
+        assertThat(state.findGroupCalls).as("존재는 헤더로 본다").doesNotContain(대형조직);
         assertThat(state.findGroupHeaderCalls).contains(대형조직);
-        assertThat(state.findChildGroupIdsCalls).contains(대형조직);
+        assertThat(state.findGroupIdsContainingCalls).as("순환 검사가 하위 조직 쪽으로 내려가지 않는다").doesNotContain(대형조직);
     }
 
     @Test
@@ -199,5 +200,45 @@ class IncrementalSyncReadScopeTest {
         // then
         assertThat(result.fullyApplied()).isTrue();
         assertThat(state.users).doesNotContainKey("loner");
+    }
+
+    @Test
+    @DisplayName("새 조직 POST 는 그 조직을 먼저 적어 둔 상위 조직을 통째로 읽지 않는다 — 헤더만, 상위 조직의 직원도 읽지 않는다")
+    void POST는_상위_조직을_통째로_읽지_않는다() {
+        // given — 대형조직이 아직 없는 LATE 를 하위 조직으로 적어 두었다(늦게 도착한 조직)
+        DirectoryGroup 상위 = state.groups.get(대형조직);
+        Set<MemberRef> 멤버 = new LinkedHashSet<>(상위.members());
+        멤버.add(MemberRef.group("LATE"));
+        state.groups.put(대형조직, new DirectoryGroup(상위.id(), 상위.externalId(), 상위.displayName(), 멤버));
+        state.findGroupCalls.clear();
+        state.findUserCalls.clear();
+        state.findUsersCalls.clear();
+
+        // when
+        var result = useCase.createGroup(new DirectoryGroup("LATE", "ou=late", "늦게 온 조직", Set.of())).block(Duration.ofSeconds(10));
+
+        // then — 늦게 도착한 조직의 상위 연결은 지금처럼 쓰인다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.written).contains(RelationTuple.child("LATE", 대형조직));
+        assertThat(state.findGroupCalls).as("상위 조직 파티션을 읽지 않는다").doesNotContain(대형조직);
+        assertThat(state.findUserCalls).isEmpty();
+        assertThat(state.findUsersCalls).allSatisfy(ids -> assertThat(ids).isEmpty());
+    }
+
+    @Test
+    @DisplayName("직원 생성·변경은 직원 META 를 한 번만 읽는다(점검 S28)")
+    void 직원_쓰기는_한_번만_읽는다() {
+        // given
+        state.findUserCalls.clear();
+
+        // when
+        useCase.createUser(new DirectoryUser("park", "uid=park", "park", "박", "park@example.com", true)).block(Duration.ofSeconds(10));
+        var 생성때 = List.copyOf(state.findUserCalls);
+        state.findUserCalls.clear();
+        useCase.changeUser("park", user -> user.withDisplayName("박 님")).block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(생성때).containsExactly("park");
+        assertThat(state.findUserCalls).containsExactly("park");
     }
 }

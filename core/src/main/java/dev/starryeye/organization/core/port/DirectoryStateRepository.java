@@ -3,11 +3,15 @@ package dev.starryeye.organization.core.port;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -16,6 +20,18 @@ import java.util.Set;
 public interface DirectoryStateRepository {
 
     Mono<DirectoryUser> findUser(String userId);
+
+    /**
+     * 직원 여러 명을 한 번에 읽는다(설계 2026-10-03 §3.1). 없는 아이디는 결과에 없다. BatchGet(키 100개씩), 강한 일관성 — 조직 PATCH·PUT·POST 의
+     * 멤버 직원을 한 명씩 GetItem 으로 읽지 않으려고 쓴다.
+     */
+    Flux<DirectoryUser> findUsers(Set<String> userIds);
+
+    /**
+     * 아이디마다 조직인지 직원인지 — 조직 META 와 직원 META 를 한 번에 묻는다(설계 2026-10-03 §3.1, 점검 P1). 둘 다 있으면 조직이다(조직을 먼저 찾던
+     * 판정 순서). 없는 아이디는 결과에 없다. BatchGet(키 100개씩), 강한 일관성.
+     */
+    Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids);
 
     /**
      * {@code userName} 으로 직원 아이디를 찾는다. <b>대소문자를 가리지 않는다</b> — RFC 7643 은
@@ -43,7 +59,19 @@ public interface DirectoryStateRepository {
      */
     Mono<GroupHeader> findGroupHeader(String groupId);
 
-    Mono<Void> saveUser(DirectoryUser user);
+    /**
+     * 직원 META 를 {@code after} 로 맞춘다. {@code before} 는 부르는 쪽이 락 안에서 강한 일관성으로 읽은 저장본이다(없으면 null) — 저장소가 다시 읽지 않고 이것과
+     * 비교해 바뀌었을 때만 쓰고, 그때만 {@code updatedAt} 을 찍는다(설계 2026-10-03 §3.5, 점검 S28).
+     */
+    Mono<Void> saveUser(DirectoryUser before, DirectoryUser after);
+
+    /** 저장본을 읽어 {@link #saveUser(DirectoryUser, DirectoryUser)} 로 넘긴다 — 저장본을 모르는 쪽(심기·테스트)이 쓴다. */
+    default Mono<Void> saveUser(DirectoryUser user) {
+        return findUser(user.id())
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(before -> saveUser(before.orElse(null), user));
+    }
 
     /** 멤버십까지 포함해 교체한다. 기존 멤버십 중 사라진 것은 삭제된다. */
     Mono<Void> saveGroup(DirectoryGroup group);
@@ -78,15 +106,33 @@ public interface DirectoryStateRepository {
     /** 이 조직의 멤버 전부를 <b>키만</b> 읽는다. 전체 교체가 목표 목록과 비교하는 데 쓴다. 강한 일관성이다. */
     Flux<MemberRef> findMemberRefs(String groupId);
 
-    /** 이 조직의 하위 조직 id. 직원 멤버는 읽지 않는다 — 순환 검사가 계층을 내려갈 때 쓴다. 조직이 없으면 비어 있다. */
-    Flux<String> findChildGroupIds(String groupId);
-
     /**
-     * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code header} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
+     * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code after} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
      * 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저, META 는 이름이나 멤버가 바뀌었을 때만 {@code updatedAt} 을 찍는다. 부르는 쪽이
      * {@code added} 가 지금 멤버가 아니고 {@code removed} 가 지금 멤버라는 것을 확인했다고 본다(락 안에서 {@link #findMembers} 로).
+     * {@code before} 는 락 안에서 읽은 헤더(없으면 null) — 저장소가 META 를 다시 읽지 않는다(점검 S28).
      */
-    Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed);
+    Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed);
+
+    /** 헤더를 읽어 {@link #saveGroupChange(GroupHeader, GroupHeader, Set, Set)} 로 넘긴다 — 저장본을 모르는 쪽이 쓴다. */
+    default Mono<Void> saveGroupChange(GroupHeader header, Set<MemberRef> added, Set<MemberRef> removed) {
+        return findGroupHeader(header.id())
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(before -> saveGroupChange(before.orElse(null), header, added, removed));
+    }
+
+    /**
+     * 보류 목록 — 순환이라 튜플을 쓰지 않은 하위 조직 연결(설계 2026-10-03 §4.1). 멤버 줄은 따로 남아 있다. 보통 비어 있다. 강한 일관성.
+     * "튜플 그래프 = 멤버 줄의 하위 조직 연결 − 보류 목록(OpenFGA 에 없는 줄)"이다.
+     */
+    Flux<GroupEdge> findCutEdges();
+
+    /** 보류 목록에 {@code added} 를 넣고 {@code removed} 를 뺀다. 둘 다 비면 아무것도 하지 않는다. */
+    Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed);
+
+    /** 보류 목록을 {@code edges} 로 통째로 바꾼다 — SCIM 재적재·wipe 가 쓴다(설계 2026-10-03 §4.6). */
+    Mono<Void> replaceCutEdges(Set<GroupEdge> edges);
 
     /** LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. */
     Mono<Void> replaceWith(DirectorySnapshot snapshot);
