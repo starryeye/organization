@@ -47,7 +47,7 @@ class TemporaryFailureClassifierTest {
     }
 
     @Test
-    @DisplayName("I/O 실패와 시간 초과는 일시 장애다 — OpenFGA HTTP 클라이언트가 감싸지 않고 올리는 것")
+    @DisplayName("원인 사슬 어디의 I/O 실패·시간 초과든 일시 장애다")
     void 입출력_실패는_일시_장애다() {
         // given
         var 분류기 = TemporaryFailureClassifier.표지만();

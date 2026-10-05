@@ -52,17 +52,17 @@ public final class ScimRouter {
             "/scim/v2/Schemas", "/scim/v2/Schemas/**", "/scim/v2/ResourceTypes", "/scim/v2/ResourceTypes/**");
 
     /** 있는 경로와 받는 메서드 — {@link #scimRoutes} 의 라우트와 같아야 한다. 틀린 메서드는 405 + Allow 로 알린다. */
-    private static final Map<PathPattern, Set<HttpMethod>> 받는_메서드 = Map.of(
-            패턴하나("/scim/v2/Users"), Set.of(HttpMethod.GET, HttpMethod.POST),
-            패턴하나("/scim/v2/Users/.search"), Set.of(HttpMethod.POST),
-            패턴하나("/scim/v2/Users/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE),
-            패턴하나("/scim/v2/Groups"), Set.of(HttpMethod.GET, HttpMethod.POST),
-            패턴하나("/scim/v2/Groups/.search"), Set.of(HttpMethod.POST),
-            패턴하나("/scim/v2/Groups/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE),
-            패턴하나("/scim/v2/ServiceProviderConfig"), Set.of(HttpMethod.GET),
-            패턴하나("/scim/v2"), Set.of(HttpMethod.GET),
-            패턴하나("/scim/v2/"), Set.of(HttpMethod.GET),
-            패턴하나("/scim/v2/.search"), Set.of(HttpMethod.POST));
+    private static final Map<PathPattern, Set<HttpMethod>> 받는_메서드 = Map.ofEntries(
+            Map.entry(패턴하나("/scim/v2/Users"), Set.of(HttpMethod.GET, HttpMethod.POST)),
+            Map.entry(패턴하나("/scim/v2/Users/.search"), Set.of(HttpMethod.POST)),
+            Map.entry(패턴하나("/scim/v2/Users/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE)),
+            Map.entry(패턴하나("/scim/v2/Groups"), Set.of(HttpMethod.GET, HttpMethod.POST)),
+            Map.entry(패턴하나("/scim/v2/Groups/.search"), Set.of(HttpMethod.POST)),
+            Map.entry(패턴하나("/scim/v2/Groups/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE)),
+            Map.entry(패턴하나("/scim/v2/ServiceProviderConfig"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/.search"), Set.of(HttpMethod.POST)));
 
     private ScimRouter() {
     }

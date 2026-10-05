@@ -91,13 +91,18 @@ public class DynamoDbMutationLock implements MutationLock {
         });
     }
 
-    /** 조건 실패 때 DynamoDB 가 돌려준 기존 락 항목의 용도. 돌려받지 못했거나 알 수 없는 값이면 null(쓰기 경합으로 본다). */
+    /** 조건 실패 때 DynamoDB 가 돌려준 기존 락 항목의 용도. 돌려받지 못했거나 알 수 없는 값(문자열이 아닌 속성 포함)이면 null(쓰기 경합으로 본다). */
     static LockPurpose 쥔_용도(ConditionalCheckFailedException error) {
-        if (!error.hasItem() || error.item().get(PURPOSE) == null) {
+        if (!error.hasItem()) {
+            return null;
+        }
+        AttributeValue 용도 = error.item().get(PURPOSE);
+        // 문자열이 아닌 속성이면 s() 가 null 이다 — valueOf(null) 이 NPE 를 낸다
+        if (용도 == null || 용도.s() == null) {
             return null;
         }
         try {
-            return LockPurpose.valueOf(error.item().get(PURPOSE).s());
+            return LockPurpose.valueOf(용도.s());
         } catch (IllegalArgumentException e) {
             return null;
         }

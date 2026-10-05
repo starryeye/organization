@@ -84,18 +84,18 @@ class IncrementalSyncLockRetryAfterTest {
     }
 
     @Test
-    @DisplayName("쥔 쪽이 도중에 바뀌면 마지막 실패의 기다릴 시간을 따른다")
+    @DisplayName("쥔 쪽이 도중에 바뀌면 가장 긴 시간이 아니라 마지막 실패의 기다릴 시간을 따른다 — 재적재가 끝나고 쓰기가 쥐면 2초")
     void 마지막_실패의_시간을_따른다() {
-        // given — 처음엔 SCIM 쓰기가 쥐고 있다가 재적재가 쥐었다
+        // given — 처음엔 재적재가 쥐고 있다가 끝나고 SCIM 쓰기가 쥐었다. 가장 긴 시간(60초)과 마지막 시간(2초)이 갈린다
         var 시도 = new AtomicInteger();
         var 쥔_쪽이_바뀌는_락 = 잡히지_않는_락(시도, n -> LockUnavailableException.잡혀_있다(
-                n == 0 ? MutationLock.LockPurpose.WRITE : MutationLock.LockPurpose.REBUILD));
+                n == 0 ? MutationLock.LockPurpose.REBUILD : MutationLock.LockPurpose.WRITE));
 
         // when
         var 실패 = catchThrowable(() -> 유스케이스(쥔_쪽이_바뀌는_락).removeUser("kim").block());
 
         // then
         assertThat(실패).isInstanceOfSatisfying(LockUnavailableException.class,
-                e -> assertThat(e.retryAfter()).isEqualTo(Duration.ofSeconds(60)));
+                e -> assertThat(e.retryAfter()).isEqualTo(Duration.ofSeconds(2)));
     }
 }

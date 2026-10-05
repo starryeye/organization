@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -73,6 +74,26 @@ class ScimRouteMissTest {
                 .expectStatus().isEqualTo(HttpStatus.METHOD_NOT_ALLOWED)
                 .expectHeader().value(HttpHeaders.ALLOW, allow -> assertThat(allow).contains("GET"))
                 .expectBody().jsonPath("$.status").isEqualTo("405");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "/scim/v2/Users                    | GET,POST",
+            "/scim/v2/Users/.search            | DELETE,GET,PATCH,POST,PUT",
+            "/scim/v2/Users/kim                | DELETE,GET,PATCH,PUT",
+            "/scim/v2/Groups                   | GET,POST",
+            "/scim/v2/Groups/.search           | DELETE,GET,PATCH,POST,PUT",
+            "/scim/v2/Groups/DEV002            | DELETE,GET,PATCH,PUT",
+            "/scim/v2/ServiceProviderConfig    | GET",
+            "/scim/v2                          | GET",
+            "/scim/v2/                         | GET",
+            "/scim/v2/.search                  | POST"})
+    @DisplayName("경로마다 받는 메서드 전부가 이름순 쉼표 연결로 Allow 에 실린다 — 지도에 없는 라우트가 생기면 405 대신 404 가 나와 드러난다")
+    void 경로마다_Allow_가_정확하다(String path, String 기대한_허용) {
+        // when, then — 어느 경로도 받지 않는 OPTIONS 로 405 를 낸다. `.search` 는 `{id}` 에도 맞아 두 지도의 합집합이다
+        client.options().uri(path).exchange()
+                .expectStatus().isEqualTo(HttpStatus.METHOD_NOT_ALLOWED)
+                .expectHeader().valueEquals(HttpHeaders.ALLOW, 기대한_허용);
     }
 
     @ParameterizedTest

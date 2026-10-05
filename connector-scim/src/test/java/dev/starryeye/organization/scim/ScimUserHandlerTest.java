@@ -290,9 +290,9 @@ class ScimUserHandlerTest {
     }
 
     @Test
-    @DisplayName("변경 락을 못 잡으면 503 이고 SCIM 에러 형식을 지킨다")
+    @DisplayName("변경 락 저장소 오류로 락을 못 잡으면 503 이고 Retry-After 가 10초이며 SCIM 에러 형식을 지킨다")
     void 락을_못_잡으면_503이다() {
-        // given — 다른 인스턴스가 락을 쥐고 있는 상황(재적재 등)을 재현한다
+        // given — 락 저장소 오류(10초)로 획득이 실패하는 상황을 재현한다. 다른 쪽이 쥔 경합(2초·60초)이 아니다
         lock.failAcquire = true;
 
         // when, then — IdP 는 503 을 재시도 신호로 보므로 프로비저닝이 유실되지 않는다
