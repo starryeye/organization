@@ -37,20 +37,17 @@ public final class LdapIdentifiers {
     }
 
     /**
-     * 없어서는 안 되는 식별 값. 없거나 비어 있으면 그 엔트리는 id 를 가질 수 없다 — 같은 디렉터리를 다시 읽어도 생기지 않으므로
-     * 재시도하지 않는 종류({@link DirectoryDataException})로 던진다.
+     * 식별 값. 없거나 비어 있으면 null — 그 엔트리는 id 를 가질 수 없어 전략이 건너뛴다(설계 2026-10-05 §3.4, 점검 M11). 읽지 못하거나
+     * {@code objectGUID} 가 이진이 아니면 {@link DirectoryDataException} — 그것은 엔트리 하나가 아니라 설정의 문제다.
      */
-    static String 필수(Attributes attributes, String attribute, String dn) {
+    static String 있으면(Attributes attributes, String attribute, String dn) {
         String 값;
         try {
             값 = 식별값(attributes, attribute, dn);
         } catch (NamingException e) {
             throw new DirectoryDataException("속성 '" + attribute + "' 를 읽지 못했습니다: dn=" + dn, e);
         }
-        if (값 == null || 값.isBlank()) {
-            throw new DirectoryDataException("필수 속성 '" + attribute + "' 가 없습니다: dn=" + dn);
-        }
-        return 값;
+        return 값 == null || 값.isBlank() ? null : 값;
     }
 
     public static String guid(byte[] b) {

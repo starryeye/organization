@@ -126,7 +126,7 @@ class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
     }
 
     @Test
-    @DisplayName("한 델타에 생성과 삭제가 섞여 있으면 삭제를 먼저 처리한다")
+    @DisplayName("한 델타에 생성과 삭제가 섞여 있어도 한 요청으로 반영된다")
     void 생성과_삭제가_섞여도_처리된다() {
         // given
         var 기존 = RelationTuple.directMember("lee", "DEV002");
@@ -141,6 +141,46 @@ class OpenFgaRelationTupleWriterTest extends OpenFgaTestSupport {
         assertThat(result.deleted()).containsExactly(기존);
         assertThat(check("user:park", "member", "group:DEV002")).isTrue();
         assertThat(check("user:lee", "member", "group:DEV002")).isFalse();
+    }
+
+    @Test
+    @DisplayName("조직을 옮기는 직원은 한 요청으로 옛 조직에서 빠지고 새 조직에 든다(점검 S20)")
+    void 옮기는_직원은_한_요청으로_반영된다() {
+        // given
+        var 옛 = RelationTuple.directMember("kim", "DEV001");
+        var 새 = RelationTuple.directMember("kim", "DEV002");
+        writer.apply(TupleDelta.writeOnly(Set.of(옛))).block();
+
+        // when
+        var result = writer.apply(new TupleDelta(Set.of(새), Set.of(옛))).block();
+
+        // then
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(result.written()).containsExactly(새);
+        assertThat(result.deleted()).containsExactly(옛);
+        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
+        assertThat(check("user:kim", "member", "group:DEV001")).isFalse();
+    }
+
+    @Test
+    @DisplayName("하위 조직의 상위를 바꾸면 구성원은 옛 상위의 권한을 잃고 새 상위의 권한을 얻는다 — 두 단계로 나가도 끝 상태는 같다")
+    void 조직의_상위를_바꾸면_권한이_따라온다() {
+        // given
+        var 소속 = RelationTuple.directMember("kim", "TEAM");
+        var 옛 = RelationTuple.child("TEAM", "DEV001");
+        var 새 = RelationTuple.child("TEAM", "DEV002");
+        writer.apply(TupleDelta.writeOnly(Set.of(소속, 옛))).block();
+        assertThat(check("user:kim", "member", "group:DEV001")).isTrue();
+
+        // when
+        var result = writer.apply(new TupleDelta(Set.of(새), Set.of(옛))).block();
+
+        // then
+        assertThat(result.hasFailure()).isFalse();
+        assertThat(result.written()).containsExactly(새);
+        assertThat(result.deleted()).containsExactly(옛);
+        assertThat(check("user:kim", "member", "group:DEV002")).isTrue();
+        assertThat(check("user:kim", "member", "group:DEV001")).isFalse();
     }
 
     @Test

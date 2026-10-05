@@ -80,10 +80,10 @@ class DitStrategyDuplicateCodeTest extends EmbeddedLdapSupport {
         properties.setStrategy("dit");
         var d = properties.getDit();
         d.setRootDn("ou=company");
-        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setOrgUnitFilter("(objectClass=organizationalUnit)");
         d.setGroupIdAttribute("ou");
         d.setGroupNameAttribute("description");
-        d.setUserObjectClass("inetOrgPerson");
+        d.setUserFilter("(objectClass=inetOrgPerson)");
         d.setUserIdAttribute("uid");
         d.setUserNameAttribute("displayName");
         d.setUserMailAttribute("mail");
@@ -110,7 +110,8 @@ class DitStrategyDuplicateCodeTest extends EmbeddedLdapSupport {
         // and — 경고 로그가 남는다
         List<ILoggingEvent> warnings = logAppender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .filter(event -> event.getFormattedMessage().contains("조직코드"))
+                .filter(event -> event.getFormattedMessage().contains("조직 검색"))
+                .filter(event -> event.getFormattedMessage().contains("아이디 겹침"))
                 .filter(event -> event.getFormattedMessage().contains("support"))
                 .toList();
         assertThat(warnings).isNotEmpty();

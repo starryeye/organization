@@ -11,9 +11,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
 import java.util.List;
-
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -93,26 +91,23 @@ class GroupOfNamesDuplicateIdTest extends EmbeddedLdapSupport {
         properties.setBaseDn(BASE_DN);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=people");
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setUserNameAttribute("displayName");
         g.setUserMailAttribute("mail");
         g.setGroupSearchBase("ou=groups");
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setGroupNameAttribute("description");
         g.setMemberAttribute("member");
         return properties;
     }
 
-    /** 경고 메시지에서 작은따옴표로 감싼 dn 들을 뽑는다. */
-    private static List<String> dn들(String message) {
-        var matcher = Pattern.compile("dn='([^']*)'").matcher(message);
-        List<String> found = new ArrayList<>();
-        while (matcher.find()) {
-            found.add(matcher.group(1));
-        }
-        return found;
+    /** 요약 경고에서 "<이름> dn='...'" 꼴로 실린 dn 을 뽑는다 — 이름은 "건너뛴" 또는 "유지된" 이다. */
+    private static String dn(String message, String 이름) {
+        var matcher = Pattern.compile(이름 + " dn='([^']*)'").matcher(message);
+        assertThat(matcher.find()).as("경고에 '%s dn' 이 있어야 한다: %s", 이름, message).isTrue();
+        return matcher.group(1);
     }
 
     @Test
@@ -131,14 +126,13 @@ class GroupOfNamesDuplicateIdTest extends EmbeddedLdapSupport {
 
         var warning = logAppender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .filter(event -> event.getFormattedMessage().contains("직원 아이디"))
+                .filter(event -> event.getFormattedMessage().contains("직원 검색"))
+                .filter(event -> event.getFormattedMessage().contains("아이디 겹침"))
                 .findFirst();
         assertThat(warning).as("충돌했는데 경고가 없다면 가드가 동작하지 않은 것이다").isPresent();
 
-        List<String> dns = dn들(warning.get().getFormattedMessage());
-        assertThat(dns).hasSize(2);
-        String 유지된dn = dns.get(0);
-        String 건너뛴dn = dns.get(1);
+        String 유지된dn = dn(warning.get().getFormattedMessage(), "유지된");
+        String 건너뛴dn = dn(warning.get().getFormattedMessage(), "건너뛴");
 
         String 살아남은dn = snapshot.users().get("kim_lee").externalId();
         assertThat(살아남은dn)
@@ -161,7 +155,8 @@ class GroupOfNamesDuplicateIdTest extends EmbeddedLdapSupport {
         // then
         List<ILoggingEvent> warnings = logAppender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .filter(event -> event.getFormattedMessage().contains("직원 아이디"))
+                .filter(event -> event.getFormattedMessage().contains("직원 검색"))
+                .filter(event -> event.getFormattedMessage().contains("아이디 겹침"))
                 .toList();
         assertThat(warnings).hasSize(1);
 

@@ -269,13 +269,16 @@ class LdapSyncEndToEndTest {
     @Order(7)
     @DisplayName("헬스체크가 LDAP·DynamoDB·OpenFGA 세 의존성을 모두 UP 으로 보고한다")
     void 헬스체크가_UP이다() {
-        // given, when, then — 설계 §12.3 이 요구하는 셋을 모두 확인한다.
+        // when, then — 설계 §12.3 이 요구하는 셋을 모두 확인한다.
         // 전에는 둘만 단언해, LDAP 인디케이터가 아예 없다는 사실을 이 테스트가 덮고 있었다.
+        // ldap 의 strategy 는 우리 인디케이터만 싣는다 — Boot 의 기본 LDAP 인디케이터가 같은 이름(ldap)으로 덮으면 status 는 UP 이어도
+        // 인증 실패 뒤 쉼과 프로브 상한이 돌지 않는다
         client.get().uri("/actuator/health").exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("UP")
                 .jsonPath("$.components.ldap.status").isEqualTo("UP")
+                .jsonPath("$.components.ldap.details.strategy").exists()
                 .jsonPath("$.components.dynamoDb.status").isEqualTo("UP")
                 .jsonPath("$.components.openFga.status").isEqualTo("UP");
     }

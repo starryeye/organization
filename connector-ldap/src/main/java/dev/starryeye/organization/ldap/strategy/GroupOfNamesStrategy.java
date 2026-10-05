@@ -19,6 +19,8 @@ import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,6 +32,9 @@ import java.util.Set;
  *
  * <p>member DN 이 사람인지 그룹인지는 미리 읽어둔 DN 집합으로 판별한다.
  * DN 마다 추가 조회를 하면 조직 규모에 비례해 왕복이 폭증한다.
+ *
+ * <p>소속의 길은 하나 더 있다 — AD 는 사용자의 기본 그룹 소속을 그 그룹의 {@code member} 에 적지 않으므로, 직원의 {@code primaryGroupID} 가 읽은
+ * 그룹의 {@code objectSid} RID 와 같으면 그 그룹의 직원 멤버로 더한다(점검 M10, 설계 2026-10-05 §3.2, {@link ActiveDirectoryPrimaryGroup}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -55,7 +60,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 LdapQueryBuilder.query()
                         .base(config.getUserSearchBase())
                         .attributes(직원_속성(config))
-                        .where("objectClass").is(config.getUserObjectClass()),
+                        .filter(config.getUserFilter()),
                 pageSize, userMapper(config, 지금));
 
         List<RawEntry> groupEntries = 범위가_잘린_멤버를_이어받는다(template, config,
@@ -63,37 +68,62 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                         LdapQueryBuilder.query()
                                 .base(config.getGroupSearchBase())
                                 .attributes(그룹_속성(config))
-                                .where("objectClass").is(config.getGroupObjectClass()),
+                                .filter(config.getGroupFilter()),
                         pageSize, groupMapper(config)));
 
         Map<String, String> userIdByDn = new LinkedHashMap<>();
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
+        // 남긴 직원의 AD 기본 그룹 RID — 건너뛴 직원은 읽지 않았으므로 없다
+        Map<String, Long> 기본그룹RID_직원별 = new LinkedHashMap<>();
+        SkippedEntries 건너뛴_직원 = new SkippedEntries("직원", config.getUserIdAttribute());
         for (UserEntry entry : userEntries) {
-            if (DuplicateIdGuard.isDuplicate("직원 아이디", entry.id(), entry.dn(), userDnById)) {
+            if (entry.id() == null) {
+                건너뛴_직원.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                continue;
+            }
+            if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), userDnById)) {
+                건너뛴_직원.겹침을_기록한다(entry.id(), entry.dn(), userDnById.get(entry.id()));
                 continue;
             }
             userIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             users.put(entry.id(), new DirectoryUser(
                     entry.id(), entry.dn(), entry.userName(), entry.displayName(), entry.email(), entry.active(),
                     entry.name()));
+            if (entry.primaryGroupRid() != null) {
+                기본그룹RID_직원별.put(entry.id(), entry.primaryGroupRid());
+            }
         }
+        건너뛴_직원.요약을_남긴다();
+        건너뛴_직원.아무도_남지_않으면_멈춘다(userEntries.size(), users.size());
 
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
         Map<String, String> groupDnById = new LinkedHashMap<>();
         Map<String, RawEntry> survivingGroupEntries = new LinkedHashMap<>();
+        SkippedEntries 건너뛴_조직 = new SkippedEntries("조직", config.getGroupIdAttribute());
         for (RawEntry entry : groupEntries) {
-            if (DuplicateIdGuard.isDuplicate("조직코드", entry.id(), entry.dn(), groupDnById)) {
+            if (entry.id() == null) {
+                건너뛴_조직.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                continue;
+            }
+            if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), groupDnById)) {
+                건너뛴_조직.겹침을_기록한다(entry.id(), entry.dn(), groupDnById.get(entry.id()));
                 continue;
             }
             groupIdByDn.put(LdapDns.대조키(entry.dn()), entry.id());
             survivingGroupEntries.put(entry.id(), entry);
         }
+        건너뛴_조직.요약을_남긴다();
+        건너뛴_조직.아무도_남지_않으면_멈춘다(groupEntries.size(), survivingGroupEntries.size());
+
+        Map<String, List<String>> 기본그룹_멤버 = 기본그룹_멤버를_모은다(survivingGroupEntries.values(), 기본그룹RID_직원별);
 
         Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
         int 멤버값수 = 0;
         int 사용자대조수 = 0;
         int 조직대조수 = 0;
+        // 읽은 직원도 조직도 아닌 member 값 — 컴퓨터·연락처이거나 위에서 건너뛴 직원·조직이다. 값마다 한 줄이 아니라 요약 한 줄로 남긴다
+        SkippedEntries 건너뛴_member = SkippedEntries.member값();
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
@@ -111,13 +141,45 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     조직대조수++;
                     continue;
                 }
-                log.warn("조직 '{}' 의 member '{}' 가 사람도 그룹도 아니어서 건너뜁니다 (dn={})", entry.id(), memberDn, entry.dn());
+                건너뛴_member.기록한다(SkippedEntries.사유.읽지_않은_member,
+                        "조직 '%s'(dn='%s') 의 member '%s'".formatted(entry.id(), entry.dn(), memberDn));
             }
+            // AD 기본 그룹(점검 M10)의 소속은 member 값이 아니라 RID 로 정해졌다 — 위 집계의 DN 대조가 아니므로 멤버값수·대조수에 넣지 않는다
+            기본그룹_멤버.getOrDefault(entry.id(), List.of()).forEach(userId -> members.add(MemberRef.user(userId)));
             groups.put(entry.id(), new DirectoryGroup(entry.id(), entry.dn(), entry.displayName(), members));
         }
+        // 가드가 던지기 전에 남긴다 — 대조가 전부 어긋난 회차의 원인을 로그에서 볼 수 있다. 이 집계로는 멈추지 않는다(사람 대조 0 은 아래 가드의 몫)
+        건너뛴_member.요약을_남긴다();
         UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
         return new DirectorySnapshot(users, groups);
+    }
+
+    /**
+     * AD 기본 그룹(점검 M10) — {@code member} 에 없는 소속을 RID 로 정한다. 한 도메인에서 RID 는 유일하다. 그룹 id 마다 그 그룹을 기본 그룹으로 가진
+     * 직원 id 를 모은다. 읽지 않은 그룹(Domain Users 513 등)을 가리키는 RID 는 어느 그룹에도 맞지 않아 아무 소속도 더하지 않는다.
+     */
+    private static Map<String, List<String>> 기본그룹_멤버를_모은다(Iterable<RawEntry> 그룹들, Map<String, Long> 기본그룹RID_직원별) {
+        Map<Long, RawEntry> 그룹_RID별 = new HashMap<>();
+        for (RawEntry entry : 그룹들) {
+            if (entry.rid() == null) {
+                continue;
+            }
+            RawEntry 먼저 = 그룹_RID별.putIfAbsent(entry.rid(), entry);
+            if (먼저 != null) {
+                throw new DirectoryDataException(("속성 '%s' 의 RID %d 를 가진 그룹이 둘입니다 — 한 도메인에서 RID 는 유일해야 합니다. "
+                        + "그룹 검색 베이스가 여러 도메인을 걸치는지(글로벌 카탈로그 등) 확인하세요: '%s'(dn=%s), '%s'(dn=%s)")
+                        .formatted(ActiveDirectoryPrimaryGroup.OBJECT_SID, entry.rid(), 먼저.id(), 먼저.dn(), entry.id(), entry.dn()));
+            }
+        }
+        Map<String, List<String>> 기본그룹_멤버 = new HashMap<>();
+        기본그룹RID_직원별.forEach((userId, rid) -> {
+            RawEntry 그룹 = 그룹_RID별.get(rid);
+            if (그룹 != null) {
+                기본그룹_멤버.computeIfAbsent(그룹.id(), k -> new ArrayList<>()).add(userId);
+            }
+        });
+        return 기본그룹_멤버;
     }
 
     /**
@@ -126,13 +188,15 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      */
     static String[] 직원_속성(LdapProperties.GroupOfNames config) {
         return UserAttributes.요청(config.getUserIdAttribute(), config.getUserLoginAttribute(),
-                config.getUserNameAttribute(), config.getUserMailAttribute());
+                config.getUserNameAttribute(), config.getUserMailAttribute(),
+                ActiveDirectoryPrimaryGroup.PRIMARY_GROUP_ID);
     }
 
     /** 그룹 검색이 요청하는 속성. {@link #groupMapper} 가 읽는 속성과 같아야 한다. */
     static String[] 그룹_속성(LdapProperties.GroupOfNames config) {
         return PagedLdapSearch.속성목록(
-                config.getGroupIdAttribute(), config.getGroupNameAttribute(), config.getMemberAttribute());
+                config.getGroupIdAttribute(), config.getGroupNameAttribute(), config.getMemberAttribute(),
+                ActiveDirectoryPrimaryGroup.OBJECT_SID);
     }
 
     /**
@@ -146,7 +210,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
-            String 식별값 = LdapIdentifiers.필수(attributes, config.getUserIdAttribute(), dn);
+            String 식별값 = LdapIdentifiers.있으면(attributes, config.getUserIdAttribute(), dn);
+            if (식별값 == null) {
+                // 건너뛸 엔트리다 — 계정 상태·기본 그룹 같은 나머지 속성은 읽지 않는다. 표준 밖의 값이 있어도 회차를 멈추지 않는다
+                return UserEntry.식별_속성_없음(dn);
+            }
             // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
             String userName = firstNonBlank(value(attributes, config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
@@ -159,9 +227,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                             value(attributes, UserAttributes.CN),
                             userName),
                     value(attributes, config.getUserMailAttribute()),
-                    // AD 가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
-                    !AdAccountStatus.막혔는가(dn, attributes, 지금),
-                    LdapPersonName.from(attributes));
+                    // 디렉터리가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
+                    !AccountStatus.막혔는가(dn, attributes, 지금),
+                    LdapPersonName.from(attributes),
+                    ActiveDirectoryPrimaryGroup.기본그룹_RID(attributes, dn));
         };
     }
 
@@ -175,7 +244,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
             DirContextAdapter adapter = (DirContextAdapter) context;
             Attributes attributes = adapter.getAttributes();
             String dn = 절대DN(adapter);
-            String code = IdNormalizer.normalize(LdapIdentifiers.필수(attributes, config.getGroupIdAttribute(), dn));
+            String 식별값 = LdapIdentifiers.있으면(attributes, config.getGroupIdAttribute(), dn);
+            if (식별값 == null) {
+                return RawEntry.식별_속성_없음(dn);
+            }
+            String code = IdNormalizer.normalize(식별값);
             RangedAttributeReader.Chunk 멤버 =
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
@@ -185,6 +258,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다
                     firstNonBlank(value(attributes, config.getGroupNameAttribute()), LdapDns.첫_RDN_값(dn)),
                     null,
+                    ActiveDirectoryPrimaryGroup.RID(attributes, dn),
                     멤버.values(),
                     멤버.완료());
         };
@@ -229,7 +303,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         // 전부_읽는다 가 IncompleteAttributeReadException 을 던지므로 여기 도달하지 못한다.
         return entries.stream()
                 .map(entry -> 이어받은것.containsKey(entry.dn())
-                        ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(),
+                        ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(), entry.rid(),
                                 이어받은것.get(entry.dn()), true)
                         : entry)
                 .toList();
@@ -278,26 +352,42 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     }
 
     /**
-     * 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, AD 가 막았는지를 싣는다.
+     * 직원 엔트리. 그룹과 달리 멤버를 읽지 않고, 디렉터리가 막았는지를 싣는다.
      *
-     * @param id          정규화된 직원 id(기본은 entryUUID)
+     * @param id          정규화된 직원 id(기본은 entryUUID). 식별 속성이 없는 엔트리는 null 이다
      * @param dn          서버가 준 절대 DN. member 대조 키이자 externalId 다
      * @param userName    로그인 속성의 원본 값. 없으면 식별 값이다
      * @param displayName 표시명. 없으면 {@code cn}, 그것도 없으면 {@code userName} 이다
      * @param email       메일. 없으면 null
-     * @param active      AD 가 막은 계정이 아니면 true
+     * @param active      디렉터리가 막은 계정이 아니면 true
      * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
+     * @param primaryGroupRid AD 기본 그룹의 RID({@code primaryGroupID}). 없으면 null
      */
     private record UserEntry(String id, String dn, String userName, String displayName, String email,
-                             boolean active, PersonName name) {
+                             boolean active, PersonName name, Long primaryGroupRid) {
+
+        /** 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이라 나머지 칸은 자리만 채운다 — 기본 그룹 RID 도 읽지 않는다 */
+        static UserEntry 식별_속성_없음(String dn) {
+            return new UserEntry(null, dn, null, null, null, true, null, null);
+        }
     }
 
     /**
+     * @param id              정규화된 조직 id. 식별 속성이 없는 엔트리는 null 이다
      * @param dn              <b>서버가 준 절대 DN.</b> member 대조 키이자 externalId 이고,
      *                        범위 검색 재요청 때 엔트리를 다시 지목하는 좌표이기도 하다
+     * @param rid             AD 그룹의 RID({@code objectSid} 의 마지막 하위 권한). 없으면 null
      * @param membersComplete 멤버 목록이 잘리지 않고 다 왔는가
      */
-    private record RawEntry(String id, String dn, String displayName, String email,
+    private record RawEntry(String id, String dn, String displayName, String email, Long rid,
                             List<String> members, boolean membersComplete) {
+
+        /**
+         * 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이다 — RID 는 읽지 않고, 멤버는 비우고 완료로 둔다. 범위 검색으로 잘린 조직만
+         * 이어받으므로 이 엔트리는 이어받기 대상이 되지 않는다
+         */
+        static RawEntry 식별_속성_없음(String dn) {
+            return new RawEntry(null, dn, null, null, null, List.of(), true);
+        }
     }
 }

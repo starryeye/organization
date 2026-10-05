@@ -1,13 +1,15 @@
 package dev.starryeye.organization.ldap.strategy;
 
+import dev.starryeye.organization.ldap.LdapTemplates;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ldap.PartialResultException;
 import org.springframework.ldap.control.PagedResultsDirContextProcessor;
 import org.springframework.ldap.core.ContextMapper;
+import org.springframework.ldap.core.ContextMapperCallbackHandler;
 import org.springframework.ldap.core.LdapTemplate;
-import dev.starryeye.organization.ldap.LdapTemplates;
 import org.springframework.ldap.query.LdapQuery;
 
 import javax.naming.directory.SearchControls;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,42 +39,100 @@ import java.util.Map;
  * (아직 검색을 수행하지 않은) processor 는 생성자에 어떤 쿠키를 넘기든 {@code hasMore()}가
  * 항상 {@code true}를 반환하므로, 다음 페이지용 processor 를 먼저 만들고 그걸 검사하면
  * 무한 루프에 빠진다 — 매 반복 새 커넥션을 열다 로컬 포트가 고갈되어서야 멈춘다.
+ *
+ * <p><b>referral(검색 결과 참조, RFC 4511 §4.5.3)은 따라가지 않되 검색마다 경고 한 줄을 남긴다(점검 S21).</b> JNDI 는 참조를 만나면
+ * 열거 끝에 {@code PartialResultException} 을 던지고, Spring 은 기본으로 그것을 DEBUG 로 삼킨다({@link LdapTemplates#configured} 가 끈다).
+ * 그래서 결과를 {@code ContextMapperCallbackHandler} 하나에 직접 모은다 — 예외가 나도 그 전까지 받은 엔트리는 핸들러에 담겨 있고, 페이징
+ * 쿠키는 Spring 이 {@code finally} 에서 읽으므로 다음 페이지도 이어진다. 참조를 만났는데 엔트리를 하나도 받지 못했으면 검색 베이스 자체가
+ * 참조라 {@link DirectoryDataException} 으로 실패한다.
  */
+@Slf4j
 final class PagedLdapSearch {
 
     private PagedLdapSearch() {
-    }
-
-    static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, ContextMapper<T> mapper) {
-        if (pageSize <= 0) {
-            return template.search(query, mapper);
-        }
-        return 한_커넥션에서_페이징한다(template, query, pageSize, mapper);
     }
 
     // 이 전략(GroupOfNames·DIT)의 매퍼는 전부 ContextMapper 다 — DN 이 필요하기 때문이다
     // (AttributesMapper 에는 DN 이 오지 않는다). 이전에는 AttributesMapper 오버로드도
     // 있었지만 마지막 호출자가 사라져 지웠다; 되살릴 때는 DN 없는 매퍼를 다시 불러들이는
     // 문이 된다는 점을 염두에 둔다.
-    private static <T> List<T> 한_커넥션에서_페이징한다(LdapTemplate template, LdapQuery query,
-                                              int pageSize, ContextMapper<T> mapper) {
+    static <T> List<T> search(LdapTemplate template, LdapQuery query, int pageSize, ContextMapper<T> mapper) {
         String base = query.base().toString();
         String filter = query.filter().encode();
         SearchControls controls = controlsOf(query);
-
+        ContextMapperCallbackHandler<T> handler = new ContextMapperCallbackHandler<>(mapper);
+        검색의_참조 참조 = new 검색의_참조(base, filter);
+        if (pageSize <= 0) {
+            참조.검색한다(() -> template.search(base, filter, controls, handler));
+            참조.확인한다(handler.getList().size());
+            return handler.getList();
+        }
         return LdapTemplates.한_커넥션에서(template, paged -> {
-            List<T> results = new ArrayList<>();
             PagedResultsDirContextProcessor processor = new PagedResultsDirContextProcessor(pageSize);
             boolean hasMore;
             do {
-                results.addAll(paged.search(base, filter, controls, mapper, processor));
+                PagedResultsDirContextProcessor 이번 = processor;
+                참조.검색한다(() -> paged.search(base, filter, controls, handler, 이번));
+                // 페이지마다 본다 — 베이스가 참조인 응답(결과 코드 10)에는 페이징 컨트롤이 없어 hasMore() 가 처음 값(true)으로 남는다.
+                // 반복이 끝난 뒤에 보면 같은 요청을 끝없이 되풀이한다
+                참조.확인한다(handler.getList().size());
                 hasMore = processor.hasMore();
                 if (hasMore) {
                     processor = new PagedResultsDirContextProcessor(pageSize, processor.getCookie());
                 }
             } while (hasMore);
-            return results;
+            return handler.getList();
         });
+    }
+
+    /**
+     * 검색 하나에서 만난 referral. 따라가지 않는다(설계 2026-10-05 §4.2) — 다른 DC 의 주소·자격 증명·DNS 가 필요하고 AD 도메인 루트에서는
+     * DNS 파티션까지 읽는다. 엔트리를 받은 검색이면 검색마다 경고 한 줄을 남기고(페이지마다 참조가 와도 한 줄) 계속한다 — AD 에서 도메인 루트를
+     * 검색 베이스로 쓰면 참조가 늘 온다.
+     *
+     * <p>참조를 만났는데 그때까지 받은 엔트리가 하나도 없으면 {@link DirectoryDataException} 으로 실패한다(재시도 없음). 검색 베이스 자체가 참조다 —
+     * 대개 이 DC 의 이름 공간 밖(다른 도메인·위임 서브트리)을 가리킨다. 빈 결과로 읽으면 전원이 빠진 회차가 된다. 페이지마다 보는 까닭은
+     * {@link #search} 의 반복에 적었다.
+     */
+    private static final class 검색의_참조 {
+        private final String base;
+        private final String filter;
+        /** 처음 만난 참조의 JNDI 메시지. 만나지 않았으면 null */
+        private String 메시지;
+        private boolean 알렸다;
+
+        검색의_참조(String base, String filter) {
+            this.base = base;
+            this.filter = filter;
+        }
+
+        void 검색한다(Runnable 검색) {
+            try {
+                검색.run();
+            } catch (PartialResultException e) {
+                // Spring 이 JNDI 의 javax.naming.PartialResultException 을 옮긴 예외다(ignorePartialResultException=false 일 때) — javax.naming 쪽이 아니다
+                if (메시지 == null) {
+                    메시지 = e.getMessage();
+                }
+            }
+        }
+
+        /** 지금까지 받은 엔트리 수로 참조를 판정한다 — 페이지마다 부른다 */
+        void 확인한다(int 받은_수) {
+            if (메시지 == null) {
+                return;
+            }
+            if (받은_수 == 0) {
+                throw new DirectoryDataException(("LDAP 검색이 엔트리를 하나도 받지 못하고 referral 만 받았다 — 검색 베이스 자체가 참조다. "
+                        + "이 DC 의 이름 공간 밖(다른 도메인·위임 서브트리)을 가리키는 것 같다. 따라가지 않으므로 검색 베이스를 이 DC 의 도메인 안으로 고쳐라: "
+                        + "base=%s, filter=%s, %s").formatted(base, filter, 메시지));
+            }
+            if (!알렸다) {
+                알렸다 = true;
+                log.warn("LDAP 검색이 referral 을 만나 그 부분을 읽지 않았다 — 따라가지 않는다. 검색 범위가 다른 도메인·위임 서브트리를 걸치는지 확인하라: base={}, filter={}, {}",
+                        base, filter, 메시지);
+            }
+        }
     }
 
     /**
@@ -97,6 +157,8 @@ final class PagedLdapSearch {
         // 쓰는 속성만 요청한다 — 비워 두면 서버가 모든 사용자 속성을 준다(AD 10만 명이면 회차마다 1~2GB, 설계 2026-10-04 §4.3).
         // 운영 속성(entryUUID)은 이름을 대야만 온다
         controls.setReturningAttributes(query.attributes());
+        // ContextMapper 오버로드는 Spring 이 이것을 켜 주지만 핸들러 오버로드는 켜지 않는다 — 없으면 매퍼가 DirContextAdapter 를 못 받는다
+        controls.setReturningObjFlag(true);
         return controls;
     }
 }

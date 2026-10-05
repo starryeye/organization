@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 검색이 쓰는 속성만 요청한다(설계 2026-10-04 §4.3, 점검 P7). 요청 속성을 비워 두면 서버가 모든 사용자 속성을 보내고,
- * 운영 속성(entryUUID)은 이름을 대야만 온다.
+ * 운영 속성(entryUUID, pwdAccountLockedTime)은 이름을 대야만 온다.
  *
  * <p>서버가 실제로 받은 검색 요청을 인터셉터로 잡아 속성 목록을 본다. 직원 엔트리에는 어느 전략도 쓰지 않는
  * {@code thumbnailPhoto} 를 둬서, "필요한 것만" 이 이름으로 가려지게 한다. AD 범위 읽기({@code member;range=…})는
@@ -24,7 +24,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ReturningAttributesTest extends EmbeddedLdapSupport {
 
     private static final List<String> 직원_계정_상태_이름 = List.of(
-            "userAccountControl", "accountExpires", "sn", "givenName", "middleName", "generationQualifier");
+            "userAccountControl", "accountExpires", "pwdAccountLockedTime",
+            "sn", "givenName", "middleName", "generationQualifier");
 
     private final List<검색요청> 요청 = new CopyOnWriteArrayList<>();
 
@@ -119,12 +120,12 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         properties.setBaseDn(BASE_DN);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=people");
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setUserNameAttribute("displayName");
         g.setUserMailAttribute("mail");
         g.setGroupSearchBase("ou=groups");
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setGroupNameAttribute("description");
         g.setMemberAttribute("member");
@@ -137,10 +138,10 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         properties.setStrategy("dit");
         var d = properties.getDit();
         d.setRootDn("ou=company");
-        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setOrgUnitFilter("(objectClass=organizationalUnit)");
         d.setGroupIdAttribute("ou");
         d.setGroupNameAttribute("description");
-        d.setUserObjectClass("inetOrgPerson");
+        d.setUserFilter("(objectClass=inetOrgPerson)");
         d.setUserIdAttribute("uid");
         d.setUserNameAttribute("displayName");
         d.setUserMailAttribute("mail");
@@ -185,6 +186,34 @@ class ReturningAttributesTest extends EmbeddedLdapSupport {
         assertThat(요청한_속성("organizationalUnit"))
                 .contains("ou", "description")
                 .doesNotContain("mail", "userAccountControl", "thumbnailPhoto");
+    }
+
+    @Test
+    @DisplayName("groupOfNames 는 AD 기본 그룹을 읽으려 직원의 primaryGroupID 와 그룹의 objectSid 를 요청한다(점검 M10)")
+    void groupOfNames_는_기본_그룹_속성을_요청한다() {
+        // given
+        var strategy = new GroupOfNamesStrategy(groupOfNames설정());
+
+        // when
+        strategy.read(ldapTemplate);
+
+        // then
+        assertThat(요청한_속성("inetOrgPerson")).contains("primaryGroupID");
+        assertThat(요청한_속성("groupOfNames")).contains("objectSid");
+    }
+
+    @Test
+    @DisplayName("DIT 는 기본 그룹을 읽지 않으므로 직원 검색이 primaryGroupID 를 요청하지 않는다")
+    void DIT_는_기본_그룹_속성을_요청하지_않는다() {
+        // given
+        var strategy = new DitStrategy(dit설정());
+
+        // when
+        strategy.read(ldapTemplate);
+
+        // then
+        assertThat(요청한_속성("inetOrgPerson")).doesNotContain("primaryGroupID");
+        assertThat(요청한_속성("organizationalUnit")).doesNotContain("objectSid");
     }
 
     @Test

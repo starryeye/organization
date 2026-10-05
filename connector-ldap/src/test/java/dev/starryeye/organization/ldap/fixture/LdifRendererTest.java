@@ -160,12 +160,12 @@ class LdifRendererTest {
         properties.setPageSize(500);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase(LdifRenderer.USER_OU);
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setUserNameAttribute("displayName");
         g.setUserMailAttribute("mail");
         g.setGroupSearchBase(LdifRenderer.GROUP_OU);
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setGroupNameAttribute("description");
         g.setMemberAttribute("member");

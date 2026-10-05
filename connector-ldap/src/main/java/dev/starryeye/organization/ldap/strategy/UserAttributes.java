@@ -12,10 +12,10 @@ final class UserAttributes {
     /** 일반 이름. 표시명 속성이 없을 때 표시명을 대신한다. */
     static final String CN = "cn";
 
-    /** 계정 상태(AD)와 이름 여섯 칸 중 직원에게 달린 넷. */
+    /** 계정 상태(AD 둘, ppolicy 하나 — 운영 속성이라 이름을 대야 온다)와 이름 여섯 칸 중 직원에게 달린 넷. */
     private static final String[] 고정 = {
             CN,
-            AdAccountStatus.USER_ACCOUNT_CONTROL, AdAccountStatus.ACCOUNT_EXPIRES,
+            AccountStatus.USER_ACCOUNT_CONTROL, AccountStatus.ACCOUNT_EXPIRES, AccountStatus.PWD_ACCOUNT_LOCKED_TIME,
             LdapPersonName.SN, LdapPersonName.GIVEN_NAME, LdapPersonName.MIDDLE_NAME, LdapPersonName.GENERATION_QUALIFIER};
 
     private UserAttributes() {

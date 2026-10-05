@@ -98,7 +98,7 @@ class LdapIdentifiersTest {
     }
 
     @Test
-    @DisplayName("식별 속성이 objectGUID 면 JNDI 환경에 이진 속성으로 선언한다")
+    @DisplayName("식별 속성이 objectGUID 면 JNDI 환경에 objectGUID 와 AD 기본 그룹의 objectSid 를 이진 속성으로 선언한다")
     void objectGUID_는_이진으로_선언한다() {
         // given
         var properties = new LdapProperties();
@@ -109,7 +109,7 @@ class LdapIdentifiersTest {
         var 환경 = LdapConfig.jndiEnvironment(properties);
 
         // then
-        assertThat(환경).containsEntry("java.naming.ldap.attributes.binary", "objectGUID");
+        assertThat(환경).containsEntry("java.naming.ldap.attributes.binary", "objectGUID objectSid");
     }
 
     @Test
@@ -125,12 +125,12 @@ class LdapIdentifiersTest {
         var 환경 = LdapConfig.jndiEnvironment(properties);
 
         // then
-        assertThat(환경).containsEntry("java.naming.ldap.attributes.binary", "objectGUID");
+        assertThat(환경).containsEntry("java.naming.ldap.attributes.binary", "objectGUID objectSid");
     }
 
     @Test
-    @DisplayName("식별 속성이 모두 문자열이면 이진 선언을 넣지 않고, 타임아웃은 그대로 싣는다")
-    void 이진_속성이_없으면_선언하지_않는다() {
+    @DisplayName("식별 속성이 모두 문자열이어도 AD 기본 그룹의 objectSid 는 늘 이진으로 선언하고, 타임아웃은 그대로 싣는다")
+    void objectSid_는_늘_이진으로_선언한다() {
         // given — 기본값(entryUUID)
         var properties = new LdapProperties();
 
@@ -139,7 +139,7 @@ class LdapIdentifiersTest {
 
         // then
         assertThat(환경)
-                .doesNotContainKey("java.naming.ldap.attributes.binary")
+                .containsEntry("java.naming.ldap.attributes.binary", "objectSid")
                 .containsEntry("com.sun.jndi.ldap.connect.timeout", "10000")
                 .containsEntry("com.sun.jndi.ldap.read.timeout", "150000");
     }

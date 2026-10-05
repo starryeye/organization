@@ -21,23 +21,23 @@ ldap:
   # LdapDitImmutableIdEndToEndTest(DIT)·LdapEntryUuidScaleTest 가 본다(설계 §8) — 그 클래스들이 아래 식별 속성을 되돌린다
   group-of-names:
     user-search-base: ou=people
-    user-object-class: inetOrgPerson
+    user-filter: "(objectClass=inetOrgPerson)"
     user-id-attribute: uid
     user-login-attribute: uid
     user-name-attribute: displayName
     user-mail-attribute: mail
     group-search-base: ou=groups
-    group-object-class: groupOfNames
+    group-filter: "(objectClass=groupOfNames)"
     group-id-attribute: cn
     group-name-attribute: description
     member-attribute: member
   # DIT 의 기본값(entryUUID) 시험은 LdapDitImmutableIdEndToEndTest 다 — 위와 같이 그 클래스가 식별 속성을 되돌린다
   dit:
     root-dn: ou=company
-    org-unit-object-class: organizationalUnit
+    org-unit-filter: "(objectClass=organizationalUnit)"
     group-id-attribute: ou
     group-name-attribute: description
-    user-object-class: inetOrgPerson
+    user-filter: "(objectClass=inetOrgPerson)"
     user-id-attribute: uid
     user-login-attribute: uid
     user-name-attribute: displayName

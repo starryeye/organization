@@ -49,9 +49,9 @@ class DitLdapPersonNameTest extends EmbeddedLdapSupport {
         properties.setStrategy("dit");
         var d = properties.getDit();
         d.setRootDn("ou=company");
-        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setOrgUnitFilter("(objectClass=organizationalUnit)");
         d.setGroupIdAttribute("ou");
-        d.setUserObjectClass("inetOrgPerson");
+        d.setUserFilter("(objectClass=inetOrgPerson)");
         d.setUserIdAttribute("uid");
         return properties;
     }

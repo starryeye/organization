@@ -12,7 +12,7 @@ import java.time.ZoneOffset;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * AD 가 막은 계정은 비활성으로 읽힌다 — 멤버십은 남고 권한 튜플만 사라진다(스펙 §2).
+ * 디렉터리가 막은 계정(AD 의 비활성·만료, ppolicy 의 영구 잠금)은 비활성으로 읽힌다 — 멤버십은 남고 권한 튜플만 사라진다(스펙 §2).
  * 지금 이 전략은 모든 직원을 활성으로 만들어, 막힌 퇴사자가 권한을 유지한다.
  */
 class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
@@ -58,6 +58,13 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
                 userAccountControl: 512
                 accountExpires: 132223104000000000
 
+                dn: uid=locked,ou=people,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: locked
+                cn: locked
+                sn: locked
+                pwdAccountLockedTime: 000001010000Z
+
                 dn: uid=plain,ou=people,dc=example,dc=com
                 objectClass: inetOrgPerson
                 uid: plain
@@ -70,6 +77,7 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
                 member: uid=normal,ou=people,dc=example,dc=com
                 member: uid=disabled,ou=people,dc=example,dc=com
                 member: uid=expired,ou=people,dc=example,dc=com
+                member: uid=locked,ou=people,dc=example,dc=com
                 member: uid=plain,ou=people,dc=example,dc=com
                 """;
     }
@@ -79,17 +87,17 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
         properties.setBaseDn(BASE_DN);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=people");
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setGroupSearchBase("ou=groups");
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setMemberAttribute("member");
         return properties;
     }
 
     @Test
-    @DisplayName("비활성화됐거나 만료된 직원은 비활성으로 읽힌다")
+    @DisplayName("비활성화됐거나 만료됐거나 영구 잠긴 직원은 비활성으로 읽힌다")
     void 막힌_직원은_비활성이다() {
         // given
         var strategy = new GroupOfNamesStrategy(설정(), 고정시계);
@@ -100,8 +108,9 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
         // then
         assertThat(users.get("disabled").active()).as("userAccountControl 514").isFalse();
         assertThat(users.get("expired").active()).as("accountExpires 가 2020-01-01").isFalse();
+        assertThat(users.get("locked").active()).as("pwdAccountLockedTime 000001010000Z — ppolicy 영구 잠금").isFalse();
         assertThat(users.get("normal").active()).as("userAccountControl 512").isTrue();
-        assertThat(users.get("plain").active()).as("두 속성이 없는 직원").isTrue();
+        assertThat(users.get("plain").active()).as("신호 속성이 없는 직원").isTrue();
     }
 
     @Test
@@ -114,6 +123,6 @@ class GroupOfNamesAccountStatusTest extends EmbeddedLdapSupport {
         var members = strategy.read(ldapTemplate).groups().get("DEV").members();
 
         // then
-        assertThat(members).contains(MemberRef.user("disabled"), MemberRef.user("expired"));
+        assertThat(members).contains(MemberRef.user("disabled"), MemberRef.user("expired"), MemberRef.user("locked"));
     }
 }

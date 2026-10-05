@@ -47,10 +47,10 @@ class DitStrategyEscapedDnTest extends EmbeddedLdapSupport {
         properties.setStrategy("dit");
         var d = properties.getDit();
         d.setRootDn("ou=company");
-        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setOrgUnitFilter("(objectClass=organizationalUnit)");
         d.setGroupIdAttribute("ou");
         d.setGroupNameAttribute("description");
-        d.setUserObjectClass("inetOrgPerson");
+        d.setUserFilter("(objectClass=inetOrgPerson)");
         d.setUserIdAttribute("uid");
         d.setUserNameAttribute("displayName");
         d.setUserMailAttribute("mail");

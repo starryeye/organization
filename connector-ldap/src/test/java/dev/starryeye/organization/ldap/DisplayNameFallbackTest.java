@@ -111,10 +111,10 @@ class DisplayNameFallbackTest extends EmbeddedLdapSupport {
         properties.setStrategy("dit");
         var d = properties.getDit();
         d.setRootDn("ou=company");
-        d.setOrgUnitObjectClass("organizationalUnit");
+        d.setOrgUnitFilter("(objectClass=organizationalUnit)");
         d.setGroupIdAttribute("ou");
         d.setGroupNameAttribute("description");
-        d.setUserObjectClass("inetOrgPerson");
+        d.setUserFilter("(objectClass=inetOrgPerson)");
         d.setUserIdAttribute("uid");
         d.setUserNameAttribute("displayName");
         d.setUserMailAttribute("mail");
@@ -126,12 +126,12 @@ class DisplayNameFallbackTest extends EmbeddedLdapSupport {
         properties.setBaseDn(BASE_DN);
         var g = properties.getGroupOfNames();
         g.setUserSearchBase("ou=people");
-        g.setUserObjectClass("inetOrgPerson");
+        g.setUserFilter("(objectClass=inetOrgPerson)");
         g.setUserIdAttribute("uid");
         g.setUserNameAttribute("displayName");
         g.setUserMailAttribute("mail");
         g.setGroupSearchBase("ou=groups");
-        g.setGroupObjectClass("groupOfNames");
+        g.setGroupFilter("(objectClass=groupOfNames)");
         g.setGroupIdAttribute("cn");
         g.setGroupNameAttribute("description");
         g.setMemberAttribute("member");

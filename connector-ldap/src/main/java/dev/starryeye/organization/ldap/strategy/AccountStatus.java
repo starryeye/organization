@@ -7,32 +7,39 @@ import java.time.Duration;
 import java.time.Instant;
 
 /**
- * AD 가 이 계정을 <b>막았는가</b>. 표준(MS-ADTS)이 정한 신호 둘 중 하나라도 막혔다고 하면 막힌 것이다.
+ * 디렉터리 표준이 정한 막힘 신호. AD(MS-ADTS) 둘과 OpenLDAP ppolicy 하나 중 하나라도 막혔다고 하면 막힌 것이다.
  *
  * <ul>
  *   <li>{@code userAccountControl} 의 {@code ACCOUNTDISABLE} 비트({@code 0x2}) — <b>비트로</b> 검사한다.
  *       AD 는 여러 플래그를 더한 값을 주므로({@code 66050} = 비활성 + 암호 만료 없음) 값 비교는 틀린다.</li>
  *   <li>{@code accountExpires} — 1601-01-01 UTC 부터 100나노초 단위. {@code 0} 과 {@link Long#MAX_VALUE} 는
  *       "만료 없음" 이다. 그 밖의 값이 {@code 지금} 이전(같은 시각 포함)이면 막혔다.</li>
+ *   <li>{@code pwdAccountLockedTime} — ppolicy(draft-behera-ldap-password-policy)의 잠금. 값이
+ *       {@code 000001010000Z} 이면 관리자만 풀 수 있는 영구 잠금이라 막혔고, 그 밖의 값은 잠긴 시각(일시 잠금)이라
+ *       막히지 않았다. 운영 속성이라 이름을 대 요청해야 온다({@link UserAttributes}).</li>
  * </ul>
  *
- * <p><b>속성이 없으면 막히지 않은 것이다.</b> OpenLDAP 등 AD 가 아닌 디렉터리에는 두 속성이 없다.
- * <b>정수가 아니면 던진다</b> — 표준 밖의 값을 짐작해 읽으면, 막힌 퇴사자를 활성으로 두거나 멀쩡한 직원의
+ * <p><b>속성이 없으면 막히지 않은 것이다.</b> 디렉터리마다 가진 속성이 달라, 없는 속성은 그 신호가 없다는 뜻이다.
+ * <b>AD 의 두 속성이 정수가 아니면 던진다</b> — 표준 밖의 값을 짐작해 읽으면, 막힌 퇴사자를 활성으로 두거나 멀쩡한 직원의
  * 권한을 지운다. 예외는 그 회차의 동기화를 실패시킨다.
  *
  * <p>막힌 계정은 SCIM 과 같은 의미의 비활성이다 — 멤버십은 남고 권한 튜플만 사라진다.
  * 설계: {@code docs/superpowers/specs/2026-09-25-ldap-disabled-account-design.md}.
  */
-final class AdAccountStatus {
+final class AccountStatus {
 
     static final String USER_ACCOUNT_CONTROL = "userAccountControl";
     static final String ACCOUNT_EXPIRES = "accountExpires";
+    static final String PWD_ACCOUNT_LOCKED_TIME = "pwdAccountLockedTime";
 
     private static final long ACCOUNTDISABLE = 0x2;
     private static final Instant FILETIME_기원 = Instant.parse("1601-01-01T00:00:00Z");
     private static final long 초당_틱 = 10_000_000L;
 
-    private AdAccountStatus() {
+    /** ppolicy(draft-behera-ldap-password-policy)가 정한 "관리자만 풀 수 있는 잠금" 값. 그 밖의 값은 잠긴 시각(일시 잠금)이다 */
+    private static final String 영구_잠금 = "000001010000Z";
+
+    private AccountStatus() {
     }
 
     /**
@@ -40,7 +47,7 @@ final class AdAccountStatus {
      *           찾게 한다
      */
     static boolean 막혔는가(String dn, Attributes attributes, Instant 지금) {
-        return 비활성화됐는가(dn, attributes) || 만료됐는가(dn, attributes, 지금);
+        return 비활성화됐는가(dn, attributes) || 만료됐는가(dn, attributes, 지금) || 영구_잠금인가(dn, attributes);
     }
 
     private static boolean 비활성화됐는가(String dn, Attributes attributes) {
@@ -55,6 +62,19 @@ final class AdAccountStatus {
         }
         Instant 만료 = FILETIME_기원.plus(Duration.ofSeconds(값 / 초당_틱, (값 % 초당_틱) * 100));
         return !만료.isAfter(지금);
+    }
+
+    /** 값을 해석하지 않고 표준 문자열과 같은지만 본다 — 일시 잠금을 비활성으로 보지 않는다(설계 2026-10-05 §3.3) */
+    private static boolean 영구_잠금인가(String dn, Attributes attributes) {
+        Attribute attribute = attributes.get(PWD_ACCOUNT_LOCKED_TIME);
+        if (attribute == null) {
+            return false;
+        }
+        try {
+            return 영구_잠금.equals(String.valueOf(attribute.get()));
+        } catch (NamingException e) {
+            throw new DirectoryDataException("속성 '" + PWD_ACCOUNT_LOCKED_TIME + "' 을 읽지 못했습니다: dn=" + dn, e);
+        }
     }
 
     private static Long 정수(String dn, Attributes attributes, String 이름) {
