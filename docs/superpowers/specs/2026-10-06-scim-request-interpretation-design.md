@@ -191,7 +191,27 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 
 ## 9. 결과 (구현 후 기록)
 
-머지 전 `test`·`scaleTest` 시간과 결과를 구현이 끝나면 여기에 적는다.
+2026-10-06, 브랜치 `audit-scim-requests` f0ac29d(그 뒤 커밋은 스펙만), DynamoDB Local·OpenFGA 컨테이너, 개발 노트북.
+
+- **`./gradlew cleanTest test`** — 1,425개 통과, 4분 40초(⑤-1 1,311개에서 +114).
+  - 첫 실행은 app-ldap `LdapImmutableIdEndToEndTest` 2건이 실패했다. 임베디드 LDAP 의 "LDAP connection has been closed" 로 첫 동기화가 재시도 3회 뒤 FAILED 가 됐고, 둘째 실패는 그 연쇄다.
+  - 이 슬라이드는 LDAP 코드를 건드리지 않았다. 별도 과제로 띄운 간헐 실패와 같은 증상이다. 다시 돌리자 전부 통과했다.
+- **`./gradlew cleanScaleTest scaleTest`** — 79개 통과, 14분 47초. 새 규모 테스트는 없다 — 요청 해석은 저장소 읽기를 늘리지 않는다.
+- **규모 실측**(같은 실행, 시간은 참고):
+
+  | 항목 | ⑤-1 | ⑤-2 |
+  |---|---|---|
+  | LDAP 전체 동기화 6,124명 — 이름 기반(`LdapScaleSyncCostTest`) | 10.5초 / 검증 2.7초 | 12.5초 / 검증 3.4초 |
+  | 같은 조직도 — `entryUUID`(`LdapEntryUuidScaleTest`) | 10.5초 / 검증 3.6초 | 7.8초 / 검증 3.6초 |
+  | SCIM 조직 먼저 순서(S1-b) — 직원 6,124명 POST + 멤버 PATCH 350건 | 41.0초 | 49.1초 |
+  | 10만 명 조직 삭제 | 38.2초 | 40.4초 |
+  | `type` 없는 멤버 1,000명 추가 | 891ms | 1,247ms |
+
+  쓰기 길은 바뀌지 않았다. 차이는 같은 노트북에서 실행할 때마다 생기는 흔들림이다(LDAP 두 줄이 서로 반대로 움직인 것도 같은 까닭이다).
+- **남은 사소한 것**(최종 검토 뒤 고치지 않고 남김):
+  - 조직 PATCH `externalId` 에 객체·배열 값이 오면 400 `invalidValue` 다. 코드와 테스트에는 있고 §4.1·README 에는 적지 않았다.
+  - §8 Group URN 행이 path 형 `members`·`externalId` 테스트를 싣지 않는다.
+  - README 의 "`manager` 를 PATCH path 로 보내면 200" 은 enterprise URN 형태에만 맞다. 맨 `manager` 는 400 이다(§3.1).
 
 ## 10. 왜 다른 길을 안 갔나
 
