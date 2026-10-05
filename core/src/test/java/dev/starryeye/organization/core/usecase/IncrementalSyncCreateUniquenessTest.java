@@ -133,7 +133,7 @@ class IncrementalSyncCreateUniquenessTest {
     }
 
     @Test
-    @DisplayName("PUT·PATCH 로 조직 externalId 를 다른 조직의 값으로 바꾸면 409 이고 아무것도 쓰지 않는다")
+    @DisplayName("PUT 으로 조직 externalId 를 다른 조직의 값으로 바꾸면 409 이고 아무것도 쓰지 않는다")
     void externalId_를_남의_값으로_바꾸면_409다() {
         // given
         useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "개발본부", Set.of())).block();

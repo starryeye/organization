@@ -98,7 +98,8 @@ public final class ScimPatchApplier {
         return current;
     }
 
-    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
+    /** 받아서 버린 속성을 알리지 않는 판 — 테스트용이다. 운영 호출은 {@code 버림} 을 받는 쪽만 쓴다(버림 보고를 잃지 않게 패키지 안에 둔다). */
+    static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
         return applyToUser(before, patch, 이름 -> { });
     }
 
@@ -196,13 +197,24 @@ public final class ScimPatchApplier {
         if (target.equalsIgnoreCase("externalId")) {
             // RFC 7643 §3.1 readWrite — PUT 과 같은 중복 판정을 유스케이스가 락 안에서 한다(설계 2026-10-06 §4.1)
             return switch (op) {
-                case "add", "replace" -> change.reidentified(asString(operation.value()));
+                case "add", "replace" -> change.reidentified(groupExternalId(operation.value()));
                 case "remove" -> change.reidentified(null);
                 default -> throw ScimException.invalidSyntax("알 수 없는 op 입니다: " + operation.op());
             };
         }
 
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+    }
+
+    /**
+     * 조직 {@code externalId} 의 값 — 문자열(숫자·불리언은 문자열로)이어야 한다. 객체·배열을 {@code toString} 으로 저장하면 {@code {value=x}} 가
+     * 외부 아이디가 되고 중복 판정도 그 문자열로 돈다. PUT 은 Jackson 이 같은 모양을 400 으로 거절한다. {@code null} 은 비우기다.
+     */
+    private static String groupExternalId(Object value) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
+            throw ScimException.invalidValue("externalId 는 문자열이어야 합니다");
+        }
+        return asString(value);
     }
 
     /**
@@ -233,7 +245,7 @@ public final class ScimPatchApplier {
                 : change;
         // 경로 없는 값의 externalId 도 path 와 같은 규칙이다 — 조용히 무시하지 않는다(설계 2026-10-06 §4.1, ④-1 이월)
         if (has(attributes, "externalId")) {
-            merged = merged.reidentified(asString(attribute(attributes, "externalId")));
+            merged = merged.reidentified(groupExternalId(attribute(attributes, "externalId")));
         }
         if (!has(attributes, "members")) {
             return merged;

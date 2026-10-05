@@ -372,6 +372,26 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("조직 PATCH externalId 에 객체·배열을 주면 400 invalidValue 다 — path 와 경로 없는 값 모두, toString 으로 저장하지 않는다(PUT 은 Jackson 이 400)")
+    void 조직_externalId_객체_배열_값은_거절한다() {
+        // given — 거절하지 않으면 {value=x} 라는 문자열이 externalId 로 저장되고 중복 판정까지 그 문자열로 돈다
+        var 요청들 = List.of(
+                패치("replace", "externalId", Map.of("value", "x")),
+                패치("replace", "externalId", List.of("x")),
+                패치("replace", null, Map.of("externalId", Map.of("value", "x"))),
+                패치("replace", null, Map.of("externalId", List.of("x"))));
+
+        // when, then
+        for (ScimPatchOp patch : 요청들) {
+            assertThatThrownBy(() -> ScimPatchApplier.toGroupChange(patch, USER_ONLY).block())
+                    .isInstanceOfSatisfying(ScimException.class, e -> {
+                        assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(e.getScimType()).isEqualTo("invalidValue");
+                    });
+        }
+    }
+
+    @Test
     @DisplayName("조직 PATCH 도 코어 Group URN 접두를 대소문자 없이 뗀다 — path 와 경로 없는 값의 키(설계 2026-10-06 §4.2, 점검 S9)")
     void 조직_Group_URN_접두를_뗀다() {
         // given
@@ -401,6 +421,35 @@ class ScimPatchApplierTest {
 
         // then
         assertThat(after.members()).containsExactly(MemberRef.group("SUB1"));
+    }
+
+    @Test
+    @DisplayName("path 에 URN 접두가 붙은 members 도 type 없는 멤버를 현재상태로 판정한다 — 모으는 쪽도 path 의 접두를 뗀다")
+    void path_URN_접두_members_의_type_없는_멤버를_판정한다() {
+        // given
+        MemberTypeResolver 하위조직이다 = ids -> Mono.just(
+                ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.GROUP)));
+
+        // when
+        var after = 적용한다(조직(), 패치("add", "urn:ietf:params:scim:schemas:core:2.0:Group:members",
+                List.of(Map.of("value", "SUB1"))), 하위조직이다);
+
+        // then
+        assertThat(after.members()).containsExactly(MemberRef.group("SUB1"));
+    }
+
+    @Test
+    @DisplayName("path 에 URN 접두가 붙은 externalId 도 바꾼다")
+    void path_URN_접두_externalId_를_바꾼다() {
+        // given
+        var patch = 패치("replace", "urn:ietf:params:scim:schemas:core:2.0:Group:externalId", "EXT-9");
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+
+        // then
+        assertThat(change.reidentifies()).isTrue();
+        assertThat(change.externalId()).isEqualTo("EXT-9");
     }
 
     @Test
