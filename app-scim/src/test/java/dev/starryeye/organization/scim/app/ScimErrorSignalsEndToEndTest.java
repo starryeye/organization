@@ -1,8 +1,12 @@
 package dev.starryeye.organization.scim.app;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.openfga.sdk.errors.ApiException;
 import dev.starryeye.organization.core.fixture.Containers;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
+import dev.starryeye.organization.scim.TemporaryFailureClassifier;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,9 +22,12 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 
+import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -144,5 +151,34 @@ class ScimErrorSignalsEndToEndTest {
 
         // then
         assertThat(인식기들).containsKeys("dynamoDbTemporaryFailures", "openFgaTemporaryFailures");
+    }
+
+    @Test
+    @DisplayName("앱이 실은 두 인식기로 조립한 분류기가 일시 장애와 버그를 가른다")
+    void 조립한_분류기가_일시_장애와_버그를_가른다() throws Exception {
+        // given — 앱 컨텍스트의 인식기 빈 전부로 분류기를 조립한다
+        var 분류기 = new TemporaryFailureClassifier(
+                List.copyOf(context.getBeansOfType(TemporaryFailureRecognizer.class).values()));
+        // SDK 가 2xx 본문 해석에 실패하면 JacksonException 을 ApiException 으로 감싼다 — 그 실제 실패
+        JsonProcessingException 해석실패 = null;
+        try {
+            new ObjectMapper().readTree("{");
+        } catch (JsonProcessingException e) {
+            해석실패 = e;
+        }
+        assertThat(해석실패).as("깨진 JSON 은 해석에 실패해야 한다").isNotNull();
+
+        // when
+        var 연결실패 = 분류기.재시도_대기(new ApiException(new ConnectException("refused")));
+        var 해석실패_감싼것 = 분류기.재시도_대기(new ApiException(해석실패));
+        var DynamoDB_서버오류 = 분류기.재시도_대기(DynamoDbException.builder().statusCode(500).message("x").build());
+        var DynamoDB_검증오류 = 분류기.재시도_대기(
+                DynamoDbException.builder().statusCode(400).message("ValidationException").build());
+
+        // then — 네트워크 실패와 서버 오류는 일시 장애(10초), 응답 해석 실패와 검증 오류는 버그다
+        assertThat(연결실패).contains(Duration.ofSeconds(10));
+        assertThat(해석실패_감싼것).isEmpty();
+        assertThat(DynamoDB_서버오류).contains(Duration.ofSeconds(10));
+        assertThat(DynamoDB_검증오류).isEmpty();
     }
 }

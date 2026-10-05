@@ -66,13 +66,16 @@
 - SDK 를 가진 어댑터가 자기 SDK 의 예외를 알아보는 구현을 core 포트 빈으로 낸다. 기다릴 시간은 모두 10초.
   - storage-dynamodb `DynamoDbTemporaryFailures`(빈 `dynamoDbTemporaryFailures`) — AWS SDK 자신의 재시도 분류를 따른다: `SdkClientException`(네트워크·시간 초과)과, `SdkServiceException` 중
     스로틀링이거나 5xx 이거나 SDK 가 재시도 가능하다고 표시한 것. 조건 실패·검증 오류(4xx)는 아니다 — 다시 보내도 같다.
-  - authz-openfga `OpenFgaTemporaryFailures`(빈 `openFgaTemporaryFailures`) — OpenFGA SDK: `ApiException` 중 거절(`FgaApiValidationError`, 400)이 아닌 것. 쓰기의 재시도 분류(`OpenFgaErrors`)와 같은 기준이다.
+  - authz-openfga `OpenFgaTemporaryFailures`(빈 `openFgaTemporaryFailures`) — OpenFGA SDK 자신의 재시도 분류를 따른다: `FgaError.isRetryable()`(429, 그리고 501 을 뺀 5xx)일 때만.
+    그 밖은 모두 빈 값이다 — 거절(400)·인증(401·403)·store 없음(404)·501, 그리고 평범한 `ApiException`. 네트워크 실패는 SDK 가 `ApiException(IOException)` 으로 감싸므로 인식기가 빈 값을 돌려주고
+    분류기가 사슬을 따라가 I/O 규칙으로 잡는다. 응답 해석 실패는 SDK 가 `ApiException(JacksonException)`(상태 0)으로 감싸고, 분류기가 Jackson 을 빼므로 일시 장애가 아니다(500).
 - connector-scim 의 `TemporaryFailureClassifier`(클래스)가 `ObjectProvider<TemporaryFailureRecognizer>` 로 인식기를 모은다: `Optional<Duration> 재시도_대기(Throwable)` — 원인 체인 어디에든 일시 장애가 있으면 기다릴 시간.
   체인의 예외마다 core 표지 → 어댑터 인식기 → I/O 실패·시간 초과(`IOException`·`TimeoutException`) 순으로 보고, 어디에도 없으면 일시 장애가 아니다. 인식기가 없는 조립(테스트)의 기본값은 core 표지와 I/O 만 본다.
   우리 어댑터가 감싼 `IllegalStateException("OpenFGA … 호출 실패", 원인)` 도 원인 체인으로 따라가 본다.
 - app-scim 은 조립만 하고 SDK 를 main 에 두지 않는다. 인식기 빈 둘이 앱에 실리는 것은 e2e 가 확인한다.
 - **구현 중 정한 것:** I/O 규칙은 Jackson 의 `JacksonException` 을 뺀다(사슬은 계속 따라간다). 이유: Jackson 의 해석·매핑 실패가 API 상 `IOException` 하위라, 빼지 않으면 깨진 JSON 본문이 400 대신 503 이 되어
   IdP 가 같은 본문을 끝없이 다시 보낸다(검토에서 잡음). 순서를 바꾸는 길(400 을 503 앞으로)은 응답 인코딩 실패(서버 버그)가 503 이 되는 같은 결함을 남겨 택하지 않았다.
+- **구현 중 정한 것:** OpenFGA 인식기는 처음에 '거절 아닌 ApiException 전부' 였으나 SDK 가 응답 해석 실패를 ApiException 으로 감싸 Jackson 제외가 우회되어, SDK 의 `FgaError.isRetryable()` 로 바꿨다(최종 검토).
 
 ### 3.4 라우터 규칙
 
@@ -153,11 +156,11 @@
 | 415 문구 | 내부 클래스 이름이 `detail` 에 없다 | connector-scim 라우터 |
 | `noTarget` | path 없는 `remove` → 400 `noTarget`(직원·조직) | connector-scim |
 | AWS 인식기 | 실제 AWS SDK 예외(스로틀링·5xx·클라이언트 오류는 일시, 조건 실패·검증은 아님) | storage-dynamodb 단위 |
-| OpenFGA 인식기 | 실제 OpenFGA SDK 예외(거절은 아님) | authz-openfga 단위 |
+| OpenFGA 인식기 | 실제 OpenFGA SDK 예외(429·500 은 일시, 501·거절·인증·store 없음·해석 실패·네트워크 감싸기는 인식기가 빈 값) | authz-openfga 단위 |
 | `batchCheck` 응답 이상 | 수 불일치·모르는/중복 correlationId·내부 오류뿐인 개별 오류는 일시 장애, 입력 오류가 있으면(섞여도) 아님 | authz-openfga 단위 |
 | 분류기 | core 표지·어댑터 인식기·I/O 를 원인 체인 깊이와 상관없이 가른다. 모르는 예외와 Jackson 해석 실패는 일시 장애가 아니다 | connector-scim 단위 |
 | 락 쥔 쪽 용도 | 실제 DynamoDB Local 에서 `REBUILD` 락을 심어 두면 획득 실패의 `retryAfter` 가 60초, `WRITE` 면 2초(Local 2.5.3 은 기존 항목을 돌려준다 — §3.2) | storage-dynamodb |
-| 끝에서 끝 | 재적재 용도 락을 심어 두면 SCIM 쓰기가 503 + `Retry-After: 60`, 큰 PATCH 413, `/scim/v2/Bulk` 501, 두 어댑터의 인식기가 앱에 실린다 | app-scim e2e |
+| 끝에서 끝 | 재적재 용도 락을 심어 두면 SCIM 쓰기가 503 + `Retry-After: 60`, 큰 PATCH 413, `/scim/v2/Bulk` 501, 두 어댑터의 인식기가 앱에 실리고 그 둘로 조립한 분류기가 네트워크 실패·5xx 와 해석 실패·검증 오류를 가른다 | app-scim e2e |
 
 ## 8. 결과 (구현 후 기록)
 
