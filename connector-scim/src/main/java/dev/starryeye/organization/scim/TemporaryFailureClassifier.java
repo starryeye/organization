@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.core.JacksonException;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
 
@@ -41,7 +42,8 @@ public final class TemporaryFailureClassifier {
                     return 대기;
                 }
             }
-            if (원인 instanceof IOException || 원인 instanceof TimeoutException) {
+            // Jackson 의 해석·매핑 실패는 IOException 의 하위 타입이지만 입출력이 아니다 — 다시 보내도 같은 결과다(설계 2026-10-05 §3.3)
+            if ((원인 instanceof IOException && !(원인 instanceof JacksonException)) || 원인 instanceof TimeoutException) {
                 return Optional.of(TemporaryFailureException.기본_대기);
             }
         }

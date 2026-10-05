@@ -107,9 +107,9 @@ public final class ScimRouter {
         // 문구는 우리 것만 쓴다 — 예외 메시지에는 OpenFGA 서버 메시지·라이브러리 예외 문자열·락 쥔 쪽의 용도가 들어 있고, 이 엔드포인트는 인증이 없다(점검 S10). 메시지는 로그로만 간다.
         Optional<Duration> 대기 = 분류기.재시도_대기(error);
         if (대기.isPresent()) {
-            log.warn("SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After {}초", 대기.get().toSeconds(), error);
+            log.warn("SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After {}초", 재시도_초(대기.get()), error);
             return write(HttpStatus.SERVICE_UNAVAILABLE, null,
-                    "일시적으로 처리할 수 없습니다 — %d초 뒤 다시 보내 주세요".formatted(대기.get().toSeconds()), 대기.get());
+                    "일시적으로 처리할 수 없습니다 — %d초 뒤 다시 보내 주세요".formatted(재시도_초(대기.get())), 대기.get());
         }
         // 본문 파싱 실패 등 SCIM 이 모르는 예외는 400 으로 번역한다.
         if (error instanceof DecodingException || error instanceof ServerWebInputException) {
@@ -136,6 +136,12 @@ public final class ScimRouter {
         return false;
     }
 
+    /** Retry-After 와 문구에 쓰는 초 — 정수 초(RFC 9110 §10.2.3)이고, 1초보다 짧은 대기도 0 이 아니라 1 로 올린다 */
+    static long 재시도_초(Duration 대기) {
+        long 올림 = 대기.toSeconds() + (대기.toNanosPart() > 0 ? 1 : 0);
+        return Math.max(1, 올림);
+    }
+
     private static String 상태_문구(HttpStatus status) {
         if (status == HttpStatus.UNSUPPORTED_MEDIA_TYPE) {
             return "Content-Type 은 application/scim+json 또는 application/json 이어야 합니다";
@@ -148,8 +154,7 @@ public final class ScimRouter {
                 String.valueOf(status.value()), scimType, detail);
         ServerResponse.BodyBuilder response = ServerResponse.status(status).contentType(SCIM_JSON);
         if (retryAfter != null) {
-            // 정수 초 — RFC 9110 §10.2.3
-            response = response.header(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfter.toSeconds()));
+            response = response.header(HttpHeaders.RETRY_AFTER, String.valueOf(재시도_초(retryAfter)));
         }
         return response.bodyValue(body);
     }

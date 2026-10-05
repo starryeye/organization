@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
@@ -22,15 +23,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.server.HandlerStrategies;
+import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
+import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.UnsupportedMediaTypeStatusException;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * 예외가 SCIM Error 응답으로 번역되는 규칙만 본다(설계 2026-10-05 §3.4) — 핸들러 대신 예외를 던지는 작은 라우트로.
@@ -123,6 +128,30 @@ class ScimErrorTranslationTest {
     }
 
     @Test
+    @DisplayName("1초보다 짧은 대기는 Retry-After 0 이 아니라 1초다 — 헤더와 문구가 같은 값을 쓴다")
+    void 짧은_대기는_1초로_올린다() {
+        // given
+        var 예외 = new TemporaryFailureException("잠깐", Duration.ofMillis(200));
+
+        // when, then
+        번역한다(예외)
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "1")
+                .expectBody()
+                .jsonPath("$.detail").value(detail -> assertThat((String) detail).contains("1초 뒤"));
+    }
+
+    @Test
+    @DisplayName("재시도 초는 올림이고 최소 1이다")
+    void 재시도_초는_올림이고_최소_1이다() {
+        // when, then
+        assertThat(ScimRouter.재시도_초(Duration.ofMillis(1500))).isEqualTo(2);
+        assertThat(ScimRouter.재시도_초(Duration.ofMillis(200))).isEqualTo(1);
+        assertThat(ScimRouter.재시도_초(Duration.ZERO)).isEqualTo(1);
+        assertThat(ScimRouter.재시도_초(Duration.ofSeconds(60))).isEqualTo(60);
+    }
+
+    @Test
     @DisplayName("부분 실패(ScimException 503)는 자기 문구에 id 를 담아 돌려주고 Retry-After 를 단다")
     void 부분_실패_예외는_자기_문구로_503이다() {
         // given
@@ -169,11 +198,15 @@ class ScimErrorTranslationTest {
     }
 
     @Test
-    @DisplayName("한도 때문이 아닌 해석 실패는 400 invalidSyntax 다")
+    @DisplayName("한도 때문이 아닌 해석 실패는 400 invalidSyntax 다 — 깨진 JSON 은 입출력 실패가 아니므로 Retry-After 가 없다")
     void 해석_실패는_400이다() {
+        // given — 실제 파서가 던진 JsonParseException(IOException 의 하위 타입)
+        Throwable 파싱_실패 = catchThrowable(() -> new ObjectMapper().readValue("{\"userName\":", Map.class));
+
         // when, then
-        번역한다(new DecodingException("JSON decoding error", new IllegalStateException("깨진 JSON")))
+        번역한다(new DecodingException("JSON decoding error", 파싱_실패))
                 .expectStatus().isEqualTo(400)
+                .expectHeader().doesNotExist(HttpHeaders.RETRY_AFTER)
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("invalidSyntax")
                 .jsonPath("$.detail").isEqualTo("요청 본문을 해석할 수 없습니다");
@@ -215,15 +248,7 @@ class ScimErrorTranslationTest {
     void 라우트에서_큰_본문은_413이다() {
         // given — 코덱 한도 100바이트, 번역 한도도 같은 값
         var state = new FakeStateRepository();
-        var useCase = new IncrementalSyncUseCase(state, new FakeTupleWriter(), new FakeTupleChecker(),
-                new FakeMutationLock(), Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
-        var query = new FakeQueryRepository(state);
-        var bookmarks = new FakePageBookmarkRepository();
-        var 라우트 = ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                new ScimListHandler(new ScimUserListing(state, query, bookmarks), new ScimGroupListing(state, query, bookmarks)),
-                TemporaryFailureClassifier.표지만(), 100);
-        var client = WebTestClient.bindToRouterFunction(라우트)
+        var client = WebTestClient.bindToRouterFunction(실제_라우트(state, 100))
                 .handlerStrategies(HandlerStrategies.builder().codecs(c -> c.defaultCodecs().maxInMemorySize(100)).build())
                 .build();
         String 큰_본문 = "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"],\"userName\":\"kim\",\"displayName\":\""
@@ -238,5 +263,36 @@ class ScimErrorTranslationTest {
                 .jsonPath("$.detail").value(detail -> assertThat((String) detail).contains("100").contains("PATCH"));
 
         assertThat(state.users).isEmpty();
+    }
+
+    @Test
+    @DisplayName("실제 라우트에서 깨진 JSON 본문을 보내면 400 invalidSyntax 다 — 503 으로 재시도를 부르지 않는다")
+    void 라우트에서_깨진_JSON은_400이다() {
+        // given
+        var state = new FakeStateRepository();
+        var client = WebTestClient.bindToRouterFunction(실제_라우트(state, 본문_한도)).build();
+
+        // when, then
+        client.post().uri("/scim/v2/Users")
+                .contentType(ScimRouter.SCIM_JSON).bodyValue("{\"userName\":")
+                .exchange()
+                .expectStatus().isEqualTo(400)
+                .expectHeader().doesNotExist(HttpHeaders.RETRY_AFTER)
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidSyntax")
+                .jsonPath("$.status").isEqualTo("400");
+
+        assertThat(state.users).isEmpty();
+    }
+
+    private static RouterFunction<ServerResponse> 실제_라우트(FakeStateRepository state, long 한도) {
+        var useCase = new IncrementalSyncUseCase(state, new FakeTupleWriter(), new FakeTupleChecker(),
+                new FakeMutationLock(), Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var query = new FakeQueryRepository(state);
+        var bookmarks = new FakePageBookmarkRepository();
+        return ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
+                new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                new ScimListHandler(new ScimUserListing(state, query, bookmarks), new ScimGroupListing(state, query, bookmarks)),
+                TemporaryFailureClassifier.표지만(), 한도);
     }
 }
