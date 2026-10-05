@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.jayway.jsonpath.JsonPath;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
@@ -19,7 +20,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -445,8 +449,103 @@ class ScimUserHandlerTest {
         assertThat(writer.appliedDeltas).isEmpty();
     }
 
+    @Test
+    @DisplayName("직원 PATCH 가 받아서 버린 속성은 이름만 관찰자로 간다 — 비활성화는 반영된다(설계 2026-10-06 §3.3, 점검 M5)")
+    void 버린_속성을_관찰자에게_알린다() {
+        // given
+        List<Set<String>> 알림 = new ArrayList<>();
+        var 관찰하는_클라이언트 = 클라이언트(알림::add);
+        String id = 직원을_만든다(관찰하는_클라이언트, "kim");
+        String body = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[
+                   {"op":"replace","path":"phoneNumbers[type eq \\"work\\"].value","value":"010-1234-5678"},
+                   {"op":"replace","value":{"active":false,
+                     "urn:ietf:params:scim:schemas:extension:custom:2.0:User:costCenter":"C1"}}]}
+                """;
+
+        // when
+        관찰하는_클라이언트.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange()
+                .expectStatus().isOk();
+
+        // then
+        assertThat(state.users.get(id).active()).isFalse();
+        assertThat(알림).containsExactly(Set.of("phoneNumbers", "other"));
+    }
+
+    @Test
+    @DisplayName("버린 속성이 없으면 관찰자를 부르지 않는다")
+    void 버린_것이_없으면_부르지_않는다() {
+        // given
+        List<Set<String>> 알림 = new ArrayList<>();
+        var 관찰하는_클라이언트 = 클라이언트(알림::add);
+        String id = 직원을_만든다(관찰하는_클라이언트, "lee");
+
+        // when
+        관찰하는_클라이언트.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","path":"active","value":false}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk();
+
+        // then
+        assertThat(알림).isEmpty();
+    }
+
+    @Test
+    @DisplayName("뒤 연산이 실패해 요청이 400 이면 앞 연산에서 버린 속성도 알리지 않는다 — 반영되지 않은 요청이다")
+    void 실패한_요청은_알리지_않는다() {
+        // given
+        List<Set<String>> 알림 = new ArrayList<>();
+        var 관찰하는_클라이언트 = 클라이언트(알림::add);
+        String id = 직원을_만든다(관찰하는_클라이언트, "park");
+
+        // when
+        관찰하는_클라이언트.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[
+                           {"op":"replace","path":"phoneNumbers[type eq \\"work\\"].value","value":"010-1234-5678"},
+                           {"op":"replace","path":"active","value":"maybe"}]}
+                        """)
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        // then
+        assertThat(알림).isEmpty();
+        assertThat(state.users.get(id).active()).isTrue();
+    }
+
     /** POST 응답의 서버 발급 id. */
     private String 만든_아이디(WebTestClient.ResponseSpec 응답) {
         return 응답.expectStatus().isCreated().expectBody(Map.class).returnResult().getResponseBody().get("id").toString();
+    }
+
+    private WebTestClient 클라이언트(IgnoredAttributeObserver 관찰자) {
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
+                IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var query = new FakeQueryRepository(state);
+        var bookmarks = new FakePageBookmarkRepository();
+        return WebTestClient.bindToRouterFunction(
+                ScimRouter.scimRoutes(new ScimUserHandler(state, useCase, 관찰자),
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                                new ScimGroupListing(state, query, bookmarks)))).build();
+    }
+
+    private static String 직원을_만든다(WebTestClient 클라이언트, String userName) {
+        return (String) JsonPath.read(new String(클라이언트.post().uri("/scim/v2/Users")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"%s","active":true}
+                        """.formatted(userName))
+                .exchange().expectStatus().isCreated()
+                .expectBody().returnResult().getResponseBody(), StandardCharsets.UTF_8), "$.id");
     }
 }

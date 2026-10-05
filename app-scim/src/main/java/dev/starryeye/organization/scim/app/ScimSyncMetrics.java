@@ -2,14 +2,16 @@ package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase.DriftObserver;
 import dev.starryeye.organization.core.usecase.LockObserver;
+import dev.starryeye.organization.scim.IgnoredAttributeObserver;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
+import java.util.Set;
 
 /**
- * 설계 §7 의 지표 넷을 Micrometer 로 낸다.
+ * 설계 §7 의 지표 넷과 받아서 버린 속성(설계 2026-10-06 §3.3)을 Micrometer 로 낸다.
  *
  * <table>
  *   <caption>설계 §7</caption>
@@ -17,6 +19,7 @@ import java.time.Duration;
  *   <tr><td>{@code scim.lock.wait}</td><td>Timer</td><td>–</td></tr>
  *   <tr><td>{@code scim.lock.contended}</td><td>Counter</td><td>–</td></tr>
  *   <tr><td>{@code scim.lock.lease_lost}</td><td>Counter</td><td>–</td></tr>
+ *   <tr><td>{@code scim.patch.ignored}</td><td>Counter</td><td>{@code attribute} = RFC 정규 이름 / other</td></tr>
  * </table>
  *
  * <p><b>어긋남.</b> Check 기준선을 넣으면 "있어야 했던 것"과 "진짜 있는 것"을 둘 다 갖게 된다.
@@ -28,7 +31,7 @@ import java.time.Duration;
  */
 @Slf4j
 @RequiredArgsConstructor
-public class ScimSyncMetrics implements DriftObserver, LockObserver {
+public class ScimSyncMetrics implements DriftObserver, LockObserver, IgnoredAttributeObserver {
 
     private final MeterRegistry registry;
 
@@ -54,5 +57,11 @@ public class ScimSyncMetrics implements DriftObserver, LockObserver {
     public void leaseLost(String reason) {
         log.warn("변경 락 리스를 잃었다: {}", reason);
         registry.counter("scim.lock.lease_lost").increment();
+    }
+
+    /** 태그 값은 {@code ScimRfcAttributes} 의 정규 이름이나 other 뿐이다 — 요청 문자열이 태그가 되지 않는다. */
+    @Override
+    public void ignored(Set<String> names) {
+        names.forEach(name -> registry.counter("scim.patch.ignored", "attribute", name).increment());
     }
 }
