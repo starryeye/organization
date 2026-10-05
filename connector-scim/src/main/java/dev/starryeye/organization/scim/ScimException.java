@@ -1,10 +1,12 @@
 package dev.starryeye.organization.scim;
 
 import lombok.Getter;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * SCIM Error 응답(설계 §9.3)으로 번역되는 예외.
@@ -17,21 +19,32 @@ public class ScimException extends RuntimeException {
     private final HttpStatus status;
     private final String scimType;
     private final Duration retryAfter;
+    private final Set<HttpMethod> allow;
 
     public ScimException(HttpStatus status, String scimType, String detail) {
-        this(status, scimType, detail, null);
+        this(status, scimType, detail, null, null);
     }
 
     public ScimException(HttpStatus status, String scimType, String detail, Duration retryAfter) {
+        this(status, scimType, detail, retryAfter, null);
+    }
+
+    private ScimException(HttpStatus status, String scimType, String detail, Duration retryAfter, Set<HttpMethod> allow) {
         super(detail);
         this.status = status;
         this.scimType = scimType;
         this.retryAfter = retryAfter;
+        this.allow = allow;
     }
 
     /** 다시 보내기 전에 기다릴 시간. 503 에만 있다. */
     public Optional<Duration> getRetryAfter() {
         return Optional.ofNullable(retryAfter);
+    }
+
+    /** 그 경로가 받는 메서드. 405 에만 있다. */
+    public Optional<Set<HttpMethod>> getAllow() {
+        return Optional.ofNullable(allow);
     }
 
     public static ScimException notFound(String detail) {
@@ -59,6 +72,11 @@ public class ScimException extends RuntimeException {
     /** RFC 7644 §3.12 — 서비스 제공자가 지원하지 않는 작업이다(서버 루트 조회 등). */
     public static ScimException notImplemented(String detail) {
         return new ScimException(HttpStatus.NOT_IMPLEMENTED, null, detail);
+    }
+
+    /** 있는 경로에 받지 않는 메서드를 보냈다 — 405 + Allow(RFC 9110 §15.5.6, 점검 S7). SCIM 이 정한 scimType 은 없다. */
+    public static ScimException methodNotAllowed(String detail, Set<HttpMethod> allow) {
+        return new ScimException(HttpStatus.METHOD_NOT_ALLOWED, null, detail, null, allow);
     }
 
     public static ScimException uniqueness(String detail) {

@@ -7,22 +7,32 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.codec.DecodingException;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.server.PathContainer;
+import org.springframework.web.reactive.function.server.RequestPredicates;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
+import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebInputException;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * SCIM 2.0 라우팅. 에러 번역은 여기 한 곳에서만 한다 —
@@ -36,6 +46,23 @@ public final class ScimRouter {
 
     /** 본문 한도 기본값 — Spring Boot 의 {@code spring.codec.max-in-memory-size} 기본(256KB)과 같다 */
     private static final long 기본_본문_한도 = 256 * 1024;
+
+    /** 지원하지 않는 SCIM 엔드포인트 — RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
+    private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**",
+            "/scim/v2/Schemas", "/scim/v2/Schemas/**", "/scim/v2/ResourceTypes", "/scim/v2/ResourceTypes/**");
+
+    /** 있는 경로와 받는 메서드 — {@link #scimRoutes} 의 라우트와 같아야 한다. 틀린 메서드는 405 + Allow 로 알린다. */
+    private static final Map<PathPattern, Set<HttpMethod>> 받는_메서드 = Map.of(
+            패턴하나("/scim/v2/Users"), Set.of(HttpMethod.GET, HttpMethod.POST),
+            패턴하나("/scim/v2/Users/.search"), Set.of(HttpMethod.POST),
+            패턴하나("/scim/v2/Users/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE),
+            패턴하나("/scim/v2/Groups"), Set.of(HttpMethod.GET, HttpMethod.POST),
+            패턴하나("/scim/v2/Groups/.search"), Set.of(HttpMethod.POST),
+            패턴하나("/scim/v2/Groups/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE),
+            패턴하나("/scim/v2/ServiceProviderConfig"), Set.of(HttpMethod.GET),
+            패턴하나("/scim/v2"), Set.of(HttpMethod.GET),
+            패턴하나("/scim/v2/"), Set.of(HttpMethod.GET),
+            패턴하나("/scim/v2/.search"), Set.of(HttpMethod.POST));
 
     private ScimRouter() {
     }
@@ -75,6 +102,8 @@ public final class ScimRouter {
                 .GET("/scim/v2", request -> rootQuery())
                 .GET("/scim/v2/", request -> rootQuery())
                 .POST("/scim/v2/.search", request -> rootQuery())
+                // 위 어느 라우트에도 맞지 않은 /scim/v2 아래 요청 — 반드시 마지막이다. 스프링의 기본 404 는 SCIM Error 가 아니라 IdP 가 읽지 못한다(점검 S7)
+                .route(RequestPredicates.path("/scim/v2/**"), ScimRouter::라우트_밖)
                 .onError(Throwable.class, (error, request) -> toScimError(error, 분류기, 본문_한도))
                 .build();
     }
@@ -84,9 +113,35 @@ public final class ScimRouter {
                 "서버 루트 조회는 지원하지 않습니다 — /scim/v2/Users 나 /scim/v2/Groups 로 조회하세요"));
     }
 
+    private static PathPattern 패턴하나(String 경로) {
+        return PathPatternParser.defaultInstance.parse(경로);
+    }
+
+    private static List<PathPattern> 패턴(String... 경로) {
+        return Stream.of(경로).map(ScimRouter::패턴하나).toList();
+    }
+
+    private static Mono<ServerResponse> 라우트_밖(ServerRequest request) {
+        PathContainer path = request.requestPath().pathWithinApplication();
+        if (지원_안_함.stream().anyMatch(p -> p.matches(path))) {
+            return Mono.error(ScimException.notImplemented("지원하지 않는 SCIM 엔드포인트입니다: " + path.value()));
+        }
+        // `.search` 가 `{id}` 에도 맞으므로 받는 메서드를 모두 모은다. 헤더 순서가 실행마다 달라지지 않게 이름순으로 둔다
+        Set<HttpMethod> 받는것 = 받는_메서드.entrySet().stream()
+                .filter(e -> e.getKey().matches(path))
+                .flatMap(e -> e.getValue().stream())
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(HttpMethod::name))));
+        if (!받는것.isEmpty()) {
+            return Mono.error(ScimException.methodNotAllowed(
+                    "이 경로는 " + request.method() + " 를 받지 않습니다: " + path.value(), 받는것));
+        }
+        return Mono.error(ScimException.notFound("없는 SCIM 경로입니다: " + path.value()));
+    }
+
     static Mono<ServerResponse> toScimError(Throwable error, TemporaryFailureClassifier 분류기, long 본문_한도) {
         if (error instanceof ScimException scim) {
-            return write(scim.getStatus(), scim.getScimType(), scim.getMessage(), scim.getRetryAfter().orElse(null));
+            return write(scim.getStatus(), scim.getScimType(), scim.getMessage(),
+                    scim.getRetryAfter().orElse(null), scim.getAllow().orElse(null));
         }
         // userName 이 이미 있거나 조직 externalId 가 겹친다 — RFC 7644 §3.12 의 409 uniqueness. 판단은 락 안에서 했다(SCIM 쓰기 락 설계 §3·§4).
         if (error instanceof DirectoryConflictException conflict) {
@@ -150,11 +205,19 @@ public final class ScimRouter {
     }
 
     private static Mono<ServerResponse> write(HttpStatus status, String scimType, String detail, Duration retryAfter) {
+        return write(status, scimType, detail, retryAfter, null);
+    }
+
+    private static Mono<ServerResponse> write(HttpStatus status, String scimType, String detail,
+                                              Duration retryAfter, Set<HttpMethod> allow) {
         ScimError body = new ScimError(List.of(ScimSchemas.ERROR),
                 String.valueOf(status.value()), scimType, detail);
         ServerResponse.BodyBuilder response = ServerResponse.status(status).contentType(SCIM_JSON);
         if (retryAfter != null) {
             response = response.header(HttpHeaders.RETRY_AFTER, String.valueOf(재시도_초(retryAfter)));
+        }
+        if (allow != null) {
+            response = response.allow(allow);
         }
         return response.bodyValue(body);
     }

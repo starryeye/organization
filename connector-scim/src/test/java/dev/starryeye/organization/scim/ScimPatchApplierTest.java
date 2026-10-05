@@ -458,28 +458,31 @@ class ScimPatchApplierTest {
     }
 
     @Test
-    @DisplayName("path 없는 remove 는 invalidSyntax 로 거절한다")
-    void path_없는_remove는_거절한다_group() {
-        // given — RFC 7644 §3.5.2.1 에서 path 는 remove 에 필수다
+    @DisplayName("path 없는 remove 는 400 noTarget 이다 — RFC 7644 §3.5.2.2(점검 S11)")
+    void path_없는_remove는_noTarget이다_group() {
+        // given — 무엇을 지울지 가리키지 않았다
         var before = 조직(MemberRef.user("kim"));
 
         // when, then
-        assertThatThrownBy(() -> 적용한다(before, 패치("remove", null, Map.of("displayName", "플랫폼팀")), USER_ONLY))
-                .isInstanceOf(ScimException.class)
-                .hasMessageContaining("replace");
+        assertThatThrownBy(() -> 적용한다(before, 패치("remove", null, null), USER_ONLY))
+                .isInstanceOfSatisfying(ScimException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getScimType()).isEqualTo("noTarget");
+                });
     }
 
     @Test
-    @DisplayName("직원에서도 path 없는 remove 는 invalidSyntax 로 거절한다")
-    void path_없는_remove는_거절한다_user() {
-        // given — RFC 7644 §3.5.2.1 에서 path 는 remove 에 필수다
+    @DisplayName("직원에서도 path 없는 remove 는 400 noTarget 이다 — RFC 7644 §3.5.2.2(점검 S11)")
+    void path_없는_remove는_noTarget이다_user() {
+        // given — 무엇을 지울지 가리키지 않았다
         var before = 직원(true);
 
         // when, then
-        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(before,
-                패치("remove", null, Map.of("active", false))))
-                .isInstanceOf(ScimException.class)
-                .hasMessageContaining("replace");
+        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(before, 패치("remove", null, null)))
+                .isInstanceOfSatisfying(ScimException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getScimType()).isEqualTo("noTarget");
+                });
     }
 
     private static final PersonName 홍길동 = new PersonName("홍길동", "홍", "길동", null, null, null);
