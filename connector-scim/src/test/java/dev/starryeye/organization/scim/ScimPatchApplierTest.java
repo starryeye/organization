@@ -631,6 +631,13 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("emails 의 값이 배열이 아니면 받아서 버리지 않고 400 invalidSyntax 다 — 저장하는 속성은 엄격하게 적용한다")
+    void 배열이_아닌_emails_값은_invalidSyntax() {
+        // when, then
+        거절한다(패치("replace", "emails", "a@x.com"), "invalidSyntax");
+    }
+
+    @Test
     @DisplayName("점검 M5 의 Entra 요청 — 전화번호 path 연산과 경로 없는 active=false 가 한 요청에 오면 비활성화가 반영된다")
     void 전화번호_path_가_섞여도_비활성화된다() {
         // given

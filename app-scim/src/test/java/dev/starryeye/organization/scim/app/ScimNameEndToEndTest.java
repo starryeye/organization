@@ -112,9 +112,9 @@ class ScimNameEndToEndTest {
 
     @Test
     @Order(3)
-    @DisplayName("저장하지 않는 속성을 경로로 PATCH 하면 400 invalidPath 이고 아무것도 바뀌지 않는다")
-    void 저장하지_않는_속성은_거절한다() {
-        // given, when, then
+    @DisplayName("RFC 가 정의했지만 저장하지 않는 title 은 받아서 버리고 같은 요청의 name 은 반영한다 — RFC 에 없는 path 만 400 invalidPath 이고 아무것도 바뀌지 않는다")
+    void 저장하지_않는_RFC_속성은_버리고_RFC_밖_path만_거절한다() {
+        // given, when — title 은 RFC 7643 이 정의한 속성이라 거절하지 않는다(설계 2026-10-06 §3.1)
         client.patch().uri("/scim/v2/Users/" + 홍길동)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
@@ -124,12 +124,32 @@ class ScimNameEndToEndTest {
                            {"op":"Replace","path":"title","value":"과장"}]}
                         """)
                 .exchange()
+                .expectStatus().isOk();
+
+        // then — title 은 저장하지도 돌려주지도 않고, name 은 반영된다
+        client.get().uri("/scim/v2/Users/" + 홍길동)
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.name.givenName").isEqualTo("길순")
+                .jsonPath("$.title").doesNotExist();
+
+        // when — 오타(name.givenNmae)는 RFC 에 없는 path 다
+        client.patch().uri("/scim/v2/Users/" + 홍길동)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[
+                           {"op":"Replace","path":"name.givenName","value":"철수"},
+                           {"op":"Replace","path":"name.givenNmae","value":"철수"}]}
+                        """)
+                .exchange()
                 .expectStatus().isBadRequest()
                 .expectBody().jsonPath("$.scimType").isEqualTo("invalidPath");
 
+        // then — 한 요청이 통째로 거절되어 앞선 연산도 반영되지 않는다
         client.get().uri("/scim/v2/Users/" + 홍길동)
                 .exchange().expectStatus().isOk()
-                .expectBody().jsonPath("$.name.givenName").isEqualTo("길동");
+                .expectBody().jsonPath("$.name.givenName").isEqualTo("길순");
     }
 
     @Test
