@@ -72,7 +72,7 @@
 - connector-scim 의 `TemporaryFailureClassifier`(클래스)가 `ObjectProvider<TemporaryFailureRecognizer>` 로 인식기를 모은다: `Optional<Duration> 재시도_대기(Throwable)` — 원인 체인 어디에든 일시 장애가 있으면 기다릴 시간.
   체인의 예외마다 core 표지 → 어댑터 인식기 → I/O 실패·시간 초과(`IOException`·`TimeoutException`) 순으로 보고, 어디에도 없으면 일시 장애가 아니다. 인식기가 없는 조립(테스트)의 기본값은 core 표지와 I/O 만 본다.
   우리 어댑터가 감싼 `IllegalStateException("OpenFGA … 호출 실패", 원인)` 도 원인 체인으로 따라가 본다.
-- app-scim 은 조립만 하고 SDK 를 main 에 두지 않는다. 인식기 빈 둘이 앱에 실리는 것은 e2e 가 확인한다.
+- app-scim 은 조립만 하고 OpenFGA SDK 를 main 에 두지 않는다. AWS SDK 는 헬스 지표 때문에 main 에 있다. 인식기 빈 둘이 앱에 실리는 것은 e2e 가 확인한다.
 - **구현 중 정한 것:** I/O 규칙은 Jackson 의 `JacksonException` 을 뺀다(사슬은 계속 따라간다). 이유: Jackson 의 해석·매핑 실패가 API 상 `IOException` 하위라, 빼지 않으면 깨진 JSON 본문이 400 대신 503 이 되어
   IdP 가 같은 본문을 끝없이 다시 보낸다(검토에서 잡음). 순서를 바꾸는 길(400 을 503 앞으로)은 응답 인코딩 실패(서버 버그)가 503 이 되는 같은 결함을 남겨 택하지 않았다.
 - **구현 중 정한 것:** OpenFGA 인식기는 처음에 '거절 아닌 ApiException 전부' 였으나 SDK 가 응답 해석 실패를 ApiException 으로 감싸 Jackson 제외가 우회되어, SDK 의 `FgaError.isRetryable()` 로 바꿨다(최종 검토).
@@ -182,6 +182,7 @@
   IdP 마다 다르다.
 - **영구히 거절되는 튜플의 부분 실패도 503 이다** — 결과에 실패 사유는 있지만 일시/영구 구분이 없다. 서버 발급 UUID 아래에서는 OpenFGA 가 거절할 아이디가 거의 생기지 않는다. 생기면 IdP 가
   되풀이하고 ERROR 로그가 남는다.
+- **OpenFGA 쓰기 차단기가 결정적 거절(인가 모델 불일치 등)로 서도 `TupleWriteAbortedException` 은 표지라 503 이다.** 그 사고 동안 IdP 는 재시도를 계속한다(WARN 로그, 재적재로 복구).
 - **분류기는 알려진 라이브러리 예외만 안다** — 새 의존성의 장애 예외는 분류기에 더할 때까지 500 이다(안전한 쪽: 버그로 보인다).
 - **DynamoDB Local 이 조건 실패 때 기존 항목을 돌려주는지** — 확인했다: Local 2.5.3 은 돌려준다(§3.2). 실제 DynamoDB 도 지원한다(SDK 2.28 의 `ReturnValuesOnConditionCheckFailure`).
 
@@ -189,5 +190,6 @@
 
 - ⑤-2 요청 해석: M5(저장하지 않는 속성의 path 연산), M18(`manager` 매핑 안내), S1(`Location` 헤더·`meta.location` 인코딩), S5 앞부분(`externalId` 없는 조직 POST 재시도), S6(속성 이름 대소문자),
   S8(`active` 문자열), S9(조직 PATCH URN 접두), S12(거절하는 조회 모양), ④-1 이월(경로 없는 조직 PATCH 의 `externalId`).
+- 재적재가 락을 쥔 동안(마지막 실패 60초) SCIM 쓰기의 획득 재시도를 3초 다 기다리지 않고 바로 끝낼 수 있다(요청마다 3초·PutItem 약 15번 절약) — 최적화라 미룬다.
 - app-ldap·관리 API 의 오류 응답(IdP 신호가 아니다).
 - 권고 ⑥(나머지 성능), 기존 백로그, 인증(마지막).

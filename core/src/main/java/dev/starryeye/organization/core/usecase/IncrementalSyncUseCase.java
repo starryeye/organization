@@ -627,11 +627,8 @@ public class IncrementalSyncUseCase {
      * <p><b>반납이 실패하면</b>(스로틀, 네트워크) 리스가 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다. 응답은 성공이다 — 일은 끝났다.
      * 대신 {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다.
      *
-     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
-     * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
-     * core 는 SDK 예외를 알아볼 수 없어 일시 장애 표지가 없고, {@code ScimRouter} 가 알아보지 못한 예외는 500(버그)이 된다.
-     * 500 은 버그, 503 은 재시도 신호다(설계 2026-10-05 §3.5). 그래서 획득 구간의 모든 에러를
-     * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
+     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> core 는 SDK 예외를 가르지 못하고, 락을 못 잡은 요청은 어차피
+     * 커밋도 못 하므로 획득 구간의 오류는 모두 {@link LockUnavailableException}(503)으로 감싼다. 500 은 버그, 503 은 재시도 신호다(설계 2026-10-05 §3.5).
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {

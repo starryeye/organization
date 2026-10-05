@@ -170,14 +170,16 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
             // 예로 드는 것은 낫지 않는 쪽(입력 오류)이 있으면 그것이다 — 500 의 원인을 가리지 않는다
             ClientBatchCheckSingleResponse example = 입력_오류.orElse(errored.get(0));
             String exampleMessage = example.getError().getMessage();
-            log.error("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
-                    errored.size(), example.getCorrelationId(), exampleMessage);
             String message = "OpenFGA batchCheck 중 %d건이 개별 오류로 끝났다(예: %s) — 상태 기준선으로 폴백하지 않는다"
                     .formatted(errored.size(), exampleMessage);
-            // 입력 오류가 하나라도 있으면 거절이라 다시 물어도 같다 — 우리 버그(500). 내부 오류뿐이면 일시 장애(503)다 (설계 2026-10-05 §3.1)
+            // 입력 오류가 하나라도 있으면 거절이라 다시 물어도 같다 — 우리 버그(500, ERROR). 내부 오류뿐이면 일시 장애(503, WARN)다 (설계 2026-10-05 §3.1)
             if (입력_오류.isPresent()) {
+                log.error("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
+                        errored.size(), example.getCorrelationId(), exampleMessage);
                 throw new IllegalStateException(message);
             }
+            log.warn("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
+                    errored.size(), example.getCorrelationId(), exampleMessage);
             throw new TemporaryFailureException(message, TemporaryFailureException.기본_대기);
         }
 

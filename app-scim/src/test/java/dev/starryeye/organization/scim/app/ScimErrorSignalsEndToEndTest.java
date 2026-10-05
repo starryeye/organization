@@ -36,9 +36,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * SCIM 오류 신호가 실제 컨텍스트와 인프라 위에서 IdP 에게 닿는지 본다(설계 2026-10-05).
  *
- * <p>단위 테스트는 각 조각을 따로 본다 — 라우터의 번역, 락의 용도별 대기 시간, 분류기와 인식기. 여기서는 그 조각들이 앱 컨텍스트에서
- * <b>실제로 이어졌는지</b>를 본다. 인식기 빈이 분류기에 모이는지, 본문 한도가 설정에서 읽혀 413 문구에 실리는지, 락을 쥔 쪽의 용도가
- * DynamoDB 의 조건 실패 응답을 거쳐 {@code Retry-After} 가 되는지는 이어 붙여 봐야 안다.
+ * <p>단위 테스트는 각 조각을 따로 본다 — 라우터의 번역, 락의 용도별 대기 시간, 분류기와 인식기. 여기서 확인하는 것은 다음이다.
+ * <ul>
+ *   <li>락을 쥔 쪽의 용도가 실제 DynamoDB 의 조건 실패 응답을 거쳐 {@code Retry-After} 가 된다(재적재 60초).</li>
+ *   <li>인식기 빈 둘이 앱에 실린다(빈 존재). 그 둘로 조립한 분류기가 일시 장애와 버그를 가른다(조립 분류기).</li>
+ *   <li>413 문구의 한도가 기본값 262144 와 같다. 이 앱은 {@code spring.codec.max-in-memory-size} 를 정하지 않아 두 값이 같으므로,
+ *       한도를 설정에서 읽는지까지는 가르지 못한다.</li>
+ *   <li>Bulk 는 501 이다.</li>
+ * </ul>
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -77,10 +82,11 @@ class ScimErrorSignalsEndToEndTest {
     @Test
     @DisplayName("재적재가 변경 락을 쥐고 있으면 SCIM 쓰기는 503 이고 Retry-After 가 60초다(점검 M4·S2)")
     void 재적재_중의_쓰기는_60초_뒤에_다시() {
-        // given — 재적재 용도로 락을 쥔다
-        var lease = lock.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
-        // 쓰기는 락을 얻으려고 3초 기다려 본 뒤에 답한다 — 기본 응답 제한(5초)에 빠듯하게 기대지 않는다
+        // given — 쓰기는 락을 얻으려고 3초 기다려 본 뒤에 답한다. 기본 응답 제한(5초)에 빠듯하게 기대지 않는다
+        // (락을 쥐기 전에 만든다 — 만드는 데 실패해도 리스가 새지 않는다)
         var 느긋한 = client.mutate().responseTimeout(Duration.ofSeconds(30)).build();
+        // 재적재 용도로 락을 쥔다
+        var lease = lock.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
 
         try {
             // when, then — 쓰기는 기다려 본 뒤 503 이다. 마지막 실패가 쥔 쪽의 용도를 알려 주므로 쓰기 경합의 2초가 아니라 60초다
@@ -97,7 +103,7 @@ class ScimErrorSignalsEndToEndTest {
             lock.release(lease).block(Duration.ofSeconds(10));
         }
 
-        // then — 503 은 재시도 신호다. 락이 풀린 뒤 같은 요청은 성공한다
+        // when, then — 503 은 재시도 신호다. 락이 풀린 뒤 같은 요청은 성공한다
         client.post().uri("/scim/v2/Users").contentType(SCIM_JSON).bodyValue(직원_본문("kim"))
                 .exchange()
                 .expectStatus().isCreated();
