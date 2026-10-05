@@ -533,7 +533,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 **거절하는 조회 모양.** 위 표 밖의 필터는 400 `invalidFilter` 다. "표준이 정한 신호만 받는다" 는 원칙에 따른 알려진 제한이고, 다음 IdP 요청이 여기에 걸린다.
 
-- `manager` 필터 — Entra 의 참조 확인 `filter=id eq "a" and manager eq "b"`.
+- `manager` 필터 — Entra 의 참조 확인 `filter=id eq "a" and manager eq "b"`. `manager` 를 PATCH path 로 보내는 요청은 받아서 버려 200 이지만(아래) 이 필터는 여전히 400 이다.
 - 이메일 매칭 — Entra 의 `filter=emails[type eq "work"].value eq "x"`.
 - `co` 연산자 — Ping 의 관리자 필터 `email Co "…"`.
 - JumpCloud 가 재연결 때 이메일로 하는 조회(요청 모양은 확인하지 못했다).
@@ -612,7 +612,7 @@ URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`, 대소문자 무시)�
 조용히 무시한다. `invalidPath` 400 은 **path 형식에서만** 난다.
 
 **우리가 저장하는 직원 속성은** `userName`, `displayName`, `externalId`, `active`, `name`(여섯 칸), 이메일 하나(`type: "work"`)
-뿐이다. 이 속성들은 엄격하게 적용한다 — 적용할 수 없는 모양이면 오류다. 나머지는 RFC 가 정의했는지로 가른다.
+뿐이다. 이 속성들은 적용할 수 있는 모양이면 엄격하게 적용한다(예: `userName` remove·빈 값은 400). 이메일의 다른 모양(work 가 아닌 type, 필터 없는 `emails.value`, `.display`)은 아래처럼 받아서 버린다. 나머지는 RFC 가 정의했는지로 가른다.
 
 - **RFC 7643 이 정의했지만 저장하지 않는 속성은 path 로 와도, 경로 없는 값으로 와도 받아서 버린다**(직원 PATCH 는 200 이다). 코어 User 의
   `title`·`phoneNumbers`·`addresses`·`nickName`·work 가 아닌 이메일 등, enterprise 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:`)의
@@ -784,7 +784,6 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 | `scim.lock.wait` | Timer | 락을 잡거나 포기하기까지 기다린 시간. 꼬리가 길어지면 `lock-acquire-timeout`을 다시 볼 때다 |
 | `scim.lock.contended` | Counter | 한 번이라도 다른 쪽에 밀린 획득. 꾸준히 오르면 전역 락의 직렬화 비용이 실제로 발생하고 있다는 뜻이다(설계 §4.1의 재검토 신호) |
 | `scim.lock.lease_lost` | Counter | 쥐고 있어야 할 리스를 잃었다 — 작업·쓰기 도중 갱신 실패, 쓰기 직전·커밋 직전 재확인 실패, 반납 실패. **응답에 흔적이 없거나(반납 실패) 503 뿐이다.** 0이 아니면 락이 TTL만큼 묶였거나 두 인스턴스가 겹쳤을 수 있다 |
-| `scim.patch.ignored` | Counter | 직원 PATCH 가 받아서 버린 RFC 속성(태그 `attribute` = RFC 이름 또는 `other`). 꾸준히 오르는 이름이 있으면 IdP 매핑에서 빼도 된다는 신호다 |
 
 **`scim.drift.detected`(Counter, 태그 `kind=extra|missing`)** — SCIM 쓰기 경로는 델타를
 계산할 때 이미 OpenFGA에 `Check`를 던져 **실제 있는 튜플**을 얻는다. 여기에 상태(DynamoDB)가
@@ -795,6 +794,8 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 이 값이 계속 오르면(0이 아니면) **`POST /admin/sync/rebuild?mode=tuples`로 재적재를 실행하라**는
 신호다 — 다만 이 지표는 "누군가 다시 건드린 리소스"에서만 드러난다. 아무도 건드리지 않는
 어긋남까지 잡는 주기적 대조는 아직 없다(아래 follow-ups 참고).
+
+**`scim.patch.ignored`(Counter, 태그 `attribute`)** — 직원 PATCH 가 받아서 버린 RFC 속성이다. 태그 `attribute` 는 RFC 이름 또는 `other` 다. 꾸준히 오르는 이름이 있으면 IdP 매핑에서 빼도 된다는 신호다.
 
 ## 불변 id 로 옮기기
 

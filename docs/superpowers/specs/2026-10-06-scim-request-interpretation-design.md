@@ -106,7 +106,7 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 
 ### 4.2 코어 Group URN 접두 (S9)
 
-조직 PATCH 의 path 와 경로 없는 값의 키에서 `urn:ietf:params:scim:schemas:core:2.0:Group:` 를 대소문자 없이 뗀다. 직원 쪽 `stripCoreUrn` 과 같은 방식이다.
+조직 PATCH 의 path 와 경로 없는 값의 키에서 `urn:ietf:params:scim:schemas:core:2.0:Group:` 를 대소문자 없이 뗀다. 직원 쪽과 같은 `stripUrn(이름, URN)` 이다.
 `…:Group:displayName`, `…:Group:members`, `…:Group:externalId` 가 접두 없는 이름과 같게 풀린다.
 
 ## 5. 형식 (S6·S8·S1)
@@ -129,7 +129,7 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
   - 문자열 `"true"`/`"false"`(대소문자 무관). Entra 가 `"True"`/`"False"` 를 문자열로 보낸다는 근거가 문서에 있다.
 - 그 밖은 400 `invalidValue` 다(`"yes"`, `"1"`, `" true"`). 조용히 비활성화하지 않는다.
 - POST·PUT 본문의 `active`(`Boolean`)는 Jackson 이 boolean 이 아닌 문자열을 이미 400 으로 거절한다. 이것은 테스트로 확인만 한다.
-- **구현 중 정한 것 — POST·PUT 본문의 `"active":"yes"` 는 바꾸기 전에도 Jackson 이 400 으로 거절했다.** 이를 확인 테스트로 고정했다.
+- **구현 중 정한 것 — POST·PUT 본문의 `"active":"yes"` 는 바꾸기 전에도 Jackson 이 400 으로 거절했다.** POST 를 확인 테스트로 고정했다(PUT 은 같은 DTO).
 
 ### 5.3 `Location` (S1)
 
@@ -176,7 +176,7 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 | M5 회귀 | 점검 문서의 Entra 요청 — `phoneNumbers[type eq "work"].value` replace + 경로 없는 `{"active":false}` — 이 200 이고 비활성화가 반영된다(직원 PATCH 는 200 과 리소스를 돌려준다) | connector-scim 핸들러, app-scim e2e |
 | 무시 규칙 | 다음 path 가 오류 없이 지나가고(직원 PATCH 는 200) 아무것도 바뀌지 않는다: `addresses[…].streetAddress`, `emails[type eq "other"]`, `…:enterprise:2.0:User:manager`·`…:enterprise:2.0:User:department`, `title`, 코어 URN 접두가 붙은 `title` | connector-scim `ScimPatchApplierTest` |
 | 400 유지 | `name.givenNmae`, `phoneNumber`, 커스텀 확장 path, `id` 가 400 `invalidPath` 다 | connector-scim |
-| 보이게 하기 | 무시한 이름이 관찰자로 가고, 라벨은 표의 정규 이름 또는 `other` 다. DEBUG 줄에 값이 없다 | connector-scim, app-scim `ScimSyncMetrics` |
+| 보이게 하기 | 무시한 이름이 관찰자로 가고, 라벨은 표의 정규 이름 또는 `other` 다. DEBUG 줄에는 직원 id 와 속성 이름만 실린다 — 집합에 정규 이름·`other` 만 들어가므로 구조로 보장한다(별도 로그 단정 없음) | connector-scim, app-scim `ScimSyncMetrics` |
 | 조직 `externalId` | path·경로 없는 값·remove 가 `externalId` 를 바꾼다. 다른 조직의 값이면 409 이고 아무것도 바뀌지 않는다. 같은 값이면 확인 없이 지나간다 | connector-scim, core, app-scim e2e |
 | Group URN | 접두 붙은 `displayName`(path·경로 없는 값)이 이름을 바꾼다 | connector-scim |
 | S6 | 조직 PUT `"Members"` 가 멤버를 지키고, 직원 PUT `"Active":false` 가 비활성이고, `.search` `"Filter"` 가 거른다(점검이 spike 브랜치에서 재현한 모양) | connector-scim 핸들러 |
@@ -217,6 +217,9 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 - **Entra·Okta 실제 요청으로 확인하지 못했다.** 요청 모양은 점검 문서의 문서 근거를 따른다.
 - **저장하는 `emails` 의 우리가 적용하지 못하는 모양도 받아서 버린다.** 필터 없는 `emails.value`, 저장된 work 이메일을 고를 수 있는 다른 필터가 여기에 든다. 그 모양으로 보내는 IdP 는 이메일 갱신이 조용히 빠진다. 메트릭 `attribute=emails` 로 보인다.
 - **같은 속성이 대소문자만 달리 두 번 온 본문의 결과는 정하지 않았다.**
+  - 정확히는 — 레코드의 칸이 다 나오기 전의 중복은 나중 값이 이기고, 칸이 다 나온 뒤의 중복(대소문자만 다른 것 포함)은 Jackson 이 `InvalidDefinitionException` 을 내 500 이 된다.
+  - ⑤-1 에서 그 예외(서버 정의 버그)를 500 에 두었고, 메시지로 가르는 신호를 지어내지 않는다. RFC 8259 는 중복 이름을 정하지 않으며 그렇게 보내는 IdP 근거가 없다.
+- **M18 은 `manager` path PATCH 의 400 만 해소한다.** 참조 확인 `id eq … and manager eq …` 필터는 여전히 400(S12)이고, Entra 가 이것을 참조 실패로 세어 격리 상한에 넣는지는 확인하지 못했다(추정).
 
 ## 12. 범위 밖
 
@@ -224,3 +227,4 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 - 쿼리 파라미터 이름(`filter`·`attributes`)의 대소문자.
 - ⑤-1 §11 의 후속(재적재 중 락 획득 재시도 조기 종료).
 - 권고 ⑥(나머지 성능: P3·P4·P5·P6), 기존 백로그, 인증(마지막).
+- **버린 연산만 있는 직원 PATCH 도 락 안에서 직원 전체 diff·Check·저장을 돈다** — 10만 명 Entra 초기 동기화의 `manager` PATCH 가 전에는 빨리 실패했다. 아무것도 안 바뀌는 PATCH 를 일찍 끝내면 그 직원의 어긋남 고치기를 잃으므로 ⑥ P3(락 재시도)와 함께 정한다.
