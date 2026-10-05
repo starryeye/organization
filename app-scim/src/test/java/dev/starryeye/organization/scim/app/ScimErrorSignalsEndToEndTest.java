@@ -1,0 +1,148 @@
+package dev.starryeye.organization.scim.app;
+
+import dev.starryeye.organization.core.fixture.Containers;
+import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * SCIM 오류 신호가 실제 컨텍스트와 인프라 위에서 IdP 에게 닿는지 본다(설계 2026-10-05).
+ *
+ * <p>단위 테스트는 각 조각을 따로 본다 — 라우터의 번역, 락의 용도별 대기 시간, 분류기와 인식기. 여기서는 그 조각들이 앱 컨텍스트에서
+ * <b>실제로 이어졌는지</b>를 본다. 인식기 빈이 분류기에 모이는지, 본문 한도가 설정에서 읽혀 413 문구에 실리는지, 락을 쥔 쪽의 용도가
+ * DynamoDB 의 조건 실패 응답을 거쳐 {@code Retry-After} 가 되는지는 이어 붙여 봐야 안다.
+ */
+@Testcontainers
+@ActiveProfiles("test")
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class ScimErrorSignalsEndToEndTest {
+
+    private static final MediaType SCIM_JSON = MediaType.valueOf("application/scim+json");
+
+    /** app-scim 은 {@code spring.codec.max-in-memory-size} 를 정하지 않는다 — 스프링 부트 기본 256KB */
+    private static final int 본문_한도 = 256 * 1024;
+
+    @Container
+    static final GenericContainer<?> OPENFGA = Containers.openFga();
+
+    @Container
+    static final GenericContainer<?> DYNAMODB = Containers.dynamoDb();
+
+    @DynamicPropertySource
+    static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) {
+        registry.add("openfga.api-url",
+                () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
+        registry.add("dynamodb.endpoint",
+                () -> "http://" + DYNAMODB.getHost() + ":" + DYNAMODB.getMappedPort(8000));
+    }
+
+    @Autowired WebTestClient client;
+    @Autowired MutationLock lock;
+    @Autowired ApplicationContext context;
+
+    private static String 직원_본문(String userName) {
+        return """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                 "userName":"%s","displayName":"%s","active":true}""".formatted(userName, userName);
+    }
+
+    @Test
+    @DisplayName("재적재가 변경 락을 쥐고 있으면 SCIM 쓰기는 503 이고 Retry-After 가 60초다(점검 M4·S2)")
+    void 재적재_중의_쓰기는_60초_뒤에_다시() {
+        // given — 재적재 용도로 락을 쥔다
+        var lease = lock.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
+        // 쓰기는 락을 얻으려고 3초 기다려 본 뒤에 답한다 — 기본 응답 제한(5초)에 빠듯하게 기대지 않는다
+        var 느긋한 = client.mutate().responseTimeout(Duration.ofSeconds(30)).build();
+
+        try {
+            // when, then — 쓰기는 기다려 본 뒤 503 이다. 마지막 실패가 쥔 쪽의 용도를 알려 주므로 쓰기 경합의 2초가 아니라 60초다
+            느긋한.post().uri("/scim/v2/Users").contentType(SCIM_JSON).bodyValue(직원_본문("kim"))
+                    .exchange()
+                    .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                    .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "60")
+                    .expectHeader().contentType(SCIM_JSON)
+                    .expectBody()
+                    .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
+                    .jsonPath("$.status").isEqualTo("503")
+                    .jsonPath("$.detail").isEqualTo("일시적으로 처리할 수 없습니다 — 60초 뒤 다시 보내 주세요");
+        } finally {
+            lock.release(lease).block(Duration.ofSeconds(10));
+        }
+
+        // then — 503 은 재시도 신호다. 락이 풀린 뒤 같은 요청은 성공한다
+        client.post().uri("/scim/v2/Users").contentType(SCIM_JSON).bodyValue(직원_본문("kim"))
+                .exchange()
+                .expectStatus().isCreated();
+    }
+
+    @Test
+    @DisplayName("한도를 넘는 PATCH 본문은 413 이고 한도를 알려 준다(점검 M3)")
+    void 큰_본문은_413() {
+        // given — 멤버 값 6,000개(한 줄 49바이트, 합쳐 약 294KB 로 256KB 를 넘는다).
+        // 핸들러는 조직을 찾기 전에 본문부터 읽으므로 없는 조직 id 로 보내도 404 가 아니라 413 에 닿는다
+        String 멤버들 = IntStream.range(0, 6_000)
+                .mapToObj(i -> "{\"value\":\"00000000-0000-4000-8000-%012d\"}".formatted(i))
+                .collect(Collectors.joining(","));
+        String 본문 = """
+                {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                 "Operations":[{"op":"add","path":"members","value":[%s]}]}""".formatted(멤버들);
+        assertThat(본문.getBytes(StandardCharsets.UTF_8).length)
+                .as("본문이 한도를 넘지 않으면 이 테스트는 413 을 시험하지 못한다").isGreaterThan(본문_한도);
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/any").contentType(SCIM_JSON).bodyValue(본문)
+                .exchange()
+                .expectStatus().isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE)
+                .expectHeader().contentType(SCIM_JSON)
+                .expectBody()
+                .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
+                .jsonPath("$.status").isEqualTo("413")
+                .jsonPath("$.detail").value(detail -> assertThat((String) detail)
+                        .as("설정에서 읽은 한도와 나눠 보낼 방법을 알려 준다")
+                        .contains(String.valueOf(본문_한도)).contains("PATCH"));
+    }
+
+    @Test
+    @DisplayName("Bulk 는 501 이다 — 지원하지 않음을 SCIM Error 로 알린다(점검 S7)")
+    void Bulk_는_501() {
+        // when, then
+        client.post().uri("/scim/v2/Bulk").contentType(SCIM_JSON).bodyValue("{}")
+                .exchange()
+                .expectStatus().isEqualTo(HttpStatus.NOT_IMPLEMENTED)
+                .expectHeader().contentType(SCIM_JSON)
+                .expectBody()
+                .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
+                .jsonPath("$.status").isEqualTo("501");
+    }
+
+    @Test
+    @DisplayName("앱은 두 어댑터의 일시 장애 인식기를 모두 싣는다")
+    void 인식기_둘이_실린다() {
+        // when
+        var 인식기들 = context.getBeansOfType(TemporaryFailureRecognizer.class);
+
+        // then
+        assertThat(인식기들).containsKeys("dynamoDbTemporaryFailures", "openFgaTemporaryFailures");
+    }
+}
