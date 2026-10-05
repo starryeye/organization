@@ -7,9 +7,12 @@ import dev.openfga.sdk.api.client.model.ClientBatchCheckSingleResponse;
 import dev.openfga.sdk.api.client.model.ClientCheckRequest;
 import dev.openfga.sdk.api.configuration.ClientBatchCheckOptions;
 import dev.openfga.sdk.api.configuration.ClientCheckOptions;
+import dev.openfga.sdk.api.model.CheckError;
 import dev.openfga.sdk.api.model.ConsistencyPreference;
+import dev.openfga.sdk.api.model.ErrorCode;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -19,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -145,7 +149,8 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
      * 통과해 "확인했고, 없다" 와 구별되지 않는다 — 설계 §6 이 금지하는 상태 기준선 폴백과 같은
      * 결이다. diff 의 기준선이 되는 이 결과에서 조용히 "없음" 으로 내려가면, 실제로 있는 튜플을
      * 다시 쓰거나(무해) <b>실제로 지워야 할 튜플의 삭제를 건너뛴다</b>(유해). 그래서 폴백하지
-     * 않고 예외로 멈춘다 — IdP 가 재시도한다.
+     * 않고 예외로 멈춘다 — IdP 가 재시도한다. 서버가 답을 못 한 것이라 {@link TemporaryFailureException} 이다. 다만 개별 오류에
+     * 서버가 입력 오류로 표시한 것이 하나라도 있으면 다시 물어도 같아 {@code IllegalStateException}(우리 버그)이다.
      *
      * <p>{@code correlationId} 로 짝짓는 것 자체도 여기서 못박힌다. 응답 순서는 보장되지 않아
      * 인덱스로 짝지으면 <b>엉뚱한 튜플이 있다고 판단</b>하는데, 실서버는 대개 순서를 지켜서
@@ -159,18 +164,30 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
                 .filter(single -> single.getError() != null)
                 .toList();
         if (!errored.isEmpty()) {
-            String firstMessage = errored.get(0).getError().getMessage();
-            log.error("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
-                    errored.size(), errored.get(0).getCorrelationId(), firstMessage);
-            throw new IllegalStateException(
-                    "OpenFGA batchCheck 중 %d건이 개별 오류로 끝났다(예: %s) — 상태 기준선으로 폴백하지 않는다"
-                            .formatted(errored.size(), firstMessage));
+            Optional<ClientBatchCheckSingleResponse> 입력_오류 = errored.stream()
+                    .filter(single -> 입력_오류인가(single.getError()))
+                    .findFirst();
+            // 예로 드는 것은 낫지 않는 쪽(입력 오류)이 있으면 그것이다 — 500 의 원인을 가리지 않는다
+            ClientBatchCheckSingleResponse example = 입력_오류.orElse(errored.get(0));
+            String exampleMessage = example.getError().getMessage();
+            String message = "OpenFGA batchCheck 중 %d건이 개별 오류로 끝났다(예: %s) — 상태 기준선으로 폴백하지 않는다"
+                    .formatted(errored.size(), exampleMessage);
+            // 입력 오류가 하나라도 있으면 거절이라 다시 물어도 같다 — 우리 버그(500, ERROR). 내부 오류뿐이면 일시 장애(503, WARN)다 (설계 2026-10-05 §3.1)
+            if (입력_오류.isPresent()) {
+                log.error("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
+                        errored.size(), example.getCorrelationId(), exampleMessage);
+                throw new IllegalStateException(message);
+            }
+            log.warn("OpenFGA batchCheck 중 {}건이 개별 오류로 끝났다 (예: correlationId={}, message={})",
+                    errored.size(), example.getCorrelationId(), exampleMessage);
+            throw new TemporaryFailureException(message, TemporaryFailureException.기본_대기);
         }
 
         if (results.size() != byCorrelationId.size()) {
-            throw new IllegalStateException(
+            throw new TemporaryFailureException(
                     "OpenFGA batchCheck 가 %d건을 물었는데 %d건만 답했다 — 빠진 항목을 '없음'으로 격하하지 않는다"
-                            .formatted(byCorrelationId.size(), results.size()));
+                            .formatted(byCorrelationId.size(), results.size()),
+                    TemporaryFailureException.기본_대기);
         }
 
         // 빼면서 읽는다 — 요청 하나가 정확히 한 번씩 소진돼야 한다. 개수가 같은데 어떤 id 가
@@ -180,14 +197,23 @@ public class OpenFgaRelationTupleChecker implements RelationTupleChecker {
         for (ClientBatchCheckSingleResponse single : results) {
             RelationTuple tuple = 답을_기다리는것.remove(single.getCorrelationId());
             if (tuple == null) {
-                throw new IllegalStateException(
+                throw new TemporaryFailureException(
                         ("OpenFGA batchCheck 응답의 correlationId '%s' 가 요청에 없거나 두 번 왔다 "
-                                + "— 어느 튜플의 답인지 알 수 없다").formatted(single.getCorrelationId()));
+                                + "— 어느 튜플의 답인지 알 수 없다").formatted(single.getCorrelationId()),
+                        TemporaryFailureException.기본_대기);
             }
             if (single.isAllowed()) {
                 found.add(tuple);
             }
         }
         return found;
+    }
+
+    /**
+     * 서버가 "입력이 틀렸다" 고 표시한 개별 오류인가. {@code inputError} 는 프로토 enum 이라 오류가 아니어도 기본값 {@code NO_ERROR} 가
+     * 실려 올 수 있다. 표시가 없는 것(내부 오류뿐이거나 둘 다 없음)은 입력 오류가 아니다.
+     */
+    private static boolean 입력_오류인가(CheckError error) {
+        return error.getInputError() != null && error.getInputError() != ErrorCode.NO_ERROR;
     }
 }

@@ -27,7 +27,7 @@ public class FakeMutationLock implements MutationLock {
      */
     public final AtomicInteger renewAttempted = new AtomicInteger();
 
-    /** 켜면 획득이 항상 실패한다 — 503 경로를 재현하는 데 쓴다. */
+    /** 켜면 획득이 항상 실패한다 — 락 저장소 오류로 503(10초)이 되는 경로를 재현하는 데 쓴다. 다른 쪽이 쥔 경합은 실제로 먼저 잡아 재현한다. */
     public boolean failAcquire = false;
 
     /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
@@ -51,11 +51,13 @@ public class FakeMutationLock implements MutationLock {
     public Mono<LockLease> acquire(LockPurpose purpose) {
         return Mono.defer(() -> {
             if (failAcquire) {
+                // 락 저장소 오류를 흉내 낸다 — 쥔 쪽이 없으므로 기본 대기(10초)다
                 return Mono.error(new LockUnavailableException("락 획득 실패(테스트)"));
             }
             String token = UUID.randomUUID().toString();
             if (!heldToken.compareAndSet(null, token)) {
-                return Mono.error(new LockUnavailableException("이미 다른 쪽이 쥐고 있다(테스트)"));
+                // 실제 락과 같다 — 쥔 쪽의 용도로 기다릴 시간이 정해진다(재적재·동기화 60초, 쓰기 2초)
+                return Mono.error(LockUnavailableException.잡혀_있다(heldPurpose.get()));
             }
             heldPurpose.set(purpose);
             acquired.incrementAndGet();

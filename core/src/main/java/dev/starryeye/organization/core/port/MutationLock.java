@@ -16,7 +16,10 @@ import reactor.core.publisher.Mono;
  */
 public interface MutationLock {
 
-    /** 못 잡으면 {@link dev.starryeye.organization.core.usecase.LockUnavailableException}. */
+    /**
+     * 못 잡으면 {@link dev.starryeye.organization.core.usecase.LockUnavailableException}. 다른 쪽이 쥐고 있으면
+     * {@code LockUnavailableException.잡혀_있다(쥔 용도)} 로 실패한다 — 쥔 용도가 기다릴 시간(재적재·동기화 60초, 쓰기 2초)을 정한다.
+     */
     Mono<LockLease> acquire(LockPurpose purpose);
 
     /** 내 토큰일 때만 푼다. 아니면 경고만 남기고 조용히 끝낸다 — 일은 이미 끝났다. */

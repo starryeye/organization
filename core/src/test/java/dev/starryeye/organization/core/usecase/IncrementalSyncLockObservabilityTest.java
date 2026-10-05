@@ -139,8 +139,8 @@ class IncrementalSyncLockObservabilityTest {
     @Test
     @DisplayName("락 획득이 저장소 장애로 실패하면 503 으로 나가되 경합으로 세지는 않는다")
     void 저장소_장애도_503이다() {
-        // given — DynamoDB 부분 장애. 그대로 흘리면 ScimRouter 기본 분기가 500 을 내고,
-        // IdP 는 500 을 영구 실패로 읽어 프로비저닝을 버린다 — 재시도해야 할 바로 그 순간에.
+        // given — DynamoDB 부분 장애. 그대로 흘리면 core 에는 일시 장애 표지가 없어 ScimRouter 가 알아보지 못한 예외로
+        // 500(버그)을 낸다 — 500 은 버그, 503 은 재시도 신호다.
         RuntimeException 저장소장애 = new RuntimeException("DynamoDB 가 응답하지 않는다(테스트)");
         MutationLock 고장난_락 = new MutationLock() {
             @Override

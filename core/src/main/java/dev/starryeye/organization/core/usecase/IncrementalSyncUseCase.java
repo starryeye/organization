@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import lombok.RequiredArgsConstructor;
@@ -508,7 +509,7 @@ public class IncrementalSyncUseCase {
      * 조직 삭제 (설계 2026-10-02 §4.1). 삭제 뒤의 모습은 "이 조직을 언급하는 줄이 하나도 없음"으로 정해져 있어 계산(직원 읽기·Check·diff)을 하지 않는다.
      * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
      *
-     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 5xx 이고
+     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 503 이고
      * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
@@ -626,11 +627,8 @@ public class IncrementalSyncUseCase {
      * <p><b>반납이 실패하면</b>(스로틀, 네트워크) 리스가 만료될 때까지 이 인스턴스도 남도 다시 잡지 못한다. 응답은 성공이다 — 일은 끝났다.
      * 대신 {@link LockObserver#leaseLost} 를 올려 {@code scim.lock.lease_lost} 에 나타난다.
      *
-     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
-     * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
-     * {@code ScimRouter} 의 기본 분기가 500 을 내고, IdP 는 500 을 <b>영구 실패</b>로 읽어
-     * 프로비저닝을 버린다. 재시도해야 할 바로 그 순간에. 그래서 획득 구간의 모든 에러를
-     * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
+     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> core 는 SDK 예외를 가르지 못하고, 락을 못 잡은 요청은 어차피
+     * 커밋도 못 하므로 획득 구간의 오류는 모두 {@link LockUnavailableException}(503)으로 감싼다. 500 은 버그, 503 은 재시도 신호다(설계 2026-10-05 §3.5).
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
@@ -668,7 +666,7 @@ public class IncrementalSyncUseCase {
                     .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
                             .filter(LockUnavailableException.class::isInstance))
                     .onErrorMap(Exceptions::isRetryExhausted,
-                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
+                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다", 마지막_대기(error)))
                     // DynamoDB 장애 등 락 이외의 예외도 503 으로 옮긴다 (설계 §6).
                     .onErrorMap(error -> !(error instanceof LockUnavailableException),
                             error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
@@ -683,6 +681,13 @@ public class IncrementalSyncUseCase {
                             .flatMap(끝 -> 반납한다(lease).thenReturn(끝))
                             .<IncrementalSyncResult>dematerialize());
         });
+    }
+
+    /** 재시도를 다 쓴 예외의 원인은 마지막 실패다 — 그 기다릴 시간(쥔 쪽의 용도)을 물려받는다. */
+    private static Duration 마지막_대기(Throwable 소진) {
+        return 소진.getCause() instanceof TemporaryFailureException 마지막
+                ? 마지막.retryAfter()
+                : TemporaryFailureException.기본_대기;
     }
 
     /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */

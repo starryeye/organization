@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
@@ -13,6 +14,7 @@ import software.amazon.awssdk.services.dynamodb.model.PutRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -62,7 +64,8 @@ class BatchRequestsTest extends DynamoDbTestSupport {
 
         // when, then
         assertThatThrownBy(() -> batch.get(List.of(키("USER#kim"))).collectList().block())
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOfSatisfying(TemporaryFailureException.class,
+                        error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(10)))
                 .hasMessageContaining("1건");
         assertThat(보낸_횟수).hasValue(BatchRequests.MAX_ATTEMPTS);
     }
@@ -110,7 +113,8 @@ class BatchRequestsTest extends DynamoDbTestSupport {
 
         // when, then
         assertThatThrownBy(() -> batch.write(List.of(하나)).block())
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOfSatisfying(TemporaryFailureException.class,
+                        error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(10)))
                 .hasMessageContaining("1건");
         assertThat(보낸_횟수).hasValue(BatchRequests.MAX_ATTEMPTS);
     }

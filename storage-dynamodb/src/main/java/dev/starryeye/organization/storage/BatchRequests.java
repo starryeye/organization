@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -19,7 +20,7 @@ import java.util.Map;
  *
  * <p>DynamoDB 는 처리량이 모자라면 묶음 일부를 돌려준다(UnprocessedKeys·UnprocessedItems). AWS 는 지수 백오프로 다시 보내라고 권한다.
  * 상한을 두지 않으면 스로틀이 계속될 때 락을 쥔 요청이 끝나지 않는다 — 그래서 {@value #MAX_ATTEMPTS}번까지 {@link #BASE_DELAY} 부터 두 배씩
- * 쉬며 보내고, 그래도 남으면 남은 수를 담아 실패시킨다.
+ * 쉬며 보내고, 그래도 남으면 남은 수를 담아 실패시킨다. 상한을 다 쓰면 일시 장애다 — 처리량이 나아진 뒤 다시 보내면 된다(③-1 이월, 설계 2026-10-05 §3.1).
  */
 @RequiredArgsConstructor
 final class BatchRequests {
@@ -54,8 +55,9 @@ final class BatchRequests {
                         return 읽은것;
                     }
                     if (attempt >= MAX_ATTEMPTS) {
-                        return 읽은것.concatWith(Mono.error(new IllegalStateException(
-                                "BatchGetItem 이 %d회 보낸 뒤에도 %d건을 읽지 못했다".formatted(attempt, 남은것.keys().size()))));
+                        return 읽은것.concatWith(Mono.error(new TemporaryFailureException(
+                                "BatchGetItem 이 %d회 보낸 뒤에도 %d건을 읽지 못했다".formatted(attempt, 남은것.keys().size()),
+                                TemporaryFailureException.기본_대기)));
                     }
                     KeysAndAttributes 다시 = 남은것.toBuilder().consistentRead(true).build();
                     return 읽은것.concatWith(Mono.delay(쉬는시간(attempt)).thenMany(get(다시, attempt + 1)));
@@ -80,8 +82,9 @@ final class BatchRequests {
                         return Mono.empty();
                     }
                     if (attempt >= MAX_ATTEMPTS) {
-                        return Mono.error(new IllegalStateException(
-                                "BatchWriteItem 이 %d회 보낸 뒤에도 %d건을 처리하지 못했다".formatted(attempt, 남은것.size())));
+                        return Mono.error(new TemporaryFailureException(
+                                "BatchWriteItem 이 %d회 보낸 뒤에도 %d건을 처리하지 못했다".formatted(attempt, 남은것.size()),
+                                TemporaryFailureException.기본_대기));
                     }
                     return Mono.delay(쉬는시간(attempt)).then(write(남은것, attempt + 1));
                 })

@@ -204,4 +204,28 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
         assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE, "나").block())
                 .isInstanceOf(LockUnavailableException.class);
     }
+
+    @Test
+    @DisplayName("재적재가 락을 쥐고 있으면 획득 실패의 기다릴 시간이 60초다 — DynamoDB 가 돌려준 기존 락 항목의 용도로 정한다(설계 2026-10-05 §3.2)")
+    void 재적재가_쥔_락은_60초다() {
+        // given
+        인스턴스1.acquire(LockPurpose.REBUILD).block();
+
+        // when, then
+        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+                .isInstanceOfSatisfying(LockUnavailableException.class,
+                        error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(60)));
+    }
+
+    @Test
+    @DisplayName("다른 SCIM 쓰기가 락을 쥐고 있으면 2초다")
+    void 쓰기가_쥔_락은_2초다() {
+        // given
+        인스턴스1.acquire(LockPurpose.WRITE).block();
+
+        // when, then
+        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+                .isInstanceOfSatisfying(LockUnavailableException.class,
+                        error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(2)));
+    }
 }

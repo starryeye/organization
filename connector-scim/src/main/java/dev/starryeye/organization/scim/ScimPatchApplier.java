@@ -123,6 +123,7 @@ public final class ScimPatchApplier {
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
+            requireTarget(op);
             requireReplaceOrAdd(op, operation.op());
             return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), 종류);
         }
@@ -215,6 +216,7 @@ public final class ScimPatchApplier {
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
+            requireTarget(op);
             requireReplaceOrAdd(op, operation.op());
             return mergeUserAttributes(op, user, asAttributeMap(operation.value()));
         }
@@ -367,6 +369,13 @@ public final class ScimPatchApplier {
             throw ScimException.invalidSyntax("op 가 비어 있습니다");
         }
         return op.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /** path 없는 remove — 무엇을 지울지 가리키지 않았다. RFC 7644 §3.5.2.2 가 400 noTarget 으로 정했다(점검 S11). */
+    private static void requireTarget(String normalizedOp) {
+        if (normalizedOp.equals("remove")) {
+            throw ScimException.noTarget("remove 에는 path 가 있어야 합니다");
+        }
     }
 
     private static void requireReplaceOrAdd(String normalizedOp, String originalOp) {

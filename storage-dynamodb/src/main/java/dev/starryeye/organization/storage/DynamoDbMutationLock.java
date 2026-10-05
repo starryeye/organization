@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedExce
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.ReturnValuesOnConditionCheckFailure;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 import java.time.Clock;
@@ -81,11 +82,30 @@ public class DynamoDbMutationLock implements MutationLock {
                                     "#pk", Keys.PK, "#expiresAt", Keys.EXPIRES_AT, "#token", TOKEN))
                             .expressionAttributeValues(Map.of(
                                     ":now", Attrs.n(now.getEpochSecond()), ":token", Attrs.s(token)))
+                            // 조건이 깨지면 쥐고 있는 쪽의 줄을 돌려받는다 — 그 용도로 기다릴 시간을 정한다(설계 2026-10-05 §3.2)
+                            .returnValuesOnConditionCheckFailure(ReturnValuesOnConditionCheckFailure.ALL_OLD)
                             .build()))
                     .thenReturn(new LockLease(token, expiresAt))
                     .onErrorMap(ConditionalCheckFailedException.class, error ->
-                            new LockUnavailableException("다른 인스턴스가 변경 락을 쥐고 있습니다"));
+                            LockUnavailableException.잡혀_있다(쥔_용도(error)));
         });
+    }
+
+    /** 조건 실패 때 DynamoDB 가 돌려준 기존 락 항목의 용도. 돌려받지 못했거나 알 수 없는 값(문자열이 아닌 속성 포함)이면 null(쓰기 경합으로 본다). */
+    static LockPurpose 쥔_용도(ConditionalCheckFailedException error) {
+        if (!error.hasItem()) {
+            return null;
+        }
+        AttributeValue 용도 = error.item().get(PURPOSE);
+        // 문자열이 아닌 속성이면 s() 가 null 이다 — valueOf(null) 이 NPE 를 낸다
+        if (용도 == null || 용도.s() == null) {
+            return null;
+        }
+        try {
+            return LockPurpose.valueOf(용도.s());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**

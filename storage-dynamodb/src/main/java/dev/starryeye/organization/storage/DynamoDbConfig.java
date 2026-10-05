@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.PageBookmarkRepository;
+import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -96,5 +97,11 @@ public class DynamoDbConfig {
     @Bean
     public DailyJobClaims dailyJobClaims(DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
         return new DynamoDbDailyJobClaims(client, properties, clock);
+    }
+
+    /** DynamoDB 예외가 일시 장애인지 알아본다 — 앱의 오류 분류기가 모아서 쓴다(설계 2026-10-05 §3.3). */
+    @Bean
+    public TemporaryFailureRecognizer dynamoDbTemporaryFailures() {
+        return new DynamoDbTemporaryFailures();
     }
 }
