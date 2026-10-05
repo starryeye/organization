@@ -310,6 +310,100 @@ class ScimPatchApplierTest {
     }
 
     @Test
+    @DisplayName("조직 PATCH path externalId — add·replace 는 그 값으로, remove 는 비운다(설계 2026-10-06 §4.1)")
+    void 조직_path_externalId() {
+        // given
+        var before = 조직(MemberRef.user("kim"));
+
+        // when
+        var 바꿈 = ScimPatchApplier.toGroupChange(패치("replace", "externalId", "EXT-9"), USER_ONLY).block();
+        var 비움 = ScimPatchApplier.toGroupChange(패치("remove", "externalId", null), USER_ONLY).block();
+
+        // then
+        assertThat(바꿈.reidentifies()).isTrue();
+        assertThat(바꿈.externalId()).isEqualTo("EXT-9");
+        assertThat(비움.reidentifies()).isTrue();
+        assertThat(비움.externalId()).isNull();
+        assertThat(적용한다(before, 패치("replace", "externalId", "EXT-9"), USER_ONLY))
+                .satisfies(after -> {
+                    assertThat(after.externalId()).isEqualTo("EXT-9");
+                    assertThat(after.members()).containsExactly(MemberRef.user("kim"));
+                });
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 externalId 키도 path 와 같은 규칙이다 — 조용히 무시하지 않는다(④-1 이월)")
+    void 조직_경로_없는_값의_externalId() {
+        // given
+        var patch = 패치("replace", null, Map.of("externalId", "EXT-9", "displayName", "플랫폼팀"));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+
+        // then
+        assertThat(change.reidentifies()).isTrue();
+        assertThat(change.externalId()).isEqualTo("EXT-9");
+        assertThat(change.displayName()).isEqualTo("플랫폼팀");
+    }
+
+    @Test
+    @DisplayName("Okta 가 경로 없는 값에 싣는 id 키는 지금처럼 무시한다 — externalId 를 건드리지 않는다")
+    void 조직_경로_없는_값의_id_는_무시한다() {
+        // given
+        var patch = 패치("replace", null, Map.of("id", "DEV002", "displayName", "플랫폼팀"));
+
+        // when
+        var change = ScimPatchApplier.toGroupChange(patch, USER_ONLY).block();
+
+        // then
+        assertThat(change.reidentifies()).isFalse();
+        assertThat(change.displayName()).isEqualTo("플랫폼팀");
+    }
+
+    @Test
+    @DisplayName("조직 PATCH externalId 의 모르는 op 는 400 invalidSyntax 다")
+    void 조직_externalId_모르는_op() {
+        // given
+        var patch = 패치("move", "externalId", "EXT-9");
+
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.toGroupChange(patch, USER_ONLY).block())
+                .isInstanceOfSatisfying(ScimException.class, e -> assertThat(e.getScimType()).isEqualTo("invalidSyntax"));
+    }
+
+    @Test
+    @DisplayName("조직 PATCH 도 코어 Group URN 접두를 대소문자 없이 뗀다 — path 와 경로 없는 값의 키(설계 2026-10-06 §4.2, 점검 S9)")
+    void 조직_Group_URN_접두를_뗀다() {
+        // given
+        var before = 조직(MemberRef.user("kim"));
+
+        // when
+        var path형 = 적용한다(before,
+                패치("replace", "urn:ietf:params:scim:schemas:core:2.0:Group:displayName", "플랫폼팀"), USER_ONLY);
+        var 값형 = 적용한다(before,
+                패치("replace", null, Map.of("URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:GROUP:displayName", "플랫폼팀")), USER_ONLY);
+
+        // then
+        assertThat(path형.displayName()).isEqualTo("플랫폼팀");
+        assertThat(값형.displayName()).isEqualTo("플랫폼팀");
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 URN 접두 붙은 members 도 type 없는 멤버를 현재상태로 판정한다 — 모으는 쪽과 적용하는 쪽이 같은 이름을 본다")
+    void URN_접두_members_의_type_없는_멤버를_판정한다() {
+        // given
+        MemberTypeResolver 하위조직이다 = ids -> Mono.just(
+                ids.stream().collect(Collectors.toMap(id -> id, id -> MemberType.GROUP)));
+
+        // when
+        var after = 적용한다(조직(), 패치("add", null, Map.of(
+                "urn:ietf:params:scim:schemas:core:2.0:Group:members", List.of(Map.of("value", "SUB1")))), 하위조직이다);
+
+        // then
+        assertThat(after.members()).containsExactly(MemberRef.group("SUB1"));
+    }
+
+    @Test
     @DisplayName("알 수 없는 op 는 invalidSyntax 로 거절한다")
     void 알_수_없는_op는_거절한다() {
         // given
