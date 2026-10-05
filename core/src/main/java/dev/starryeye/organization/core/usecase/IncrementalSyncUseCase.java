@@ -509,7 +509,7 @@ public class IncrementalSyncUseCase {
      * 조직 삭제 (설계 2026-10-02 §4.1). 삭제 뒤의 모습은 "이 조직을 언급하는 줄이 하나도 없음"으로 정해져 있어 계산(직원 읽기·Check·diff)을 하지 않는다.
      * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
      *
-     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 5xx 이고
+     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 503 이고
      * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
@@ -629,8 +629,8 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> DynamoDB 부분 장애로
      * {@code putItem} 이 {@code SdkException} 을 던지면 그대로 흘려보낼 수 없다 —
-     * {@code ScimRouter} 의 기본 분기가 500 을 내고, IdP 는 500 을 <b>영구 실패</b>로 읽어
-     * 프로비저닝을 버린다. 재시도해야 할 바로 그 순간에. 그래서 획득 구간의 모든 에러를
+     * core 는 SDK 예외를 알아볼 수 없어 일시 장애 표지가 없고, {@code ScimRouter} 가 알아보지 못한 예외는 500(버그)이 된다.
+     * 500 은 버그, 503 은 재시도 신호다(설계 2026-10-05 §3.5). 그래서 획득 구간의 모든 에러를
      * {@link LockUnavailableException} 으로 옮긴다 — "어차피 커밋도 못 한다".
      */
     private Mono<IncrementalSyncResult> withLock(Function<LockLease, Mono<IncrementalSyncResult>> work) {

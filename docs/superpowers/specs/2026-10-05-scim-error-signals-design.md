@@ -19,7 +19,8 @@
 ## 2. 결정 (사용자 확인, 2026-10-05)
 
 - ⑤ 를 둘로 나눈다 — ⑤-1 응답 신호, ⑤-2 요청 해석.
-- M4: **core 표지 + 앱이 라이브러리 예외를 알아보기.** 우리가 만드는 일시 장애는 core 표지를 달고, 라이브러리 예외(AWS SDK·OpenFGA SDK)는 조립하는 모듈(app-scim)의 분류기가 알아본다.
+- M4: **core 표지 + 어댑터가 라이브러리 예외를 알아보기.** 우리가 만드는 일시 장애는 core 표지를 달고, 라이브러리 예외(AWS SDK·OpenFGA SDK)는 그 SDK 를 가진 어댑터가 core 포트로 알아보며
+  connector-scim 의 분류기가 모은다(§3.3). 처음 결정은 "조립하는 모듈(app-scim)의 분류기" 였으나 계획 단계에서 바꿨다 — SDK 를 아는 코드가 어댑터 안에 머물고 app-scim 은 조립만 한다.
   일시 장애는 503 + `Retry-After`, 요청 문제는 4xx, 그 밖은 500(진짜 버그).
 - S2: **원인별 `Retry-After`** — 쓰기 경합 2초, 긴 작업(재적재·전체 동기화) 60초, 장애·부분 실패 10초. 429 는 쓰지 않는다(HTTP 의 뜻은 속도 제한이다).
 - M3·S7·S10·S11 은 §4 설계로 확인받았다.
@@ -33,6 +34,9 @@
   - `LockUnavailableException`(core) — `TemporaryFailureException` 을 상속한다. 락 경합·리스 상실·락 저장소 장애 모두.
   - `TupleWriteAbortedException`(core) — OpenFGA 쓰기 차단기. 상속으로 단다(부분 결과를 싣는 기존 계약은 그대로).
   - storage 의 재시도 상한 소진(`BatchRequests`, 지금은 `IllegalStateException`) — `TemporaryFailureException` 으로 던진다(③-1 이월).
+  - OpenFGA `batchCheck` 응답 이상(`OpenFgaRelationTupleChecker`) — 개별 오류(내부 오류뿐일 때)·응답 수 불일치·요청에 없거나 두 번 온 correlationId. 답을 못 받은 항목을 "없음"으로 격하하지 않고 멈추는
+    기존 계약은 그대로이고, 던지는 예외가 `IllegalStateException` 에서 이 표지로 바뀐다.
+- 표지를 달지 않는 것: check·`batchCheck` 호출 **순간**의 동기 예외는 매개변수 거절이라 다시 보내도 같다 — 500(버그)이다.
 - 기다릴 시간(상수, 운영에서 바꿀 이유가 보이면 그때 설정으로 올린다):
 
   | 원인 | `retryAfter` |
@@ -41,32 +45,49 @@
   | 락 획득 조건 실패 — 쥔 쪽이 재적재(`REBUILD`)·전체 동기화(`SYNC`) | 60초 |
   | 락 획득 조건 실패 — 쥔 쪽의 용도를 돌려받지 못함 | 2초(흔한 경우인 쓰기 경합으로 본다) |
   | 락 저장소 오류(조건 실패가 아닌 것)·리스 상실·갱신 실패 | 10초 |
-  | 쓰기 차단기·재시도 상한 소진·분류기가 알아본 라이브러리 장애·부분 실패 | 10초 |
+  | 쓰기 차단기·재시도 상한 소진·`batchCheck` 응답 이상·분류기가 알아본 라이브러리 장애·부분 실패 | 10초 |
+
+- **구현 중 정한 것:** `batchCheck` 의 **개별 오류는 OpenFGA 자신의 분류로 가른다** — 오류 항목 중 하나라도 `inputError`(`NO_ERROR` 가 아닌 값)가 있으면 거절이라 우리 버그(500, `IllegalStateException`),
+  모두 `internalError`(또는 둘 다 없음)면 일시 장애(10초)다. 이유: 개별 오류를 전부 503 으로 하면 모델에 없는 relation 같은 결정적인 우리 버그에 IdP 가 끝없이 재시도한다.
+  수 불일치와 모르는·중복 correlationId 는 서버가 답을 못 한 것이라 일시 장애(10초)다.
+- **구현 중 정한 것:** 입력 오류와 내부 오류가 섞이면 입력 오류가 이긴다(500). 메시지·로그의 "(예: …)" 는 첫 `inputError` 항목을 든다 — 500 의 원인을 가리지 않으려고.
 
 ### 3.2 락을 쥔 쪽의 용도
 
 - `DynamoDbMutationLock.acquire` 의 `PutItem` 에 `ReturnValuesOnConditionCheckFailure.ALL_OLD` 를 단다. 조건이 깨지면 DynamoDB 가 기존 락 항목을 돌려주고, 그 `PURPOSE`(이미 적고 있다)로 위 표의 시간을 고른다.
   돌려받지 못하면(빈 항목) 2초.
 - core 의 획득 재시도(3초 기다림)가 끝나 `LockUnavailableException` 을 새로 만들 때, 마지막 시도의 `retryAfter` 를 물려받는다(재시도 소진 예외의 원인이 마지막 실패다).
+- **구현 중 정한 것:** DynamoDB Local 2.5.3 은 `ReturnValuesOnConditionCheckFailure.ALL_OLD` 를 지킨다 — 재적재가 쥔 락에 쓰기가 60초를 받는 것을 storage 통합 테스트와 app-scim e2e 가,
+  `WRITE` 락에 2초를 받는 것을 storage 통합 테스트가 실제로 확인했다. §10 의 "Local 지원 불확실" 한계는 이 사실로 풀렸다.
 
 ### 3.3 라이브러리 예외 분류기
 
-- connector-scim 에 인터페이스 `TemporaryFailureClassifier` 를 둔다: `Optional<Duration> 재시도_대기(Throwable)` — 원인 체인 어디에든 일시 장애가 있으면 기다릴 시간.
-- connector-scim 의 기본 구현은 core 표지(`TemporaryFailureException`)만 본다.
-- app-scim 의 구현(빈으로 바꿔 끼운다)은 core 표지에 더해, 각 SDK 가 스스로 정한 재시도 분류를 따른다:
-  - AWS SDK: `SdkClientException`(네트워크·시간 초과)과, `AwsServiceException` 중 스로틀링이거나 5xx 이거나 SDK 가 재시도 가능하다고 표시한 것. 조건 실패·검증 오류(4xx)는 아니다 — 다시 보내도 같다.
-  - OpenFGA SDK: `ApiException`(`FgaError`) 중 거절(`FgaApiValidationError`, 400)이 아닌 것, 그리고 OpenFGA 호출이 `IOException`·시간 초과로 끝난 것.
-    우리 어댑터가 감싼 `IllegalStateException("OpenFGA … 호출 실패", 원인)` 도 원인 체인으로 따라가 본다.
-  - 모두 10초.
+- core(`core.port`)에 포트 `TemporaryFailureRecognizer` 를 둔다: `Optional<Duration> 재시도_대기(Throwable)` — 예외 **하나**를 보고 일시 장애인지, 기다릴 시간은 얼마인지.
+- SDK 를 가진 어댑터가 자기 SDK 의 예외를 알아보는 구현을 core 포트 빈으로 낸다. 기다릴 시간은 모두 10초.
+  - storage-dynamodb `DynamoDbTemporaryFailures`(빈 `dynamoDbTemporaryFailures`) — AWS SDK 자신의 재시도 분류를 따른다: `SdkClientException`(네트워크·시간 초과)과, `SdkServiceException` 중
+    스로틀링이거나 5xx 이거나 SDK 가 재시도 가능하다고 표시한 것. 조건 실패·검증 오류(4xx)는 아니다 — 다시 보내도 같다.
+  - authz-openfga `OpenFgaTemporaryFailures`(빈 `openFgaTemporaryFailures`) — OpenFGA SDK: `ApiException` 중 거절(`FgaApiValidationError`, 400)이 아닌 것. 쓰기의 재시도 분류(`OpenFgaErrors`)와 같은 기준이다.
+- connector-scim 의 `TemporaryFailureClassifier`(클래스)가 `ObjectProvider<TemporaryFailureRecognizer>` 로 인식기를 모은다: `Optional<Duration> 재시도_대기(Throwable)` — 원인 체인 어디에든 일시 장애가 있으면 기다릴 시간.
+  체인의 예외마다 core 표지 → 어댑터 인식기 → I/O 실패·시간 초과(`IOException`·`TimeoutException`) 순으로 보고, 어디에도 없으면 일시 장애가 아니다. 인식기가 없는 조립(테스트)의 기본값은 core 표지와 I/O 만 본다.
+  우리 어댑터가 감싼 `IllegalStateException("OpenFGA … 호출 실패", 원인)` 도 원인 체인으로 따라가 본다.
+- app-scim 은 조립만 하고 SDK 를 main 에 두지 않는다. 인식기 빈 둘이 앱에 실리는 것은 e2e 가 확인한다.
+- **구현 중 정한 것:** I/O 규칙은 Jackson 의 `JacksonException` 을 뺀다(사슬은 계속 따라간다). 이유: Jackson 의 해석·매핑 실패가 API 상 `IOException` 하위라, 빼지 않으면 깨진 JSON 본문이 400 대신 503 이 되어
+  IdP 가 같은 본문을 끝없이 다시 보낸다(검토에서 잡음). 순서를 바꾸는 길(400 을 503 앞으로)은 응답 인코딩 실패(서버 버그)가 503 이 되는 같은 결함을 남겨 택하지 않았다.
 
 ### 3.4 라우터 규칙
 
 `ScimRouter` 한 곳에서, 이 순서로:
 
-1. `ScimException`·락 이외의 알려진 도메인 예외(409 `uniqueness`, 400 `invalidValue` 등) — 지금과 같다.
-2. 분류기가 일시 장애라고 하면 → 503 + `Retry-After: <초>`(정수 초, RFC 9110 §10.2.3) + SCIM Error. `LockUnavailableException` 도 이 길로 온다.
-3. 본문 파싱 실패 → 400 `invalidSyntax`(지금과 같다), 본문 크기 한도 → 413(§4.1), WebFlux 상태 예외 → 그 상태 + 우리 문구(§4.3).
-4. 그 밖 → 500 + ERROR 로그(진짜 버그).
+1. 자기 상태를 싣는 `ScimException`(400·404·405·501·503 등)과 알려진 도메인 예외(409 `uniqueness`, 400 `invalidValue` 등) — 지금과 같다.
+2. 본문 크기 한도 → 413(§4.1).
+3. 분류기가 일시 장애라고 하면 → 503 + `Retry-After: <초>`(정수 초, RFC 9110 §10.2.3) + SCIM Error. `LockUnavailableException` 도 이 길로 온다.
+4. 본문 파싱 실패 → 400 `invalidSyntax`(지금과 같다), WebFlux 상태 예외 → 그 상태 + 우리 문구(§4.3).
+5. 그 밖 → 500 + ERROR 로그(진짜 버그).
+
+- **구현 중 정한 것:** 본문 한도(413)는 400 해석 실패보다 앞에 둔다 — 한도 예외가 `DecodingException` 에 싸여 오므로 뒤에 두면 400 이 되어 IdP 가 같은 본문을 되풀이한다.
+- **구현 중 정한 것:** 분류기가 낸 503 의 `detail` 은 늘 고정 문구 "일시적으로 처리할 수 없습니다 — N초 뒤 다시 보내 주세요" 다. 예외 메시지를 싣지 않는다 — OpenFGA 서버 메시지·라이브러리 예외 문자열·락 용도 이름이
+  인증 없는 엔드포인트로 나가지 않게(§4.3 의 취지). 예외는 WARN 로그에만 남는다. 부분 실패 503(§3.5)은 핸들러가 쓴 고정 문구에 리소스 `id` 만 붙는다.
+- **구현 중 정한 것:** `Retry-After` 와 문구의 초는 정수 초로 **올림, 최소 1** 이다 — 1초 미만 대기가 0 이 되어 즉시 재시도를 부르지 않게.
 
 ### 3.5 부분 실패
 
@@ -74,6 +95,8 @@
   계산하는 설계(SCIM 쓰기 락 설계 §7.2)는 그대로다.
 - `ScimException.internal` 은 "저장된 리소스를 다시 읽지 못했다"(커밋 직후 다시 읽기가 빈 경우 — 동시 DELETE 등)에만 남는다.
 - 코드 주석의 "IdP 는 500 을 영구 실패로 본다" 전제를 고쳐 적는다: 503 은 재시도 신호, 500 은 버그.
+- **구현 중 정한 것:** 이 전제(또는 "응답은 5xx")를 적은 주석은 connector-scim 의 `ScimRouter`·핸들러뿐 아니라 core 의 `IncrementalSyncUseCase`(락 획득 구간·조직 삭제)·`IncrementalSyncResult`와
+  authz-openfga 의 `OpenFgaRelationTupleWriter` 에도 있었다. connector-scim 의 것은 코드 변경과 함께, 나머지는 마지막 문서 커밋에서 "503 은 재시도 신호, 500 은 버그" 로 고쳤다.
 
 ## 4. 형식과 상태 코드 (M3·S7·S10·S11)
 
@@ -81,15 +104,18 @@
 
 - 원인 체인에 `DataBufferLimitException` 이 있으면 413 + SCIM Error. `detail` 에 한도 바이트 수와 "큰 조직의 멤버는 PATCH 로 나눠 보낸다" 를 싣는다.
 - 한도 값은 Spring 코덱 설정(`spring.codec.max-in-memory-size`, 기본 256KB)을 `ScimConfig` 가 읽어 라우터에 넘긴다. 한도 자체는 올리지 않는다(인증 전 노출 — 별도 결정).
+- **구현 중 정한 것:** 413 이 생기기 전에는 한도를 넘는 본문이 400 이 아니라 500 이었다(구현 중 연결 테스트로 확인) — 점검 M3 의 진단이 맞다.
 
 ### 4.2 라우트 밖 요청 (S7)
 
 `/scim/v2/**` 아래에서 맞는 라우트가 없을 때도 SCIM Error 로 답한다.
 
 - 있는 경로에 틀린 메서드 → 405 + `Allow` 헤더(그 경로가 받는 메서드).
-- `/Schemas`, `/ResourceTypes`, `/Bulk`, `/Me` → 501 — 서버 루트 조회와 같다. RFC 7644 는 지원하지 않는 작업을 501 로 알린다(§3.12). `/Me` 는 §3.11 이 501 을 명시하고, Bulk 는
+- `/Schemas`, `/ResourceTypes`, `/Bulk`, `/Me`(와 그 아래 경로) → 501 — 서버 루트 조회와 같다. RFC 7644 는 지원하지 않는 작업을 501 로 알린다(§3.12). `/Me` 는 §3.11 이 501 을 명시하고, Bulk 는
   `ServiceProviderConfig` 가 이미 지원 안 함으로 선언했다.
 - 그 밖 → 404.
+- **구현 중 정한 것:** 405 의 `Allow` 지도에 서버 루트 라우트도 넣는다(`/scim/v2`·`/scim/v2/` 는 GET, `/scim/v2/.search` 는 POST) — 그래야 `DELETE /scim/v2` 가 404 가 아니라 405 다.
+  `.search` 가 `{id}` 패턴에도 맞으므로 받는 메서드를 모두 모으고, `Allow` 는 이름순으로 낸다(실행마다 헤더 순서가 달라지지 않게).
 
 ### 4.3 내부 정보 노출 (S10)
 
@@ -104,11 +130,12 @@
 
 | 모듈 | 바뀌는 것 |
 |---|---|
-| core | `TemporaryFailureException`(새), `LockUnavailableException`·`TupleWriteAbortedException` 이 상속, 락 획득 재시도 소진 때 `retryAfter` 물려받기 |
-| storage-dynamodb | `DynamoDbMutationLock`(`ReturnValuesOnConditionCheckFailure.ALL_OLD`, 쥔 쪽 용도 → `retryAfter`), `BatchRequests`(상한 소진 → `TemporaryFailureException`) |
-| connector-scim | `TemporaryFailureClassifier`(새, 기본 구현), `ScimRouter`(규칙, 413, 405·501·404, 문구), `ScimConfig`(분류기·한도 주입), 핸들러(부분 실패 503), `ScimPatchApplier`(`noTarget`), `ScimException`(503 생성자) |
-| app-scim | AWS·OpenFGA SDK 를 아는 분류기 빈 |
-| 문서 | README SCIM 오류 표(상태, 언제, 재시도 여부, `Retry-After`), 점검 문서 M3·M4·S2·S7·S10·S11 해결 표시 |
+| core | `TemporaryFailureException`(새), `TemporaryFailureRecognizer`(새 포트), `LockUnavailableException`·`TupleWriteAbortedException` 이 상속, 락 획득 재시도 소진 때 `retryAfter` 물려받기, 전제를 적은 주석 정정 |
+| storage-dynamodb | `DynamoDbMutationLock`(`ReturnValuesOnConditionCheckFailure.ALL_OLD`, 쥔 쪽 용도 → `retryAfter`), `BatchRequests`(상한 소진 → `TemporaryFailureException`), `DynamoDbTemporaryFailures`(새, AWS SDK 인식기 빈) |
+| authz-openfga | `OpenFgaTemporaryFailures`(새, OpenFGA SDK 인식기 빈), `OpenFgaRelationTupleChecker`(`batchCheck` 응답 이상 → 표지) |
+| connector-scim | `TemporaryFailureClassifier`(새, 인식기를 모은다), `ScimRouter`(규칙, 413, 405·501·404, 문구), `ScimConfig`(인식기·한도 주입), 핸들러(부분 실패 503), `ScimPatchApplier`(`noTarget`), `ScimException`(503·405 생성자) |
+| app-scim | main 은 그대로(조립만) — e2e 테스트만 더한다 |
+| 문서 | README SCIM 오류 표(상태, 언제, IdP 가 할 일, `Retry-After`), 점검 문서 M3·M4·S2·S7·S10·S11 해결 표시 |
 
 ## 6. 옮기기
 
@@ -121,13 +148,16 @@
 | 일시 장애 → 503 | 가짜 분류기·core 표지로 503, `Retry-After` 초, SCIM Error 형식 | connector-scim 라우터 |
 | 버그 → 500 | 모르는 예외(예: `NullPointerException`)는 500, ERROR 로그 | connector-scim 라우터 |
 | 부분 실패 → 503 | 핸들러가 `fullyApplied == false` 결과에 503 + 10초 | connector-scim 핸들러 |
-| 413 | 한도를 넘는 PATCH 본문 → 413, `detail` 에 한도 | connector-scim·app-scim e2e |
+| 413 | 한도를 넘는 PATCH 본문 → 413, `detail` 에 한도. 깨진 JSON 본문은 400 `invalidSyntax`(503 이 아니다) | connector-scim·app-scim e2e |
 | 405·501·404 | 틀린 메서드 405 + `Allow`, `/Bulk`·`/Me`·`/Schemas`·`/ResourceTypes` 501, 모르는 경로 404 — 모두 SCIM Error | connector-scim 라우터 |
 | 415 문구 | 내부 클래스 이름이 `detail` 에 없다 | connector-scim 라우터 |
 | `noTarget` | path 없는 `remove` → 400 `noTarget`(직원·조직) | connector-scim |
-| 분류기 | 실제 AWS SDK 예외(스로틀링·5xx·클라이언트 오류는 일시, 조건 실패·검증은 아님)와 OpenFGA SDK 예외(거절은 아님)를 원인 체인 깊이와 상관없이 가른다 | app-scim 단위 |
-| 락 쥔 쪽 용도 | 실제 DynamoDB Local 에서 `REBUILD` 락을 심어 두면 획득 실패의 `retryAfter` 가 60초, `WRITE` 면 2초. Local 이 기존 항목을 돌려주지 않으면 그 사실을 기록하고 2초 기본값을 시험한다 | storage |
-| 끝에서 끝 | 재적재 용도 락을 심어 두면 SCIM 쓰기가 503 + `Retry-After: 60`, 큰 PATCH 413, `/scim/v2/Bulk` 501 | app-scim e2e |
+| AWS 인식기 | 실제 AWS SDK 예외(스로틀링·5xx·클라이언트 오류는 일시, 조건 실패·검증은 아님) | storage-dynamodb 단위 |
+| OpenFGA 인식기 | 실제 OpenFGA SDK 예외(거절은 아님) | authz-openfga 단위 |
+| `batchCheck` 응답 이상 | 수 불일치·모르는/중복 correlationId·내부 오류뿐인 개별 오류는 일시 장애, 입력 오류가 있으면(섞여도) 아님 | authz-openfga 단위 |
+| 분류기 | core 표지·어댑터 인식기·I/O 를 원인 체인 깊이와 상관없이 가른다. 모르는 예외와 Jackson 해석 실패는 일시 장애가 아니다 | connector-scim 단위 |
+| 락 쥔 쪽 용도 | 실제 DynamoDB Local 에서 `REBUILD` 락을 심어 두면 획득 실패의 `retryAfter` 가 60초, `WRITE` 면 2초(Local 2.5.3 은 기존 항목을 돌려준다 — §3.2) | storage-dynamodb |
+| 끝에서 끝 | 재적재 용도 락을 심어 두면 SCIM 쓰기가 503 + `Retry-After: 60`, 큰 PATCH 413, `/scim/v2/Bulk` 501, 두 어댑터의 인식기가 앱에 실린다 | app-scim e2e |
 
 ## 8. 결과 (구현 후 기록)
 
@@ -140,6 +170,7 @@
 - **`Retry-After` 하나로 통일.** 재적재 중에는 IdP 가 헛되이 자주 두드리고, 짧은 경합에는 너무 오래 기다린다.
 - **락 경합은 429.** AWS·Auth0 가 쓰지만 HTTP 의 429 는 속도 제한이라 뜻이 맞지 않는다.
 - **라이브러리 예외를 connector-scim 이 직접 알아보기.** connector-scim 이 AWS·OpenFGA SDK 에 의존하게 된다 — 지금 모듈 경계를 깬다.
+- **조립하는 app-scim 이 SDK 를 아는 분류기를 갖기.** 처음 설계였다. 계획 단계에서 어댑터가 core 포트 인식기를 내는 쪽으로 바꿨다 — SDK 를 아는 코드가 어댑터 안에 머물고 app-scim 은 OpenFGA SDK 를 main 에 두지 않는다.
 - **본문 한도 올리기.** 인증 없는 엔드포인트에서 메모리를 더 쓰게 한다 — 인증 슬라이드 뒤에 다시 본다.
 
 ## 10. 이 설계가 말할 수 없는 것
@@ -149,7 +180,7 @@
 - **영구히 거절되는 튜플의 부분 실패도 503 이다** — 결과에 실패 사유는 있지만 일시/영구 구분이 없다. 서버 발급 UUID 아래에서는 OpenFGA 가 거절할 아이디가 거의 생기지 않는다. 생기면 IdP 가
   되풀이하고 ERROR 로그가 남는다.
 - **분류기는 알려진 라이브러리 예외만 안다** — 새 의존성의 장애 예외는 분류기에 더할 때까지 500 이다(안전한 쪽: 버그로 보인다).
-- **DynamoDB Local 이 조건 실패 때 기존 항목을 돌려주는지** — 구현에서 확인한다. 실제 DynamoDB 는 지원한다(SDK 2.28 의 `ReturnValuesOnConditionCheckFailure`).
+- **DynamoDB Local 이 조건 실패 때 기존 항목을 돌려주는지** — 확인했다: Local 2.5.3 은 돌려준다(§3.2). 실제 DynamoDB 도 지원한다(SDK 2.28 의 `ReturnValuesOnConditionCheckFailure`).
 
 ## 11. 범위 밖
 
