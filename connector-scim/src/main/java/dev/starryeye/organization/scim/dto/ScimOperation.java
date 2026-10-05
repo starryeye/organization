@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.dto;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *              path 없는 부분 리소스다. 그래서 Object 로 받고 적용 시점에 해석한다.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonFormat(with = JsonFormat.Feature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ScimOperation(String op, String path, Object value) {
 }

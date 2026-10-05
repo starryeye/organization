@@ -12,6 +12,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.net.URI;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
@@ -119,9 +120,14 @@ public class ScimUserHandler {
         }
         return state.findUser(id)
                 .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
-                .flatMap(saved -> ServerResponse.status(status)
-                        .contentType(SCIM_JSON)
-                        .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(saved)))));
+                .flatMap(saved -> {
+                    ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
+                    // 생성은 Location 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3)
+                    if (status == HttpStatus.CREATED) {
+                        builder.location(URI.create(ScimMapper.userLocation(id)));
+                    }
+                    return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(saved))));
+                });
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */
