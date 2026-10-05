@@ -17,16 +17,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * SCIM PATCH 연산을 도메인 객체에 적용한다.
  *
- * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName(S-3 설계 §7.2). 속성 이름은
- * 대소문자를 가리지 않는다. 지원하지 않는 path 는 조용히 무시하지 않고 거절한다 — IdP 는 2xx 를
- * 받으면 반영됐다고 믿고 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다. 조직은
- * {@link GroupChange} 로 정리만 하고 적용은 유스케이스가 한다.
+ * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName·externalId 를 다룬다(S-3 설계 §7.2, 설계 2026-10-06 §4). 속성 이름은
+ * 대소문자를 가리지 않는다. 저장하는 속성은 엄격하게 적용한다. RFC 7643 이 정의했지만 저장하지 않는 직원 속성은 path 로 와도 받아서
+ * 버린다 — 저장하지도 돌려주지도 않으니 불일치가 보일 곳이 없다. 거절하면 오히려 같은 요청의 비활성화까지 막힌다(설계 2026-10-06 §3,
+ * 점검 M5). RFC 에 없는 path 만 400 이다. 조직은 {@link GroupChange} 로 정리만 하고 적용은 유스케이스가 한다.
  */
 public final class ScimPatchApplier {
 
@@ -64,12 +65,17 @@ public final class ScimPatchApplier {
                 });
     }
 
-    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
+    /** 직원 PATCH. 받아서 버린 속성의 이름({@link ScimRfcAttributes} 의 정규 이름이나 {@code other})을 {@code 버림} 으로 넘긴다(설계 2026-10-06 §3.3). */
+    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch, Consumer<String> 버림) {
         DirectoryUser current = before;
         for (ScimOperation operation : operations(patch)) {
-            current = applyOne(current, operation);
+            current = applyOne(current, operation, 버림);
         }
         return current;
+    }
+
+    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
+        return applyToUser(before, patch, 이름 -> { });
     }
 
     private static List<ScimOperation> operations(ScimPatchOp patch) {
@@ -211,24 +217,31 @@ public final class ScimPatchApplier {
             "honorificprefix", PersonName::withHonorificPrefix,
             "honorificsuffix", PersonName::withHonorificSuffix);
 
-    private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation) {
+    private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation, Consumer<String> 버림) {
         String op = requireKnownOp(operation.op());
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
             requireTarget(op);
             requireReplaceOrAdd(op, operation.op());
-            return mergeUserAttributes(op, user, asAttributeMap(operation.value()));
+            return mergeUserAttributes(op, user, asAttributeMap(operation.value()), 버림);
         }
 
-        return applyPath(user, op, path.trim(), operation.value())
+        Optional<DirectoryUser> applied = applyPath(user, op, path.trim(), operation.value());
+        if (applied.isPresent()) {
+            return applied.get();
+        }
+        // 저장하지 않는 속성 — RFC 가 정의한 것이면 받아서 버리고, 모르는 것만 거절한다(설계 2026-10-06 §3.1)
+        String 버린것 = ScimRfcAttributes.userAttribute(path)
                 .orElseThrow(() -> ScimException.invalidPath("지원하지 않는 path 입니다: " + path));
+        버림.accept(버린것);
+        return user;
     }
 
     /**
-     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 몰라서 못 적용하면
-     * {@link Optional#empty()}. path 형식은 이를 400 {@code invalidPath} 로 바꾸고, 경로 없는 값은
-     * 그 키를 무시하고 원래 값을 지킨다(§7.3).
+     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 저장하지 않아 못 적용하면
+     * {@link Optional#empty()}. 그 뒤는 부르는 쪽이 정한다 — path 형식은 RFC 가 정의한 속성이면 받아서 버리고 아니면 400
+     * {@code invalidPath}, 경로 없는 값은 그 키를 무시하고 원래 값을 지킨다(설계 2026-10-06 §3).
      */
     private static Optional<DirectoryUser> applyPath(DirectoryUser user, String op, String path, Object value) {
         String target = stripCoreUrn(path);
@@ -299,13 +312,19 @@ public final class ScimPatchApplier {
 
     /**
      * 경로 없는 add/replace — 값 객체의 키마다 {@code (op, path=키, value=값)} 연산 하나로 보고
-     * {@link #applyPath} 로 적용한다(F1). 모르는 키(저장하지 않는 속성)는 무시한다(§7.3). Jackson 은
-     * 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
+     * {@link #applyPath} 로 적용한다(F1). 모르는 키는 지금처럼 무시한다(설계 2026-10-06 §3.4). 그 이름은 표의 정규 이름이나 {@code other} 로 알린다 —
+     * 요청 문자열을 메트릭 태그로 넘기지 않는다. Jackson 은 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
      */
-    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes) {
+    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes,
+                                                     Consumer<String> 버림) {
         DirectoryUser merged = user;
         for (Map.Entry<String, Object> entry : attributes.entrySet()) {
-            merged = applyPath(merged, op, entry.getKey(), entry.getValue()).orElse(merged);
+            Optional<DirectoryUser> applied = applyPath(merged, op, entry.getKey(), entry.getValue());
+            if (applied.isPresent()) {
+                merged = applied.get();
+            } else {
+                버림.accept(ScimRfcAttributes.userAttribute(entry.getKey()).orElse(ScimRfcAttributes.OTHER));
+            }
         }
         return merged;
     }
@@ -430,13 +449,22 @@ public final class ScimPatchApplier {
         return value == null ? null : value.toString();
     }
 
+    /**
+     * {@code active} 값 — JSON boolean, 또는 문자열 {@code "true"}/{@code "false"}(대소문자 무관, Entra 가 문자열로 보낸다)만 받는다.
+     * 그 밖을 거짓으로 읽으면 조용히 비활성화하므로 400 이다(설계 2026-10-06 §5.2, 점검 S8).
+     */
     private static boolean asBoolean(Object value) {
         if (value instanceof Boolean bool) {
             return bool;
         }
         if (value instanceof String text) {
-            return Boolean.parseBoolean(text);
+            if (text.equalsIgnoreCase("true")) {
+                return true;
+            }
+            if (text.equalsIgnoreCase("false")) {
+                return false;
+            }
         }
-        throw ScimException.invalidSyntax("boolean 값이 아닙니다: " + value);
+        throw ScimException.invalidValue("active 는 true 또는 false 여야 합니다: " + value);
     }
 }

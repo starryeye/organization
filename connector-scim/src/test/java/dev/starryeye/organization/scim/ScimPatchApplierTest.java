@@ -11,6 +11,8 @@ import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 
 import java.util.ArrayList;
@@ -594,13 +596,148 @@ class ScimPatchApplierTest {
     }
 
     @Test
-    @DisplayName("work 가 아닌 이메일 필터와 저장하지 않는 속성은 400 invalidPath 다")
-    void 저장하지_않는_경로는_invalidPath() {
-        거절한다(패치("replace", "emails[type eq \"home\"].value", "a@x.com"), "invalidPath");
-        거절한다(패치("replace", "title", "과장"), "invalidPath");
-        거절한다(패치("replace", "phoneNumbers[type eq \"mobile\"].value", "010"), "invalidPath");
-        거절한다(패치("replace", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department", "개발"),
-                "invalidPath");
+    @DisplayName("RFC 가 정의했지만 저장하지 않는 속성은 path 로 와도 받아서 버린다 — 직원은 그대로다(설계 2026-10-06 §3.1, 점검 M5)")
+    void 저장하지_않는_RFC_속성은_받아서_버린다() {
+        // given
+        var before = 이름있는_직원();
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(before, 패치(
+                new ScimOperation("replace", "emails[type eq \"home\"].value", "a@x.com"),
+                new ScimOperation("replace", "title", "과장"),
+                new ScimOperation("replace", "phoneNumbers[type eq \"mobile\"].value", "010"),
+                new ScimOperation("replace", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department", "개발")),
+                버린것::add);
+
+        // then
+        assertThat(after).isEqualTo(before);
+        assertThat(버린것).containsExactly("emails", "title", "phoneNumbers", "department");
+    }
+
+    @Test
+    @DisplayName("필터 없는 emails.value 는 적용하지 못하는 emails 모양이라 받아서 버린다")
+    void 필터_없는_emails_value_는_받아서_버린다() {
+        // given
+        var before = 이름있는_직원();
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(before, 패치("replace", "emails.value", "x@y.com"), 버린것::add);
+
+        // then
+        assertThat(after).isEqualTo(before);
+        assertThat(버린것).containsExactly("emails");
+    }
+
+    @Test
+    @DisplayName("점검 M5 의 Entra 요청 — 전화번호 path 연산과 경로 없는 active=false 가 한 요청에 오면 비활성화가 반영된다")
+    void 전화번호_path_가_섞여도_비활성화된다() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치(
+                new ScimOperation("replace", "phoneNumbers[type eq \"work\"].value", "010-1234-5678"),
+                new ScimOperation("replace", null, Map.of("active", false))), 버린것::add);
+
+        // then
+        assertThat(after.active()).isFalse();
+        assertThat(버린것).containsExactly("phoneNumbers");
+    }
+
+    @Test
+    @DisplayName("한 요청에 섞인 연산 — 저장하는 path 는 모두 반영되고 저장하지 않는 것만 버린다")
+    void 섞인_연산은_저장하는_것만_반영한다() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치(
+                new ScimOperation("replace", "addresses[type eq \"work\"].streetAddress", "판교로 1"),
+                new ScimOperation("replace", "displayName", "김철수(개명)"),
+                new ScimOperation("replace", null, Map.of("active", false, "nickName", "철이"))), 버린것::add);
+
+        // then
+        assertThat(after.displayName()).isEqualTo("김철수(개명)");
+        assertThat(after.active()).isFalse();
+        assertThat(버린것).containsExactly("addresses", "nickName");
+    }
+
+    @Test
+    @DisplayName("저장하는 work 이메일의 다른 하위 속성(.display)은 버리고 이메일은 그대로다")
+    void work_이메일의_display_는_버린다() {
+        // given
+        var before = 이름있는_직원();
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(before,
+                패치("replace", "emails[type eq \"work\"].display", "회사 메일"), 버린것::add);
+
+        // then
+        assertThat(after.email()).isEqualTo(before.email());
+        assertThat(버린것).containsExactly("emails");
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 모르는 키는 지금처럼 무시하되, 표에 없는 키의 이름은 other 로 알린다 — 요청 문자열을 그대로 넘기지 않는다")
+    void 경로_없는_값의_표_밖_키는_other() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치("replace", null, Map.of(
+                "urn:ietf:params:scim:schemas:extension:custom:2.0:User:costCenter", "C1")), 버린것::add);
+
+        // then
+        assertThat(after).isEqualTo(이름있는_직원());
+        assertThat(버린것).containsExactly("other");
+    }
+
+    @Test
+    @DisplayName("RFC 에 없는 path 는 지금처럼 400 invalidPath 다 — 오타·커스텀 확장·URN 없는 enterprise 이름·공통 속성 id")
+    void RFC_밖의_path는_invalidPath() {
+        // when, then
+        거절한다(패치("replace", "name.givenNmae", "철수"), "invalidPath");
+        거절한다(패치("replace", "phoneNumber", "010"), "invalidPath");
+        거절한다(패치("replace", "urn:ietf:params:scim:schemas:extension:custom:2.0:User:costCenter", "C1"), "invalidPath");
+        거절한다(패치("replace", "department", "개발"), "invalidPath");
+        거절한다(패치("replace", "id", "other-id"), "invalidPath");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"true", "True", "TRUE"})
+    @DisplayName("active 문자열 \"true\" 는 대소문자 없이 참이다 — Entra 는 문자열로 보낸다")
+    void active_문자열_참(String 값) {
+        // when
+        var after = ScimPatchApplier.applyToUser(직원(false), 패치("replace", "active", 값));
+
+        // then
+        assertThat(after.active()).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "False"})
+    @DisplayName("active 문자열 \"false\" 는 대소문자 없이 거짓이다")
+    void active_문자열_거짓(String 값) {
+        // when
+        var after = ScimPatchApplier.applyToUser(직원(true), 패치("replace", "active", 값));
+
+        // then
+        assertThat(after.active()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "1", " true", ""})
+    @DisplayName("active 의 그 밖의 문자열은 조용히 비활성화하지 않고 400 invalidValue 다(설계 2026-10-06 §5.2, 점검 S8)")
+    void active_의_그_밖_문자열은_invalidValue(String 값) {
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.applyToUser(직원(true), 패치("replace", "active", 값)))
+                .isInstanceOfSatisfying(ScimException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getScimType()).isEqualTo("invalidValue");
+                });
     }
 
     @Test
@@ -700,11 +837,20 @@ class ScimPatchApplierTest {
     }
 
     @Test
-    @DisplayName("확장 스키마 URN 이 붙은 path 는 모르는 경로라 400 invalidPath 다")
-    void 확장_스키마_URN_path는_invalidPath() {
-        거절한다(패치("replace",
-                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber", "Aklq"),
-                "invalidPath");
+    @DisplayName("enterprise 확장의 manager·employeeNumber path 는 받아서 버린다 — Entra 참조 실패로 세지지 않는다(점검 M18)")
+    void enterprise_속성은_받아서_버린다() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+
+        // when
+        var after = ScimPatchApplier.applyToUser(이름있는_직원(), 패치(
+                new ScimOperation("add", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager", "boss-1"),
+                new ScimOperation("replace", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber", "Aklq")),
+                버린것::add);
+
+        // then
+        assertThat(after).isEqualTo(이름있는_직원());
+        assertThat(버린것).containsExactly("manager", "employeeNumber");
     }
 
     // ---------- F3: 빈 userName ----------
