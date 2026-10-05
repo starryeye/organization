@@ -162,4 +162,49 @@ class IncrementalSyncCreateUniquenessTest {
         assertThat(state.groups.get("g-1").externalId()).isEqualTo("DEV009");
         assertThat(state.groups.get("g-1").displayName()).isEqualTo("개발본부(개명)");
     }
+
+    @Test
+    @DisplayName("조직 PATCH(증분)로 externalId 를 다른 조직의 값으로 바꾸면 409 이고 아무것도 쓰지 않는다(설계 2026-10-06 §4.1)")
+    void PATCH_로_externalId_를_남의_값으로_바꾸면_409다() {
+        // given
+        useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "개발본부", Set.of())).block();
+        useCase.createGroup(new DirectoryGroup("g-2", "DEV002", "백엔드팀", Set.of())).block();
+
+        // when
+        var 바꾸기 = useCase.changeGroup("g-2", GroupChange.delta().renamed("백엔드팀(개명)").reidentified("DEV001"));
+
+        // then
+        assertThatThrownBy(바꾸기::block).isInstanceOf(DirectoryConflictException.class).hasMessageContaining("externalId");
+        assertThat(state.groups.get("g-2").externalId()).isEqualTo("DEV002");
+        assertThat(state.groups.get("g-2").displayName()).isEqualTo("백엔드팀");
+    }
+
+    @Test
+    @DisplayName("조직 PATCH(증분)로 externalId 만 바꾸면 이름은 그대로다")
+    void PATCH_로_externalId_만_바꾼다() {
+        // given
+        useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "개발본부", Set.of())).block();
+
+        // when
+        useCase.changeGroup("g-1", GroupChange.delta().reidentified("DEV009")).block();
+
+        // then
+        assertThat(state.groups.get("g-1").externalId()).isEqualTo("DEV009");
+        assertThat(state.groups.get("g-1").displayName()).isEqualTo("개발본부");
+    }
+
+    @Test
+    @DisplayName("조직 PATCH 로 externalId 를 비우면, 다른 조직이 그 옛 값으로 만들어질 수 있다")
+    void externalId_를_비우면_옛_값을_다른_조직이_쓴다() {
+        // given
+        useCase.createGroup(new DirectoryGroup("g-1", "DEV001", "개발본부", Set.of())).block();
+        useCase.changeGroup("g-1", GroupChange.delta().reidentified(null)).block();
+
+        // when
+        useCase.createGroup(new DirectoryGroup("g-2", "DEV001", "새 개발본부", Set.of())).block();
+
+        // then
+        assertThat(state.groups.get("g-1").externalId()).isNull();
+        assertThat(state.groups.get("g-2").externalId()).isEqualTo("DEV001");
+    }
 }
