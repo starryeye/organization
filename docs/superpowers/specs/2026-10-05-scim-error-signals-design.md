@@ -198,6 +198,8 @@
   되풀이하고 ERROR 로그가 남는다.
 - **OpenFGA 쓰기 차단기가 결정적 거절(인가 모델 불일치 등)로 서도 `TupleWriteAbortedException` 은 표지라 503 이다.** 그 사고 동안 IdP 는 재시도를 계속한다(WARN 로그, 재적재로 복구).
 - **분류기는 알려진 라이브러리 예외만 안다** — 새 의존성의 장애 예외는 분류기에 더할 때까지 500 이다(안전한 쪽: 버그로 보인다).
+- **I/O 규칙은 `IOException` 전체다(Jackson 만 뺀다)** — 결정적인 설정 사고(`UnknownHostException`·`SSLHandshakeException`·모델 리소스의 `FileNotFoundException`)도 503 이 된다. 패키징·설정 사고에서만 생긴다(최종 검토에서 판단하지 않은 것).
+- **HEAD·OPTIONS 와 끝에 `/` 가 붙은 경로** — 실제 라우트는 정확한 메서드만 받아 HEAD·OPTIONS 는 405(`Allow` 에 GET 은 있고 HEAD 는 없다), `/scim/v2/Bulk/`·`/scim/v2/Users/` 처럼 `/` 가 붙은 경로는 501·405 가 아니라 404 다. SCIM 클라이언트는 쓰지 않는 모양이다.
 - **DynamoDB Local 이 조건 실패 때 기존 항목을 돌려주는지** — 확인했다: Local 2.5.3 은 돌려준다(§3.2). 실제 DynamoDB 도 지원한다(SDK 2.28 의 `ReturnValuesOnConditionCheckFailure`).
 
 ## 11. 범위 밖
