@@ -250,6 +250,27 @@ class ScimUserHandlerTest {
     }
 
     @Test
+    @DisplayName("직원 삭제가 일부 튜플을 지우지 못하면 503 + Retry-After 를 돌려 IdP 가 재시도하게 한다")
+    void 삭제의_부분_실패는_503이다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀",
+                Set.of(MemberRef.user("kim")))).block();
+        checker.allowed.add(RelationTuple.directMember("kim", "DEV002"));
+        writer.failFor(tuple -> true);
+
+        // when, then
+        client.delete().uri("/scim/v2/Users/kim")
+                .exchange()
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals("Retry-After", "10")
+                .expectBody()
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR)
+                .jsonPath("$.status").isEqualTo("503")
+                .jsonPath("$.detail").value(detail -> assertThat((String) detail).contains("kim"));
+    }
+
+    @Test
     @DisplayName("PUT 은 리소스를 통째로 교체한다")
     void PUT은_전체를_교체한다() {
         // given
@@ -281,6 +302,7 @@ class ScimUserHandlerTest {
                          "userName":"gd.hong","displayName":"홍길동"}""")
                 .exchange()
                 .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals("Retry-After", "10")
                 .expectBody()
                 .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
                 .jsonPath("$.status").isEqualTo("503");

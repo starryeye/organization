@@ -349,8 +349,8 @@ class ScimGroupHandlerTest {
     }
 
     @Test
-    @DisplayName("일부 튜플 적용에 실패하면 500 을 돌려 IdP 가 재시도하게 한다")
-    void 부분_실패는_500이다() {
+    @DisplayName("일부 튜플 적용에 실패하면 503 + Retry-After 를 돌려 IdP 가 재시도하게 한다")
+    void 부분_실패는_503이다() {
         // given
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
         state.saveGroup(new DirectoryGroup("DEV002", "DEV002", "백엔드팀", Set.of())).block();
@@ -365,9 +365,11 @@ class ScimGroupHandlerTest {
         client.patch().uri("/scim/v2/Groups/DEV002")
                 .contentType(MediaType.APPLICATION_JSON).bodyValue(patch)
                 .exchange()
-                .expectStatus().is5xxServerError()
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals("Retry-After", "10")
                 .expectBody()
-                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR);
+                .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR)
+                .jsonPath("$.status").isEqualTo("503");
     }
 
     @Test

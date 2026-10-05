@@ -3,6 +3,9 @@ package dev.starryeye.organization.scim;
 import lombok.Getter;
 import org.springframework.http.HttpStatus;
 
+import java.time.Duration;
+import java.util.Optional;
+
 /**
  * SCIM Error 응답(설계 §9.3)으로 번역되는 예외.
  *
@@ -13,11 +16,22 @@ public class ScimException extends RuntimeException {
 
     private final HttpStatus status;
     private final String scimType;
+    private final Duration retryAfter;
 
     public ScimException(HttpStatus status, String scimType, String detail) {
+        this(status, scimType, detail, null);
+    }
+
+    public ScimException(HttpStatus status, String scimType, String detail, Duration retryAfter) {
         super(detail);
         this.status = status;
         this.scimType = scimType;
+        this.retryAfter = retryAfter;
+    }
+
+    /** 다시 보내기 전에 기다릴 시간. 503 에만 있다. */
+    public Optional<Duration> getRetryAfter() {
+        return Optional.ofNullable(retryAfter);
     }
 
     public static ScimException notFound(String detail) {
@@ -61,7 +75,12 @@ public class ScimException extends RuntimeException {
         return new ScimException(HttpStatus.BAD_REQUEST, "noTarget", detail);
     }
 
-    /** 하위 시스템(OpenFGA/DynamoDB) 실패. IdP 가 재시도하도록 5xx 로 돌려준다. */
+    /** 다시 보내면 나을 수 있다 — 503 + Retry-After(설계 2026-10-05 §3.5). 부분 실패에 쓴다. */
+    public static ScimException temporarilyUnavailable(String detail, Duration retryAfter) {
+        return new ScimException(HttpStatus.SERVICE_UNAVAILABLE, null, detail, retryAfter);
+    }
+
+    /** 커밋 직후 다시 읽기가 빈 경우처럼 설명할 수 없는 상태 — 500 */
     public static ScimException internal(String detail) {
         return new ScimException(HttpStatus.INTERNAL_SERVER_ERROR, null, detail);
     }
