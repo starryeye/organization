@@ -10,6 +10,7 @@ import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
 import reactor.core.publisher.Mono;
 
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -17,16 +18,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * SCIM PATCH 연산을 도메인 객체에 적용한다.
  *
- * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName(S-3 설계 §7.2). 속성 이름은
- * 대소문자를 가리지 않는다. 지원하지 않는 path 는 조용히 무시하지 않고 거절한다 — IdP 는 2xx 를
- * 받으면 반영됐다고 믿고 다시 보내지 않으므로, 무시는 영구적인 상태 불일치가 된다. 조직은
- * {@link GroupChange} 로 정리만 하고 적용은 유스케이스가 한다.
+ * <p>직원은 우리가 저장하는 속성 전부, 조직은 members·displayName·externalId 를 다룬다(S-3 설계 §7.2, 설계 2026-10-06 §4). 속성 이름은
+ * 대소문자를 가리지 않는다. 저장하는 속성은 엄격하게 적용한다. RFC 7643 이 정의했지만 저장하지 않는 직원 속성은 path 로 와도 받아서
+ * 버린다 — 저장하지도 돌려주지도 않으니 불일치가 보일 곳이 없다. 거절하면 오히려 같은 요청의 비활성화까지 막힌다(설계 2026-10-06 §3,
+ * 점검 M5). RFC 에 없는 path 만 400 이다. 조직은 {@link GroupChange} 로 정리만 하고 적용은 유스케이스가 한다.
  */
 public final class ScimPatchApplier {
 
@@ -42,6 +44,29 @@ public final class ScimPatchApplier {
     /** 값 붙은 remove members — RFC 7644 에 없는 모양이라 "그 멤버만" 으로 추측하지 않는다(조직 멤버 PATCH 설계 §2·§7). */
     static final String REMOVE_WITH_VALUE = "members 에서 멤버를 골라 빼려면 path 에 필터를 쓰세요: members[value eq \"<id>\"]. "
             + "Microsoft Entra ID 는 SCIM 테넌트 URL 에 ?aadOptscim062020 을 붙이면 이 형식으로 보냅니다.";
+
+    /** 코어 스키마 URN 접두(RFC 7643 §3.10) — path·경로 없는 값의 키 모두에서 대소문자 없이 뗀다(F1). 직원은 User, 조직은 Group(설계 2026-10-06 §4.2). */
+    private static final String CORE_USER_URN = "urn:ietf:params:scim:schemas:core:2.0:user:";
+    private static final String CORE_GROUP_URN = "urn:ietf:params:scim:schemas:core:2.0:group:";
+
+    /** 코어 스키마 URN 접두를 대소문자 없이 뗀다 — 확장 스키마(enterprise 등) 접두는 그대로 두어 모르는 경로가 된다. */
+    private static String stripUrn(String name, String urn) {
+        if (name.length() > urn.length() && name.substring(0, urn.length()).equalsIgnoreCase(urn)) {
+            return name.substring(urn.length());
+        }
+        return name;
+    }
+
+    /** 조직 경로 없는 값 — 키의 Group URN 접두를 뗀 사본. 키 순서는 지킨다. 값 객체가 아니면 null(모으는 쪽은 예외를 던지지 않는다). */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> groupAttributesOrNull(Object value) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Map<String, Object> 정리 = new LinkedHashMap<>();
+        ((Map<String, Object>) map).forEach((key, v) -> 정리.put(stripUrn(key, CORE_GROUP_URN), v));
+        return 정리;
+    }
 
     /**
      * 조직 PATCH 를 <b>저장소를 읽지 않고</b> {@link GroupChange} 로 정리한다(조직 멤버 PATCH 설계 §4). 연산은 배열 순서대로 쌓인다.
@@ -64,12 +89,18 @@ public final class ScimPatchApplier {
                 });
     }
 
-    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
+    /** 직원 PATCH. 받아서 버린 속성의 이름({@link ScimRfcAttributes} 의 정규 이름이나 {@code other})을 {@code 버림} 으로 넘긴다(설계 2026-10-06 §3.3). */
+    public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch, Consumer<String> 버림) {
         DirectoryUser current = before;
         for (ScimOperation operation : operations(patch)) {
-            current = applyOne(current, operation);
+            current = applyOne(current, operation, 버림);
         }
         return current;
+    }
+
+    /** 받아서 버린 속성을 알리지 않는 판 — 테스트용이다. 운영 호출은 {@code 버림} 을 받는 쪽만 쓴다(버림 보고를 잃지 않게 패키지 안에 둔다). */
+    static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch) {
+        return applyToUser(before, patch, 이름 -> { });
     }
 
     private static List<ScimOperation> operations(ScimPatchOp patch) {
@@ -94,10 +125,11 @@ public final class ScimPatchApplier {
         String path = operation.path();
         Object members = null;
         if (path == null || path.isBlank()) {
-            if (operation.value() instanceof Map<?, ?> map) {
-                members = attribute((Map<String, Object>) map, "members");
+            Map<String, Object> attributes = groupAttributesOrNull(operation.value());
+            if (attributes != null) {
+                members = attribute(attributes, "members");
             }
-        } else if (path.trim().equalsIgnoreCase("members")) {
+        } else if (stripUrn(path.trim(), CORE_GROUP_URN).equalsIgnoreCase("members")) {
             members = operation.value();
         }
         if (!(members instanceof List<?> list)) {
@@ -125,10 +157,15 @@ public final class ScimPatchApplier {
         if (path == null || path.isBlank()) {
             requireTarget(op);
             requireReplaceOrAdd(op, operation.op());
-            return mergeGroupAttributes(change, op, asAttributeMap(operation.value()), 종류);
+            Map<String, Object> attributes = groupAttributesOrNull(operation.value());
+            if (attributes == null) {
+                throw ScimException.invalidSyntax("값은 객체여야 합니다");
+            }
+            return mergeGroupAttributes(change, op, attributes, 종류);
         }
 
-        Matcher filter = MEMBER_FILTER.matcher(path.trim());
+        String target = stripUrn(path.trim(), CORE_GROUP_URN);
+        Matcher filter = MEMBER_FILTER.matcher(target);
         if (filter.matches()) {
             if (!op.equals("remove")) {
                 throw ScimException.invalidPath(
@@ -137,7 +174,7 @@ public final class ScimPatchApplier {
             return change.removingId(memberId(filter.group("filter"), path));
         }
 
-        if (path.trim().equalsIgnoreCase("members")) {
+        if (target.equalsIgnoreCase("members")) {
             return switch (op) {
                 case "add" -> change.adding(toMemberRefs(operation.value(), 종류));
                 case "remove" -> {
@@ -152,12 +189,32 @@ public final class ScimPatchApplier {
             };
         }
 
-        if (path.trim().equalsIgnoreCase("displayName")) {
+        if (target.equalsIgnoreCase("displayName")) {
             requireReplaceOrAdd(op, operation.op());
             return change.renamed(asString(operation.value()));
         }
 
+        if (target.equalsIgnoreCase("externalId")) {
+            // RFC 7643 §3.1 readWrite — PUT 과 같은 중복 판정을 유스케이스가 락 안에서 한다(설계 2026-10-06 §4.1)
+            return switch (op) {
+                case "add", "replace" -> change.reidentified(groupExternalId(operation.value()));
+                case "remove" -> change.reidentified(null);
+                default -> throw ScimException.invalidSyntax("알 수 없는 op 입니다: " + operation.op());
+            };
+        }
+
         throw ScimException.invalidPath("지원하지 않는 path 입니다: " + path);
+    }
+
+    /**
+     * 조직 {@code externalId} 의 값 — 문자열(숫자·불리언은 문자열로)이어야 한다. 객체·배열을 {@code toString} 으로 저장하면 {@code {value=x}} 가
+     * 외부 아이디가 되고 중복 판정도 그 문자열로 돈다. PUT 은 Jackson 이 같은 모양을 400 으로 거절한다. {@code null} 은 비우기다.
+     */
+    private static String groupExternalId(Object value) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
+            throw ScimException.invalidValue("externalId 는 문자열이어야 합니다");
+        }
+        return asString(value);
     }
 
     /**
@@ -183,14 +240,18 @@ public final class ScimPatchApplier {
      */
     private static GroupChange mergeGroupAttributes(GroupChange change, String op, Map<String, Object> attributes,
                                                     Map<String, MemberType> 종류) {
-        GroupChange renamed = has(attributes, "displayName")
+        GroupChange merged = has(attributes, "displayName")
                 ? change.renamed(asString(attribute(attributes, "displayName")))
                 : change;
+        // 경로 없는 값의 externalId 도 path 와 같은 규칙이다 — 조용히 무시하지 않는다(설계 2026-10-06 §4.1, ④-1 이월)
+        if (has(attributes, "externalId")) {
+            merged = merged.reidentified(groupExternalId(attribute(attributes, "externalId")));
+        }
         if (!has(attributes, "members")) {
-            return renamed;
+            return merged;
         }
         Set<MemberRef> members = toMemberRefs(attribute(attributes, "members"), 종류);
-        return op.equals("add") ? renamed.adding(members) : renamed.replacing(members);
+        return op.equals("add") ? merged.adding(members) : merged.replacing(members);
     }
 
     // ---------- 직원 ----------
@@ -198,9 +259,6 @@ public final class ScimPatchApplier {
     /** {@code emails[type eq "work"]} 와 {@code .value} — 우리는 이메일을 하나만 담고 type "work" 로 내보낸다. */
     private static final Pattern EMAIL_FILTER = Pattern.compile(
             "^emails\\[\\s*type\\s+eq\\s+\"(?<type>[^\"]*)\"\\s*](?<value>\\.value)?$", Pattern.CASE_INSENSITIVE);
-
-    /** 코어 스키마 URN 접두(RFC 7643 §3.10) — path·경로 없는 값의 키 모두에서 대소문자 없이 뗀다(F1). */
-    private static final String CORE_USER_URN = "urn:ietf:params:scim:schemas:core:2.0:user:";
 
     /** {@code name} 의 하위 속성 여섯. 키는 소문자. */
     private static final Map<String, BiFunction<PersonName, String, PersonName>> NAME_PARTS = Map.of(
@@ -211,27 +269,34 @@ public final class ScimPatchApplier {
             "honorificprefix", PersonName::withHonorificPrefix,
             "honorificsuffix", PersonName::withHonorificSuffix);
 
-    private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation) {
+    private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation, Consumer<String> 버림) {
         String op = requireKnownOp(operation.op());
         String path = operation.path();
 
         if (path == null || path.isBlank()) {
             requireTarget(op);
             requireReplaceOrAdd(op, operation.op());
-            return mergeUserAttributes(op, user, asAttributeMap(operation.value()));
+            return mergeUserAttributes(op, user, asAttributeMap(operation.value()), 버림);
         }
 
-        return applyPath(user, op, path.trim(), operation.value())
+        Optional<DirectoryUser> applied = applyPath(user, op, path.trim(), operation.value());
+        if (applied.isPresent()) {
+            return applied.get();
+        }
+        // 저장하지 않는 속성 — RFC 가 정의한 것이면 받아서 버리고, 모르는 것만 거절한다(설계 2026-10-06 §3.1)
+        String 버린것 = ScimRfcAttributes.userAttribute(path)
                 .orElseThrow(() -> ScimException.invalidPath("지원하지 않는 path 입니다: " + path));
+        버림.accept(버린것);
+        return user;
     }
 
     /**
-     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 몰라서 못 적용하면
-     * {@link Optional#empty()}. path 형식은 이를 400 {@code invalidPath} 로 바꾸고, 경로 없는 값은
-     * 그 키를 무시하고 원래 값을 지킨다(§7.3).
+     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 저장하지 않아 못 적용하면
+     * {@link Optional#empty()}. 그 뒤는 부르는 쪽이 정한다 — path 형식은 RFC 가 정의한 속성이면 받아서 버리고 아니면 400
+     * {@code invalidPath}, 경로 없는 값은 그 키를 무시하고 원래 값을 지킨다(설계 2026-10-06 §3).
      */
     private static Optional<DirectoryUser> applyPath(DirectoryUser user, String op, String path, Object value) {
-        String target = stripCoreUrn(path);
+        String target = stripUrn(path, CORE_USER_URN);
         Matcher email = EMAIL_FILTER.matcher(target);
         if (email.matches()) {
             if (!email.group("type").equalsIgnoreCase("work")) {
@@ -273,15 +338,6 @@ public final class ScimPatchApplier {
         return user.withUserName(userName);
     }
 
-    /** 코어 스키마 URN 접두를 대소문자 없이 뗀다(F1) — 확장 스키마(enterprise 등) 접두는 그대로 두어 모르는 경로가 된다. */
-    private static String stripCoreUrn(String path) {
-        if (path.length() > CORE_USER_URN.length()
-                && path.substring(0, CORE_USER_URN.length()).equalsIgnoreCase(CORE_USER_URN)) {
-            return path.substring(CORE_USER_URN.length());
-        }
-        return path;
-    }
-
     /** RFC 7644 §3.5.2.3 — 이메일이 없는데 replace 하면 가리킬 값이 없다. add 는 새로 담는다. */
     private static DirectoryUser applyWorkEmail(DirectoryUser user, String op, Object value,
                                                 Matcher filter, String path) {
@@ -299,13 +355,19 @@ public final class ScimPatchApplier {
 
     /**
      * 경로 없는 add/replace — 값 객체의 키마다 {@code (op, path=키, value=값)} 연산 하나로 보고
-     * {@link #applyPath} 로 적용한다(F1). 모르는 키(저장하지 않는 속성)는 무시한다(§7.3). Jackson 은
-     * 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
+     * {@link #applyPath} 로 적용한다(F1). 모르는 키는 지금처럼 무시한다(설계 2026-10-06 §3.4). 그 이름은 표의 정규 이름이나 {@code other} 로 알린다 —
+     * 요청 문자열을 메트릭 태그로 넘기지 않는다. Jackson 은 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
      */
-    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes) {
+    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes,
+                                                     Consumer<String> 버림) {
         DirectoryUser merged = user;
         for (Map.Entry<String, Object> entry : attributes.entrySet()) {
-            merged = applyPath(merged, op, entry.getKey(), entry.getValue()).orElse(merged);
+            Optional<DirectoryUser> applied = applyPath(merged, op, entry.getKey(), entry.getValue());
+            if (applied.isPresent()) {
+                merged = applied.get();
+            } else {
+                버림.accept(ScimRfcAttributes.userAttribute(entry.getKey()).orElse(ScimRfcAttributes.OTHER));
+            }
         }
         return merged;
     }
@@ -430,13 +492,22 @@ public final class ScimPatchApplier {
         return value == null ? null : value.toString();
     }
 
+    /**
+     * {@code active} 값 — JSON boolean, 또는 문자열 {@code "true"}/{@code "false"}(대소문자 무관, Entra 가 문자열로 보낸다)만 받는다.
+     * 그 밖을 거짓으로 읽으면 조용히 비활성화하므로 400 이다(설계 2026-10-06 §5.2, 점검 S8).
+     */
     private static boolean asBoolean(Object value) {
         if (value instanceof Boolean bool) {
             return bool;
         }
         if (value instanceof String text) {
-            return Boolean.parseBoolean(text);
+            if (text.equalsIgnoreCase("true")) {
+                return true;
+            }
+            if (text.equalsIgnoreCase("false")) {
+                return false;
+            }
         }
-        throw ScimException.invalidSyntax("boolean 값이 아닙니다: " + value);
+        throw ScimException.invalidValue("active 는 true 또는 false 여야 합니다: " + value);
     }
 }

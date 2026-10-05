@@ -531,14 +531,24 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센
 값이다. 서버 루트 조회(`GET /scim/v2?filter=`)는 501 이다. 설계: `docs/superpowers/specs/2026-09-25-scim-list-filter-design.md`.
 
-지원하는 PATCH는 다음이 전부다.
+**거절하는 조회 모양.** 위 표 밖의 필터는 400 `invalidFilter` 다. "표준이 정한 신호만 받는다" 는 원칙에 따른 알려진 제한이고, 다음 IdP 요청이 여기에 걸린다.
+
+- `manager` 필터 — Entra 의 참조 확인 `filter=id eq "a" and manager eq "b"`. `manager` 를 PATCH path 로 보내는 요청은 받아서 버려 200 이지만(아래) 이 필터는 여전히 400 이다.
+- 이메일 매칭 — Entra 의 `filter=emails[type eq "work"].value eq "x"`.
+- `co` 연산자 — Ping 의 관리자 필터 `email Co "…"`.
+- JumpCloud 가 재연결 때 이메일로 하는 조회(요청 모양은 확인하지 못했다).
+
+IdP 의 매칭 속성은 `userName` 이나 `externalId` 를 쓴다.
+
+적용하는 PATCH는 다음이 전부다. 저장하지 않는 직원 속성은 이 표 밖이지만 받아서 버린다(아래 "우리가 저장하는 직원 속성은").
 
 | 대상 | `path` | 지원 `op` |
 |---|---|---|
 | Group | `members` | `add` / `replace` / `remove` — `value` 가 없으면 전원 빼기(RFC 7644 §3.5.2.2), **`value` 가 있으면 400 `invalidValue`** |
 | Group | `members[value eq "..."]` | `remove` — 값은 큰따옴표 JSON 문자열(이스케이프 풀림). 작은따옴표로 감싸면 400 `invalidFilter`. 토큰 사이 공백은 한 칸 |
 | Group | `displayName` | `replace` / `add` |
-| Group | (path 없음) | `replace` / `add` — `displayName` 은 바꾸고, `members` 는 `add` 면 추가·`replace` 면 교체(RFC 7644 §3.5.2.1·§3.5.2.3) |
+| Group | `externalId` | `replace` / `add` / `remove`(비움) — PUT 과 같은 중복 판정이라 다른 조직과 겹치면 409 `uniqueness` |
+| Group | (path 없음) | `replace` / `add` — `displayName`·`externalId` 는 바꾸고, `members` 는 `add` 면 추가·`replace` 면 교체(RFC 7644 §3.5.2.1·§3.5.2.3) |
 | User | `userName` | `replace` / `add`(null·빈 문자열·공백만이면 400 `invalidValue`) (`remove` 는 400 `mutability` — 필수 속성) |
 | User | `displayName` / `externalId` / `active` | `replace` / `add` / `remove`(비움. `active` 는 "없음" = 활성) |
 | User | `name`, `name.givenName`·`familyName`·`middleName`·`formatted`·`honorificPrefix`·`honorificSuffix` | `replace` / `add`(`name` 은 준 하위 속성만 바꿈) / `remove` |
@@ -546,8 +556,9 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | User | `emails[type eq "work"]` / `emails[type eq "work"].value` | `add` / `replace`(이메일이 없으면 400 `noTarget`) / `remove`(비움) |
 | User | (path 없음) | `replace` / `add` — 위 속성 전부를 병합 |
 
-그 외 path는 조용히 무시하지 않고 `invalidPath`로 400을 돌려준다 — IdP가 실제로는 반영되지
-않은 변경을 반영됐다고 오해하면 안 되기 때문이다.
+조직 PATCH 는 `path` 와 경로 없는 값의 키 모두 코어 Group URN 접두(`urn:ietf:params:scim:schemas:core:2.0:Group:`, 대소문자 무시)를 붙여도
+받는다 — `…:Group:displayName` 은 `displayName` 과 같다. 표에 없는 조직 path 는 400 `invalidPath` 다. 직원의 표 밖 path 는 RFC 가
+정의한 속성이면 받아서 버리고 RFC 에 없는 것만 400 이다.
 
 **조직 PATCH 는 `attributes` 가 없으면 성공 시 `204 No Content` 다**(본문 없음). RFC 7644 §3.5.2 가 허용하고, Entra 는 조직 PATCH 에
 멤버 전체를 담아 돌려주는 것을 권하지 않으며 Okta 도 204 를 받는다. `attributes` 를 붙이면 RFC 가 MUST 로 정한 대로 200 과 요청한
@@ -565,7 +576,13 @@ members`, 경로 없는 `members`, `PUT`)는 저장된 멤버 아이디를 한 �
 교체는 바뀐) 멤버의 권한만 OpenFGA 와 맞춰 본다 — 조직 전원을 맞추려면 `POST /admin/sync/rebuild?mode=tuples` 다. 요청 본문은
 WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 413 이다(아래 "오류 응답").
 
-`op` 와 `path` 의 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1).
+**요청 형식.**
+
+- 본문의 속성 이름은 대소문자를 가리지 않는다(RFC 7643 §2.1) — `"Members"`·`"Active"`·`"Filter"` 도 읽는다. `op`·`path`·PATCH 값 객체의 키도 같다. 같은 속성이
+  대소문자만 달리 두 번 오면 어느 값이 쓰이는지는 정하지 않았다. 응답의 속성 이름은 RFC 표기 그대로다.
+- PATCH 의 `active` 는 JSON boolean 이나 문자열 `"true"`/`"false"`(대소문자 무관 — Entra 가 문자열로 보낸다는 문서 근거가 있다)만 받는다. 그 밖(`"yes"`·`"1"`·`" true"`)은 400
+  `invalidValue` 이고 비활성화하지 않는다. POST·PUT 본문의 `active` 가 `"yes"` 처럼 boolean 으로 읽히지 않는 문자열이어도 400 이다.
+- 직원·조직 POST 의 201 에는 `Location` 헤더가 붙는다. 값은 본문 `meta.location` 과 같은 상대 경로(`/scim/v2/Users/<id>`, `/scim/v2/Groups/<id>`)다(RFC 7644 §3.3).
 
 **`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 무작위 UUID(v4, 소문자 하이픈)를 새로 만들어 응답으로 돌려주고,
 요청 본문의 `id` 는 무시한다. IdP 는 이 `id` 를 저장해 PATCH·PUT·DELETE 의 경로와 조직의 `members[].value` 에 쓴다. PUT 도 경로의 `id` 가
@@ -577,23 +594,38 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 
 
 **`userName` 은 POST·PUT·PATCH 모두에서 대소문자를 무시하고 유일하다**(RFC 7643 `uniqueness: server`, `caseExact: false`). 겹치면
 409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
-PUT 도 같다(조직 PATCH 는 `externalId` 를 바꿀 수 없다 — 경로로 지정하면 400 `invalidPath`). RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. 응답을 잃은 POST 를 IdP 가 재시도하면 같은 조직이
-둘 생겨 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
+PUT 도 같다(PATCH 도 같다 — path `externalId` 와 경로 없는 값의 `externalId` 키 모두. remove 는 비운다). RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. `externalId` 가 있는 조직이면 응답을 잃은 POST 를 IdP 가 재시도해 같은 조직이
+둘 생기고 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
 보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본
 테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만) 저장된 직원과 대소문자만 다른 이름, 방금 저장된 조직과 같은 `externalId` 는 드물게 통과할 수 있다.
 설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`, `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`.
 
+**`externalId` 없는 조직 POST 는 재시도를 막지 못한다.** Okta 식으로 `externalId` 없이 조직을 만들고(서버가 새 `id` 를 발급한다) IdP 가 응답을 잃어
+같은 POST 를 재시도하면 같은 이름의 조직이 둘 생길 수 있다. 조직 `displayName` 은 겹쳐도 되는 속성(RFC 7643 §8.7.1 Group 스키마, `uniqueness: none`)이고 POST 는
+멱등이 아니라서 표준에 막을 신호가 없다 — 이름으로 막으면 이름이 같은 정상 조직도 막힌다. 응답을 잃은 쪽이 재시도 찌꺼기이고 멤버가 없다(Okta 는 빈 조직을 만들고 PATCH 로
+채운다). 관리 API `GET /admin/organizations?displayName=…` 로 같은 이름의 조직을 찾고(접두사 검색이라 이름이 더 긴 조직도 함께 나온다) 조직 상세로 멤버 없는 쪽을 가려낸다. IdP 가 조직 `externalId` 를
+보낼 수 있으면 매핑한다 — 그러면 재시도가 409 로 막힌다.
+
 **경로 없는(path 없이 값 객체를 보내는) add/replace 도 같은 규칙으로 푼다.** 값 객체의 키 하나하나를
 `path`로 봐서 위 표와 똑같이 해석한다 — `name.givenName`, `emails[type eq "work"].value`, 코어 스키마
-URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`, 대소문자 무시)까지 그대로 받는다. 다만 저장하지
-않는 속성 키는 POST 본문과 똑같이 조용히 무시한다 — `invalidPath` 400 은 **path 형식에서만** 난다. 그래서
-Entra 의 표준 호환 모드(`aadOptscim062020`)로 지우지 않고 남겨 둔 속성 매핑은 400 이 아니라 조용히
-버려진다 — 운영자가 "반영은 안 됐지만 오류도 안 났다"는 것을 알고 있어야 한다.
+URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`, 대소문자 무시)까지 그대로 받는다. 다른 점은 하나다 — RFC 에 없는 키(오타, 커스텀 확장 키)는
+조용히 무시한다. `invalidPath` 400 은 **path 형식에서만** 난다.
 
 **우리가 저장하는 직원 속성은** `userName`, `displayName`, `externalId`, `active`, `name`(여섯 칸), 이메일 하나(`type: "work"`)
-뿐이다. `title`, `phoneNumbers`, `addresses`, 엔터프라이즈 확장(`department`, `manager` 등)을 경로로 PATCH 하면 400
-`invalidPath` 다 — 반영되지 않은 변경을 반영됐다고 IdP 가 오해하지 않게 하려는 것이다. **IdP 의 속성 매핑에서 이 속성들을 뺀다**
-(Entra 는 기본 매핑에 넣을 수 있다).
+뿐이다. 이 속성들은 적용할 수 있는 모양이면 엄격하게 적용한다(예: `userName` remove·빈 값은 400). 이메일의 다른 모양(work 가 아닌 type, 필터 없는 `emails.value`, `.display`)은 아래처럼 받아서 버린다. 나머지는 RFC 가 정의했는지로 가른다.
+
+- **RFC 7643 이 정의했지만 저장하지 않는 속성은 path 로 와도, 경로 없는 값으로 와도 받아서 버린다**(직원 PATCH 는 200 이다). 코어 User 의
+  `title`·`phoneNumbers`·`addresses`·`nickName`·work 가 아닌 이메일 등, enterprise 확장(`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:`)의
+  `department`·`employeeNumber`·`manager` 등이다. 거절하지 않는 까닭은 PATCH 가 원자적이라(RFC 7644 §3.5.2) 이 속성 하나를 400 으로 거절하면 같은 요청의
+  `active=false` 까지 반영되지 않아 퇴사자 권한이 남기 때문이다. 그래서 IdP 매핑에 이 속성들이 남아 있어도 같은 요청의 비활성화를 막지 않는다. 대신 응답에는 "반영되지 않았다" 는 흔적이 없다 —
+  아래 메트릭으로 본다.
+- **RFC 에 없는 path 는 400 `invalidPath` 다** — 오타(`name.givenNmae`), 커스텀 확장(`urn:…:extension:<이름>:2.0:User:…`), URN 없는 enterprise 이름(`department`).
+  커스텀 확장을 path 로 보내는 테넌트는 그 요청 전체가 실패하므로, Entra 는 `aadOptscim062020` 을 켜거나 커스텀 확장 매핑을 뺀다. 같은 키가 경로 없는 값으로 오면 무시한다.
+- **이메일은 `emails`, `emails[type eq "work"]`, `emails[type eq "work"].value` 만 적용한다.** `emails[primary eq true].value` 처럼 저장된 이메일을 고르는 다른 필터나 필터 없는
+  `emails.value` 는 적용하지 못해 받아서 버린다 — 그 모양으로 보내는 IdP 는 이메일 갱신이 조용히 빠진다(메트릭 `attribute=emails` 로 보인다).
+- **받아서 버린 속성은 `scim_patch_ignored_total{attribute}` 로 본다**(Micrometer 이름 `scim.patch.ignored`). 태그는 RFC 이름(`phoneNumbers`, `manager`)이나 `other`(표에 없는
+  경로 없는 값의 키)뿐이고 요청 문자열은 태그가 되지 않는다. 한 요청에서 이름마다 한 번 센다. 로그는 직원 PATCH 한 건에 DEBUG 한 줄이고 아이디와 속성 이름만 남는다 —
+  값(전화번호·주소)은 개인정보라 남기지 않는다. WARN 이 아닌 까닭은 IdP 가 갱신마다 같은 연산을 다시 보낼 수 있어서다.
 
 `members[].value`는 IdP 가 받은 `id` 다. 지금도 `IdNormalizer` 를 거치지만 UUID 에는 바꿀 글자가 없어 그대로다.
 `members[].type`은 RFC 7643에서 선택 필드라 없을 수 있는데, 그때는 User로 단정하지 않고
@@ -762,6 +794,8 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 이 값이 계속 오르면(0이 아니면) **`POST /admin/sync/rebuild?mode=tuples`로 재적재를 실행하라**는
 신호다 — 다만 이 지표는 "누군가 다시 건드린 리소스"에서만 드러난다. 아무도 건드리지 않는
 어긋남까지 잡는 주기적 대조는 아직 없다(아래 follow-ups 참고).
+
+**`scim.patch.ignored`(Counter, 태그 `attribute`)** — 직원 PATCH 가 받아서 버린 RFC 속성이다. 태그 `attribute` 는 RFC 이름 또는 `other` 다. 꾸준히 오르는 이름이 있으면 IdP 매핑에서 빼도 된다는 신호다.
 
 ## 불변 id 로 옮기기
 

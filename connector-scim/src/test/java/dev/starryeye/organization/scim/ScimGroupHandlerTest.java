@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.jayway.jsonpath.JsonPath;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
@@ -506,6 +508,60 @@ class ScimGroupHandlerTest {
     void 없는_조직_DELETE는_404다() {
         client.delete().uri("/scim/v2/Groups/NONE").exchange().expectStatus().isNotFound();
         assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직 POST 201 에 Location 헤더가 있고 본문 meta.location 과 같다(점검 S1)")
+    void 조직_POST_는_Location_을_단다() {
+        // when
+        var result = client.post().uri("/scim/v2/Groups")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"개발본부"}
+                        """)
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody().returnResult();
+
+        // then
+        String body = new String(result.getResponseBody(), StandardCharsets.UTF_8);
+        String id = JsonPath.read(body, "$.id");
+        assertThat(result.getResponseHeaders().getLocation()).hasToString("/scim/v2/Groups/" + id);
+        assertThat((String) JsonPath.read(body, "$.meta.location")).isEqualTo("/scim/v2/Groups/" + id);
+    }
+
+    @Test
+    @DisplayName("조직 PUT 의 \"Members\" 도 멤버다 — 대소문자가 달라 멤버 전원이 지워지지 않는다(RFC 7643 §2.1, 점검 S6)")
+    void 조직_PUT_Members_대소문자() {
+        // given — 직원 하나와 그 직원을 멤버로 둔 조직
+        String userId = 만든다("/scim/v2/Users", """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"kim","active":true}
+                """);
+        String groupId = 만든다("/scim/v2/Groups", """
+                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"개발본부",
+                 "members":[{"value":"%s","type":"User"}]}
+                """.formatted(userId));
+
+        // when
+        client.put().uri("/scim/v2/Groups/" + groupId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"DisplayName":"개발본부",
+                         "Members":[{"Value":"%s","Type":"User"}]}
+                        """.formatted(userId))
+                .exchange()
+                .expectStatus().isOk();
+
+        // then
+        assertThat(state.groups.get(groupId).members()).containsExactly(MemberRef.user(userId));
+    }
+
+    /** POST 하고 받은 id. */
+    private String 만든다(String uri, String body) {
+        return JsonPath.read(new String(client.post().uri(uri)
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .exchange().expectStatus().isCreated()
+                .expectBody().returnResult().getResponseBody(), StandardCharsets.UTF_8), "$.id");
     }
 
     @Test

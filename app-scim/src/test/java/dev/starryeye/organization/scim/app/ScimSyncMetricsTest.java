@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -62,5 +63,17 @@ class ScimSyncMetricsTest {
 
         // then
         assertThat(registry.counter("scim.lock.lease_lost").count()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("받아서 버린 속성은 이름 태그를 달고 하나씩 오른다(설계 2026-10-06 §3.3)")
+    void 버린_속성을_센다() {
+        // when
+        metrics.ignored(Set.of("phoneNumbers", "other"));
+        metrics.ignored(Set.of("phoneNumbers"));
+
+        // then
+        assertThat(registry.counter("scim.patch.ignored", "attribute", "phoneNumbers").count()).isEqualTo(2);
+        assertThat(registry.counter("scim.patch.ignored", "attribute", "other").count()).isEqualTo(1);
     }
 }

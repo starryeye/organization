@@ -254,7 +254,7 @@ class ScimRequestRendererTest {
 
         // when
         var after = ScimPatchApplier.applyToUser(before,
-                JSON을_거친다(ScimRequestRenderer.직원비활성(before.id())));
+                JSON을_거친다(ScimRequestRenderer.직원비활성(before.id())), 이름 -> { });
 
         // then
         assertThat(after.active()).isFalse();

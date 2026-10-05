@@ -150,7 +150,7 @@ public final class ScimMapper {
                 user.displayName(),
                 emails,
                 user.active(),
-                new ScimMeta("User", "/scim/v2/Users/" + user.id()));
+                new ScimMeta("User", userLocation(user.id())));
     }
 
     public static ScimGroup toScimGroup(DirectoryGroup group) {
@@ -164,7 +164,7 @@ public final class ScimMapper {
                 group.externalId(),
                 group.displayName(),
                 members,
-                new ScimMeta("Group", "/scim/v2/Groups/" + group.id()));
+                new ScimMeta("Group", groupLocation(group.id())));
     }
 
     /** 멤버 없이 조직을 그린다 — {@code members} 가 응답에 필요 없을 때 멤버 줄을 읽지 않기 위해서다. */
@@ -175,7 +175,16 @@ public final class ScimMapper {
                 header.externalId(),
                 header.displayName(),
                 null,
-                new ScimMeta("Group", "/scim/v2/Groups/" + header.id()));
+                new ScimMeta("Group", groupLocation(header.id())));
+    }
+
+    /** 리소스 위치 — 본문 {@code meta.location} 과 POST 201 의 {@code Location} 이 같은 값을 쓴다(RFC 7644 §3.3). 아이디는 서버 발급 UUID 라 인코딩할 글자가 없다(④-1). */
+    public static String userLocation(String id) {
+        return "/scim/v2/Users/" + id;
+    }
+
+    public static String groupLocation(String id) {
+        return "/scim/v2/Groups/" + id;
     }
 
     private static String firstNonBlank(String... candidates) {

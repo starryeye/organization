@@ -15,7 +15,7 @@ import java.util.function.Predicate;
  * 멤버십을 보고 판단하는 일(지금 멤버인가, id 빼기가 직원·하위 조직 중 무엇인가)은 유스케이스가 락 안에서 한다.
  *
  * @param renames      이름을 바꾸는가. {@code displayName} 은 이것이 참일 때만 뜻이 있다(null 도 값이다)
- * @param reidentifies {@code externalId} 를 바꾸는가 — PUT 만 참이다
+ * @param reidentifies {@code externalId} 를 바꾸는가 — PUT, 그리고 {@code externalId} 를 다루는 PATCH 가 참이다
  * @param base         전체 교체의 시작 목록. 증분이면 null
  * @param ops          멤버 연산. 순서가 뜻이다
  */
@@ -54,6 +54,14 @@ public record GroupChange(boolean renames, String displayName,
 
     public GroupChange renamed(String newDisplayName) {
         return new GroupChange(true, newDisplayName, reidentifies, externalId, base, ops);
+    }
+
+    /**
+     * {@code externalId} 를 바꾼다(null 이면 비운다). 유스케이스가 헤더의 값이 바뀌었을 때만 PUT 과 같은 중복 판정을 락 안에서 한다
+     * (설계 2026-10-06 §4.1, RFC 7643 §3.1 readWrite).
+     */
+    public GroupChange reidentified(String newExternalId) {
+        return new GroupChange(renames, displayName, true, newExternalId, base, ops);
     }
 
     /** 목표 목록을 정한다. 앞의 멤버 연산은 이 목록에 덮여 뜻이 없어진다. */

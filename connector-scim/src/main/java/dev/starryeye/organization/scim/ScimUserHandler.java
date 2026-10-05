@@ -6,21 +6,37 @@ import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
 import dev.starryeye.organization.scim.dto.ScimUser;
-import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.net.URI;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
-@RequiredArgsConstructor
+@Slf4j
 public class ScimUserHandler {
 
     private final DirectoryStateRepository state;
     private final IncrementalSyncUseCase sync;
+    private final IgnoredAttributeObserver ignoredAttributes;
+
+    public ScimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync) {
+        this(state, sync, IgnoredAttributeObserver.NOOP);
+    }
+
+    public ScimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync,
+                           IgnoredAttributeObserver ignoredAttributes) {
+        this.state = state;
+        this.sync = sync;
+        this.ignoredAttributes = ignoredAttributes;
+    }
 
     public Mono<ServerResponse> create(ServerRequest request) {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimUser.class)
@@ -60,9 +76,24 @@ public class ScimUserHandler {
         String id = request.pathVariable("id");
         return projection(request).flatMap(projection -> request.bodyToMono(ScimPatchOp.class)
                 .switchIfEmpty(Mono.error(ScimException.invalidSyntax("요청 본문이 비어 있습니다")))
-                .flatMap(patch -> sync.changeUser(id, before -> ScimPatchApplier.applyToUser(before, patch))
-                        .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id))))
+                .flatMap(patch -> {
+                    // 락 안의 계산이 다시 돌 수 있어 집합으로 모은다
+                    Set<String> 버린것 = ConcurrentHashMap.newKeySet();
+                    return sync.changeUser(id, before -> ScimPatchApplier.applyToUser(before, patch, 버린것::add))
+                            .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
+                            .doOnNext(result -> 버린것을_알린다(id, 버린것));
+                })
                 .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
+    }
+
+    /** 받아서 버린 속성 — 이름만 남긴다. 값(전화번호·주소)은 개인정보라 로그에 싣지 않는다(설계 2026-10-06 §3.3). WARN 이 아닌 까닭: IdP 가 갱신마다 다시 보낸다. */
+    private void 버린것을_알린다(String id, Set<String> 버린것) {
+        if (버린것.isEmpty()) {
+            return;
+        }
+        Set<String> 이름들 = new TreeSet<>(버린것);
+        log.debug("SCIM 직원 PATCH 가 저장하지 않는 속성을 받아서 버렸다: id={}, 속성={}", id, 이름들);
+        ignoredAttributes.ignored(Set.copyOf(이름들));
     }
 
     public Mono<ServerResponse> delete(ServerRequest request) {
@@ -89,9 +120,14 @@ public class ScimUserHandler {
         }
         return state.findUser(id)
                 .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
-                .flatMap(saved -> ServerResponse.status(status)
-                        .contentType(SCIM_JSON)
-                        .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(saved)))));
+                .flatMap(saved -> {
+                    ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
+                    // 생성은 Location 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3)
+                    if (status == HttpStatus.CREATED) {
+                        builder.location(URI.create(ScimMapper.userLocation(id)));
+                    }
+                    return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(saved))));
+                });
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */

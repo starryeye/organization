@@ -16,9 +16,11 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 @Configuration
 public class ScimConfig {
 
+    /** 받아서 버린 속성을 알릴 관찰자가 있으면 단다 — app-scim 의 메트릭(설계 2026-10-06 §3.3). 없으면 아무 일도 하지 않는다. */
     @Bean
-    public ScimUserHandler scimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync) {
-        return new ScimUserHandler(state, sync);
+    public ScimUserHandler scimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync,
+                                           ObjectProvider<IgnoredAttributeObserver> ignoredAttributes) {
+        return new ScimUserHandler(state, sync, ignoredAttributes.getIfAvailable(() -> IgnoredAttributeObserver.NOOP));
     }
 
     @Bean
