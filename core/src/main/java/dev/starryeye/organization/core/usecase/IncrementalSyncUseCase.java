@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import lombok.RequiredArgsConstructor;
@@ -668,7 +669,7 @@ public class IncrementalSyncUseCase {
                     .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
                             .filter(LockUnavailableException.class::isInstance))
                     .onErrorMap(Exceptions::isRetryExhausted,
-                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다"))
+                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다", 마지막_대기(error)))
                     // DynamoDB 장애 등 락 이외의 예외도 503 으로 옮긴다 (설계 §6).
                     .onErrorMap(error -> !(error instanceof LockUnavailableException),
                             error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
@@ -683,6 +684,13 @@ public class IncrementalSyncUseCase {
                             .flatMap(끝 -> 반납한다(lease).thenReturn(끝))
                             .<IncrementalSyncResult>dematerialize());
         });
+    }
+
+    /** 재시도를 다 쓴 예외의 원인은 마지막 실패다 — 그 기다릴 시간(쥔 쪽의 용도)을 물려받는다. */
+    private static Duration 마지막_대기(Throwable 소진) {
+        return 소진.getCause() instanceof TemporaryFailureException 마지막
+                ? 마지막.retryAfter()
+                : TemporaryFailureException.기본_대기;
     }
 
     /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */
