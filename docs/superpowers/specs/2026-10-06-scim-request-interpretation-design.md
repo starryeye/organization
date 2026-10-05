@@ -13,7 +13,7 @@
 
 | 항목 | 지금 | 결과 |
 |---|---|---|
-| M5 | 저장하지 않는 속성을 **path 형**으로 보내면 400 `invalidPath` 다. 예: `phoneNumbers[type eq "work"].value`, `addresses[…]`, `title`, enterprise `department` | PATCH 는 원자적이다(RFC 7644 §3.5.2). 그래서 같은 요청의 `active=false` 도 반영되지 않고 **퇴사자 권한이 남는다**. Entra 기본 매핑에 이 속성들이 있고, 옵션(`aadOptscim062020`) 없이는 모든 속성이 path 형으로 온다. 같은 속성이 **경로 없는 값 객체**로 오면 무시하고 204 다 — 모양에 따라 결과가 갈린다 |
+| M5 | 저장하지 않는 속성을 **path 형**으로 보내면 400 `invalidPath` 다. 예: `phoneNumbers[type eq "work"].value`, `addresses[…]`, `title`, enterprise `department` | PATCH 는 원자적이다(RFC 7644 §3.5.2). 그래서 같은 요청의 `active=false` 도 반영되지 않고 **퇴사자 권한이 남는다**. Entra 기본 매핑에 이 속성들이 있고, 옵션(`aadOptscim062020`) 없이는 모든 속성이 path 형으로 온다. 같은 속성이 **경로 없는 값 객체**로 오면 무시하고 200 이다(직원 PATCH 는 리소스를 돌려준다) — 모양에 따라 결과가 갈린다 |
 | M18 | enterprise `manager` path PATCH 가 400 이다 | Entra 는 이것을 참조 실패로 센다. 10만 명 초기 동기화에서 관리자가 있는 직원이 6만 명을 넘으면 격리 상한에 닿는다(추정) |
 | ④-1 이월 | 조직 PATCH 의 `externalId` — path 형은 400 `invalidPath`, 경로 없는 값의 키는 **조용히 무시** | IdP 는 204 를 받고 반영됐다고 믿는다. `externalId` 는 우리가 저장하는 속성이고 RFC 에서 readWrite 다 |
 | S9 | 조직 PATCH 가 코어 Group URN 접두(`urn:ietf:params:scim:schemas:core:2.0:Group:displayName`)를 모른다 | path 형은 400 이다. 값 객체로 오면 204 인데 이름이 안 바뀐다. 직원 쪽은 이미 코어 User URN 을 뗀다 |
@@ -48,11 +48,14 @@
 3. 우리가 저장하는 속성이면 지금처럼 적용한다. 적용할 수 없는 모양이면 지금처럼 오류다.
 4. 적용하지 못했을 때:
    - **무시하고 성공**: 속성이 §3.2 표에 있고, 하위 속성이 없거나 그 속성의 RFC 하위 속성일 때. 무시한 속성 이름을 기록한다(§3.3).
-     예: `phoneNumbers[type eq "work"].value`, `addresses[type eq "work"].streetAddress`, `emails[type eq "other"]`, `…:enterprise:2.0:User:manager`, `title`, `department`, `groups`, `password`.
+     예: `phoneNumbers[type eq "work"].value`, `addresses[type eq "work"].streetAddress`, `emails[type eq "other"]`, `…:enterprise:2.0:User:manager`, `…:enterprise:2.0:User:department`, `title`, `groups`, `password`.
    - **그 밖은 지금처럼 400 `invalidPath`**. 예: `name.givenNmae`(오타), `phoneNumber`, 커스텀 확장 `urn:…:extension:<이름>:2.0:User:…`.
 5. 공통 속성 `id`·`meta` 는 표에 넣지 않는다. path 로 오면 지금처럼 400 이다. 이렇게 보내는 IdP 는 없다.
 
 `emails` 는 우리가 하나(`type: "work"`)만 저장하는 복수 속성이다. `emails[type eq "work"]` 와 그 `.value` 는 지금처럼 적용한다. 다른 `type` 이나 `.display` 같은 하위 속성은 4번 규칙으로 무시한다.
+
+- **구현 중 정한 것 — URN 없는 enterprise 이름은 400 이다.** 맨 `department` 가 여기에 든다. RFC 7644 §3.10 은 확장 속성을 URN 으로 완전히 쓰라 하고, Entra 매핑 대상도 URN 이름이다. URN 없이 보내는 IdP 근거는 없다.
+- **구현 중 정한 것 — 필터 없는 `emails.value` 는 받아서 버린다.** 전에는 400 이었다. 우리가 적용하지 못하는 `emails` 모양이라 4번 규칙을 그대로 따른다. 저장된 work 이메일을 고를 수 있는 필터(`emails[primary eq true].value`, `emails[value eq "…"].value`)도 같다. 한계는 §11 에 적는다.
 
 ### 3.2 RFC 표
 
@@ -71,7 +74,7 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 
 ### 3.3 보이게 하기
 
-- `ScimPatchApplier` 가 적용 결과와 함께 무시한 속성 이름들을 돌려준다.
+- `ScimPatchApplier.applyToUser` 가 받아서 버린 속성 이름을 `Consumer<String>` 으로 넘긴다. 이름은 §3.2 표의 정규 이름이나 `other` 다.
 - 직원 PATCH 핸들러는 무시한 것이 있으면 다음 둘을 한다:
   - **DEBUG 한 줄**을 남긴다. 아이디와 무시한 이름 목록만 담고 **값은 남기지 않는다**(전화번호·주소는 개인정보다).
   - connector-scim 의 관찰자 인터페이스 `IgnoredAttributeObserver` 로 알린다.
@@ -79,6 +82,10 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
   - 태그 값은 §3.2 표의 정규 이름이다. 표에 없는 키(§3.4 의 경로 없는 값)는 `other` 로 묶는다. **요청 문자열을 태그에 그대로 넣지 않는다** — 태그 수가 늘 유한하다.
   - 관찰자가 없으면 아무 일도 하지 않는다. 테스트와 다른 조립이 여기에 든다.
 - WARN 으로 남기지 않는다. Entra 가 갱신마다 같은 연산을 다시 실을 것이므로(추정) 경고가 정상 흐름이 된다. 앞서 `type` 없는 멤버의 경고를 요약 한 줄로 줄인 것(P1)과 같은 이유다.
+- **구현 중 정한 것 — 메트릭은 요청 하나에서 이름마다 한 번 센다.** 핸들러가 이름을 집합으로 모으기 때문이다.
+  - 변경이 성공한 뒤에만 센다. 뒤 연산이 400 이면 세지 않는다(테스트로 고정).
+  - 부분 실패 503 은 세고, 그 재시도도 다시 센다. 관측 카운터의 가장자리다.
+- **구현 중 정한 것 — 경로 없는 값에서 enterprise 확장 객체 키 `urn:…:enterprise:2.0:User`(끝 콜론 없음)는 태그 `other` 다.** 표는 속성 이름으로 찾기 때문이다.
 
 ### 3.4 경로 없는 값 객체 — 그대로
 
@@ -112,6 +119,8 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 - `ScimPatchOp` 의 `"Operations"`(RFC 가 대문자로 정함)는 `"operations"` 로 와도 받는다.
 - PATCH 값 객체 안의 키는 이미 대소문자 없이 읽는다(`ScimPatchApplier.attribute`).
 - 응답 직렬화는 바뀌지 않는다.
+- **구현 중 정한 것 — 확인했다: 관리 API 는 SCIM DTO 를 쓰지 않는다.** 그래서 영향이 없다.
+- **구현 중 정한 것 — 같은 속성이 대소문자만 달리 두 번 오면 어느 값이 쓰이는지는 정하지 않았다.** Jackson 에 맡긴다. 이것은 §11 에 적는다.
 
 ### 5.2 PATCH 의 `active` 값 (S8)
 
@@ -120,6 +129,7 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
   - 문자열 `"true"`/`"false"`(대소문자 무관). Entra 가 `"True"`/`"False"` 를 문자열로 보낸다는 근거가 문서에 있다.
 - 그 밖은 400 `invalidValue` 다(`"yes"`, `"1"`, `" true"`). 조용히 비활성화하지 않는다.
 - POST·PUT 본문의 `active`(`Boolean`)는 Jackson 이 boolean 이 아닌 문자열을 이미 400 으로 거절한다. 이것은 테스트로 확인만 한다.
+- **구현 중 정한 것 — POST·PUT 본문의 `"active":"yes"` 는 바꾸기 전에도 Jackson 이 400 으로 거절했다.** 이를 확인 테스트로 고정했다.
 
 ### 5.3 `Location` (S1)
 
@@ -144,13 +154,14 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
   - M5·M18·S1·S6·S8·S9 와 ④-1 이월에 해결 표시를 한다.
   - S5 앞부분·S12 에는 "문서로 정리" 표시를 한다.
   - ⑤-1 과 같은 모양을 쓴다.
+  - **구현 중 정한 것 — 점검 문서에는 ④-1 이월 행이 없어 표시하지 않는다.** 이월은 ④-1 설계(§3.2)와 이 설계의 §4.1 이 기록한다.
 
 ## 7. 바뀌는 곳
 
 | 모듈 | 바뀌는 것 |
 |---|---|
 | core | `GroupChange.reidentified` |
-| connector-scim | `ScimRfcAttributes`(새), `IgnoredAttributeObserver`(새). `ScimPatchApplier`: §3.1 판정, 무시 목록 반환, 조직 `externalId`·Group URN, `active` 값. DTO 여덟에 대소문자 무시. 핸들러: `Location`, DEBUG 한 줄, 관찰자. `ScimConfig`: 관찰자 주입, 없으면 아무 일도 안 함 |
+| connector-scim | `ScimRfcAttributes`(새), `IgnoredAttributeObserver`(새). `ScimPatchApplier`: §3.1 판정, 받아서 버린 이름 알림, 조직 `externalId`·Group URN, `active` 값. DTO 여덟에 대소문자 무시. 핸들러: `Location`, DEBUG 한 줄, 관찰자. `ScimConfig`: 관찰자 주입, 없으면 아무 일도 안 함 |
 | app-scim | `ScimSyncMetrics` 가 `IgnoredAttributeObserver` 를 구현(`scim.patch.ignored`), 조립 |
 | 문서 | README SCIM 절, 점검 문서 |
 
@@ -162,8 +173,8 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 
 | 무엇 | 어떻게 | 어디 |
 |---|---|---|
-| M5 회귀 | 점검 문서의 Entra 요청 — `phoneNumbers[type eq "work"].value` replace + 경로 없는 `{"active":false}` — 이 204 이고 비활성화가 반영된다 | connector-scim 핸들러, app-scim e2e |
-| 무시 규칙 | 다음 path 가 204 이고 아무것도 바뀌지 않는다: `addresses[…].streetAddress`, `emails[type eq "other"]`, enterprise `manager`·`department`, `title`, 코어 URN 접두가 붙은 `title` | connector-scim `ScimPatchApplierTest` |
+| M5 회귀 | 점검 문서의 Entra 요청 — `phoneNumbers[type eq "work"].value` replace + 경로 없는 `{"active":false}` — 이 200 이고 비활성화가 반영된다(직원 PATCH 는 200 과 리소스를 돌려준다) | connector-scim 핸들러, app-scim e2e |
+| 무시 규칙 | 다음 path 가 오류 없이 지나가고(직원 PATCH 는 200) 아무것도 바뀌지 않는다: `addresses[…].streetAddress`, `emails[type eq "other"]`, `…:enterprise:2.0:User:manager`·`…:enterprise:2.0:User:department`, `title`, 코어 URN 접두가 붙은 `title` | connector-scim `ScimPatchApplierTest` |
 | 400 유지 | `name.givenNmae`, `phoneNumber`, 커스텀 확장 path, `id` 가 400 `invalidPath` 다 | connector-scim |
 | 보이게 하기 | 무시한 이름이 관찰자로 가고, 라벨은 표의 정규 이름 또는 `other` 다. DEBUG 줄에 값이 없다 | connector-scim, app-scim `ScimSyncMetrics` |
 | 조직 `externalId` | path·경로 없는 값·remove 가 `externalId` 를 바꾼다. 다른 조직의 값이면 409 이고 아무것도 바뀌지 않는다. 같은 값이면 확인 없이 지나간다 | connector-scim, core, app-scim e2e |
@@ -172,6 +183,11 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 | S8 | `true`·`false`·`"True"`·`"false"` 는 반영되고, `"yes"`·`"1"`·`" true"` 는 400 `invalidValue` 이고 바뀌지 않는다. POST 본문의 `"active":"yes"` 는 400 | connector-scim |
 | S1 | 직원·조직 POST 의 `Location` 이 본문 `meta.location` 과 같다 | connector-scim 핸들러, app-scim e2e |
 | 규모 | 기존 규모 테스트 전체가 바뀐 적용기를 지난다 — 머지 전 `test`·`scaleTest` 둘 다 | 전체 |
+
+- **구현 중 정한 것 — app-scim `ScimNameEndToEndTest` 의 "저장하지 않는 속성은 거절한다" 를 새 규칙으로 바꿨다.**
+  - `title` 은 받아서 버리고 `name.givenName` 은 반영한다.
+  - `name.givenNmae` 는 400 이다.
+  - 계획은 같은 모듈 테스트만 짚었다. 이 테스트는 작업별 검토가 찾았다.
 
 ## 9. 결과 (구현 후 기록)
 
@@ -194,11 +210,13 @@ RFC 7643 은 2015 년 이후 바뀌지 않았다. 표를 손볼 일은 RFC 가 �
 ## 11. 이 설계가 말할 수 없는 것
 
 - **커스텀 확장 path 는 여전히 400 이다** — 같은 키를 경로 없는 값으로 보내면 무시한다(§3.4). Entra 커스텀 확장을 옵션 없이(path 형으로) 보내는 테넌트는 그 속성이 든 PATCH 의 비활성화가 막힌다.
-- **"Entra 가 같은 연산을 매번 다시 싣는다" 는 추정이다.** 맞든 틀리든 이제는 204 라 해가 없다.
+- **"Entra 가 같은 연산을 매번 다시 싣는다" 는 추정이다.** 맞든 틀리든 이제는 직원 PATCH 가 200 이라 해가 없다.
 - **RFC 가 읽기 전용으로 정한 `groups` 도 무시한다.** 엄밀히는 400 `mutability` 다. 이렇게 보내는 IdP 근거는 없고, 경로 없는 값에서는 원래 무시했다.
 - **`Location` 은 상대 참조다.**
 - **S5 앞부분은 막지 않는다** — 재시도 찌꺼기 조직이 남을 수 있다(§6).
 - **Entra·Okta 실제 요청으로 확인하지 못했다.** 요청 모양은 점검 문서의 문서 근거를 따른다.
+- **저장하는 `emails` 의 우리가 적용하지 못하는 모양도 받아서 버린다.** 필터 없는 `emails.value`, 저장된 work 이메일을 고를 수 있는 다른 필터가 여기에 든다. 그 모양으로 보내는 IdP 는 이메일 갱신이 조용히 빠진다. 메트릭 `attribute=emails` 로 보인다.
+- **같은 속성이 대소문자만 달리 두 번 온 본문의 결과는 정하지 않았다.**
 
 ## 12. 범위 밖
 
