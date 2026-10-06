@@ -281,6 +281,13 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 직원 검색은 `userName`·`displayName`·`externalId` 중 **정확히 하나**를, 조직 검색은 `displayName`·`externalId` 중
 **정확히 하나**를 줘야 한다. 없거나 둘 이상이면 400이다.
 
+**조직 멤버 목록의 커서.** `GET /admin/organizations/{orgCode}/members` 의 `cursor` 는 불투명 문자열이다 — 응답의 `nextCursor` 를 그대로 다음
+요청의 `?cursor=` 에 넘긴다. 직원 아이디 순으로 조직 파티션에서 한 쪽(`limit`, 기본 20)씩만 읽고, 쪽 사이에 멤버가 바뀌어도 이미 준 직원을 다시 주거나
+그대로 있는 직원을 건너뛰지 않는다. `nextCursor` 는 저장소(DynamoDB)가 다음 쪽이 있을 수 있다고 알릴 때만 온다 — 마지막 쪽이 정확히 `limit` 명으로
+끝나면 `items` 가 빈 쪽이 한 번 더 오고, 거기서 `nextCursor` 가 null 이다. 다른 조직·다른 검색이 발급한 커서, 형식이 깨진 커서, 이 조직의 직원
+멤버 키가 아닌 값으로 고친 커서(정렬키가 DynamoDB 한도인 1024바이트를 넘는 것 포함)는 400 이다. 커서에 서명하지는 않으므로 같은 조직 안의 다른 위치로
+고친 커서는 그 위치부터 읽는다. **조직 상세는 멤버 첫 쪽만 읽는다** — 조직 파티션 전체를 읽지 않으므로 멤버가 10만 명인 조직도 멤버는 쪽 크기(20명)만큼만 읽는다.
+
 **식별자 셋.** 직원에는 이름이 다른 세 값이 붙는다.
 
 - `employeeId` — **불변 id**. 실제로 OpenFGA 튜플(`user:{employeeId}`)에 실리는 값이다. SCIM은 서버가 발급한 UUID, LDAP은
@@ -530,6 +537,16 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
 동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센
 값이다. 서버 루트 조회(`GET /scim/v2?filter=`)는 501 이다. 설계: `docs/superpowers/specs/2026-09-25-scim-list-filter-design.md`.
+
+**멤버를 싣는 조직 응답은 흘려 쓴다.** `members` 가 응답에 남는 조직 응답 — `GET /Groups/{id}`, `GET /Groups`·`POST /Groups/.search` 의 목록,
+POST·PUT 의 응답, `attributes` 를 붙인 PATCH 의 응답 — 은 본문을 `Content-Length` 없이 청크로 보낸다. 멤버를 DynamoDB 에서 한 쪽씩 읽는 대로
+JSON 으로 써 내보내고 메모리에 모으지 않으므로, 10만 명 조직 하나가 힙을 조직 크기만큼 차지하지 않는다. 클라이언트가 덜 받으면 다음 쪽을 읽지 않는다.
+읽는 양은 그대로 조직 전체다 — 멤버 전체를 달라는 요청이기 때문이다. Okta 가 그룹을 연결·푸시할 때 보내는 파라미터 없는 `GET /Groups/{id}` 와
+`excludedAttributes` 없는 `filter=displayName eq` 가 이 길이다. `excludedAttributes=members`(Entra 는 늘 붙인다)나 `members` 를 뺀 `attributes`
+를 붙이면 멤버 줄을 읽지 않고 이름표만 한 번에 보낸다. JSON 값은 예전과 같고 필드 순서만 다르다 — `members` 가 맨 뒤이고, 목록은 `itemsPerPage`
+가 맨 끝이다(실제로 쓴 조직 수 — 목록을 만든 뒤 지워진 조직은 건너뛴다). 멤버는 하위 조직이 먼저, 그다음 직원이고 각각 아이디 순이다. 조직 헤더를
+먼저 읽으므로 없는 조직의 404 와 이 단계의 저장소 장애(503)는 첫 바이트 전에 나간다. **첫 바이트가 나간 뒤 저장소가 실패하면 상태 코드를 바꿀 수 없어 연결이
+끊긴다** — 닫는 괄호를 쓰지 않으므로 완결된 200 JSON 은 나가지 않고, IdP 에는 네트워크 오류로 보인다. 설계: `docs/superpowers/specs/2026-10-06-read-paths-design.md`.
 
 **거절하는 조회 모양.** 위 표 밖의 필터는 400 `invalidFilter` 다. "표준이 정한 신호만 받는다" 는 원칙에 따른 알려진 제한이고, 다음 IdP 요청이 여기에 걸린다.
 
@@ -817,7 +834,7 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 ./gradlew scaleTest   # 규모 테스트만 — 머지 전에 돌린다
 ```
 
-**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 16개 클래스(`@ScaleTest`
+**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 17개 클래스(`@ScaleTest`
 가 붙은 것)가 전체 시간의 대부분(약 9분)을 차지해서다. 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
 않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
 테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.

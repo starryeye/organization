@@ -38,7 +38,7 @@
 1. 조직 헤더를 GetItem(강한 일관성)으로 읽는다. 없으면 404(지금과 같다).
 2. 직원 멤버 한 쪽을 Query 로 읽는다.
    - 조건: `PK = GROUP#<orgCode>`, `SK begins_with MEMBER#USER#`, `Limit = limit`, 강한 일관성.
-   - 정렬키만 읽는다(`ProjectionExpression`).
+   - `PK`·`SK` 만 읽는다(`ProjectionExpression`, `LastEvaluatedKey` 가 그 둘이다).
    - 커서가 있으면 그 위치부터 읽는다.
    - 정렬키가 아이디 순이라 응답 순서는 지금과 같다(아이디 오름차순).
 3. 다음 쪽 커서는 DynamoDB 의 `LastEvaluatedKey` 가 있을 때만 준다(표준 신호). 쪽이 정확히 끝나면 마지막에 빈 쪽이 한 번 올 수 있다.
@@ -49,21 +49,25 @@
    - `SK` 가 `MEMBER#USER#` 로 시작한다.
 
    형식만 맞춘 위조 커서가 DynamoDB `ValidationException` 으로 500 이 되는 길(S16 앞쪽)을 이 엔드포인트에서는 막는다.
-6. 한 쪽의 직원 읽기와 권한 Check 는 지금처럼 쪽 크기만큼 병렬로 한다(설계 §8.2 의 동시성 그대로).
+6. 한 쪽에 든 직원의 읽기와 권한 Check 는 지금처럼 병렬(동시 8)로 하고 결과는 쪽 순서를 지킨다(설계 §8.2 의 동시성 그대로).
+
+구현 중 정한 것: 위조 시작 키 검사에 `SK` 가 1024바이트(UTF-8)를 넘으면 400 을 더했다. 이유: DynamoDB 정렬키 한도다. DynamoDB Local 은 거절하지 않지만, 실제 DynamoDB 는 `ValidationException` 을 내 500 이 된다.
 
 ### 3.2 조직 상세 `GET /admin/organizations/{orgCode}`
 
 - 헤더 GetItem, 하위 조직, 멤버 첫 쪽(§3.1 과 같은 Query)만 읽는다.
-- 하위 조직은 `MEMBER#GROUP#` 접두로 정렬키만 읽고, 상한(`MAX_PATHS`)까지만 읽는다. 상한을 넘으면 지금처럼 경고하고 자른다.
+- 하위 조직은 `MEMBER#GROUP#` 접두로 정렬키만 읽고, 쪽 단위로 이어 읽다가 상한(`MAX_PATHS`)을 넘기면 멈춘다(그 쪽 안의 줄은 읽는다). 상한을 넘으면 지금처럼 경고하고 자른다.
 - 상위 계층은 지금 방식 그대로다(소속 줄을 따라 올라가 조직 크기와 무관하다).
 - 응답 모양(`OrganizationDetail`)은 바뀌지 않는다.
 
 ### 3.3 바뀌는 포트
 
 - 직원 멤버 아이디 한 쪽을 커서로 읽는 메서드를 관리 API 검색 포트(`DirectorySearchRepository`)에 둔다. 커서를 다루는 다른 검색과 같은 곳이다.
-- 하위 조직 아이디를 읽는 메서드를 상태 포트(`DirectoryStateRepository`)에 둔다. 상한까지 읽고 멈출 수 있게 `Flux` 로 낸다.
-- 이름은 계획에서 정한다.
+- 하위 조직 아이디를 읽는 메서드(`findChildOrgCodes`)도 상태 포트가 아니라 검색 포트(`DirectorySearchRepository`)에 둔다. 상한까지 읽고 멈출 수 있게 `Flux` 로 낸다.
+- 이름은 `findGroupUserMemberIds`·`findChildOrgCodes` 다.
 - `AdminQueryUseCase` 의 두 진입점에서 `findGroup` 을 뺀다. 오프셋 커서 파싱(`parseCursor`)도 없앤다.
+
+구현 중 정한 것: 하위 조직 아이디 메서드를 상태 포트에 두지 않고 검색 포트에 두었다. 이유: 검색 포트의 자바독이 "조회 관심사를 쓰기 경로의 심장(상태 포트)에 얹지 않는다" 를 원칙으로 둔다.
 
 ### 3.4 규모
 
@@ -92,11 +96,23 @@
 3. **멤버.**
    - 기존 `findMemberRefs`(정렬키만, 강한 일관성)를 DynamoDB 한 쪽씩 이어 읽는다.
    - 멤버 하나를 `{"value":<id>,"type":"User"|"Group"}` 로 직렬화한다. 하위 속성 투영(`members.value` 등)이 있으면 멤버마다 적용한다.
-   - 일정 개수씩 묶어 흘려보낸다(묶음 크기는 계획에서 정한다).
+   - 멤버 100명씩 묶어 흘려보낸다(묶음 크기를 정한 이유는 아래).
    - 멤버 순서는 지금과 같다(정렬키 순: 하위 조직이 먼저, 그다음 직원, 각각 아이디 순).
 4. **뒷부분.** `]}` 로 닫는다.
 5. 응답 본문은 `Flux<DataBuffer>` 다. `Content-Length` 없이 청크로 간다.
 6. **아래로부터 오는 끌어당김을 따른다.** 클라이언트가 덜 받으면 다음 DynamoDB 쪽을 읽지 않는다.
+
+구현 중 정한 것 — 쪽 읽기 `Paginator`: 전역으로 `concatMapIterable(…, 1)` 로 바꿨다. 많아야 한 쪽만 앞서 읽는다.
+- 이유: 기본 prefetch 32 는 멈춘 소비자 아래에서 최대 32쪽을 미리 읽었다. 검토자가 재현했다: 요청 5개 뒤 멈추면 6쪽을 다 읽었다.
+- 배압 테스트가 이것을 고정한다(Query ≤ 2).
+- 이 바꿈은 `findGroup`·재적재 훑기 같은 다른 전체 읽기에도 걸린다. 소비가 끊기지 않으면 쪽을 연달아 읽어 결과는 같다.
+
+구현 중 정한 것 — 멤버 묶음 크기: 1,000 이 아니라 100 이다.
+- 이유: Reactor Netty 1.3.7 의 보내기는 버퍼 128개를 미리 당긴다(`reactor.netty.send.maxPrefetchSize`, 기본 128 — jar 로 확인).
+- 1,000명 묶음(약 50KB)이면 느린 클라이언트 연결당 약 6MB(10만 명 응답 전체)까지 쌓였다. 100명 묶음이면 약 0.6MB 에서 멈춘다.
+- Netty 속성은 전역이라 바꾸지 않았다.
+
+구현 중 정한 것: 목록의 조직 사이 쉼표는 조직 앞부분에 붙인다. 빈 버퍼를 내지 않는다.
 
 ### 4.3 목록 (`GET /Groups`, `.search`)
 
@@ -115,8 +131,13 @@
 
 ### 4.5 코드 자리
 
-- connector-scim 에 조직 응답을 흘려 쓰는 클래스 하나를 둔다. `ScimGroupHandler` 와 `ScimGroupListing` 이 함께 쓴다.
+- connector-scim 에 조직 응답을 흘려 쓰는 클래스 하나(`ScimGroupStream`)를 둔다. `ScimGroupHandler` 와 `ScimGroupListing` 이 함께 쓴다.
 - 멤버를 싣지 않는 경로와 직원 응답은 지금 그대로다(트리 → `bodyValue`).
+
+구현 중 정한 것: `ScimGroupStream.group`·`list` 는 늘 `members` 를 쓴다.
+- 부른 쪽이 `projection.includes("members")` 일 때만 부른다. 목록은 `count > 0` 일 때만 부른다.
+- 아니면 지금처럼 이름표 트리 응답을 쓴다.
+- 그 갈래는 `ScimGroupHandler.body` 와 `ScimListHandler.groupsResponse` 에 있다.
 
 ### 4.6 원칙과의 관계
 
@@ -136,9 +157,9 @@
 
 | 모듈 | 바뀌는 것 |
 |---|---|
-| core | 포트 메서드 둘(직원 멤버 한 쪽·하위 조직 아이디). `AdminQueryUseCase` 의 조직 상세·멤버 목록이 `findGroup` 을 쓰지 않는다. 오프셋 커서 제거 |
-| storage-dynamodb | 두 포트 메서드 구현(`MEMBER#USER#`·`MEMBER#GROUP#` 접두 Query, 커서 범위·시작 키 검사) |
-| admin-api | 커서 형식이 불투명 문자열로 바뀐다(엔드포인트 모양은 같다) |
+| core | 검색 포트(`DirectorySearchRepository`)에 메서드 둘(직원 멤버 한 쪽·하위 조직 아이디). `AdminQueryUseCase` 의 조직 상세·멤버 목록이 `findGroup` 을 쓰지 않는다. 오프셋 커서 제거 |
+| storage-dynamodb | 검색 포트의 두 메서드 구현(`MEMBER#USER#`·`MEMBER#GROUP#` 접두 Query, 커서 범위·시작 키 검사). `Paginator` 는 많아야 한 쪽만 앞서 읽는다 |
+| admin-api | 코드는 그대로다(커서는 이미 문자열로 넘기고 `IllegalArgumentException` 을 400 으로 옮긴다). 멤버 목록 커서 값이 오프셋 숫자에서 불투명 문자열로 바뀐다(엔드포인트 모양은 같다) |
 | connector-scim | 조직 응답 흘려 쓰기 클래스(새), `ScimGroupHandler`·`ScimGroupListing` 이 멤버를 실을 때 그것을 쓴다 |
 | 문서 | README 관리 API·SCIM 절, 점검 문서 |
 
@@ -146,14 +167,18 @@
 
 | 무엇 | 어떻게 | 어디 |
 |---|---|---|
-| P4 멤버 쪽 | 쪽 크기만큼 아이디 순, 커서로 이어 읽기, 끝 쪽, 망가진 커서·다른 조직 커서·`PK`/`SK` 가 이 조직의 직원 멤버가 아닌 위조 커서는 400 | storage(DynamoDB Local), core, admin-api |
+| P4 멤버 쪽 | 쪽 크기만큼 아이디 순, 커서로 이어 읽기, 끝 쪽, 망가진 커서·다른 조직 커서·`PK`/`SK` 가 이 조직의 직원 멤버가 아닌 위조 커서는 400 | storage(DynamoDB Local), core(검색 포트의 거절을 그대로 흘린다 — 400 으로 옮기는 것은 admin-api 의 기존 매핑) |
 | P4 조직 상세 | `findGroup` 을 부르지 않는다(가짜 저장소). 하위 조직 상한 | core |
-| P4 규모 | 10만 명 조직 첫 쪽이 읽은 아이템이 쪽 크기 수준이다(`DynamoDbReadCounter`) | 기존 10만 명 규모 테스트에 측정 하나 |
+| P4 규모 | 10만 명 조직의 멤버 첫 쪽과 조직 상세가 읽은 아이템이 쪽 크기 수준이다(`DynamoDbReadCounter`) | 새 규모 테스트 `ScimLargeGroupReadScaleTest`(app-scim) |
 | P5 응답 모양 | 지금과 같은 JSON. 투영(`attributes`·`excludedAttributes`·`members.value`), 404, 목록 중간에 지워진 조직은 건너뛰고 `itemsPerPage` 가 실제 수 | connector-scim |
 | P5 흘려 쓰기 | `Content-Length` 없음. 멤버를 쪽 단위로 이어 읽고, 끝까지 받지 않으면 다음 쪽을 읽지 않는다 | connector-scim, storage(Paginator) |
 | P5 도중 오류 | 멤버 중간에 저장소가 실패하면 완결된 200 JSON 이 나가지 않는다 | connector-scim |
-| P5 규모 | 10만 명 조직 `GET /Groups/{id}` 응답에 멤버 100,000개, 걸린 시간 기록 | 규모 테스트 |
+| P5 규모 | 10만 명 조직 `GET /Groups/{id}` 응답에 멤버 100,000개, 걸린 시간 기록 | 같은 클래스 `ScimLargeGroupReadScaleTest`(app-scim) |
 | 전체 | 머지 전 `test`·`scaleTest` 둘 다 | 전체 |
+
+구현 중 정한 것: P4·P5 규모 측정은 기존 10만 명 규모 테스트에 붙이지 않고 새 클래스 `ScimLargeGroupReadScaleTest`(app-scim)에 모았다. 이 클래스가 자기 10만 명 조직을 심는다.
+- 이유: 기존 10만 명 클래스(`ScimGroupMemberPatchScaleTest`)는 끝에서 자기 조직을 지워, 읽기 측정을 그 뒤에 붙일 수 없다.
+- 비용: 10만 명을 한 번 더 심는다(약 48초).
 
 ## 8. 왜 다른 길을 안 갔나
 
@@ -172,9 +197,13 @@
 ## 10. 이 설계가 말할 수 없는 것
 
 - **메모리가 실제로 고정되는지는 수치로 단정하지 않는다.** 힙 측정은 흔들림이 커서 테스트로 굳히기 어렵다. "끝까지 받지 않으면 다음 쪽을 읽지 않는다" 는 지연 읽기를 간접 근거로 고정한다.
+- **연결당 메모리 상한은 셈한 값이다.** Netty 보내기 창(버퍼 128개) × 묶음(멤버 100명, 약 5KB) ≈ 연결당 0.6MB 다. 클라이언트가 아무리 느려도 이보다 쌓이지 않는다.
+  - 이 값은 코드와 jar 상수로 셈한 것이다. 힙을 재 확인하지는 않았다.
 - **멤버를 싣는 큰 조직 조회는 여전히 멤버 전체를 읽는다**(§4.6). 그런 요청이 몰리면 DynamoDB 용량을 쓴다. 동시 요청 상한은 범위 밖이다.
 - **응답 도중 저장소 실패는 연결 끊김이다.** 첫 바이트가 나간 뒤에는 상태 코드를 바꿀 수 없다. IdP 는 네트워크 오류처럼 보고 다시 보낸다.
 - **여러 쪽 사이의 동시 쓰기는 반영이 섞일 수 있다.** 지금 `findGroup` 도 같다. 스냅샷 격리는 없다.
+- **헤더를 읽은 뒤 멤버를 읽기 전에, 또는 흘리는 도중에 조직이 지워질 수 있다.** 그러면 200 과 빈(또는 일찍 끝난) `members` 가 나간다.
+  - 첫 바이트 뒤라 상태를 바꿀 수 없다. 여러 쪽 사이의 동시 쓰기와 같은 성질이다.
 - **목록은 조직을 하나씩 차례로 읽어 지연이 는다.**
 - **관리 API 멤버 목록은 쪽이 정확히 끝나면 빈 마지막 쪽이 한 번 온다**(DynamoDB 신호를 그대로 씀).
 - **Okta 가 큰 조직 응답을 얼마나 기다리는지(요청 타임아웃)는 문서에 없다.**
