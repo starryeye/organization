@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -106,7 +107,66 @@ class ScimListHandlerTest {
     }
 
     @Test
-    @DisplayName("조직 쓰기 응답도 members 를 빼면 조직 파티션을 다시 읽지 않는다")
+    @DisplayName("멤버를 싣는 조직 목록은 흘려 쓴다 — Content-Length 가 없고 itemsPerPage 가 실제 수다(점검 P5)")
+    void 멤버를_싣는_목록은_흘려_쓴다() {
+        // when, then
+        client.get().uri("/scim/v2/Groups").exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
+                .expectHeader().doesNotExist(HttpHeaders.CONTENT_LENGTH)
+                .expectBody()
+                .jsonPath("$.itemsPerPage").isEqualTo(1)
+                .jsonPath("$.Resources[0].id").isEqualTo("DEV001")
+                .jsonPath("$.Resources[0].members[0].value").isEqualTo("Kim.Lee");
+        assertThat(state.findGroupCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직 .search 도 멤버를 싣고 필터가 있으면 흘려 쓴다 — 필터로 고른 조직의 멤버 줄만 읽는다")
+    void 멤버를_싣는_search_는_흘려_쓴다() {
+        // given
+        state.saveGroup(new DirectoryGroup("DEV002", "grp-dev2", "Backend", Set.of(MemberRef.user("park")))).block();
+        state.findGroupCalls.clear();
+        state.findMemberRefsCalls.clear();
+
+        // when, then
+        client.post().uri("/scim/v2/Groups/.search")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:SearchRequest"],
+                         "filter":"displayName eq \\"Backend\\"","startIndex":1,"count":10}
+                        """)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
+                .expectHeader().doesNotExist(HttpHeaders.CONTENT_LENGTH)
+                .expectBody()
+                .jsonPath("$.totalResults").isEqualTo(1)
+                .jsonPath("$.itemsPerPage").isEqualTo(1)
+                .jsonPath("$.Resources[0].id").isEqualTo("DEV002")
+                .jsonPath("$.Resources[0].members[0].value").isEqualTo("park");
+        assertThat(state.findGroupCalls).isEmpty();
+        assertThat(state.findMemberRefsCalls).containsExactly("DEV002");
+    }
+
+    @Test
+    @DisplayName("count=0 인 조직 목록은 멤버가 응답에 남아도 Resources 없이 전체 수만 주고 멤버 줄을 읽지 않는다")
+    void count_0_이면_멤버_줄을_읽지_않는다() {
+        // given
+        state.findMemberRefsCalls.clear();
+
+        // when, then
+        client.get().uri("/scim/v2/Groups?count=0").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.totalResults").isEqualTo(1)
+                .jsonPath("$.Resources").doesNotExist();
+        assertThat(state.findGroupCalls).isEmpty();
+        assertThat(state.findMemberRefsCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조직 쓰기 응답은 members 를 실을 때만 멤버 줄을 읽고, 어느 쪽도 findGroup 으로 모으지 않는다")
     void 쓰기_응답도_members_를_빼면_읽지_않는다() {
         // given
         String body = """
@@ -116,20 +176,26 @@ class ScimListHandlerTest {
 
         // when — 같은 모양의 조직 둘을 만들되 하나만 members 를 뺀다
         state.findGroupCalls.clear();
+        state.findMemberRefsCalls.clear();
         client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body.formatted("grp-a", "A"))
-                .exchange().expectStatus().isCreated();
-        int 멤버포함 = state.findGroupCalls.size();
+                .exchange().expectStatus().isCreated()
+                .expectBody().jsonPath("$.members[0].value").isEqualTo("park");
+        int 멤버포함_조직읽기 = state.findGroupCalls.size();
+        int 멤버포함_멤버줄읽기 = state.findMemberRefsCalls.size();
 
         state.findGroupCalls.clear();
+        state.findMemberRefsCalls.clear();
         client.post().uri("/scim/v2/Groups?excludedAttributes=members").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body.formatted("grp-b", "B"))
                 .exchange().expectStatus().isCreated()
                 .expectBody().jsonPath("$.members").doesNotExist();
-        int 멤버제외 = state.findGroupCalls.size();
+        int 멤버제외_조직읽기 = state.findGroupCalls.size();
+        int 멤버제외_멤버줄읽기 = state.findMemberRefsCalls.size();
 
-        // then — 응답을 그리려 읽던 한 번이 빠진다
-        assertThat(멤버제외).isEqualTo(멤버포함 - 1);
+        // then — 응답을 그리려 멤버 줄을 이어 읽던 한 번만 빠지고, 응답은 어느 쪽도 findGroup 으로 멤버를 모으지 않는다
+        assertThat(멤버제외_멤버줄읽기).isEqualTo(멤버포함_멤버줄읽기 - 1);
+        assertThat(멤버제외_조직읽기).isEqualTo(멤버포함_조직읽기);
     }
 
     @Test

@@ -1,7 +1,11 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import java.io.UncheckedIOException;
 
 /**
  * SCIM DTO 를 JSON 트리로 바꾼다. 속성 선택(RFC 7644 §3.9)이 트리에서 속성을 지우기 때문이다.
@@ -16,5 +20,13 @@ final class ScimJson {
 
     static ObjectNode tree(Object resource) {
         return MAPPER.valueToTree(resource);
+    }
+
+    static String string(JsonNode node) {
+        try {
+            return MAPPER.writeValueAsString(node);
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 }

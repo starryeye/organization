@@ -1,5 +1,7 @@
 package dev.starryeye.organization.core.fake;
 
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import org.junit.jupiter.api.BeforeEach;
@@ -7,6 +9,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -90,6 +93,48 @@ class FakeSearchRepositoryTest {
         allNames.addAll(page2.items().stream().map(UserSummary::userName).toList());
         allNames.addAll(page3.items().stream().map(UserSummary::userName).toList());
         assertThat(allNames).containsExactly("alice", "bob", "charlie", "david", "eve");
+    }
+
+    @Test
+    @DisplayName("직원 멤버 쪽도 저장소처럼 쪽이 가득 차면 커서를 주고, 빈 마지막 쪽에서 끝난다 — 하위 조직은 섞이지 않는다")
+    void 직원_멤버_쪽_경계() {
+        // given — 직원 4명, 하위 조직 하나, 쪽 크기 2
+        var state = new FakeStateRepository();
+        state.groups.put("DEV", new DirectoryGroup("DEV", null, "개발", new LinkedHashSet<>(List.of(
+                MemberRef.user("u3"), MemberRef.user("u1"), MemberRef.group("SUB"),
+                MemberRef.user("u2"), MemberRef.user("u0")))));
+        var search = new FakeSearchRepository(state);
+
+        // when
+        Page<String> page1 = search.findGroupUserMemberIds("DEV", null, 2).block();
+        Page<String> page2 = search.findGroupUserMemberIds("DEV", page1.nextCursor(), 2).block();
+        Page<String> page3 = search.findGroupUserMemberIds("DEV", page2.nextCursor(), 2).block();
+
+        // then
+        assertThat(page1.items()).containsExactly("u0", "u1");
+        assertThat(page1.nextCursor()).isNotNull();
+        assertThat(page2.items()).containsExactly("u2", "u3");
+        assertThat(page2.nextCursor()).isNotNull();
+        assertThat(page3.items()).isEmpty();
+        assertThat(page3.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("하위 조직 아이디만 정렬 순으로 주고, 상태에 없는 조직은 빈 결과다")
+    void 하위_조직_아이디() {
+        // given
+        var state = new FakeStateRepository();
+        state.groups.put("DEV", new DirectoryGroup("DEV", null, "개발", new LinkedHashSet<>(List.of(
+                MemberRef.group("SUB2"), MemberRef.user("u1"), MemberRef.group("SUB1")))));
+        var search = new FakeSearchRepository(state);
+
+        // when
+        var 하위 = search.findChildOrgCodes("DEV").collectList().block();
+        var 없는_조직 = search.findChildOrgCodes("NONE").collectList().block();
+
+        // then
+        assertThat(하위).containsExactly("SUB1", "SUB2");
+        assertThat(없는_조직).isEmpty();
     }
 
     @Test

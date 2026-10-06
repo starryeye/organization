@@ -155,8 +155,7 @@ public final class ScimMapper {
 
     public static ScimGroup toScimGroup(DirectoryGroup group) {
         List<ScimMember> members = group.members().stream()
-                .map(ref -> new ScimMember(ref.id(),
-                        ref.type() == MemberType.GROUP ? "Group" : "User", null))
+                .map(ScimMapper::toScimMember)
                 .toList();
         return new ScimGroup(
                 List.of(ScimSchemas.GROUP),
@@ -165,6 +164,11 @@ public final class ScimMapper {
                 group.displayName(),
                 members,
                 new ScimMeta("Group", groupLocation(group.id())));
+    }
+
+    /** 멤버 하나 — 조직 응답과 흘려 쓰는 응답이 같은 모양을 쓴다. */
+    public static ScimMember toScimMember(MemberRef ref) {
+        return new ScimMember(ref.id(), ref.type() == MemberType.GROUP ? "Group" : "User", null);
     }
 
     /** 멤버 없이 조직을 그린다 — {@code members} 가 응답에 필요 없을 때 멤버 줄을 읽지 않기 위해서다. */

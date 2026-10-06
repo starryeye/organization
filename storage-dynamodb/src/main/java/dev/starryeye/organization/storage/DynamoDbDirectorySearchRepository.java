@@ -1,10 +1,12 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.query.GroupSummary;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import lombok.RequiredArgsConstructor;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -13,8 +15,10 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -25,6 +29,9 @@ import java.util.function.Function;
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectorySearchRepository implements DirectorySearchRepository {
+
+    /** DynamoDB 정렬키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 DynamoDB 가 거절한다. */
+    private static final int MAX_SORT_KEY_BYTES = 1024;
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -68,6 +75,69 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
         return Mono.fromFuture(() -> client.getItem(request))
                 .filter(GetItemResponse::hasItem)
                 .map(response -> toGroupSummary(response.item()));
+    }
+
+    /** 멤버 목록 커서의 검색 범위 — 조직마다 다르다. 다른 조직의 커서는 {@link Cursor#decode} 가 거절한다. */
+    private static String memberScope(String orgCode) {
+        return "group-members/" + orgCode;
+    }
+
+    @Override
+    public Mono<Page<String>> findGroupUserMemberIds(String orgCode, String cursor, int limit) {
+        String pk = Keys.groupPk(orgCode);
+        String prefix = Keys.memberSkPrefix(MemberType.USER);
+        String scope = memberScope(orgCode);
+        return Mono.defer(() -> {
+            QueryRequest.Builder request = QueryRequest.builder()
+                    .tableName(properties.getTableName())
+                    .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                    .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
+                    .expressionAttributeValues(Map.of(":pk", Attrs.s(pk), ":prefix", Attrs.s(prefix)))
+                    .projectionExpression("#pk, #sk")
+                    .consistentRead(true)
+                    .limit(limit);
+            Map<String, AttributeValue> start = Cursor.decode(scope, cursor);
+            if (start != null) {
+                request.exclusiveStartKey(시작_키를_확인한다(start, pk, prefix));
+            }
+            return Mono.fromFuture(() -> client.query(request.build()))
+                    .map(response -> new Page<>(
+                            response.items().stream()
+                                    .map(item -> Keys.parseMemberSk(Attrs.str(item, Keys.SK)).id())
+                                    .toList(),
+                            Cursor.encode(scope, response.lastEvaluatedKey())));
+        });
+    }
+
+    /**
+     * 커서에서 꺼낸 시작 키를 그대로 믿지 않는다 — 범위만 맞춘 위조 커서가 다른 파티션이나 다른 접두를 가리키거나 정렬키 한도(1024바이트)를
+     * 넘으면 DynamoDB 가 {@code ValidationException} 을 내 500 이 된다(점검 S16 앞쪽). 이 조직의 직원 멤버 키가 아니면 400 으로 갈 예외다.
+     *
+     * <p>키 속성이 정확히 {@code PK}·{@code SK} 둘임을 먼저 확인하므로 아래에서 둘 다 꺼낼 수 있고, 값은 {@link Cursor#decode} 가 문자열로만 만든다.
+     */
+    private static Map<String, AttributeValue> 시작_키를_확인한다(Map<String, AttributeValue> start, String pk, String prefix) {
+        if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK))
+                || !pk.equals(start.get(Keys.PK).s())
+                || !start.get(Keys.SK).s().startsWith(prefix)
+                || start.get(Keys.SK).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES) {
+            throw new IllegalArgumentException("이 조직의 멤버 목록 커서가 아니다");
+        }
+        return start;
+    }
+
+    @Override
+    public Flux<String> findChildOrgCodes(String orgCode) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.groupPk(orgCode)),
+                        ":prefix", Attrs.s(Keys.memberSkPrefix(MemberType.GROUP))))
+                .projectionExpression("#sk")
+                .consistentRead(true)
+                .build();
+        return Paginator.queryAll(client, request)
+                .map(item -> Keys.parseMemberSk(Attrs.str(item, Keys.SK)).id());
     }
 
     /**

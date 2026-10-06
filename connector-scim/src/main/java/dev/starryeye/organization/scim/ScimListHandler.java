@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.scim.dto.ScimListResponse;
 import dev.starryeye.organization.scim.dto.ScimSearchRequest;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
@@ -34,15 +35,22 @@ public class ScimListHandler {
 
     public Mono<ServerResponse> listGroups(ServerRequest request) {
         return Mono.fromCallable(() -> ScimQuery.fromRequest(ScimResourceType.GROUP, request))
-                .flatMap(groups::list)
-                .flatMap(ScimListHandler::ok);
+                .flatMap(this::groupsResponse);
     }
 
     public Mono<ServerResponse> searchGroups(ServerRequest request) {
         return body(request)
                 .map(search -> ScimQuery.fromSearch(ScimResourceType.GROUP, search))
-                .flatMap(groups::list)
-                .flatMap(ScimListHandler::ok);
+                .flatMap(this::groupsResponse);
+    }
+
+    /** 멤버가 응답에 남고 자원을 담는 쪽(count > 0)이면 흘려 쓴다(설계 2026-10-06 §4.3). 아니면 지금처럼 한 번에. */
+    private Mono<ServerResponse> groupsResponse(ScimQuery query) {
+        if (query.projection().includes("members") && query.count() > 0) {
+            return groups.streamed(query).flatMap(body ->
+                    ServerResponse.ok().contentType(SCIM_JSON).body(BodyInserters.fromDataBuffers(body)));
+        }
+        return groups.list(query).flatMap(ScimListHandler::ok);
     }
 
     private static Mono<ScimSearchRequest> body(ServerRequest request) {

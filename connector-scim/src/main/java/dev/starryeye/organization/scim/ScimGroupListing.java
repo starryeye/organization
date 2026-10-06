@@ -1,13 +1,12 @@
 package dev.starryeye.organization.scim;
 
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.PageBookmarkRepository;
 import dev.starryeye.organization.core.query.ListingKind;
 import dev.starryeye.organization.scim.dto.ScimListResponse;
-import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.buffer.DataBuffer;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -19,41 +18,44 @@ import java.util.Set;
  * {@code GET /Groups} 의 조회 실행 (S-1 설계 §4.2~4.5).
  *
  * <p>조직은 이름표(META)로 찾고 자른다. <b>{@code members} 가 응답에 남을 때만</b> 페이지에 든 조직의
- * 파티션을 읽는다 — Entra 는 조직을 조회할 때마다 {@code excludedAttributes=members} 를 붙인다.
+ * 멤버 줄을 읽는다 — Entra 는 조직을 조회할 때마다 {@code excludedAttributes=members} 를 붙인다.
  */
-@RequiredArgsConstructor
 public class ScimGroupListing {
 
     private static final Set<String> ATTRIBUTES = Set.of("id", "externalid", "displayname");
     private static final List<String> INDEXED = List.of("id", "displayname", "externalid");
-    /** 페이지(최대 100개)의 조직 파티션을 읽는 동시성. 저장소의 다른 읽기와 같은 값이다. */
-    private static final int MEMBER_READ_CONCURRENCY = 8;
 
     private final DirectoryStateRepository state;
     private final DirectoryQueryRepository query;
     private final PageBookmarkRepository bookmarks;
+    private final ScimGroupStream stream;
 
+    public ScimGroupListing(DirectoryStateRepository state, DirectoryQueryRepository query, PageBookmarkRepository bookmarks) {
+        this.state = state;
+        this.query = query;
+        this.bookmarks = bookmarks;
+        this.stream = new ScimGroupStream(state);
+    }
+
+    /** 이름표만 싣는 목록을 한 번에 만든다. 멤버를 싣는 목록은 {@link #streamed} 다. */
     public Mono<ScimListResponse> list(ScimQuery request) {
-        Mono<ScimPager.Slice<GroupHeader>> slice = request.filter() == null
+        return slice(request).map(page -> ScimListResponse.of(request, page.totalResults(), page.items().stream()
+                .map(header -> request.projection().apply(ScimJson.tree(ScimMapper.toScimGroup(header))))
+                .toList()));
+    }
+
+    /** 멤버를 싣는 목록 — 헤더만 자르고 조직은 흘려 쓴다(설계 2026-10-06 §4.3). */
+    Mono<Flux<DataBuffer>> streamed(ScimQuery request) {
+        return slice(request).map(page -> stream.list(request, page.totalResults(), page.items()));
+    }
+
+    /** 조회가 가리키는 쪽의 조직 이름표와 전체 수. 멤버는 읽지 않는다. */
+    Mono<ScimPager.Slice<GroupHeader>> slice(ScimQuery request) {
+        return request.filter() == null
                 ? ScimPager.unfiltered(ListingKind.GROUP, request, bookmarks, query::countGroups,
                         n -> query.skipGroups(n, request.descending()),
                         (from, limit) -> query.listGroupHeaders(from, limit, request.descending()))
                 : filtered(request);
-        return slice.flatMap(page -> resources(page.items(), request)
-                .map(resources -> ScimListResponse.of(request, page.totalResults(), resources)));
-    }
-
-    private Mono<List<ObjectNode>> resources(List<GroupHeader> headers, ScimQuery request) {
-        if (!request.projection().includes("members")) {
-            return Mono.just(headers.stream()
-                    .map(header -> request.projection().apply(ScimJson.tree(ScimMapper.toScimGroup(header))))
-                    .toList());
-        }
-        // 페이지 순서를 지킨다. 그사이 지워진 조직은 빈 결과라 빠진다(itemsPerPage 가 실제 수를 말한다)
-        return Flux.fromIterable(headers)
-                .flatMapSequential(header -> state.findGroup(header.id()), MEMBER_READ_CONCURRENCY)
-                .map(group -> request.projection().apply(ScimJson.tree(ScimMapper.toScimGroup(group))))
-                .collectList();
     }
 
     private Mono<ScimPager.Slice<GroupHeader>> filtered(ScimQuery request) {
