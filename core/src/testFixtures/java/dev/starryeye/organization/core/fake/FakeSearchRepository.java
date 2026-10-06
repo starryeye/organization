@@ -72,7 +72,10 @@ public class FakeSearchRepository implements DirectorySearchRepository {
                 .findFirst().orElse(null);
     }
 
-    /** 상태 저장소의 조직 멤버 중 직원만 아이디 순으로 자른다. 커서는 다음 인덱스다(불투명하다는 계약만 지킨다). */
+    /**
+     * 상태 저장소의 조직 멤버 중 직원만 아이디 순으로 자른다. 커서는 다음 인덱스다(불투명하다는 계약만 지킨다).
+     * 저장소의 표준 신호를 따른다 — 쪽이 가득 차면 남은 것이 없어도 커서를 주고, 빈 마지막 쪽에서 끝난다.
+     */
     @Override
     public Mono<Page<String>> findGroupUserMemberIds(String orgCode, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
@@ -80,7 +83,7 @@ public class FakeSearchRepository implements DirectorySearchRepository {
             List<String> ids = memberIds(orgCode, MemberType.USER);
             int from = cursor == null ? 0 : Integer.parseInt(cursor);
             int to = Math.min(from + limit, ids.size());
-            return new Page<>(ids.subList(from, to), to < ids.size() ? String.valueOf(to) : null);
+            return new Page<>(ids.subList(from, to), to - from == limit ? String.valueOf(to) : null);
         });
     }
 

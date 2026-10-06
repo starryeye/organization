@@ -3,6 +3,7 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import java.time.Clock;
@@ -223,6 +224,26 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("쪽 크기에 딱 맞게 끝나면 커서가 있는 쪽 뒤에 빈 마지막 쪽이 오고, 그 쪽의 커서는 없다 — 중복도 누락도 없다")
+    void 쪽_경계에서_빈_마지막_쪽이_온다() {
+        // given — 직원 4명, 쪽 크기 2
+        조직을_심는다("DEV", 4);
+
+        // when — 커서가 없을 때까지 읽는다
+        var 첫쪽 = search.findGroupUserMemberIds("DEV", null, 2).block();
+        var 둘째쪽 = search.findGroupUserMemberIds("DEV", 첫쪽.nextCursor(), 2).block();
+        var 셋째쪽 = search.findGroupUserMemberIds("DEV", 둘째쪽.nextCursor(), 2).block();
+
+        // then — 표준 신호: 쪽이 가득 차면 커서가 오고, 비어 있는 마지막 쪽에서 끝난다
+        assertThat(첫쪽.items()).containsExactly("u000", "u001");
+        assertThat(첫쪽.nextCursor()).isNotNull();
+        assertThat(둘째쪽.items()).containsExactly("u002", "u003");
+        assertThat(둘째쪽.nextCursor()).isNotNull();
+        assertThat(셋째쪽.items()).isEmpty();
+        assertThat(셋째쪽.nextCursor()).isNull();
+    }
+
+    @Test
     @DisplayName("직원 멤버가 없으면 빈 쪽이고 커서도 없다")
     void 직원_멤버가_없으면_빈_쪽이다() {
         // given
@@ -252,7 +273,7 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("범위는 맞아도 시작 키가 이 조직의 직원 멤버가 아니면 IllegalArgumentException 이다 — DynamoDB 오류(500)로 새지 않는다(점검 S16 앞쪽)")
     void 위조한_시작_키는_거절한다() {
-        // given — 같은 범위로 위조한 커서 셋: 다른 PK, 하위 조직 SK, 속성이 하나 더 있음
+        // given — 같은 범위로 위조한 커서 넷: 다른 PK, 하위 조직 SK, 속성이 하나 더 있음, 정렬키 한도(1024바이트)를 넘는 SK
         조직을_심는다("DEV", 3);
         String 범위 = "group-members/DEV";
         String 다른_PK = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("OTHER")),
@@ -261,9 +282,11 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
                 Keys.SK, Attrs.s(Keys.memberSk(MemberRef.group("SUB1")))));
         String 남는_속성 = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("DEV")),
                 Keys.SK, Attrs.s(Keys.memberSk(MemberRef.user("u000"))), "extra", Attrs.s("x")));
+        String 너무_긴_SK = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("DEV")),
+                Keys.SK, Attrs.s(Keys.memberSkPrefix(MemberType.USER) + "x".repeat(1100))));
 
         // when, then
-        for (String 위조 : List.of(다른_PK, 조직_SK, 남는_속성)) {
+        for (String 위조 : List.of(다른_PK, 조직_SK, 남는_속성, 너무_긴_SK)) {
             assertThatThrownBy(() -> search.findGroupUserMemberIds("DEV", 위조, 1).block())
                     .isInstanceOf(IllegalArgumentException.class);
         }
@@ -272,6 +295,8 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("깨진 멤버 커서는 Mono 를 만들 때는 던지지 않고, 구독할 때 IllegalArgumentException 으로 나온다")
     void 깨진_멤버_커서는_구독할_때_실패한다() {
+        // given — 형식이 깨진 커서
+
         // when
         var mono = search.findGroupUserMemberIds("DEV", "!!not-base64!!", 1);
 
