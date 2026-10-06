@@ -271,10 +271,10 @@ class AdminQueryUseCaseTest {
         var detail = useCase.organizationDetail("DEV002", 20).block();
 
         // then — 이름 칸을 채우려고 파티션 전체(META + 멤버십 전부)를 읽던 자리다.
-        // 멤버 목록이 실제로 필요한 것은 조회 대상 조직 자신뿐이다.
+        // 조회 대상 조직 자신도 파티션 전체를 읽지 않는다 — 헤더·하위 조직·멤버 한 쪽만(설계 2026-10-06 §3.2)
         assertThat(detail.childOrganizations()).extracting("displayName").containsExactly("DEV003-조직");
         assertThat(detail.ancestors()).extracting("orgCode").containsExactly("DEV001", "ROOT");
-        assertThat(state.findGroupCalls).containsExactly("DEV002");
+        assertThat(state.findGroupCalls).isEmpty();
         assertThat(search.findGroupSummaryCalls).containsExactlyInAnyOrder("DEV003", "DEV001", "ROOT");
     }
 
@@ -487,28 +487,35 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
-    @DisplayName("상한을 넘는 커서는 예외 대신 빈 마지막 페이지를 준다")
-    void 상한을_넘는_커서는_빈_페이지다() {
-        // given — 낡은 북마크: 멤버가 3명뿐인데 커서는 10번째를 가리킨다
+    @DisplayName("멤버 목록은 조직 파티션 전체를 읽지 않고 검색 포트의 한 쪽과 그 커서를 그대로 쓴다(설계 2026-10-06 §3.1)")
+    void 멤버_목록은_한_쪽만_읽는다() {
+        // given
         state.saveUser(직원("kim", true)).block();
-        state.saveGroup(조직("DEV002", MemberRef.user("kim"))).block();
+        state.saveUser(직원("lee", true)).block();
+        state.saveUser(직원("park", true)).block();
+        state.saveGroup(조직("DEV002", MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.user("park"))).block();
+        state.findGroupCalls.clear();
 
         // when
-        var page = useCase.organizationMembers("DEV002", "10", 20).block();
+        var 첫_쪽 = useCase.organizationMembers("DEV002", null, 2).block();
+        var 둘째_쪽 = useCase.organizationMembers("DEV002", 첫_쪽.nextCursor(), 2).block();
 
         // then
-        assertThat(page.items()).isEmpty();
-        assertThat(page.nextCursor()).isNull();
+        assertThat(첫_쪽.items()).extracting("employeeId").containsExactly("kim", "lee");
+        assertThat(둘째_쪽.items()).extracting("employeeId").containsExactly("park");
+        assertThat(둘째_쪽.nextCursor()).isNull();
+        assertThat(state.findGroupCalls).isEmpty();
     }
 
     @Test
-    @DisplayName("파싱할 수 없는 커서는 예외를 던진다")
-    void 파싱할_수_없는_커서는_예외다() {
+    @DisplayName("검색 포트가 커서를 거절하면(IllegalArgumentException) 그대로 흘려 관리 API 가 400 으로 바꾼다")
+    void 거절된_커서는_그대로_흐른다() {
         // given
         state.saveGroup(조직("DEV002")).block();
+        search.failWith = new IllegalArgumentException("이 조직의 멤버 목록 커서가 아니다");
 
         // when, then
-        assertThatThrownBy(() -> useCase.organizationMembers("DEV002", "abc", 20).block())
+        assertThatThrownBy(() -> useCase.organizationMembers("DEV002", "x", 20).block())
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

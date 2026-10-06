@@ -1,9 +1,8 @@
 package dev.starryeye.organization.core.usecase;
 
-import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
-import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -262,20 +261,21 @@ public class AdminQueryUseCase {
     // ---------- 조직 상세 ----------
 
     public Mono<OrganizationDetail> organizationDetail(String orgCode, int memberPageSize) {
-        return state.findGroup(orgCode).flatMap(group ->
-                Mono.zip(ancestorsOf(group), childrenOf(group),
-                                membersPage(group, null, memberPageSize))
+        // 조직 파티션 전체(findGroup)를 읽지 않는다 — 헤더·하위 조직·멤버 첫 쪽만(설계 2026-10-06 §3.2, 점검 P4)
+        return state.findGroupHeader(orgCode).flatMap(header ->
+                Mono.zip(ancestorsOf(header), childrenOf(header.id()),
+                                membersPage(header.id(), null, memberPageSize))
                         .map(parts -> new OrganizationDetail(
-                                group.id(), group.displayName(), group.externalId(),
+                                header.id(), header.displayName(), header.externalId(),
                                 parts.getT1(), parts.getT2(), parts.getT3())));
     }
 
     public Mono<Page<OrgMember>> organizationMembers(String orgCode, String cursor, int limit) {
-        return state.findGroup(orgCode).flatMap(group -> membersPage(group, cursor, limit));
+        return state.findGroupHeader(orgCode).flatMap(header -> membersPage(header.id(), cursor, limit));
     }
 
     /**
-     * 상위 계층 전부. {@code group} 자신은 방문 집합에 미리 넣어 두어, 순환이 자기 자신으로
+     * 상위 계층 전부. {@code header} 조직 자신은 방문 집합에 미리 넣어 두어, 순환이 자기 자신으로
      * 되돌아오더라도 조상 목록에 자신이 끼어들지 않는다.
      *
      * <p>파생 목록은 순회가 끝난 뒤 {@code reached.entries}(부작용으로 누적된 상태)를 읽어
@@ -286,15 +286,15 @@ public class AdminQueryUseCase {
      * {@code core} 의 기존 파일을 건드릴 수 없어 필드를 더할 수도 없다). 그래서 잘렸을 때는
      * 조용히 짧은 목록을 돌려주는 대신 경고를 남긴다.
      */
-    private Mono<List<GroupSummary>> ancestorsOf(DirectoryGroup group) {
+    private Mono<List<GroupSummary>> ancestorsOf(GroupHeader header) {
         Reached reached = new Reached();
-        reached.seen.add(group.id());
-        Step seed = new Step(new GroupSummary(group.id(), group.displayName()), Set.of(group.id()));
+        reached.seen.add(header.id());
+        Step seed = new Step(new GroupSummary(header.id(), header.displayName()), Set.of(header.id()));
         return Flux.just(seed)
                 .expand(step -> expandParents(step, reached))
                 .then(Mono.fromSupplier(() -> {
                     if (reached.truncated) {
-                        log.warn("조직 '{}' 의 상위 계층이 상한({})을 넘어 잘렸습니다", group.id(), MAX_PATHS);
+                        log.warn("조직 '{}' 의 상위 계층이 상한({})을 넘어 잘렸습니다", header.id(), MAX_PATHS);
                     }
                     return reached.entries.stream().map(entry -> entry.group).toList();
                 }));
@@ -304,70 +304,41 @@ public class AdminQueryUseCase {
      * 직속 하위 조직만(1 depth). 멤버 참조에는 조직코드밖에 없으므로 표시명을 채우려면
      * 각 하위 조직을 읽어야 한다 — 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다.
      * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이다.
+     * 하위 조직 아이디는 {@code MEMBER#GROUP#} 줄만 상한까지 읽는다.
      *
      * <p><b>여기에도 상한을 둔다.</b> "보통 수십 개" 는 정상 조직도의 이야기이고, 이 엔드포인트는
      * 인증이 없어 누구나 부를 수 있다. 하위 조직이 수천 개인 조직이 하나라도 있으면 요청 하나가
      * 그만큼의 읽기를 무제한으로 낸다. 조용히 짧은 목록을 주는 대신 {@code ancestorsOf} 와 같이
      * 경고를 남긴다 — {@code OrganizationDetail} 에는 {@code truncated} 를 실을 자리가 없다.
      */
-    private Mono<List<GroupSummary>> childrenOf(DirectoryGroup group) {
-        List<String> childIds = group.members().stream()
-                .filter(member -> member.type() == MemberType.GROUP)
-                .map(MemberRef::id)
-                .sorted()
-                .toList();
-        if (childIds.size() > MAX_PATHS) {
-            log.warn("조직 '{}' 의 직속 하위 조직이 상한({})을 넘어 잘렸습니다", group.id(), MAX_PATHS);
-            childIds = childIds.subList(0, MAX_PATHS);
-        }
-        return Flux.fromIterable(childIds)
-                .concatMap(this::loadGroupOrEmpty)
-                .collectList();
-    }
-
-    private Mono<Page<OrgMember>> membersPage(DirectoryGroup group, String cursor, int limit) {
-        List<String> userIds = group.members().stream()
-                .filter(member -> member.type() == MemberType.USER)
-                .map(MemberRef::id)
-                .sorted()
-                .toList();
-
-        int from = parseCursor(cursor, userIds.size());
-        int to = Math.min(from + limit, userIds.size());
-        String next = to < userIds.size() ? String.valueOf(to) : null;
-
-        // 설계 §8.2 는 페이지 단위 Check 를 "동시성 제한을 걸어 병렬로" 내라고 한다.
-        // concatMap 은 그것을 한 줄씩 직렬로 냈다 — 한 페이지(기본 20건)에 findUser 20번과
-        // Check 20번, 도합 40번의 왕복이 줄줄이 이어진다. flatMapSequential 은 병렬로 내면서
-        // 결과는 소스 순서대로 흘려보내므로 페이지 순서도 그대로 지켜진다.
-        return Flux.fromIterable(userIds.subList(from, to))
-                .flatMapSequential(userId -> loadUserOrEmpty(userId)
-                        .flatMap(user -> checkOrNull(RelationTuple.member(user.id(), group.id()))
-                                .map(allowed -> new OrgMember(user.id(), user.displayName(),
-                                        user.active(), allowed))
-                                .defaultIfEmpty(new OrgMember(user.id(), user.displayName(),
-                                        user.active(), null))), CHECK_CONCURRENCY)
+    private Mono<List<GroupSummary>> childrenOf(String orgCode) {
+        return search.findChildOrgCodes(orgCode)
+                .take(MAX_PATHS + 1)
                 .collectList()
-                .map(items -> new Page<>(items, next));
+                .flatMap(childIds -> {
+                    if (childIds.size() > MAX_PATHS) {
+                        log.warn("조직 '{}' 의 직속 하위 조직이 상한({})을 넘어 잘렸습니다", orgCode, MAX_PATHS);
+                        childIds = childIds.subList(0, MAX_PATHS);
+                    }
+                    return Flux.fromIterable(childIds)
+                            .concatMap(this::loadGroupOrEmpty)
+                            .collectList();
+                });
     }
 
-    /**
-     * 커서를 신뢰하지 않고 유효 범위로 접는다. 멤버가 지워진 뒤 재발급된 낡은 커서는
-     * 드문 일이 아니다 — {@code cursor="10"} 인데 멤버가 3명뿐이면 예외 대신 빈 마지막
-     * 페이지를 주고, 음수도 0 으로 접는다. 다만 아예 숫자가 아닌 커서는 호출자의 실수이므로
-     * 조용히 접지 않고 예외를 던진다 — 뒤이을 컨트롤러 계층이 이를 400 으로 매핑한다.
-     */
-    private static int parseCursor(String cursor, int size) {
-        if (cursor == null) {
-            return 0;
-        }
-        int parsed;
-        try {
-            parsed = Integer.parseInt(cursor);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("잘못된 커서: " + cursor, e);
-        }
-        return Math.max(0, Math.min(parsed, size));
+    private Mono<Page<OrgMember>> membersPage(String orgCode, String cursor, int limit) {
+        // 쪽 하나만 읽는다 — 커서는 검색 포트가 발급·검사한다(설계 2026-10-06 §3.1, 점검 P4·S16)
+        return search.findGroupUserMemberIds(orgCode, cursor, limit).flatMap(page ->
+                // 설계 §8.2 의 동시성: 병렬로 내고 결과는 쪽 순서대로(flatMapSequential)
+                Flux.fromIterable(page.items())
+                        .flatMapSequential(userId -> loadUserOrEmpty(userId)
+                                .flatMap(user -> checkOrNull(RelationTuple.member(user.id(), orgCode))
+                                        .map(allowed -> new OrgMember(user.id(), user.displayName(),
+                                                user.active(), allowed))
+                                        .defaultIfEmpty(new OrgMember(user.id(), user.displayName(),
+                                                user.active(), null))), CHECK_CONCURRENCY)
+                        .collectList()
+                        .map(items -> new Page<>(items, page.nextCursor())));
     }
 
     // ---------- Check ----------
