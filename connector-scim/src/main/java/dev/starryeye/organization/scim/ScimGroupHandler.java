@@ -7,8 +7,8 @@ import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.scim.dto.ScimGroup;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
@@ -18,12 +18,19 @@ import java.util.UUID;
 
 import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
-@RequiredArgsConstructor
 public class ScimGroupHandler {
 
     private final DirectoryStateRepository state;
     private final IncrementalSyncUseCase sync;
     private final MemberTypeResolver memberTypes;
+    private final ScimGroupStream stream;
+
+    public ScimGroupHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync, MemberTypeResolver memberTypes) {
+        this.state = state;
+        this.sync = sync;
+        this.memberTypes = memberTypes;
+        this.stream = new ScimGroupStream(state);
+    }
 
     public Mono<ServerResponse> create(ServerRequest request) {
         return projection(request).flatMap(projection -> request.bodyToMono(ScimGroup.class)
@@ -37,10 +44,8 @@ public class ScimGroupHandler {
 
     public Mono<ServerResponse> get(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> byProjection(id, projection)
-                .switchIfEmpty(Mono.error(ScimException.notFound("조직을 찾을 수 없습니다: " + id)))
-                .flatMap(scim -> ServerResponse.ok().contentType(SCIM_JSON)
-                        .bodyValue(projection.apply(ScimJson.tree(scim)))));
+        return projection(request).flatMap(projection -> body(HttpStatus.OK, id, projection,
+                ScimException.notFound("조직을 찾을 수 없습니다: " + id)));
     }
 
     /** PUT — 전체 교체로 처리한다(조직 멤버 PATCH 설계 §4). 존재 확인은 락 안에서 한다. */
@@ -101,26 +106,30 @@ public class ScimGroupHandler {
             return Mono.error(ScimException.temporarilyUnavailable(
                     "일부 튜플 적용에 실패했습니다 — 잠시 뒤 다시 보내 주세요: " + id, TemporaryFailureException.기본_대기));
         }
-        return byProjection(id, projection)
-                .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
-                .flatMap(scim -> {
-                    ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
-                    // 생성은 Location 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3)
-                    if (status == HttpStatus.CREATED) {
-                        builder.location(URI.create(ScimMapper.groupLocation(id)));
-                    }
-                    return builder.bodyValue(projection.apply(ScimJson.tree(scim)));
-                });
+        return body(status, id, projection, ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id));
     }
 
     /**
-     * members 가 응답에 없으면 조직 파티션(멤버 줄 전부)을 읽지 않는다 — Entra 가 늘 붙이는 조건이고,
-     * 쓰기 응답(create/replace, attributes 가 있는 patch)도 이 규칙을 따른다(S-1 설계 §4.5).
+     * 조직 응답. 헤더를 먼저 읽는다 — 없으면 응답을 쓰기 전에 {@code missing}(GET 이면 404, 쓰기 직후면 500)이다.
+     * {@code members} 가 남으면 멤버를 흘려 쓰고(설계 2026-10-06 §4, 점검 P5), 남지 않으면 지금처럼 이름표만 쓴다 —
+     * Entra 가 늘 붙이는 조건이고, 쓰기 응답(create/replace, attributes 가 있는 patch)도 이 규칙을 따른다(S-1 설계 §4.5).
      */
-    private Mono<ScimGroup> byProjection(String id, ScimAttributeProjection projection) {
-        return projection.includes("members")
-                ? state.findGroup(id).map(ScimMapper::toScimGroup)
-                : state.findGroupHeader(id).map(ScimMapper::toScimGroup);
+    private Mono<ServerResponse> body(HttpStatus status, String id, ScimAttributeProjection projection,
+                                      ScimException missing) {
+        return state.findGroupHeader(id)
+                .switchIfEmpty(Mono.error(missing))
+                .flatMap(header -> projection.includes("members")
+                        ? builder(status, id).body(BodyInserters.fromDataBuffers(stream.group(header, projection)))
+                        : builder(status, id).bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimGroup(header)))));
+    }
+
+    /** 생성(201)이면 {@code Location} 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3). */
+    private static ServerResponse.BodyBuilder builder(HttpStatus status, String id) {
+        ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
+        if (status == HttpStatus.CREATED) {
+            builder.location(URI.create(ScimMapper.groupLocation(id)));
+        }
+        return builder;
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */

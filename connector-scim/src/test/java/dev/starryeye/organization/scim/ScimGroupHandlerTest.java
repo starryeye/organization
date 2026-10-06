@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
@@ -216,6 +217,72 @@ class ScimGroupHandlerTest {
                 .jsonPath("$.status").isEqualTo("404")
                 .jsonPath("$.schemas[0]").isEqualTo(ScimSchemas.ERROR)
                 .jsonPath("$.detail").value(d -> assertThat((String) d).contains("DEV999"));
+    }
+
+    @Test
+    @DisplayName("멤버를 싣는 조직 GET 은 흘려 쓴다 — Content-Length 가 없고 멤버가 다 실린다(설계 2026-10-06 §4.2, 점검 P5)")
+    void 멤버를_싣는_GET_은_흘려_쓴다() {
+        // given
+        state.saveGroup(new DirectoryGroup("DEV", "ext-DEV", "개발본부",
+                Set.of(MemberRef.user("kim"), MemberRef.user("lee")))).block();
+        state.findGroupCalls.clear();
+
+        // when, then
+        client.get().uri("/scim/v2/Groups/DEV").exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentType(ScimRouter.SCIM_JSON)
+                .expectHeader().doesNotExist(HttpHeaders.CONTENT_LENGTH)
+                .expectBody()
+                .jsonPath("$.id").isEqualTo("DEV")
+                .jsonPath("$.displayName").isEqualTo("개발본부")
+                .jsonPath("$.members.length()").isEqualTo(2);
+        assertThat(state.findGroupCalls).as("멤버를 메모리에 모으는 findGroup 을 부르지 않는다").isEmpty();
+        assertThat(state.findMemberRefsCalls).containsExactly("DEV");
+    }
+
+    @Test
+    @DisplayName("excludedAttributes=members 면 지금처럼 이름표만 읽고 멤버 줄을 읽지 않는다")
+    void 멤버를_빼면_멤버_줄을_읽지_않는다() {
+        // given
+        state.saveGroup(new DirectoryGroup("DEV", null, "개발본부", Set.of(MemberRef.user("kim")))).block();
+        state.findGroupCalls.clear();
+        state.findMemberRefsCalls.clear();
+
+        // when, then
+        client.get().uri("/scim/v2/Groups/DEV?excludedAttributes=members").exchange()
+                .expectStatus().isOk()
+                .expectBody().jsonPath("$.members").doesNotExist();
+        assertThat(state.findGroupCalls).isEmpty();
+        assertThat(state.findMemberRefsCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("없는 조직의 멤버 GET 은 응답을 쓰기 전에 404 다 — 멤버 줄은 읽지도 않는다")
+    void 없는_조직의_멤버_GET_은_404다() {
+        // when, then
+        client.get().uri("/scim/v2/Groups/NOPE").exchange()
+                .expectStatus().isNotFound()
+                .expectBody().jsonPath("$.status").isEqualTo("404");
+        assertThat(state.findMemberRefsCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("attributes=members 가 붙은 PATCH 의 200 응답도 흘려 쓴다")
+    void attributes_가_붙은_PATCH_도_흘려_쓴다() {
+        // given
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김", null, true)).block();
+        state.saveGroup(new DirectoryGroup("DEV", null, "개발본부", Set.of())).block();
+
+        // when, then
+        client.patch().uri("/scim/v2/Groups/DEV?attributes=members").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"add","path":"members","value":[{"value":"kim","type":"User"}]}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().doesNotExist(HttpHeaders.CONTENT_LENGTH)
+                .expectBody().jsonPath("$.members[0].value").isEqualTo("kim");
     }
 
     @Test

@@ -1,5 +1,7 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
@@ -9,7 +11,9 @@ import dev.starryeye.organization.scim.dto.ScimListResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.buffer.DataBufferUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Set;
 
@@ -48,15 +52,28 @@ class ScimGroupListingTest {
     }
 
     @Test
-    @DisplayName("members 가 응답에 남으면 페이지의 조직만 읽어 멤버를 담는다")
-    void members_가_남으면_페이지의_조직을_읽는다() {
+    @DisplayName("members 가 응답에 남으면 조직 파티션을 통째로 읽지 않고 흘려 쓴다 — 멤버 줄만 이어 읽는다(설계 2026-10-06 §4.3)")
+    void members_가_남으면_흘려_쓴다() throws Exception {
+        // given
+        ScimQuery query = ScimQuery.of(ScimResourceType.GROUP, null, 1L, 100L, null, null, null, null);
+
         // when
-        ScimListResponse page = 조회(null, null);
+        String body = listing.streamed(query)
+                .flatMap(DataBufferUtils::join)
+                .map(buffer -> {
+                    String text = buffer.toString(StandardCharsets.UTF_8);
+                    DataBufferUtils.release(buffer);
+                    return text;
+                })
+                .block();
+        JsonNode page = new ObjectMapper().readTree(body);
 
         // then
-        assertThat(state.findGroupCalls).containsExactlyInAnyOrder("DEV001", "DEV002");
-        assertThat(page.resources().get(0).get("id").asText()).isEqualTo("DEV002");
-        assertThat(page.resources().get(1).get("members")).hasSize(2);
+        assertThat(state.findGroupCalls).isEmpty();
+        assertThat(state.findMemberRefsCalls).containsExactlyInAnyOrder("DEV001", "DEV002");
+        assertThat(page.get("itemsPerPage").asInt()).isEqualTo(2);
+        assertThat(page.get("Resources").get(0).get("id").asText()).isEqualTo("DEV002");
+        assertThat(page.get("Resources").get(1).get("members")).hasSize(2);
     }
 
     @Test
