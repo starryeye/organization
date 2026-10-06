@@ -105,7 +105,9 @@ class ScimLargeGroupReadScaleTest {
         // then
         System.out.printf("관리 API 멤버 첫 쪽: %,dms, Query %,d번, 훑은 아이템 %,d, GetItem %,d번%n",
                 System.currentTimeMillis() - 시작, counter.queries.get(), counter.scannedItems.get(), counter.getItems.get());
-        assertThat(counter.scannedItems.get()).isLessThanOrEqualTo(20);
+        // 하한이 있어야 카운터가 끊겨 0 이 나와도 통과하는 일이 없다. 상한 20 은 10만 명 조직에서 P4 를 보여 주는 유일한 근거다
+        assertThat(counter.queries.get()).as("Query 를 셌다 — 카운터가 붙어 있다").isPositive();
+        assertThat(counter.scannedItems.get()).as("조직 파티션을 훑지 않는다").isBetween(1L, 20L);
     }
 
     @Test
@@ -120,7 +122,9 @@ class ScimLargeGroupReadScaleTest {
 
         // then
         System.out.printf("관리 API 조직 상세: Query %,d번, 훑은 아이템 %,d%n", counter.queries.get(), counter.scannedItems.get());
-        assertThat(counter.scannedItems.get()).isLessThanOrEqualTo(20 + 200);
+        // 심은 조직에는 하위 조직이 없어 하위 조직 접두 읽기는 0 이고, 멤버 첫 쪽 20개가 전부다
+        assertThat(counter.queries.get()).as("Query 를 셌다 — 카운터가 붙어 있다").isPositive();
+        assertThat(counter.scannedItems.get()).as("조직 파티션을 훑지 않는다").isBetween(1L, 20L);
     }
 
     @Test

@@ -349,6 +349,20 @@ class AdminQueryControllerTest {
     }
 
     @Test
+    @DisplayName("잘못된 멤버 목록 커서는 400 이다")
+    void 잘못된_멤버_목록_커서는_400이다() {
+        // given — 이 페이크는 커서를 보지 않고 무조건 실패하므로, 이 테스트가 증명하는 것은
+        // "잘못된 커서가 예외가 된다" 가 아니라 "멤버 목록 경로에서도 그 예외가 400 이 된다" 뿐이다.
+        // 어떤 커서가 실제로 예외를 부르는지는 저장소 테스트가 못박는다.
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀", Set.of())).block();
+        search.failWith = new IllegalArgumentException("이 조직의 멤버 목록 커서가 아니다");
+
+        // when, then
+        client.get().uri("/admin/organizations/DEV002/members?cursor=x")
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
     @DisplayName("멤버 목록에서 어긋남을 만나면 드리프트 카운터가 올라간다")
     void 멤버_목록_드리프트_카운터가_올라간다() {
         // given — 상태는 소속을 말하는데 OpenFGA 에는 튜플이 없다
