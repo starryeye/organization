@@ -119,6 +119,26 @@ public final class ScimAttributeProjection {
         return resource;
     }
 
+    /**
+     * 복합 속성의 원소 하나(예: 멤버 하나)에 하위 속성 투영을 건다 — {@link #apply} 가 배열 원소마다 하는 것과 같다.
+     * 멤버를 흘려 쓸 때 멤버마다 부른다(설계 2026-10-06 §4.2).
+     */
+    public ObjectNode applyToElement(String attribute, ObjectNode element) {
+        String name = attribute.toLowerCase(Locale.ROOT);
+        if (!include.isEmpty() && !include.contains(name)) {
+            Set<String> subs = subAttributes(include, name);
+            if (!subs.isEmpty()) {
+                retain(element, subs);
+            }
+        }
+        for (String path : exclude) {
+            if (path.startsWith(name + ".")) {
+                removeIgnoringCase(element, path.substring(name.length() + 1));
+            }
+        }
+        return element;
+    }
+
     private static Set<String> subAttributes(Set<String> paths, String parent) {
         return paths.stream()
                 .filter(path -> path.startsWith(parent + "."))
