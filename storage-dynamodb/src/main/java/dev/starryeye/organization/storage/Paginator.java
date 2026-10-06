@@ -33,9 +33,10 @@ final class Paginator {
      * ({@code scanIndexForward=false} + {@code take(limit)} 조합이 그것에 기댄다)
      * 뒤섞이면 "최신 N건" 이 최신이 아니게 된다.
      *
-     * <p><b>소비자가 요청한 만큼만 읽는다 — 많아야 한 쪽만 앞서 읽는다.</b> {@code concatMapIterable} 의 기본 prefetch 는 32 라서,
+     * <p><b>많아야 한 쪽만 앞서 읽는다.</b> {@code concatMapIterable} 의 기본 prefetch 는 32 라서,
      * 소비자가 5줄만 요청하고 취소 없이 멈춰도 위쪽에 응답을 32개까지 요청해 쪽이 끝까지 읽혔다. 멤버를 흘려 쓰는 SCIM 응답은
      * 느린 클라이언트가 소켓을 붙잡고 있어도 조직 전체를 끌어오면 안 되므로 prefetch 를 1 로 묶는다(설계 2026-10-06 §4.2).
+     * 그래서 멈춘 소비자 아래에서는 읽는 중인 쪽에 더해 앞서 받은 응답 하나까지만 쥔다(배압 테스트: Query ≤ 2).
      * 쪽 순서와 취소 동작은 그대로다.
      */
     static Flux<Map<String, AttributeValue>> queryAll(DynamoDbAsyncClient client, QueryRequest request) {

@@ -540,7 +540,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 **멤버를 싣는 조직 응답은 흘려 쓴다.** `members` 가 응답에 남는 조직 응답 — `GET /Groups/{id}`, `GET /Groups`·`POST /Groups/.search` 의 목록,
 POST·PUT 의 응답, `attributes` 를 붙인 PATCH 의 응답 — 은 본문을 `Content-Length` 없이 청크로 보낸다. 멤버를 DynamoDB 에서 한 쪽씩 읽는 대로
-JSON 으로 써 내보내고 메모리에 모으지 않으므로, 10만 명 조직 하나가 힙을 조직 크기만큼 차지하지 않는다. 클라이언트가 덜 받으면 다음 쪽을 읽지 않는다.
+JSON 으로 써 내보내고 메모리에 모으지 않으므로, 10만 명 조직 하나가 힙을 조직 크기만큼 차지하지 않는다. 클라이언트가 덜 받으면 많아야 DynamoDB 한 쪽 앞서 읽고 멈춘다.
 읽는 양은 그대로 조직 전체다 — 멤버 전체를 달라는 요청이기 때문이다. Okta 가 그룹을 연결·푸시할 때 보내는 파라미터 없는 `GET /Groups/{id}` 와
 `excludedAttributes` 없는 `filter=displayName eq` 가 이 길이다. `excludedAttributes=members`(Entra 는 늘 붙인다)나 `members` 를 뺀 `attributes`
 를 붙이면 멤버 줄을 읽지 않고 이름표만 한 번에 보낸다. JSON 값은 예전과 같고 필드 순서만 다르다 — `members` 가 맨 뒤이고, 목록은 `itemsPerPage`
