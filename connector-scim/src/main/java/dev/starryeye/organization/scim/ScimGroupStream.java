@@ -23,8 +23,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class ScimGroupStream {
 
-    /** 멤버를 이만큼씩 묶어 버퍼 하나로 내보낸다. 멤버 하나가 약 40~60바이트라 묶음 하나가 수십 KB 다. */
-    static final int 멤버_묶음 = 1_000;
+    /**
+     * 멤버를 이만큼씩 묶어 버퍼 하나로 내보낸다. 멤버 하나가 약 40~60바이트라 묶음 하나가 5KB 안팎이다.
+     * 묶음은 Netty 보내기 창(버퍼 128개, {@code reactor.netty.send.maxPrefetchSize})에 견줘 작아야 한다 —
+     * 느린 클라이언트가 받아 가지 않아도 연결당 쌓이는 바이트가 조직이 얼마나 크든 약 0.6MB(128 x 5KB)로 묶인다.
+     * 묶음이 1,000개(약 50KB)면 10만 명 응답 전체(약 6MB)가 연결 하나에 쌓일 수 있다. Netty 속성은 전역이라 건드리지 않는다.
+     */
+    static final int 멤버_묶음 = 100;
 
     private static final DataBufferFactory BUFFERS = DefaultDataBufferFactory.sharedInstance;
 
@@ -34,26 +39,33 @@ final class ScimGroupStream {
         this.state = state;
     }
 
-    /** 조직 하나. 헤더는 호출자가 이미 읽었다 — 없는 조직이면 응답을 쓰기 전에 404 를 냈다. */
+    /**
+     * 조직 하나. 헤더는 호출자가 이미 읽었다 — 없는 조직이면 응답을 쓰기 전에 404 를 냈다.
+     * 이 부품은 늘 {@code members} 를 쓴다 — 부른 쪽이 {@code projection.includes("members")} 일 때만 부른다. 아니면 이름표 트리 응답을 쓴다.
+     */
     Flux<DataBuffer> group(GroupHeader header, ScimAttributeProjection projection) {
+        return group("", header, projection);
+    }
+
+    /** {@code prefix} 는 응답 앞에 붙는 글자다 — 목록에서 앞 조직과 이을 쉼표. 빈 버퍼를 따로 내보내지 않으려고 앞부분에 합친다. */
+    private Flux<DataBuffer> group(String prefix, GroupHeader header, ScimAttributeProjection projection) {
         return Flux.concat(
-                Mono.fromSupplier(() -> buffer(head(header, projection))),
+                Mono.fromSupplier(() -> buffer(prefix + head(header, projection))),
                 members(header.id(), projection),
                 Mono.fromSupplier(() -> buffer("]}")));
     }
 
     /**
      * 목록(RFC 7644 §3.4.2). 조직을 하나씩 차례로 쓴다 — 앞 조직을 다 쓰기 전에 뒤 조직을 미리 읽지 않는다(미리 읽으면 큰 조직 하나를 통째로 쥔다).
-     * 목록을 만든 뒤 지워진 조직은 헤더가 비어 건너뛴다.
+     * 목록을 만든 뒤 지워진 조직은 헤더가 비어 건너뛴다. 조직 사이의 쉼표는 입력 순번이 아니라 실제로 쓴 수를 따른다.
+     * {@link #group} 처럼 늘 {@code members} 를 쓴다 — 부른 쪽이 {@code projection.includes("members")} 일 때만 부른다. 아니면 이름표 트리 응답을 쓴다.
      */
     Flux<DataBuffer> list(ScimQuery query, long totalResults, List<GroupHeader> headers) {
         return Flux.defer(() -> {
             AtomicInteger 쓴_수 = new AtomicInteger();
             Flux<DataBuffer> resources = Flux.fromIterable(headers)
                     .concatMap(listed -> state.findGroupHeader(listed.id())
-                            .flatMapMany(header -> Flux.concat(
-                                    Mono.fromSupplier(() -> buffer(쓴_수.getAndIncrement() == 0 ? "" : ",")),
-                                    group(header, query.projection()))));
+                            .flatMapMany(header -> group(쓴_수.getAndIncrement() == 0 ? "" : ",", header, query.projection())));
             return Flux.concat(
                     Mono.fromSupplier(() -> buffer(listHead(query, totalResults))),
                     resources,

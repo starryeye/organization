@@ -10,6 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import reactor.core.publisher.Flux;
@@ -20,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -163,5 +165,72 @@ class ScimGroupStreamTest {
         assertThat(목록.get("Resources")).hasSize(1);
         assertThat(목록.get("Resources").get(0).get("id").asText()).isEqualTo("DEV");
         assertThat(목록.get("Resources").get(0).get("members")).hasSize(1);
+    }
+
+    @ParameterizedTest(name = "멤버 {0}명")
+    @ValueSource(ints = {2 * ScimGroupStream.멤버_묶음 + 1, 2 * ScimGroupStream.멤버_묶음})
+    @DisplayName("멤버가 여러 묶음에 걸쳐도 묶음 사이를 쉼표로 이어 완결된 JSON 이 된다 — 모든 멤버가 한 번씩, 차례대로")
+    void 여러_묶음도_완결된_JSON_이다(int 멤버_수) throws Exception {
+        // given
+        var state = new FakeStateRepository() {
+            @Override
+            public Flux<MemberRef> findMemberRefs(String groupId) {
+                return Flux.range(0, 멤버_수).map(i -> MemberRef.user("u%06d".formatted(i)));
+            }
+        };
+
+        // when
+        String 흘려쓴 = 모은다(new ScimGroupStream(state).group(new GroupHeader("ALL", null, "전 직원"),
+                ScimAttributeProjection.all()));
+
+        // then
+        List<String> 받은_아이디 = new ArrayList<>();
+        JSON.readTree(흘려쓴).get("members").forEach(member -> 받은_아이디.add(member.get("value").asText()));
+        assertThat(받은_아이디).containsExactlyElementsOf(
+                IntStream.range(0, 멤버_수).mapToObj(i -> "u%06d".formatted(i)).toList());
+    }
+
+    @Test
+    @DisplayName("목록의 첫 조직이 그사이 지워져도 쉼표는 쓴 수를 따른다 — 완결된 JSON, 나머지 둘이 차례로, itemsPerPage 2")
+    void 첫_조직이_지워져도_쉼표가_맞다() throws Exception {
+        // given — 목록을 만들 때는 셋이었는데 맨 앞 GONE 이 그사이 지워졌다
+        var state = new FakeStateRepository();
+        state.saveGroup(new DirectoryGroup("A", null, "가", Set.of(MemberRef.user("kim")))).block();
+        state.saveGroup(new DirectoryGroup("B", null, "나", Set.of())).block();
+        var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
+        List<GroupHeader> headers = List.of(new GroupHeader("GONE", null, "사라짐"),
+                new GroupHeader("A", null, "가"), new GroupHeader("B", null, "나"));
+
+        // when
+        JsonNode 목록 = JSON.readTree(모은다(new ScimGroupStream(state).list(query, 3, headers)));
+
+        // then
+        List<String> 받은_아이디 = new ArrayList<>();
+        목록.get("Resources").forEach(resource -> 받은_아이디.add(resource.get("id").asText()));
+        assertThat(받은_아이디).containsExactly("A", "B");
+        assertThat(목록.get("itemsPerPage").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("목록은 길이 0 인 버퍼를 내보내지 않는다 — 구분 쉼표는 조직 앞부분에 붙는다")
+    void 목록에_빈_버퍼가_없다() {
+        // given
+        var state = new FakeStateRepository();
+        state.saveGroup(new DirectoryGroup("A", null, "가", Set.of(MemberRef.user("kim")))).block();
+        state.saveGroup(new DirectoryGroup("B", null, "나", Set.of())).block();
+        var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
+        List<GroupHeader> headers = List.of(new GroupHeader("A", null, "가"), new GroupHeader("B", null, "나"));
+
+        // when
+        List<Integer> 길이들 = new ScimGroupStream(state).list(query, 2, headers)
+                .map(buffer -> {
+                    int length = buffer.readableByteCount();
+                    DataBufferUtils.release(buffer);
+                    return length;
+                })
+                .collectList().block();
+
+        // then
+        assertThat(길이들).isNotEmpty().allMatch(length -> length > 0);
     }
 }
