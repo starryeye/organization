@@ -2,6 +2,7 @@ package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import java.time.Clock;
@@ -11,7 +12,9 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -184,5 +187,108 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // then — 구독해야 비로소 IllegalArgumentException 이 onError 신호로 나온다
         assertThatThrownBy(() -> built.get().block())
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private void 조직을_심는다(String orgCode, int 직원수, String... 하위조직) {
+        Set<MemberRef> members = new LinkedHashSet<>();
+        for (int i = 0; i < 직원수; i++) {
+            members.add(MemberRef.user("u%03d".formatted(i)));
+        }
+        for (String child : 하위조직) {
+            members.add(MemberRef.group(child));
+        }
+        state.saveGroup(new DirectoryGroup(orgCode, "ext-" + orgCode, orgCode + "-조직", members)).block();
+    }
+
+    @Test
+    @DisplayName("직원 멤버를 아이디 순으로 한 쪽씩 읽고, 커서로 이어 읽으면 중복도 누락도 없다 — 하위 조직·META 는 섞이지 않는다(설계 2026-10-06 §3.1)")
+    void 직원_멤버를_한_쪽씩_읽는다() {
+        // given — 직원 5명, 하위 조직 둘
+        조직을_심는다("DEV", 5, "SUB1", "SUB2");
+
+        // when — 2명씩 끝까지 읽는다
+        List<String> 읽은것 = new ArrayList<>();
+        int 쪽수 = 0;
+        String cursor = null;
+        do {
+            var page = search.findGroupUserMemberIds("DEV", cursor, 2).block();
+            읽은것.addAll(page.items());
+            cursor = page.nextCursor();
+            쪽수++;
+        } while (cursor != null && 쪽수 < 10);
+
+        // then
+        assertThat(읽은것).containsExactly("u000", "u001", "u002", "u003", "u004");
+        assertThat(쪽수).isGreaterThan(1);
+    }
+
+    @Test
+    @DisplayName("직원 멤버가 없으면 빈 쪽이고 커서도 없다")
+    void 직원_멤버가_없으면_빈_쪽이다() {
+        // given
+        조직을_심는다("EMPTY", 0, "SUB1");
+
+        // when
+        var page = search.findGroupUserMemberIds("EMPTY", null, 20).block();
+
+        // then
+        assertThat(page.items()).isEmpty();
+        assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("다른 조직의 멤버 커서는 IllegalArgumentException 이다 — 다른 파티션을 엉뚱하게 이어 읽지 않는다")
+    void 다른_조직의_커서는_거절한다() {
+        // given
+        조직을_심는다("A", 3);
+        조직을_심는다("B", 3);
+        String A의_커서 = search.findGroupUserMemberIds("A", null, 1).block().nextCursor();
+
+        // when, then
+        assertThatThrownBy(() -> search.findGroupUserMemberIds("B", A의_커서, 1).block())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("범위는 맞아도 시작 키가 이 조직의 직원 멤버가 아니면 IllegalArgumentException 이다 — DynamoDB 오류(500)로 새지 않는다(점검 S16 앞쪽)")
+    void 위조한_시작_키는_거절한다() {
+        // given — 같은 범위로 위조한 커서 셋: 다른 PK, 하위 조직 SK, 속성이 하나 더 있음
+        조직을_심는다("DEV", 3);
+        String 범위 = "group-members/DEV";
+        String 다른_PK = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("OTHER")),
+                Keys.SK, Attrs.s(Keys.memberSk(MemberRef.user("u000")))));
+        String 조직_SK = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("DEV")),
+                Keys.SK, Attrs.s(Keys.memberSk(MemberRef.group("SUB1")))));
+        String 남는_속성 = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(Keys.groupPk("DEV")),
+                Keys.SK, Attrs.s(Keys.memberSk(MemberRef.user("u000"))), "extra", Attrs.s("x")));
+
+        // when, then
+        for (String 위조 : List.of(다른_PK, 조직_SK, 남는_속성)) {
+            assertThatThrownBy(() -> search.findGroupUserMemberIds("DEV", 위조, 1).block())
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
+    @DisplayName("깨진 멤버 커서는 Mono 를 만들 때는 던지지 않고, 구독할 때 IllegalArgumentException 으로 나온다")
+    void 깨진_멤버_커서는_구독할_때_실패한다() {
+        // when
+        var mono = search.findGroupUserMemberIds("DEV", "!!not-base64!!", 1);
+
+        // then
+        assertThatThrownBy(mono::block).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("하위 조직 아이디만 정렬 순으로 읽는다 — 직원 멤버는 섞이지 않는다")
+    void 하위_조직_아이디만_읽는다() {
+        // given
+        조직을_심는다("DEV", 3, "SUB2", "SUB1");
+
+        // when
+        var 하위 = search.findChildOrgCodes("DEV").collectList().block();
+
+        // then
+        assertThat(하위).containsExactly("SUB1", "SUB2");
     }
 }

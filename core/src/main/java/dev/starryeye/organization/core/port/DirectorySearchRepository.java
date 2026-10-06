@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.port;
 import dev.starryeye.organization.core.query.GroupSummary;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 /**
@@ -52,4 +53,15 @@ public interface DirectorySearchRepository {
      * {@code DirectoryStateRepository} 에 얹지 않고도 조회에 맞는 읽기를 정의할 수 있다.
      */
     Mono<GroupSummary> findGroupSummary(String orgCode);
+
+    /**
+     * 조직의 <b>직원 멤버</b> 아이디 한 쪽(아이디 순). {@code cursor} 가 null 이면 첫 쪽이고, 다음 쪽이 없으면 {@code nextCursor} 가 null 이다.
+     * 쪽이 정확히 끝나면 빈 마지막 쪽이 한 번 올 수 있다(저장소의 표준 신호를 그대로 쓴다). 잘못된 커서는 구독할 때 {@link IllegalArgumentException} 이다.
+     *
+     * <p>조직 파티션 전체를 읽지 않는다 — 10만 명 조직이어도 쪽 크기만큼만 읽는다(설계 2026-10-06 §3.1, 점검 P4).
+     */
+    Mono<Page<String>> findGroupUserMemberIds(String orgCode, String cursor, int limit);
+
+    /** 조직의 직속 하위 조직 아이디(아이디 순). 쪽 단위로 이어 읽으므로 호출자가 {@code take} 로 자르면 거기서 멈춘다(설계 2026-10-06 §3.2). */
+    Flux<String> findChildOrgCodes(String orgCode);
 }

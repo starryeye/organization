@@ -1,9 +1,12 @@
 package dev.starryeye.organization.core.fake;
 
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.query.GroupSummary;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
@@ -67,6 +70,34 @@ public class FakeSearchRepository implements DirectorySearchRepository {
         return groups.stream()
                 .filter(summary -> summary.orgCode().equals(orgCode))
                 .findFirst().orElse(null);
+    }
+
+    /** 상태 저장소의 조직 멤버 중 직원만 아이디 순으로 자른다. 커서는 다음 인덱스다(불투명하다는 계약만 지킨다). */
+    @Override
+    public Mono<Page<String>> findGroupUserMemberIds(String orgCode, String cursor, int limit) {
+        if (failWith != null) return Mono.error(failWith);
+        return Mono.fromCallable(() -> {
+            List<String> ids = memberIds(orgCode, MemberType.USER);
+            int from = cursor == null ? 0 : Integer.parseInt(cursor);
+            int to = Math.min(from + limit, ids.size());
+            return new Page<>(ids.subList(from, to), to < ids.size() ? String.valueOf(to) : null);
+        });
+    }
+
+    @Override
+    public Flux<String> findChildOrgCodes(String orgCode) {
+        return Flux.defer(() -> Flux.fromIterable(memberIds(orgCode, MemberType.GROUP)));
+    }
+
+    private List<String> memberIds(String orgCode, MemberType type) {
+        if (state == null || state.groups.get(orgCode) == null) {
+            return List.of();
+        }
+        return state.groups.get(orgCode).members().stream()
+                .filter(member -> member.type() == type)
+                .map(MemberRef::id)
+                .sorted()
+                .toList();
     }
 
     /**
