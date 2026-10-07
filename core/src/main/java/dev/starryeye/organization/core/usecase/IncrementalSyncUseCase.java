@@ -16,16 +16,14 @@ import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
-import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.tuple.TupleDiff;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Signal;
 import reactor.core.publisher.Sinks;
-import reactor.util.retry.Retry;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -115,9 +113,6 @@ public class IncrementalSyncUseCase {
 
     private static final int LOAD_CONCURRENCY = 8;
 
-    /** 획득 재시도 간격. 대기 한도를 이 값으로 나눈 횟수가 재시도 횟수다. */
-    private static final Duration ACQUIRE_RETRY_DELAY = Duration.ofMillis(200);
-
     /** 갱신 주기를 넘기지 않는 생성자가 쓰는 값 — 운영 결선은 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofSeconds(10);
 
@@ -126,26 +121,24 @@ public class IncrementalSyncUseCase {
     private final RelationTupleChecker checker;
     private final MutationLock lock;
     /**
-     * 락 획득을 포기하기까지의 대기 한도 (설계 §4.4). 재시도 <b>횟수</b>가 아니라 한도를
-     * 받는다 — 횟수를 받으면 그것을 계산한 쪽이 {@link #ACQUIRE_RETRY_DELAY} 를 따로 알고
-     * 있어야 하고, 컴파일러가 이어주지 않는 그 중복 때문에 한쪽만 바뀌면 획득 예산이
-     * 조용히 달라진다.
+     * 락 획득을 포기하기까지의 대기 한도(설계 §4.4, 2026-10-07 §3.1). 줄에 선 순간부터 잰다 — 서버 안 줄에서 기다린 시간과 다른 서버와
+     * 백오프로 겨룬 시간이 모두 든다. 한도는 시도와 시도 사이에서만 본다 — 날아가는 중인 획득은 끊지 않는다.
      */
     private final Duration acquireTimeout;
     /** 락을 쥔 동안 리스를 갱신하는 주기(설계 2026-10-02 §3.1). */
     private final Duration renewInterval;
     private final DriftObserver driftObserver;
     private final LockObserver lockObserver;
+    /** 서버 안의 SCIM 쓰기 줄(설계 2026-10-07 §3.1) — 이 유스케이스 하나, 곧 서버 하나에 하나다. */
+    private final LocalWriteQueue 줄 = new LocalWriteQueue();
+    /** 다른 서버가 쥔 락을 다시 시도하는 간격(§3.2). */
+    private final AcquireBackoff 백오프 = AcquireBackoff.무작위로();
 
     /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 8인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
                                   LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
-    }
-
-    private long acquireRetries() {
-        return acquireTimeout.toMillis() / ACQUIRE_RETRY_DELAY.toMillis();
     }
 
     /**
@@ -655,39 +648,59 @@ public class IncrementalSyncUseCase {
 
     private Mono<IncrementalSyncResult> 잡고_돌린다(Function<LockLease, Mono<IncrementalSyncResult>> work) {
         return Mono.defer(() -> {
-            long 시작 = System.nanoTime();
+            long 시작 = AcquireBackoff.지금();
             AtomicBoolean 경합했다 = new AtomicBoolean();
 
-            return lock.acquire(MutationLock.LockPurpose.WRITE)
-                    // retryWhen 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
-                    .doOnError(LockUnavailableException.class, error -> 경합했다.set(true))
-                    // 밀리초 단위로 쥐는 락이라 즉시 503 을 내면 재시도만 늘어난다. 짧게 기다려보고
-                    // 그래도 안 되면 그때의 503 이 IdP 에게 의미 있는 신호가 된다 (설계 §4.4).
-                    .retryWhen(Retry.fixedDelay(acquireRetries(), ACQUIRE_RETRY_DELAY)
-                            .filter(LockUnavailableException.class::isInstance))
-                    .onErrorMap(Exceptions::isRetryExhausted,
-                            error -> new LockUnavailableException("변경 락을 얻지 못했습니다", 마지막_대기(error)))
-                    // DynamoDB 장애 등 락 이외의 예외도 503 으로 옮긴다 (설계 §6).
-                    .onErrorMap(error -> !(error instanceof LockUnavailableException),
-                            error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
-                    // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도
-                    // LockUnavailableException 으로 옮기므로 예외 타입으로는 구별할 수 없고,
-                    // 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
-                    .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
-                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
-                    .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
-                            .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
-                            .materialize()
-                            .flatMap(끝 -> 반납한다(lease).thenReturn(끝))
-                            .<IncrementalSyncResult>dematerialize());
+            return 줄.줄을_선다(acquireTimeout)
+                    // 줄에서 한도를 넘겼다 — 앞에 이 서버의 쓰기가 있었으니 경합이다
+                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
+                    .flatMap(차례 -> {
+                        if (차례.밀렸다()) {
+                            경합했다.set(true);
+                        }
+                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 acquire 도 한 번이다
+                        return Mono.defer(() -> 잡는다(시작, 경합했다))
+                                .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
+                                        .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
+                                        .materialize()
+                                        .flatMap(끝 -> 반납한다(lease).thenReturn(끝)))
+                                // 획득 실패도 끝이다
+                                .onErrorResume(error -> Mono.just(Signal.<IncrementalSyncResult>error(error)))
+                                // 반납까지 끝났거나 획득이 실패했다 — 결과를 내기 <b>전에</b> 다음 요청에 차례를 넘긴다(설계 2026-10-07 §3.1).
+                                // 결과를 낸 뒤에 넘기면 그 결과를 받은 IdP 의 다음 요청이 아직 넘어가지 않은 차례 뒤에 줄을 선다
+                                .doOnNext(끝 -> 차례.넘긴다())
+                                // 끝이 오지 않고 취소돼도 차례를 쥔 채 사라지지 않는다 — 넘긴다는 한 번만 넘긴다
+                                .doFinally(signal -> 차례.넘긴다())
+                                .<IncrementalSyncResult>dematerialize();
+                    });
         });
     }
 
-    /** 재시도를 다 쓴 예외의 원인은 마지막 실패다 — 그 기다릴 시간(쥔 쪽의 용도)을 물려받는다. */
-    private static Duration 마지막_대기(Throwable 소진) {
-        return 소진.getCause() instanceof TemporaryFailureException 마지막
-                ? 마지막.retryAfter()
-                : TemporaryFailureException.기본_대기;
+    /**
+     * 차례를 받은 요청이 전역 락을 잡는다 — 다른 서버와는 백오프로 겨룬다(설계 2026-10-07 §3.2). 한도는 줄에 선 순간({@code 시작})부터 잰다.
+     *
+     * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> 락 이외의 예외(DynamoDB 장애 등)도 {@link LockUnavailableException} 으로 감싼다.
+     */
+    private Mono<LockLease> 잡는다(long 시작, AtomicBoolean 경합했다) {
+        Duration 남은_한도 = acquireTimeout.minusMillis(AcquireBackoff.지금() - 시작);
+        // acquire 를 한 번만 부르고 그 Mono 를 다시 구독해야 재시도도 같은 토큰이다(점검 S14)
+        Mono<LockLease> 획득;
+        try {
+            획득 = lock.acquire(MutationLock.LockPurpose.WRITE);
+        } catch (RuntimeException e) {
+            // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
+            획득 = Mono.error(e);
+        }
+        Mono<LockLease> 시도 = 획득
+                // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
+                .doOnError(LockUnavailableException.class, error -> 경합했다.set(true));
+        return 백오프.잡는다(시도, 남은_한도)
+                .onErrorMap(error -> !(error instanceof LockUnavailableException),
+                        error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
+                // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도 LockUnavailableException 으로 옮기므로
+                // 예외 타입으로는 구별할 수 없고, 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
+                .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
+                .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()));
     }
 
     /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */
@@ -700,8 +713,9 @@ public class IncrementalSyncUseCase {
                 });
     }
 
-    private static Duration 경과(long 시작나노) {
-        return Duration.ofNanos(System.nanoTime() - 시작나노);
+    /** 스케줄러 시계로 잰 경과 — 한도와 같은 시계다({@link AcquireBackoff#지금}). */
+    private static Duration 경과(long 시작) {
+        return Duration.ofMillis(AcquireBackoff.지금() - 시작);
     }
 
     /**

@@ -16,8 +16,12 @@ public class LockUnavailableException extends TemporaryFailureException {
     /** 재적재·전체 동기화가 쥐고 있다 — 수 분 걸린다 */
     public static final Duration 긴_작업_대기 = Duration.ofSeconds(60);
 
+    /** 조건 실패 때 돌려받은 쥔 쪽의 용도 — {@link #잡혀_있다} 로 만든 것만 싣는다. 그 밖(저장소 오류·리스 상실)이나 용도를 모르면 null 이다. */
+    private final MutationLock.LockPurpose 쥔_용도;
+
     public LockUnavailableException(String message) {
         super(message, 기본_대기);
+        this.쥔_용도 = null;
     }
 
     /**
@@ -27,16 +31,32 @@ public class LockUnavailableException extends TemporaryFailureException {
      */
     public LockUnavailableException(String message, Throwable cause) {
         super(message, 기본_대기, cause);
+        this.쥔_용도 = null;
     }
 
     public LockUnavailableException(String message, Duration retryAfter) {
         super(message, retryAfter);
+        this.쥔_용도 = null;
+    }
+
+    private LockUnavailableException(String message, Duration retryAfter, MutationLock.LockPurpose 쥔_용도) {
+        super(message, retryAfter);
+        this.쥔_용도 = 쥔_용도;
     }
 
     /** 다른 쪽이 락을 쥐고 있어 획득 조건이 깨졌다. 쥔 쪽의 용도를 모르면(null) 흔한 경우인 쓰기 경합으로 본다. */
     public static LockUnavailableException 잡혀_있다(MutationLock.LockPurpose 쥔_용도) {
-        Duration 대기 = 쥔_용도 == MutationLock.LockPurpose.REBUILD || 쥔_용도 == MutationLock.LockPurpose.SYNC
-                ? 긴_작업_대기 : 쓰기_경합_대기;
-        return new LockUnavailableException("다른 작업이 변경 락을 쥐고 있습니다(" + (쥔_용도 == null ? "용도 모름" : 쥔_용도) + ")", 대기);
+        Duration 대기 = 긴_작업(쥔_용도) ? 긴_작업_대기 : 쓰기_경합_대기;
+        return new LockUnavailableException(
+                "다른 작업이 변경 락을 쥐고 있습니다(" + (쥔_용도 == null ? "용도 모름" : 쥔_용도) + ")", 대기, 쥔_용도);
+    }
+
+    /** 재적재·동기화가 쥐고 있다 — 몇 분 걸리므로 획득 재시도가 결과를 바꾸지 못한다(설계 2026-10-07 §3.3). 용도를 모르면 아니다(쓰기 경합으로 본다). */
+    public boolean 긴_작업이_쥐었다() {
+        return 긴_작업(쥔_용도);
+    }
+
+    private static boolean 긴_작업(MutationLock.LockPurpose 용도) {
+        return 용도 == MutationLock.LockPurpose.REBUILD || 용도 == MutationLock.LockPurpose.SYNC;
     }
 }

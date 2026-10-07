@@ -10,6 +10,7 @@ import dev.starryeye.organization.scim.dto.ScimOperation;
 import dev.starryeye.organization.scim.dto.ScimPatchOp;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -93,9 +94,38 @@ public final class ScimPatchApplier {
     public static DirectoryUser applyToUser(DirectoryUser before, ScimPatchOp patch, Consumer<String> 버림) {
         DirectoryUser current = before;
         for (ScimOperation operation : operations(patch)) {
-            current = applyOne(current, operation, 버림);
+            String op = requireKnownOp(operation.op());
+            for (Target target : targets(operation, op)) {
+                Optional<UserChange> change = storedAttribute(target.name());
+                if (change.isPresent()) {
+                    current = change.get().apply(current, op, target.value());
+                } else {
+                    discard(target, 버림);
+                }
+            }
         }
         return current;
+    }
+
+    /**
+     * 이 PATCH 의 어떤 연산도 저장하는 직원 속성에 닿지 않는가(설계 2026-10-07 §4) — 참이면 핸들러가 락 없이 지금 모습을 돌려준다.
+     * 가르는 규칙은 {@link #applyToUser} 와 같은 하나({@link #storedAttribute})다. 저장하는지는 path 이름(과 이메일 필터의 type)만으로 정해지고
+     * 직원의 현재 값과 무관하다 — 그래서 요청만 보고 정한다. 모양 검사(모르는 연산·모르는 path 400, 경로 없는 remove noTarget, 값이 객체가
+     * 아니면 400)도 같은 도우미를 지나 같다. 버린 속성 이름은 {@code 버림} 으로 넘긴다.
+     */
+    public static boolean touchesNoStoredUserAttribute(ScimPatchOp patch, Consumer<String> 버림) {
+        boolean touches = false;
+        for (ScimOperation operation : operations(patch)) {
+            String op = requireKnownOp(operation.op());
+            for (Target target : targets(operation, op)) {
+                if (storedAttribute(target.name()).isPresent()) {
+                    touches = true;
+                } else {
+                    discard(target, 버림);
+                }
+            }
+        }
+        return !touches;
     }
 
     /** 받아서 버린 속성을 알리지 않는 판 — 테스트용이다. 운영 호출은 {@code 버림} 을 받는 쪽만 쓴다(버림 보고를 잃지 않게 패키지 안에 둔다). */
@@ -269,61 +299,78 @@ public final class ScimPatchApplier {
             "honorificprefix", PersonName::withHonorificPrefix,
             "honorificsuffix", PersonName::withHonorificSuffix);
 
-    private static DirectoryUser applyOne(DirectoryUser user, ScimOperation operation, Consumer<String> 버림) {
-        String op = requireKnownOp(operation.op());
-        String path = operation.path();
-
-        if (path == null || path.isBlank()) {
-            requireTarget(op);
-            requireReplaceOrAdd(op, operation.op());
-            return mergeUserAttributes(op, user, asAttributeMap(operation.value()), 버림);
-        }
-
-        Optional<DirectoryUser> applied = applyPath(user, op, path.trim(), operation.value());
-        if (applied.isPresent()) {
-            return applied.get();
-        }
-        // 저장하지 않는 속성 — RFC 가 정의한 것이면 받아서 버리고, 모르는 것만 거절한다(설계 2026-10-06 §3.1)
-        String 버린것 = ScimRfcAttributes.userAttribute(path)
-                .orElseThrow(() -> ScimException.invalidPath("지원하지 않는 path 입니다: " + path));
-        버림.accept(버린것);
-        return user;
+    /** 연산 하나가 겨누는 속성 — path 형이면 하나(이름은 앞뒤 공백을 뺀 path), 경로 없는 값이면 키마다 하나(F1). */
+    private record Target(String name, Object value, boolean pathForm) {
     }
 
     /**
-     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 해석한다(F1) — 저장하지 않아 못 적용하면
-     * {@link Optional#empty()}. 그 뒤는 부르는 쪽이 정한다 — path 형식은 RFC 가 정의한 속성이면 받아서 버리고 아니면 400
-     * {@code invalidPath}, 경로 없는 값은 그 키를 무시하고 원래 값을 지킨다(설계 2026-10-06 §3).
+     * 연산을 겨눈 속성들로 편다. 경로 없는 값은 add/replace 만 되고 값이 객체여야 한다. Jackson 은 값 객체를 {@code LinkedHashMap} 으로 주므로
+     * 키 순서대로 누적 적용된다.
      */
-    private static Optional<DirectoryUser> applyPath(DirectoryUser user, String op, String path, Object value) {
-        String target = stripUrn(path, CORE_USER_URN);
+    private static List<Target> targets(ScimOperation operation, String op) {
+        String path = operation.path();
+        if (path == null || path.isBlank()) {
+            requireTarget(op);
+            requireReplaceOrAdd(op, operation.op());
+            List<Target> targets = new ArrayList<>();
+            asAttributeMap(operation.value()).forEach((key, value) -> targets.add(new Target(key, value, false)));
+            return targets;
+        }
+        return List.of(new Target(path.trim(), operation.value(), true));
+    }
+
+    /**
+     * 저장하지 않는 속성 — path 형이면 RFC 가 정의한 것만 받아서 버리고 모르는 것은 400 {@code invalidPath}, 경로 없는 값의 키는 무시하고
+     * 이름만 알린다(설계 2026-10-06 §3). 이름은 표의 정규 이름이나 {@code other} — 요청 문자열을 메트릭 태그로 넘기지 않는다.
+     */
+    private static void discard(Target target, Consumer<String> 버림) {
+        if (target.pathForm()) {
+            버림.accept(ScimRfcAttributes.userAttribute(target.name())
+                    .orElseThrow(() -> ScimException.invalidPath("지원하지 않는 path 입니다: " + target.name())));
+        } else {
+            버림.accept(ScimRfcAttributes.userAttribute(target.name()).orElse(ScimRfcAttributes.OTHER));
+        }
+    }
+
+    /** 저장하는 속성 하나에 연산을 적용한다. */
+    @FunctionalInterface
+    private interface UserChange {
+        DirectoryUser apply(DirectoryUser user, String op, Object value);
+    }
+
+    /**
+     * path 형식과 경로 없는 값의 키 하나를 <b>같은 규칙</b>으로 가른다(F1) — 저장하는 속성이면 그 적용, 아니면 빈 값. 이름만 보고 정한다
+     * (직원의 현재 값과 무관하다). 적용({@link #applyToUser})과 판정({@link #touchesNoStoredUserAttribute})이 이 하나를 쓴다.
+     */
+    private static Optional<UserChange> storedAttribute(String name) {
+        String target = stripUrn(name, CORE_USER_URN);
         Matcher email = EMAIL_FILTER.matcher(target);
         if (email.matches()) {
             if (!email.group("type").equalsIgnoreCase("work")) {
                 return Optional.empty();
             }
-            return Optional.of(applyWorkEmail(user, op, value, email, path));
+            return Optional.of((user, op, value) -> applyWorkEmail(user, op, value, email, name));
         }
 
-        boolean remove = op.equals("remove");
         String lower = target.toLowerCase(Locale.ROOT);
         if (lower.startsWith("name.")) {
             BiFunction<PersonName, String, PersonName> part = NAME_PARTS.get(lower.substring("name.".length()));
             if (part == null) {
                 return Optional.empty();
             }
-            return Optional.of(user.withName(part.apply(user.name(), remove ? null : asString(value))));
+            return Optional.of((user, op, value) -> user.withName(part.apply(user.name(), op.equals("remove") ? null : asString(value))));
         }
-        return switch (lower) {
-            case "username" -> Optional.of(applyUserName(user, remove, value));
-            case "displayname" -> Optional.of(user.withDisplayName(remove ? null : asString(value)));
-            case "externalid" -> Optional.of(user.withExternalId(remove ? null : asString(value)));
+        UserChange change = switch (lower) {
+            case "username" -> (user, op, value) -> applyUserName(user, op.equals("remove"), value);
+            case "displayname" -> (user, op, value) -> user.withDisplayName(op.equals("remove") ? null : asString(value));
+            case "externalid" -> (user, op, value) -> user.withExternalId(op.equals("remove") ? null : asString(value));
             // active 가 없으면 활성이다 — POST 에 active 가 없을 때와 같은 규칙
-            case "active" -> Optional.of(user.withActive(remove || asBoolean(value)));
-            case "name" -> Optional.of(user.withName(remove ? PersonName.EMPTY : mergeName(user.name(), asAttributeMap(value))));
-            case "emails" -> Optional.of(user.withEmail(remove ? null : primaryEmail(value)));
-            default -> Optional.empty();
+            case "active" -> (user, op, value) -> user.withActive(op.equals("remove") || asBoolean(value));
+            case "name" -> (user, op, value) -> user.withName(op.equals("remove") ? PersonName.EMPTY : mergeName(user.name(), asAttributeMap(value)));
+            case "emails" -> (user, op, value) -> user.withEmail(op.equals("remove") ? null : primaryEmail(value));
+            default -> null;
         };
+        return Optional.ofNullable(change);
     }
 
     /** {@code userName} remove 는 필수 속성이라 400 {@code mutability}, 빈 값은 400 {@code invalidValue}(F3, RFC 7644 §3.12). */
@@ -351,25 +398,6 @@ public final class ScimPatchApplier {
                 ? asString(value)
                 : asString(attribute(asAttributeMap(value), "value"));
         return user.withEmail(resolved);
-    }
-
-    /**
-     * 경로 없는 add/replace — 값 객체의 키마다 {@code (op, path=키, value=값)} 연산 하나로 보고
-     * {@link #applyPath} 로 적용한다(F1). 모르는 키는 지금처럼 무시한다(설계 2026-10-06 §3.4). 그 이름은 표의 정규 이름이나 {@code other} 로 알린다 —
-     * 요청 문자열을 메트릭 태그로 넘기지 않는다. Jackson 은 값 객체를 {@code LinkedHashMap} 으로 주므로 키 순서대로 누적 적용된다.
-     */
-    private static DirectoryUser mergeUserAttributes(String op, DirectoryUser user, Map<String, Object> attributes,
-                                                     Consumer<String> 버림) {
-        DirectoryUser merged = user;
-        for (Map.Entry<String, Object> entry : attributes.entrySet()) {
-            Optional<DirectoryUser> applied = applyPath(merged, op, entry.getKey(), entry.getValue());
-            if (applied.isPresent()) {
-                merged = applied.get();
-            } else {
-                버림.accept(ScimRfcAttributes.userAttribute(entry.getKey()).orElse(ScimRfcAttributes.OTHER));
-            }
-        }
-        return merged;
     }
 
     /** RFC 7644 §3.5.2.3 — 준 하위 속성만 바꾸고 나머지는 그대로 둔다. 모르는 하위 속성은 무시한다. */

@@ -128,7 +128,7 @@ class IncrementalSyncLockObservabilityTest {
         };
         state.users.put("kim", 직원("kim", true));
 
-        // when — 200ms 간격으로 두 번 재시도할 수 있는 예산
+        // when — 한도 400ms 안에서 백오프로 다시 시도한다
         유스케이스(한번_밀리는_락, Duration.ofMillis(400)).upsertUser(직원("kim", false)).block();
 
         // then

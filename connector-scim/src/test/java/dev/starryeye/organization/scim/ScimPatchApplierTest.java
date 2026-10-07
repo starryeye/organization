@@ -1003,6 +1003,70 @@ class ScimPatchApplierTest {
         assertThat(버린것).containsExactly("manager", "employeeNumber");
     }
 
+    // ---------- 저장하는 속성에 닿는가 (설계 2026-10-07 §4) ----------
+
+    private static final String MANAGER = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager";
+
+    @Test
+    @DisplayName("버리는 속성만 있는 PATCH 는 저장하는 속성에 닿지 않는다 — 버린 이름은 알린다(설계 2026-10-07 §4)")
+    void 버리는_속성만이면_닿지_않는다() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+        var 패치 = 패치(
+                new ScimOperation("replace", MANAGER, Map.of("value", "lee")),
+                new ScimOperation("replace", "phoneNumbers[type eq \"work\"].value", "010-1234-5678"),
+                new ScimOperation("replace", "emails[type eq \"home\"].value", "kim@home.example"));
+
+        // when
+        boolean 닿지_않는다 = ScimPatchApplier.touchesNoStoredUserAttribute(패치, 버린것::add);
+
+        // then
+        assertThat(닿지_않는다).isTrue();
+        assertThat(버린것).containsExactly("manager", "phoneNumbers", "emails");
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 키가 모두 저장하지 않는 것이어도 닿지 않는다 — 모르는 키는 other 다")
+    void 경로_없는_값의_키가_모두_버리는_것이면_닿지_않는다() {
+        // given
+        List<String> 버린것 = new ArrayList<>();
+        var 패치 = 패치("replace", null, Map.of("nickName", "k"));
+
+        // when, then
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(패치, 버린것::add)).isTrue();
+        assertThat(버린것).containsExactly("nickName");
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(
+                패치("replace", null, Map.of("x-custom", 1)), 버린것::add)).isTrue();
+        assertThat(버린것).containsExactly("nickName", "other");
+    }
+
+    @Test
+    @DisplayName("저장하는 속성이 하나라도 섞이면 닿는다 — 같은 값을 다시 보낸 것도 락 안으로 간다")
+    void 저장하는_속성이_섞이면_닿는다() {
+        // when, then
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(
+                패치(new ScimOperation("replace", MANAGER, Map.of("value", "lee")),
+                        new ScimOperation("replace", "displayName", "김철수")), 이름 -> { })).isFalse();
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", "name.givenName", "철수"), 이름 -> { })).isFalse();
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", "emails[type eq \"work\"].value", "a@b.c"), 이름 -> { })).isFalse();
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", null, Map.of("nickName", "k", "active", false)), 이름 -> { })).isFalse();
+        assertThat(ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", "urn:ietf:params:scim:schemas:core:2.0:User:active", true), 이름 -> { })).isFalse();
+    }
+
+    @Test
+    @DisplayName("판정도 적용과 같은 모양 검사를 한다 — 모르는 path·경로 없는 remove·객체가 아닌 값은 400 이다")
+    void 판정도_모양을_검사한다() {
+        // when, then
+        assertThatThrownBy(() -> ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", "fooBar", "x"), 이름 -> { }))
+                .isInstanceOfSatisfying(ScimException.class, e -> assertThat(e.getScimType()).isEqualTo("invalidPath"));
+        assertThatThrownBy(() -> ScimPatchApplier.touchesNoStoredUserAttribute(패치("remove", null, null), 이름 -> { }))
+                .isInstanceOfSatisfying(ScimException.class, e -> assertThat(e.getScimType()).isEqualTo("noTarget"));
+        assertThatThrownBy(() -> ScimPatchApplier.touchesNoStoredUserAttribute(패치("replace", null, "문자열"), 이름 -> { }))
+                .isInstanceOfSatisfying(ScimException.class, e -> assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThatThrownBy(() -> ScimPatchApplier.touchesNoStoredUserAttribute(패치("frobnicate", "displayName", "x"), 이름 -> { }))
+                .isInstanceOfSatisfying(ScimException.class, e -> assertThat(e.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
     // ---------- F3: 빈 userName ----------
 
     @Test

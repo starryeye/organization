@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
- * 획득 재시도를 다 쓰고 나서 새로 만드는 예외는 마지막 실패의 기다릴 시간을 물려받는다(설계 2026-10-05 §3.1).
- * 쥔 쪽이 재적재면 IdP 가 2초 뒤에 다시 와도 또 막히므로, 응답의 {@code Retry-After} 가 쥔 쪽의 용도를 따라가야 한다.
+ * 획득을 포기할 때의 기다릴 시간은 쥔 쪽의 용도를 따른다(설계 2026-10-05 §3.1, 2026-10-07 §3.3). 재적재·동기화면 다시 시도하지 않고 바로 60초,
+ * 쓰기 경합이면 한도까지 다시 시도한 뒤 마지막 실패의 2초다.
  */
 class IncrementalSyncLockRetryAfterTest {
 
@@ -61,15 +61,15 @@ class IncrementalSyncLockRetryAfterTest {
         };
     }
 
-    /** 200ms 간격으로 두 번 재시도할 수 있는 예산이다(처음을 합쳐 세 번 시도한다). */
+    /** 한도 400ms — 쓰기 경합이면 백오프로 여러 번 다시 시도할 수 있다. */
     private IncrementalSyncUseCase 유스케이스(MutationLock lock) {
         return new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ofMillis(400),
                 IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
     }
 
     @Test
-    @DisplayName("재적재가 쥔 락을 끝내 못 잡으면 기다릴 시간이 60초다")
-    void 재시도를_다_쓰면_쥔_쪽의_기다릴_시간을_물려받는다() {
+    @DisplayName("재적재가 쥔 락이면 다시 시도하지 않고 바로 60초다 — 몇 분 걸리는 일이라 한도 안의 재시도가 결과를 바꾸지 못한다(설계 2026-10-07 §3.3)")
+    void 재적재가_쥐면_바로_60초다() {
         // given
         var 시도 = new AtomicInteger();
         var 재적재가_쥔_락 = 잡히지_않는_락(시도, n -> LockUnavailableException.잡혀_있다(MutationLock.LockPurpose.REBUILD));
@@ -78,23 +78,40 @@ class IncrementalSyncLockRetryAfterTest {
         var 실패 = catchThrowable(() -> 유스케이스(재적재가_쥔_락).removeUser("kim").block());
 
         // then
-        assertThat(시도).as("처음 한 번과 재시도 두 번").hasValue(3);
+        assertThat(시도).hasValue(1);
         assertThat(실패).isInstanceOfSatisfying(LockUnavailableException.class,
                 e -> assertThat(e.retryAfter()).isEqualTo(Duration.ofSeconds(60)));
     }
 
     @Test
-    @DisplayName("쥔 쪽이 도중에 바뀌면 가장 긴 시간이 아니라 마지막 실패의 기다릴 시간을 따른다 — 재적재가 끝나고 쓰기가 쥐면 2초")
-    void 마지막_실패의_시간을_따른다() {
-        // given — 처음엔 재적재가 쥐고 있다가 끝나고 SCIM 쓰기가 쥐었다. 가장 긴 시간(60초)과 마지막 시간(2초)이 갈린다
+    @DisplayName("쓰기가 쥐어 다시 시도하다 재적재가 쥐면 그 자리에서 멈추고 60초다")
+    void 도중에_재적재가_쥐면_멈춘다() {
+        // given — 처음엔 SCIM 쓰기가 쥐고 있다가 재적재가 잡았다
         var 시도 = new AtomicInteger();
         var 쥔_쪽이_바뀌는_락 = 잡히지_않는_락(시도, n -> LockUnavailableException.잡혀_있다(
-                n == 0 ? MutationLock.LockPurpose.REBUILD : MutationLock.LockPurpose.WRITE));
+                n == 0 ? MutationLock.LockPurpose.WRITE : MutationLock.LockPurpose.REBUILD));
 
         // when
         var 실패 = catchThrowable(() -> 유스케이스(쥔_쪽이_바뀌는_락).removeUser("kim").block());
 
         // then
+        assertThat(시도).hasValue(2);
+        assertThat(실패).isInstanceOfSatisfying(LockUnavailableException.class,
+                e -> assertThat(e.retryAfter()).isEqualTo(Duration.ofSeconds(60)));
+    }
+
+    @Test
+    @DisplayName("쓰기가 끝내 쥐고 있으면 한도까지 다시 시도하고, 마지막 실패의 기다릴 시간(2초)을 물려받는다")
+    void 쓰기가_쥐면_한도까지_시도한다() {
+        // given
+        var 시도 = new AtomicInteger();
+        var 쓰기가_쥔_락 = 잡히지_않는_락(시도, n -> LockUnavailableException.잡혀_있다(MutationLock.LockPurpose.WRITE));
+
+        // when
+        var 실패 = catchThrowable(() -> 유스케이스(쓰기가_쥔_락).removeUser("kim").block());
+
+        // then
+        assertThat(시도.get()).as("백오프로 여러 번 다시 시도했다").isGreaterThan(1);
         assertThat(실패).isInstanceOfSatisfying(LockUnavailableException.class,
                 e -> assertThat(e.retryAfter()).isEqualTo(Duration.ofSeconds(2)));
     }

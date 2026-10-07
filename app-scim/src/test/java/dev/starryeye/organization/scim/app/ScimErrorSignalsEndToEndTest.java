@@ -82,14 +82,15 @@ class ScimErrorSignalsEndToEndTest {
     @Test
     @DisplayName("재적재가 변경 락을 쥐고 있으면 SCIM 쓰기는 503 이고 Retry-After 가 60초다(점검 M4·S2)")
     void 재적재_중의_쓰기는_60초_뒤에_다시() {
-        // given — 쓰기는 락을 얻으려고 3초 기다려 본 뒤에 답한다. 기본 응답 제한(5초)에 빠듯하게 기대지 않는다
+        // given — 쥔 쪽이 재적재라 쓰기는 기다리지 않고 첫 시도에서 바로 503 으로 답한다(설계 2026-10-07 §3.3).
+        // 응답 제한은 느린 환경에 빠듯하게 기대지 않도록 넉넉히 둔다
         // (락을 쥐기 전에 만든다 — 만드는 데 실패해도 리스가 새지 않는다)
         var 느긋한 = client.mutate().responseTimeout(Duration.ofSeconds(30)).build();
         // 재적재 용도로 락을 쥔다
         var lease = lock.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
 
         try {
-            // when, then — 쓰기는 기다려 본 뒤 503 이다. 마지막 실패가 쥔 쪽의 용도를 알려 주므로 쓰기 경합의 2초가 아니라 60초다
+            // when, then — 쓰기는 첫 시도에서 바로 503 이다. 첫 실패가 쥔 쪽의 용도(재적재)를 알려 주므로 쓰기 경합의 2초가 아니라 60초다
             느긋한.post().uri("/scim/v2/Users").contentType(SCIM_JSON).bodyValue(직원_본문("kim"))
                     .exchange()
                     .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
