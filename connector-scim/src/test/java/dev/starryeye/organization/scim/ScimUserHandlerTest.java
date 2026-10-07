@@ -522,6 +522,135 @@ class ScimUserHandlerTest {
         assertThat(state.users.get(id).active()).isTrue();
     }
 
+    private static final String MANAGER_PATCH = """
+            {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+             "Operations":[
+               {"op":"replace","path":"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager","value":{"value":"lee"}},
+               {"op":"replace","path":"phoneNumbers[type eq \\"work\\"].value","value":"010-1234-5678"}]}
+            """;
+
+    @Test
+    @DisplayName("버리는 속성만 있는 PATCH 는 락 없이 200 과 지금 모습을 돌려준다 — Entra 의 manager(설계 2026-10-07 §4)")
+    void 버리는_속성만_있는_PATCH_는_락이_없다() {
+        // given
+        List<Set<String>> 알림 = new ArrayList<>();
+        var 관찰하는_클라이언트 = 클라이언트(알림::add);
+        String id = 직원을_만든다(관찰하는_클라이언트, "kim");
+        int 잡은_수 = lock.acquired.get();
+        int 적용한_수 = writer.appliedDeltas.size();
+
+        // when
+        관찰하는_클라이언트.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(MANAGER_PATCH)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.id").isEqualTo(id)
+                .jsonPath("$.userName").isEqualTo("kim")
+                .jsonPath("$.active").isEqualTo(true);
+
+        // then
+        assertThat(lock.acquired.get()).as("락을 잡지 않았다").isEqualTo(잡은_수);
+        assertThat(writer.appliedDeltas).as("OpenFGA 에 쓰지 않았다").hasSize(적용한_수);
+        assertThat(알림).containsExactly(Set.of("manager", "phoneNumbers"));
+    }
+
+    @Test
+    @DisplayName("버리는 속성만 있는 PATCH 도 attributes 투영을 지킨다")
+    void 락_없는_응답도_투영을_지킨다() {
+        // given
+        String id = 직원을_만든다(client, "lee");
+
+        // when, then
+        client.patch().uri("/scim/v2/Users/" + id + "?attributes=userName")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(MANAGER_PATCH)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.userName").isEqualTo("lee")
+                .jsonPath("$.active").doesNotExist();
+    }
+
+    @Test
+    @DisplayName("버리는 속성만 있는 PATCH 를 없는 직원에 보내면 락 없이 404 다")
+    void 없는_직원은_락_없이_404다() {
+        // given
+        int 잡은_수 = lock.acquired.get();
+
+        // when, then
+        client.patch().uri("/scim/v2/Users/no-such-id")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(MANAGER_PATCH)
+                .exchange()
+                .expectStatus().isNotFound();
+        assertThat(lock.acquired.get()).isEqualTo(잡은_수);
+    }
+
+    @Test
+    @DisplayName("경로 없는 값의 키가 모두 저장하지 않는 것이면 락 없이 200 이다")
+    void 경로_없는_값의_버리는_키만이면_락이_없다() {
+        // given
+        List<Set<String>> 알림 = new ArrayList<>();
+        var 관찰하는_클라이언트 = 클라이언트(알림::add);
+        String id = 직원을_만든다(관찰하는_클라이언트, "park");
+        int 잡은_수 = lock.acquired.get();
+
+        // when
+        관찰하는_클라이언트.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","value":{"nickName":"k","x-custom":1}}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk();
+
+        // then
+        assertThat(lock.acquired.get()).isEqualTo(잡은_수);
+        assertThat(알림).containsExactly(Set.of("nickName", "other"));
+    }
+
+    @Test
+    @DisplayName("저장하는 속성이 섞이면 같은 값이어도 락 안에서 처리한다 — 어긋남 고치기를 남긴다")
+    void 저장하는_속성이_섞이면_락_안이다() {
+        // given
+        String id = 직원을_만든다(client, "choi");
+        int 잡은_수 = lock.acquired.get();
+
+        // when
+        client.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[
+                           {"op":"replace","path":"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager","value":{"value":"lee"}},
+                           {"op":"replace","path":"active","value":true}]}
+                        """)
+                .exchange()
+                .expectStatus().isOk();
+
+        // then
+        assertThat(lock.acquired.get()).isEqualTo(잡은_수 + 1);
+    }
+
+    @Test
+    @DisplayName("모르는 path 는 여전히 400 이고 락을 잡지 않는다 — 판정이 먼저 거절한다")
+    void 모르는_path_는_락_전에_400이다() {
+        // given
+        String id = 직원을_만든다(client, "jung");
+        int 잡은_수 = lock.acquired.get();
+
+        // when, then
+        client.patch().uri("/scim/v2/Users/" + id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"replace","path":"fooBar","value":"x"}]}
+                        """)
+                .exchange()
+                .expectStatus().isBadRequest();
+        assertThat(lock.acquired.get()).isEqualTo(잡은_수);
+    }
+
     @Test
     @DisplayName("직원 POST 201 에 Location 헤더가 있고 본문 meta.location 과 같다(RFC 7644 §3.3, 점검 S1)")
     void 직원_POST_는_Location_을_단다() {

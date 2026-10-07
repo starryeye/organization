@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
@@ -70,7 +71,8 @@ public class ScimUserHandler {
 
     /**
      * PATCH — 연산 적용은 락 안에서, 락을 잡은 뒤 읽은 직원에 한다(SCIM 쓰기 락 설계 §3). 락 밖에서 읽은 직원으로 계산하면
-     * 동시에 온 비활성화를 되돌리거나 방금 지운 직원을 되살린다.
+     * 동시에 온 비활성화를 되돌리거나 방금 지운 직원을 되살린다. 단 저장하는 속성에 하나도 닿지 않는 PATCH 는 우리 상태에 아무 말도 하지 않으므로
+     * 락 없이 지금 모습을 돌려준다(설계 2026-10-07 §4) — Check·쓰기·저장이 없고, 같은 순간 지워지면 지우기 직전 모습일 수 있다(GET 과 같다).
      */
     public Mono<ServerResponse> patch(ServerRequest request) {
         String id = request.pathVariable("id");
@@ -79,11 +81,17 @@ public class ScimUserHandler {
                 .flatMap(patch -> {
                     // 락 안의 계산이 다시 돌 수 있어 집합으로 모은다
                     Set<String> 버린것 = ConcurrentHashMap.newKeySet();
+                    if (ScimPatchApplier.touchesNoStoredUserAttribute(patch, 버린것::add)) {
+                        return state.findUser(id)
+                                .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
+                                .doOnNext(user -> 버린것을_알린다(id, 버린것))
+                                .flatMap(user -> 본문으로(HttpStatus.OK, id, user, projection));
+                    }
                     return sync.changeUser(id, before -> ScimPatchApplier.applyToUser(before, patch, 버린것::add))
                             .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
-                            .doOnNext(result -> 버린것을_알린다(id, 버린것));
-                })
-                .flatMap(result -> respond(HttpStatus.OK, id, result, projection)));
+                            .doOnNext(result -> 버린것을_알린다(id, 버린것))
+                            .flatMap(result -> respond(HttpStatus.OK, id, result, projection));
+                }));
     }
 
     /** 받아서 버린 속성 — 이름만 남긴다. 값(전화번호·주소)은 개인정보라 로그에 싣지 않는다(설계 2026-10-06 §3.3). WARN 이 아닌 까닭: IdP 가 갱신마다 다시 보낸다. */
@@ -120,14 +128,16 @@ public class ScimUserHandler {
         }
         return state.findUser(id)
                 .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
-                .flatMap(saved -> {
-                    ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
-                    // 생성은 Location 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3)
-                    if (status == HttpStatus.CREATED) {
-                        builder.location(URI.create(ScimMapper.userLocation(id)));
-                    }
-                    return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(saved))));
-                });
+                .flatMap(saved -> 본문으로(status, id, saved, projection));
+    }
+
+    /** 직원 하나의 SCIM 응답 — 생성은 Location 을 단다(RFC 7644 §3.3 SHALL, 설계 2026-10-06 §5.3). */
+    private static Mono<ServerResponse> 본문으로(HttpStatus status, String id, DirectoryUser user, ScimAttributeProjection projection) {
+        ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
+        if (status == HttpStatus.CREATED) {
+            builder.location(URI.create(ScimMapper.userLocation(id)));
+        }
+        return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(user))));
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */
