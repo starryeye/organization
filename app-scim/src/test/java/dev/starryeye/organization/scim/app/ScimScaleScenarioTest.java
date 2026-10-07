@@ -439,7 +439,8 @@ class ScimScaleScenarioTest {
     void S3_락_경합() throws Exception {
         // given — 이미 활성인 직원에게 active:true 를 보낸다.
         // 어느 요청이 성공하든 <b>최종 상태가 안 바뀌는</b> 연산이라, 경합 결과가
-        // 기대 조직도를 흔들지 않는다. 재려는 것은 상태 변화가 아니라 거절 방식이다.
+        // 기대 조직도를 흔들지 않는다. 재려는 것은 상태 변화가 아니라 경합 때의 응답이다 —
+        // 500 이 없고, 서버 안 줄 덕에 동시 16개에서 503 도 없는 것이다.
         List<String> 대상 = 직속직원들(기대.landmarks().대형조직()).stream()
                 .sorted().limit(200).toList();
         assertThat(대상).isNotEmpty();
@@ -457,9 +458,11 @@ class ScimScaleScenarioTest {
             }
             System.out.println("=== S3. 동시 16스레드 × " + 대상.size() + "건 응답: " + 집계);
 
-            // then — 락을 못 잡은 요청은 503 이다. IdP 는 503 을 재시도 신호로 보므로
-            // 프로비저닝이 유실되지 않는다. 500 이나 400 으로 뭉개면 IdP 가 영구 실패로
-            // 판단해 포기하거나 무한히 재시도한다.
+            // then — 재는 것은 둘이다. 500 이나 400 으로 뭉개는 요청이 없어야 하고(IdP 가 영구 실패로
+            // 판단해 포기하거나 무한히 재시도한다), 동시 16개는 서버 안 FIFO 줄 덕에 한도(3초) 안에
+            // 모두 차례를 받아 503 도 없어야 한다(설계 2026-10-07 §3.5). 락을 못 잡았을 때 500 이 아니라
+            // 503 으로 거절하는 모양은 여기서 보지 않는다 — ScimRebuildLockScaleTest 와
+            // TwoInstanceWriteTest 가 맡는다.
             assertThat(집계.keySet())
                     .as("200 과 503 이외의 응답이 나왔다")
                     .isSubsetOf(200, 503);
