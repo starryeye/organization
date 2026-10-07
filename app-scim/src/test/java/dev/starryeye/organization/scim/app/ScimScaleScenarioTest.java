@@ -463,6 +463,9 @@ class ScimScaleScenarioTest {
             assertThat(집계.keySet())
                     .as("200 과 503 이외의 응답이 나왔다")
                     .isSubsetOf(200, 503);
+            assertThat(집계.getOrDefault(503, 0))
+                    .as("서버 안 줄 — 동시 16개는 한도(3초) 안에 모두 차례를 받는다(설계 2026-10-07 §3.5)")
+                    .isZero();
             assertThat(집계.getOrDefault(200, 0)).as("전부 거절되면 안 된다").isPositive();
         } finally {
             pool.shutdown();
