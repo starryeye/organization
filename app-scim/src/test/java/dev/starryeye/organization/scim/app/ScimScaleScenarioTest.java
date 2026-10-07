@@ -435,7 +435,7 @@ class ScimScaleScenarioTest {
 
     @Test
     @Order(15)
-    @DisplayName("S3. 동시 쓰기 경합 — 못 잡으면 503 이고, 500 은 하나도 없어야 한다")
+    @DisplayName("S3. 동시 쓰기 경합 — 동시 16개에서 500 은 하나도 없고, 서버 안 줄 덕에 503 도 없어야 한다")
     void S3_락_경합() throws Exception {
         // given — 이미 활성인 직원에게 active:true 를 보낸다.
         // 어느 요청이 성공하든 <b>최종 상태가 안 바뀌는</b> 연산이라, 경합 결과가
