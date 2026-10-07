@@ -87,8 +87,8 @@ class ScimRebuildLockScaleTest {
         // 재적재보다 짧은 리스. 갱신이 안 돌면 재적재가 리스를 잃고 FAILED 로 끝난다.
         registry.add("dynamodb.lock-ttl", () -> 리스_TTL.toMillis() + "ms");
         registry.add("dynamodb.lock-renew-interval", () -> 갱신_주기.toMillis() + "ms");
-        // 짧게 잡는다. 기본 3초로 두면 프로브 쓰기가 3초를 기다렸다가 재적재가 끝난 뒤
-        // 성공해 버려서 "재적재 중에는 거절된다" 를 볼 수 없다.
+        // 재적재가 쥐고 있으면 이 한도와 상관없이 프로브 쓰기는 첫 시도에서 바로 503(60초)이다 — 기다리지 않는다(설계 2026-10-07 §3.3).
+        // 이 한도는 쥔 쪽이 SCIM 쓰기일 때(서버 안 줄·백오프)만 걸린다. 값은 그대로 둔다 — 기준선 적재의 503 재시도(보낸다)가 이 짧은 한도를 전제한다.
         registry.add("dynamodb.lock-acquire-timeout", () -> "500ms");
     }
 
