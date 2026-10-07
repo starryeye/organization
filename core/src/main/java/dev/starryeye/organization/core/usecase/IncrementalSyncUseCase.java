@@ -658,7 +658,8 @@ public class IncrementalSyncUseCase {
                         if (차례.밀렸다()) {
                             경합했다.set(true);
                         }
-                        return 잡는다(시작, 경합했다)
+                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 acquire 도 한 번이다
+                        return Mono.defer(() -> 잡는다(시작, 경합했다))
                                 .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
                                         .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
                                         .materialize()
@@ -683,7 +684,14 @@ public class IncrementalSyncUseCase {
     private Mono<LockLease> 잡는다(long 시작, AtomicBoolean 경합했다) {
         Duration 남은_한도 = acquireTimeout.minusMillis(AcquireBackoff.지금() - 시작);
         // acquire 를 한 번만 부르고 그 Mono 를 다시 구독해야 재시도도 같은 토큰이다(점검 S14)
-        Mono<LockLease> 시도 = lock.acquire(MutationLock.LockPurpose.WRITE)
+        Mono<LockLease> 획득;
+        try {
+            획득 = lock.acquire(MutationLock.LockPurpose.WRITE);
+        } catch (RuntimeException e) {
+            // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
+            획득 = Mono.error(e);
+        }
+        Mono<LockLease> 시도 = 획득
                 // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
                 .doOnError(LockUnavailableException.class, error -> 경합했다.set(true));
         return 백오프.잡는다(시도, 남은_한도)
