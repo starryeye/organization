@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 서버마다 많아야 하나다.
  *
  * <p>줄에서 기다리는 동안에는 아무것도 부르지 않으므로 한도가 지나 빠져도 새는 것이 없다. 차례를 주는 순간과 빠지는 순간이 겹쳐도 차례를
- * 잃지 않는다 — 시간 초과와 겹치면 받은 차례를 쓰고, 취소와 겹치면 다음 요청에 넘긴다.
+ * 잃지 않고 쥔 쪽이 둘이 되지도 않는다 — 시간 초과와 겹치면 받은 차례를 쓰고, 취소와 겹치면 다음 요청에 넘기고 그 요청에는 내지 않는다.
  */
 public final class LocalWriteQueue {
 
@@ -32,21 +32,32 @@ public final class LocalWriteQueue {
 
     /**
      * 줄을 선다. 차례가 오면 {@link Turn} 을 내고, {@code 한도} 안에 오지 않으면 줄에서 빠져 {@code 잡혀_있다(WRITE)}(503, 2초)다 —
-     * 앞에 선 것이 이 서버의 SCIM 쓰기다.
+     * 앞에 선 것이 이 서버의 SCIM 쓰기다. 줄이 비어 바로 받는 차례도 기다리는 요청과 같은 상태(GRANTED)로 낸다 — 건네받기 전에 취소해도 차례가 다음
+     * 요청에 넘어간다.
+     *
+     * <p>받는 쪽의 계약: {@link Turn} 은 늦게 온 {@code onNext} 를 버리지 않는 연산자({@code flatMap})로 받고, 일이 끝나든 실패하든 취소되든
+     * {@code doFinally(넘긴다)} 로 넘긴다. 건네받은 뒤의 취소는 줄이 무시하므로(TAKEN) 받은 쪽이 넘기지 않으면 줄이 멈춘다.
      */
     public Mono<Turn> 줄을_선다(Duration 한도) {
         return Mono.defer(() -> {
             Waiter 나 = new Waiter();
+            boolean 바로_받는다;
             synchronized (잠금) {
-                if (!차례가_나가_있다) {
+                바로_받는다 = !차례가_나가_있다;
+                if (바로_받는다) {
                     차례가_나가_있다 = true;
-                    return Mono.just(new Turn(false));
+                } else {
+                    대기열.addLast(나);
                 }
-                대기열.addLast(나);
+            }
+            if (바로_받는다) {
+                나.차례 = new Turn(false);
+                나.상태.set(GRANTED);
+                나.신호.tryEmitValue(나.차례);
             }
             return 나.신호.asMono()
                     .timeout(한도, Mono.defer(() -> 시간이_지났다(나)))
-                    .doOnNext(차례 -> 나.상태.set(TAKEN))
+                    .filter(차례 -> 나.상태.compareAndSet(GRANTED, TAKEN))
                     .doOnCancel(() -> 떠났다(나));
         });
     }
@@ -56,8 +67,8 @@ public final class LocalWriteQueue {
             빼낸다(나);
             return Mono.error(LockUnavailableException.잡혀_있다(MutationLock.LockPurpose.WRITE));
         }
-        // 차례를 주는 순간과 겹쳤다 — 이미 받은 차례를 쓴다
-        return Mono.just(나.차례);
+        // 차례를 주는 순간과 겹쳤다 — 받은 차례를 쓴다. 취소가 먼저 이겼으면(ABANDONED) 차례는 이미 다음 요청에 넘어갔으니 내지 않는다
+        return 나.상태.get() == GRANTED ? Mono.just(나.차례) : Mono.empty();
     }
 
     private void 떠났다(Waiter 나) {
