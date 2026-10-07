@@ -151,8 +151,7 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                     .concatMap(같은_단계 -> 같은_단계.flatMapSequential(묶음마다, 동시_수))
                     // 결과는 보낸 순서대로 센다. 앞 묶음을 센 뒤에야 다음 묶음이 나가므로, 멈춤 표시는 다음 묶음이 나가기 전에 선다.
                     // 실제로 보낸 것만 센다 — 보내지 않은 묶음은 셈을 올리지도 되돌리지도 않는다
-                    .reduce(TupleWriteResult.empty(), (누적, 묶음) -> {
-                        TupleWriteResult 합 = 누적;
+                    .collect(ResultAccumulator::new, (누적기, 묶음) -> {
                         if (묶음.보낸_결과().isPresent()) {
                             TupleWriteResult result = 묶음.보낸_결과().get();
                             if (!멈춤.get()) {
@@ -163,10 +162,13 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                     멈춤.set(true);
                                 }
                             }
-                            합 = merge(합, result);
+                            누적기.더한다(result);
                         }
-                        return 묶음.보내지_않은_결과().hasFailure() ? merge(합, 묶음.보내지_않은_결과()) : 합;
+                        if (묶음.보내지_않은_결과().hasFailure()) {
+                            누적기.더한다(묶음.보내지_않은_결과());
+                        }
                     })
+                    .map(ResultAccumulator::결과)
                     .doOnNext(누적 -> {
                         if (보류한_쓰기_수.get() > 0) {
                             log.warn("OpenFGA 쓰기: {} 단계에서 실패한 줄이 있어 뒤 단계의 쓰기 {}줄을 보내지 않았다 — 지우기는 보냈다. "
@@ -206,6 +208,28 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
 
         static 묶음_결과 보내지_않았다(TupleWriteResult 보류) {
             return new 묶음_결과(Optional.empty(), 보류);
+        }
+    }
+
+    /**
+     * 묶음 결과를 모은다(점검 P6, 설계 2026-10-07 §5). 묶음마다 지금까지의 누적 전체를 새 집합에 복사하면 비용이 묶음 수의 제곱이다 —
+     * 튜플 11만이면 해시 삽입 약 1.2억 번. 더할 때는 가변 집합에 넣고 {@link #결과} 에서 한 번만 불변으로 만든다.
+     * 구독마다 새로 만들고({@code collect} 의 공급자), {@code collect} 가 신호를 하나씩 주므로 잠그지 않는다.
+     */
+    static final class ResultAccumulator {
+
+        private final Set<RelationTuple> written = new HashSet<>();
+        private final Set<RelationTuple> deleted = new HashSet<>();
+        private final List<TupleFailure> failures = new ArrayList<>();
+
+        void 더한다(TupleWriteResult result) {
+            written.addAll(result.written());
+            deleted.addAll(result.deleted());
+            failures.addAll(result.failures());
+        }
+
+        TupleWriteResult 결과() {
+            return new TupleWriteResult(written, deleted, failures);
         }
     }
 
@@ -375,7 +399,8 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                 batch.size(), rootMessage(error));
                         return Flux.fromIterable(batch.halves())
                                 .concatMap(half -> 쪼개며_보낸다(half, send, 거절인가))
-                                .reduce(TupleWriteResult.empty(), OpenFgaRelationTupleWriter::merge);
+                                .collect(ResultAccumulator::new, ResultAccumulator::더한다)
+                                .map(ResultAccumulator::결과);
                     }
                     if (거절인가.test(error)) {
                         // 한 줄까지 좁혔는데도 거절됐다 — 이 줄만의 문제이지 OpenFGA 가 죽은 게 아니므로 스택 트레이스 없이 남긴다
@@ -427,16 +452,6 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             cause = cause.getCause();
         }
         return cause.getMessage();
-    }
-
-    private static TupleWriteResult merge(TupleWriteResult a, TupleWriteResult b) {
-        Set<RelationTuple> written = new HashSet<>(a.written());
-        written.addAll(b.written());
-        Set<RelationTuple> deleted = new HashSet<>(a.deleted());
-        deleted.addAll(b.deleted());
-        List<TupleFailure> failures = new ArrayList<>(a.failures());
-        failures.addAll(b.failures());
-        return new TupleWriteResult(written, deleted, failures);
     }
 
     /**
