@@ -28,9 +28,8 @@ public interface DirectorySearchRepository {
     Mono<Page<UserSummary>> searchUsersByUserName(String prefix, String cursor, int limit);
 
     /**
-     * 직원 {@code displayName} 접두사 검색. GSI2 정렬키가 속성값을 그대로 쓰므로
-     * <b>대소문자를 가린다</b> — {@link #searchUsersByUserName}·{@link #searchGroupsByDisplayName}
-     * 과 다르다.
+     * 직원 {@code displayName} 접두사 검색. 대소문자를 가리지 않는다 — {@link #searchUsersByUserName}·{@link #searchGroupsByDisplayName}
+     * 과 같다(설계 2026-10-08 §3). 결과의 표시명은 저장한 그대로다.
      */
     Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit);
 

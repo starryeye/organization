@@ -27,29 +27,19 @@ public final class Keys {
     public static final String GSI2 = "GSI2";
 
     /**
-     * GSI2 는 <b>자기만의 키 속성을 만들지 않는다</b>. 파티션키로 {@link #GSI1PK} 를 그대로
-     * 쓰고, 정렬키로 아이템이 이미 갖고 있는 {@code displayName} 속성을 그대로 쓴다.
+     * GSI2 — 관리 API 의 직원 표시명 접두사 검색. 파티션키는 {@link #GSI1PK} 를 그대로 쓰고({@link #USER_INDEX}), 정렬키는 직원 META 에만
+     * 쓰는 소문자 표시명 {@link #GSI2SK} 다 — {@code userName}·조직명 검색처럼 대소문자를 가리지 않는다(설계 2026-10-08 §3, 점검 S19).
      *
-     * <p><b>왜 전용 속성(GSI2PK/GSI2SK)을 쓰지 않나.</b> DynamoDB 는 인덱스의 키 속성을
-     * <b>전부</b> 가진 아이템만 그 인덱스에 싣는다. 전용 속성을 새로 도입하면 그 속성을 쓰기
-     * 시작하기 <b>전에</b> 저장된 아이템은 인덱스 추가 시점의 백필에서도 통째로 빠진다 —
-     * 즉 이 인덱스가 배포되는 순간 기존 직원 전원이 표시명 검색에서 사라진다. app-ldap 은
-     * 주기적 전체 동기화가 전원을 다시 써서 저절로 나아지지만, <b>app-scim 에는 전량 재기록
-     * 경로 자체가 없어</b>({@code FullSyncUseCase} 도 {@code RebuildUseCase} 도 배선돼 있지
-     * 않다) 영영 회복되지 않는다. 이미 모든 아이템이 갖고 있는 속성을 키로 삼으면 DynamoDB
-     * 자신의 백필이 기존 아이템을 그대로 실어 주고, 마이그레이션이 필요 없다는 설계의 주장이
-     * 실제로 참이 된다.
+     * <p><b>조직은 실리지 않는다.</b> 조직 META 에는 {@link #GSI2SK} 를 쓰지 않는다. DynamoDB 는 인덱스의 키 속성을 전부 가진 아이템만
+     * 싣는다. 표시명이 없는(또는 빈) 직원도 같은 까닭으로 실리지 않는다 — 아이디·계정명으로는 여전히 찾힌다.
      *
-     * <p>대가는 쓰기 증폭이다. {@code GSI1PK} 파티션에는 {@link #GROUP_INDEX}(조직 META)도
-     * 있고 그쪽도 {@code displayName} 을 가지므로 조직 아이템이 GSI2 에 함께 실린다. 조회는
-     * 파티션으로 갈리므로 표시명 직원 검색은 {@link #USER_INDEX} 파티션만 본다.
-     *
-     * <p>{@code displayName} 이 없는 직원이 표시명 검색에 안 잡히는 성질은 그대로다 —
-     * 정렬키 속성이 없으면 여전히 인덱스에 실리지 않는다.
+     * <p><b>옛 테이블은 다시 만든다.</b> 예전 GSI2 는 백필이 기존 아이템을 싣도록 {@code displayName} 을 그대로 정렬키로 썼다. 새 키 속성은
+     * 옛 아이템에 없어 인덱스를 더해도 백필이 싣지 못한다. 운영 배포 전이라 테이블을 다시 만들고, 옛 모양이면 {@link TableInitializer} 가
+     * 기동을 멈춘다.
      */
     public static final String GSI2PK = GSI1PK;
-    /** @see #GSI2PK — 아이템 속성 {@code displayName} 그 자체다. */
-    public static final String GSI2SK = "displayName";
+    /** @see #GSI2PK — 직원 META 에만 쓰는 소문자 표시명({@link #indexKey}). */
+    public static final String GSI2SK = "displayNameKey";
 
     /**
      * GSI3 — {@code externalId} 로 직원·조직을 찾는다(S-1 설계 §5.2). GSI2 처럼 <b>새 속성을 만들지

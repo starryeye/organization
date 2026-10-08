@@ -113,14 +113,15 @@ public class FakeSearchRepository implements DirectorySearchRepository {
     }
 
     /**
-     * 직원 {@code displayName} 은 GSI2 가 속성값을 그대로 키로 쓰므로 대소문자를 가린다.
+     * 직원 {@code displayName} 은 GSI2 의 소문자 키로 찾으므로 대소문자를 가리지 않는다(운영 코드와 맞춘다).
      */
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
-        // displayName 이 없는 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
-        List<UserSummary> indexed = users.stream().filter(u -> u.displayName() != null).toList();
-        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit, false));
+        // displayName 이 없거나 빈 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
+        List<UserSummary> indexed = users.stream()
+                .filter(u -> u.displayName() != null && !u.displayName().isEmpty()).toList();
+        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit, true));
     }
 
     /**

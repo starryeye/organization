@@ -11,6 +11,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -66,8 +68,7 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("같은 표시명 인덱스를 공유하는 조직은 직원 표시명 검색에 섞이지 않는다")
     void 조직은_직원_표시명_검색에_안_섞인다() {
-        // given — GSI2 는 GSI1PK 를 파티션키로 공유하므로 조직 META 도 이 인덱스에 실린다.
-        // 이름까지 같은 접두사로 겹치게 두어, 파티션으로 갈리는지 실제로 확인한다.
+        // given — 조직 META 에는 소문자 표시명 키가 없어 GSI2 에 실리지 않는다. 이름까지 같은 접두사로 겹치게 두어 확인한다.
         state.saveUser(new DirectoryUser("gd.hong", "e1", "gd.hong", "홍길동", null, true)).block();
         state.saveGroup(new DirectoryGroup("PR001", "g1", "홍보팀", Set.of())).block();
 
@@ -78,6 +79,77 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // then — 직원 검색에는 직원만, 조직 검색에는 조직만
         assertThat(users.items()).extracting(UserSummary::employeeId).containsExactly("gd.hong");
         assertThat(groups.items()).extracting("orgCode").containsExactly("PR001");
+    }
+
+    @Test
+    @DisplayName("표시명 검색은 대소문자를 가리지 않는다 — 결과의 표시명은 저장한 그대로다(점검 S19)")
+    void 표시명_검색은_대소문자를_가리지_않는다() {
+        // given — 대소문자만 다른 두 직원
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+        state.saveUser(new DirectoryUser("u2", "e2", "u2", "kim younghee", null, true)).block();
+
+        // when
+        var 대문자 = search.searchUsersByDisplayName("KIM", null, 20).block();
+        var 소문자 = search.searchUsersByDisplayName("kim", null, 20).block();
+
+        // then — 프로젝션이 표시명을 실어 온다(정렬키가 아니게 된 displayName)
+        assertThat(대문자.items()).extracting(UserSummary::displayName)
+                .containsExactlyInAnyOrder("Kim Chulsoo", "kim younghee");
+        assertThat(소문자.items()).extracting(UserSummary::employeeId).containsExactlyInAnyOrder("u1", "u2");
+    }
+
+    @Test
+    @DisplayName("직원 META 에는 소문자 표시명 키가 있고, 조직 META 에는 없다 — 조직은 GSI2 에 실리지 않는다")
+    void 소문자_표시명_키는_직원에만_있다() {
+        // given
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+        state.saveGroup(new DirectoryGroup("PR001", "g1", "Kim Team", Set.of())).block();
+
+        // when
+        Map<String, AttributeValue> 직원 = 원본("USER#u1");
+        Map<String, AttributeValue> 조직 = 원본("GROUP#PR001");
+
+        // then
+        assertThat(직원.get("displayNameKey").s()).isEqualTo("kim chulsoo");
+        assertThat(직원.get("displayName").s()).isEqualTo("Kim Chulsoo");
+        assertThat(조직).doesNotContainKey("displayNameKey");
+    }
+
+    @Test
+    @DisplayName("표시명을 바꾸면 소문자 키도 따라 바뀐다 — 옛 이름으로는 안 찾힌다")
+    void 표시명을_바꾸면_키도_바뀐다() {
+        // given
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+
+        // when
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Lee Chulsoo", null, true)).block();
+
+        // then
+        assertThat(search.searchUsersByDisplayName("kim", null, 20).block().items()).isEmpty();
+        assertThat(search.searchUsersByDisplayName("LEE", null, 20).block().items())
+                .extracting(UserSummary::employeeId).containsExactly("u1");
+    }
+
+    @Test
+    @DisplayName("표시명이 빈 문자열인 직원도 저장되고, 소문자 표시명 키는 쓰이지 않는다 — 인덱스 키에 빈 문자열을 쓰지 않는다")
+    void 빈_표시명은_키를_쓰지_않는다() {
+        // given — 표시명이 빈 문자열인 직원
+        DirectoryUser 빈_표시명 = new DirectoryUser("blank", "e9", "blank", "", null, true);
+
+        // when — DynamoDB 는 인덱스 키 속성의 빈 문자열을 거절한다. 쓰면 이 저장이 ValidationException 이다
+        state.saveUser(빈_표시명).block();
+
+        // then
+        assertThat(원본("USER#blank")).doesNotContainKey("displayNameKey");
+    }
+
+    /** 본 테이블의 META 아이템 원본. */
+    private Map<String, AttributeValue> 원본(String pk) {
+        return client.getItem(GetItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                .consistentRead(true)
+                .build()).join().item();
     }
 
     @Test
