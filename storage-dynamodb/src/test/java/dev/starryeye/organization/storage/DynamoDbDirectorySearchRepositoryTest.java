@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.query.GroupSummary;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import java.time.Clock;
@@ -221,6 +222,52 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("정상 커서는 세 검색 모두에서 커서 검사를 지나 끝까지 이어진다 — 저장값과 대소문자가 다른 접두사로 물어도 중복도 누락도 없다(점검 S16 앞쪽)")
+    void 세_검색의_정상_다음_쪽이_이어진다() {
+        // given — 검색마다 같은 접두사를 가진 대상 셋. 계정명 "Ab1".."Ab3", 표시명 "Kim A".."Kim C", 조직명 "Dev A".."Dev C"
+        for (String 계정명 : List.of("Ab1", "Ab2", "Ab3")) {
+            state.saveUser(new DirectoryUser(계정명, "x-" + 계정명, 계정명, null, null, true)).block();
+        }
+        for (String 글자 : List.of("A", "B", "C")) {
+            state.saveUser(new DirectoryUser("k" + 글자, "xk" + 글자, "kim." + 글자, "Kim " + 글자, null, true)).block();
+            state.saveGroup(new DirectoryGroup("D" + 글자, "xd" + 글자, "Dev " + 글자, Set.of())).block();
+        }
+
+        // when — 접두사를 저장값과 대소문자가 다르게("AB"·"KIM"·"DEV") 물어 limit 1 로 끝까지 따라 읽는다. 중간에 예외가 나면 여기서 실패한다
+        이어_읽기<UserSummary> 계정명_결과 = 끝까지_읽는다(c -> search.searchUsersByUserName("AB", c, 1).block());
+        이어_읽기<UserSummary> 직원_표시명_결과 = 끝까지_읽는다(c -> search.searchUsersByDisplayName("KIM", c, 1).block());
+        이어_읽기<GroupSummary> 조직명_결과 = 끝까지_읽는다(c -> search.searchGroupsByDisplayName("DEV", c, 1).block());
+
+        // then — 셋 다 빠짐없이 중복 없이 모이고, 쪽이 여럿이었으며(커서를 실제로 따라갔다), 마지막 쪽의 커서는 없다.
+        // 쪽이 정확히 끝나면 DynamoDB 가 빈 쪽을 하나 더 줄 수 있어 쪽 수의 위쪽은 막지 않는다
+        assertThat(계정명_결과.항목()).extracting(UserSummary::userName).containsExactly("Ab1", "Ab2", "Ab3");
+        assertThat(직원_표시명_결과.항목()).extracting(UserSummary::displayName).containsExactly("Kim A", "Kim B", "Kim C");
+        assertThat(조직명_결과.항목()).extracting(GroupSummary::displayName).containsExactly("Dev A", "Dev B", "Dev C");
+        for (이어_읽기<?> 결과 : List.of(계정명_결과, 직원_표시명_결과, 조직명_결과)) {
+            assertThat(결과.쪽수()).isGreaterThanOrEqualTo(3);
+            assertThat(결과.마지막_커서()).isNull();
+        }
+    }
+
+    /** 커서를 따라 끝까지 읽은 결과 — 모은 항목, 읽은 쪽 수, 마지막 쪽의 nextCursor(끝까지 읽었으면 null). */
+    private record 이어_읽기<T>(List<T> 항목, int 쪽수, String 마지막_커서) {
+    }
+
+    /** limit 1 로 읽은 쪽의 커서를 다음 요청에 그대로 넘긴다. 끝나지 않는 검색에 매달리지 않도록 열 쪽에서 멈춘다(그러면 마지막 커서가 남는다). */
+    private static <T> 이어_읽기<T> 끝까지_읽는다(Function<String, Page<T>> 묻기) {
+        List<T> 모은것 = new ArrayList<>();
+        String cursor = null;
+        int 쪽수 = 0;
+        do {
+            Page<T> page = 묻기.apply(cursor);
+            모은것.addAll(page.items());
+            cursor = page.nextCursor();
+            쪽수++;
+        } while (cursor != null && 쪽수 < 10);
+        return new 이어_읽기<>(모은것, 쪽수, cursor);
+    }
+
+    @Test
     @DisplayName("결과가 없으면 빈 페이지이고 커서도 없다")
     void 결과가_없으면_빈_페이지다() {
         // when
@@ -276,7 +323,8 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
 
         // when, then — 같은 인덱스·파티션이라 범위 검사는 통과하지만 시작 키가 "v" 접두 밖이다
         assertThatThrownBy(() -> search.searchUsersByUserName("v", 커서, 1).block())
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("이 검색의 커서가 아니다");
     }
 
     @Test
@@ -304,14 +352,17 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
                     바꾼다(정상, s.정렬키(), Attrs.s("x1")),                                                                  // 다른 접두사
                     바꾼다(정상, s.정렬키(), Attrs.s("u" + "x".repeat(1100))),                                                // 정렬키 한도 초과
                     바꾼다(정상, Keys.PK, Attrs.s(Keys.USER_INDEX.equals(s.파티션()) ? Keys.groupPk("G1") : Keys.userPk("u1"))), // 다른 종류의 PK
-                    바꾼다(정상, Keys.SK, Attrs.s("MEMBER#USER#u1")));                                                       // META 가 아닌 SK
+                    바꾼다(정상, Keys.SK, Attrs.s("MEMBER#USER#u1")),                                                      // META 가 아닌 SK
+                    바꾼다(정상, Keys.PK, Attrs.s(Keys.USER_INDEX.equals(s.파티션())                                            // 파티션키 한도(2048바이트) 초과
+                            ? Keys.userPk("x".repeat(2100)) : Keys.groupPk("x".repeat(2100)))));
 
             // when, then
             for (Map<String, AttributeValue> 위조 : 위조들) {
                 String 커서 = Cursor.encode(s.범위(), 위조);
                 assertThatThrownBy(() -> s.묻기().apply(커서))
                         .as("%s / %s", s.범위(), 위조)
-                        .isInstanceOf(IllegalArgumentException.class);
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessage("이 검색의 커서가 아니다");
             }
         }
     }

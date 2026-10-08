@@ -33,6 +33,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     /** DynamoDB 정렬키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 DynamoDB 가 거절한다. */
     private static final int MAX_SORT_KEY_BYTES = 1024;
 
+    /** DynamoDB 파티션키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 실제 DynamoDB 가 거절한다(DynamoDB Local 은 거절하지 않는다). */
+    private static final int MAX_PARTITION_KEY_BYTES = 2048;
+
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
 
@@ -129,8 +132,10 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
      * 다시 보낸 이전 커서는 DynamoDB 가 {@code ValidationException} 으로 거절해 500 이 된다. 이 검색의 시작 키가 아니면 400 으로 갈 예외다.
      *
      * <p>본다: 키 속성이 본 테이블 {@code PK}·{@code SK} 와 인덱스 키 둘로 정확히 넷, 인덱스 파티션키가 이 파티션, 인덱스 정렬키가 이번 접두사로
-     * 시작하고 정렬키 한도(1024바이트) 안, {@code PK} 가 종류 접두({@code USER#}/{@code GROUP#})로 시작하고 {@code SK} 가 {@code META}.
-     * 값이 문자열인 것은 {@link Cursor#decode} 가 이미 지켰다.
+     * 시작하고 정렬키 한도(1024바이트) 안, {@code PK} 가 종류 접두({@code USER#}/{@code GROUP#})로 시작하고 파티션키 한도(2048바이트) 안,
+     * {@code SK} 가 {@code META}. 값이 문자열인 것은 {@link Cursor#decode} 가 이미 지켰다.
+     *
+     * <p>키 집합 검사가 먼저다 — 뒤의 {@code start.get(...)} 은 키가 있다는 것에 기댄다.
      */
     private static Map<String, AttributeValue> 검색_시작_키를_확인한다(Map<String, AttributeValue> start, String pkName, String skName,
                                                                 String partition, String prefix) {
@@ -140,6 +145,7 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
                 || !start.get(skName).s().startsWith(prefix)
                 || start.get(skName).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES
                 || !start.get(Keys.PK).s().startsWith(종류_접두)
+                || start.get(Keys.PK).s().getBytes(StandardCharsets.UTF_8).length > MAX_PARTITION_KEY_BYTES
                 || !Keys.META.equals(start.get(Keys.SK).s())) {
             throw new IllegalArgumentException("이 검색의 커서가 아니다");
         }
