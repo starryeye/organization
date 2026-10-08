@@ -124,6 +124,28 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
         return start;
     }
 
+    /**
+     * 검색 커서에서 꺼낸 시작 키를 그대로 믿지 않는다(설계 2026-10-08 §4, 점검 S16 앞쪽). 범위(인덱스/파티션)만 맞춘 위조 커서나, 검색어를 바꾼 채
+     * 다시 보낸 이전 커서는 DynamoDB 가 {@code ValidationException} 으로 거절해 500 이 된다. 이 검색의 시작 키가 아니면 400 으로 갈 예외다.
+     *
+     * <p>본다: 키 속성이 본 테이블 {@code PK}·{@code SK} 와 인덱스 키 둘로 정확히 넷, 인덱스 파티션키가 이 파티션, 인덱스 정렬키가 이번 접두사로
+     * 시작하고 정렬키 한도(1024바이트) 안, {@code PK} 가 종류 접두({@code USER#}/{@code GROUP#})로 시작하고 {@code SK} 가 {@code META}.
+     * 값이 문자열인 것은 {@link Cursor#decode} 가 이미 지켰다.
+     */
+    private static Map<String, AttributeValue> 검색_시작_키를_확인한다(Map<String, AttributeValue> start, String pkName, String skName,
+                                                                String partition, String prefix) {
+        String 종류_접두 = Keys.USER_INDEX.equals(partition) ? Keys.USER_PREFIX : Keys.GROUP_PREFIX;
+        if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK, pkName, skName))
+                || !partition.equals(start.get(pkName).s())
+                || !start.get(skName).s().startsWith(prefix)
+                || start.get(skName).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES
+                || !start.get(Keys.PK).s().startsWith(종류_접두)
+                || !Keys.META.equals(start.get(Keys.SK).s())) {
+            throw new IllegalArgumentException("이 검색의 커서가 아니다");
+        }
+        return start;
+    }
+
     @Override
     public Flux<String> findChildOrgCodes(String orgCode) {
         QueryRequest request = QueryRequest.builder()
@@ -146,6 +168,8 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
      * 여러 Mono 를 조립만 하고 아직 구독하지 않은 코드에서 인자 평가 중에 예외가 터져
      * Reactor 체인에 진입하지도 못한 채 죽는다. {@code defer} 로 감싸면 구독 시점까지
      * 평가가 미뤄져 예외가 정상적인 {@code onError} 신호가 된다.
+     *
+     * <p>시작 키는 {@link #검색_시작_키를_확인한다} 로 검사한다.
      */
     private <T> Mono<Page<T>> query(String indexName, String pkName, String skName, String partition,
                                     String prefix, String cursor, int limit,
@@ -165,7 +189,7 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
             Map<String, AttributeValue> start = Cursor.decode(scope, cursor);
             if (start != null) {
-                request.exclusiveStartKey(start);
+                request.exclusiveStartKey(검색_시작_키를_확인한다(start, pkName, skName, partition, prefix));
             }
 
             return Mono.fromFuture(() -> client.query(request.build()))
