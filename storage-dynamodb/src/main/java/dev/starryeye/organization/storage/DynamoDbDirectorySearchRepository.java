@@ -33,6 +33,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     /** DynamoDB 정렬키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 DynamoDB 가 거절한다. */
     private static final int MAX_SORT_KEY_BYTES = 1024;
 
+    /** DynamoDB 파티션키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 실제 DynamoDB 가 거절한다(DynamoDB Local 은 거절하지 않는다). */
+    private static final int MAX_PARTITION_KEY_BYTES = 2048;
+
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
 
@@ -45,11 +48,10 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
-        // 파티션이 USER_INDEX 인 것은 오타가 아니다 — GSI2 는 GSI1 과 같은 파티션키 속성을
-        // 쓰고 정렬키만 displayName 으로 바꾼 인덱스다(Keys.GSI2PK 참고). 그래서 이 질의는
-        // 조직 META(GROUP_INDEX)를 건드리지 않고 직원만 본다.
+        // GSI2 는 GSI1 과 같은 파티션키 속성(USER_INDEX)을 쓰고 정렬키만 소문자 표시명으로 바꾼 인덱스다(Keys.GSI2PK).
+        // 정렬키가 소문자라 접두사도 소문자로 묻는다 — userName·조직명 검색과 같다(점검 S19).
         return query(Keys.GSI2, Keys.GSI2PK, Keys.GSI2SK, Keys.USER_INDEX,
-                prefix, cursor, limit, DynamoDbDirectorySearchRepository::toUserSummary);
+                Keys.indexKey(prefix), cursor, limit, DynamoDbDirectorySearchRepository::toUserSummary);
     }
 
     @Override
@@ -125,6 +127,31 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
         return start;
     }
 
+    /**
+     * 검색 커서에서 꺼낸 시작 키를 그대로 믿지 않는다(설계 2026-10-08 §4, 점검 S16 앞쪽). 범위(인덱스/파티션)만 맞춘 위조 커서나, 검색어를 바꾼 채
+     * 다시 보낸 이전 커서는 DynamoDB 가 {@code ValidationException} 으로 거절해 500 이 된다. 이 검색의 시작 키가 아니면 400 으로 갈 예외다.
+     *
+     * <p>본다: 키 속성이 본 테이블 {@code PK}·{@code SK} 와 인덱스 키 둘로 정확히 넷, 인덱스 파티션키가 이 파티션, 인덱스 정렬키가 이번 접두사로
+     * 시작하고 정렬키 한도(1024바이트) 안, {@code PK} 가 종류 접두({@code USER#}/{@code GROUP#})로 시작하고 파티션키 한도(2048바이트) 안,
+     * {@code SK} 가 {@code META}. 값이 문자열인 것은 {@link Cursor#decode} 가 이미 지켰다.
+     *
+     * <p>키 집합 검사가 먼저다 — 뒤의 {@code start.get(...)} 은 키가 있다는 것에 기댄다.
+     */
+    private static Map<String, AttributeValue> 검색_시작_키를_확인한다(Map<String, AttributeValue> start, String pkName, String skName,
+                                                                String partition, String prefix) {
+        String 종류_접두 = Keys.USER_INDEX.equals(partition) ? Keys.USER_PREFIX : Keys.GROUP_PREFIX;
+        if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK, pkName, skName))
+                || !partition.equals(start.get(pkName).s())
+                || !start.get(skName).s().startsWith(prefix)
+                || start.get(skName).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES
+                || !start.get(Keys.PK).s().startsWith(종류_접두)
+                || start.get(Keys.PK).s().getBytes(StandardCharsets.UTF_8).length > MAX_PARTITION_KEY_BYTES
+                || !Keys.META.equals(start.get(Keys.SK).s())) {
+            throw new IllegalArgumentException("이 검색의 커서가 아니다");
+        }
+        return start;
+    }
+
     @Override
     public Flux<String> findChildOrgCodes(String orgCode) {
         QueryRequest request = QueryRequest.builder()
@@ -147,6 +174,8 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
      * 여러 Mono 를 조립만 하고 아직 구독하지 않은 코드에서 인자 평가 중에 예외가 터져
      * Reactor 체인에 진입하지도 못한 채 죽는다. {@code defer} 로 감싸면 구독 시점까지
      * 평가가 미뤄져 예외가 정상적인 {@code onError} 신호가 된다.
+     *
+     * <p>시작 키는 {@link #검색_시작_키를_확인한다} 로 검사한다.
      */
     private <T> Mono<Page<T>> query(String indexName, String pkName, String skName, String partition,
                                     String prefix, String cursor, int limit,
@@ -166,7 +195,7 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
             Map<String, AttributeValue> start = Cursor.decode(scope, cursor);
             if (start != null) {
-                request.exclusiveStartKey(start);
+                request.exclusiveStartKey(검색_시작_키를_확인한다(start, pkName, skName, partition, prefix));
             }
 
             return Mono.fromFuture(() -> client.query(request.build()))

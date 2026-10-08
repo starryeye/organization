@@ -9,12 +9,16 @@ import dev.starryeye.organization.core.query.UserSummary;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -53,10 +57,37 @@ public class FakeSearchRepository implements DirectorySearchRepository {
         this.state = state;
     }
 
+    /** {@link #findGroupSummary} 한 번이 걸리는 시간. 병렬로 읽는지 가상 시간으로 재는 데 쓴다. */
+    public Duration summaryDelay = Duration.ZERO;
+
+    /**
+     * 조직코드별로 따로 정한 {@link #findGroupSummary} 시간. 여기 있으면 {@link #summaryDelay} 보다 앞선다.
+     * 소스 앞쪽 조직일수록 오래 걸리게 해서 완료 순서를 소스 순서와 뒤집을 때 쓴다 — 시간이 모두 같으면
+     * 같은 시각에 끝나 순서를 지키는지 못 지키는지 구분되지 않는다.
+     */
+    public final Map<String, Duration> summaryDelayById = new HashMap<>();
+
+    /** {@link #findGroupSummary} 가 동시에 몇 개까지 진행 중이었나. */
+    public final AtomicInteger summaryInFlightMax = new AtomicInteger();
+
+    private final AtomicInteger summaryInFlight = new AtomicInteger();
+
     @Override
     public Mono<GroupSummary> findGroupSummary(String orgCode) {
-        return Mono.fromRunnable(() -> findGroupSummaryCalls.add(orgCode))
-                .then(Mono.justOrEmpty(lookupGroup(orgCode)));
+        Duration delay = summaryDelayById.getOrDefault(orgCode, summaryDelay);
+        return Mono.fromRunnable(() -> {
+                    findGroupSummaryCalls.add(orgCode);
+                    summaryInFlightMax.accumulateAndGet(summaryInFlight.incrementAndGet(), Math::max);
+                })
+                .then(delay.isZero() ? Mono.<Void>empty() : Mono.delay(delay).then())
+                // 결과를 내려보내기 전에 센다. doFinally 로 세면 안 된다 — 그쪽은 종료 신호를 먼저 전파하고
+                // 나서 콜백을 돌리므로, 다음 읽기가 시작된 뒤에 감소가 일어나 동시 개수가 하나 더 크게 보인다
+                // (FakeTupleChecker 가 같은 이유로 이렇게 센다). 지연 도중 취소하면 감소가 빠진다 — 취소하는
+                // 테스트에는 쓰지 않는다.
+                .then(Mono.defer(() -> {
+                    summaryInFlight.decrementAndGet();
+                    return Mono.justOrEmpty(lookupGroup(orgCode));
+                }));
     }
 
     private GroupSummary lookupGroup(String orgCode) {
@@ -113,14 +144,15 @@ public class FakeSearchRepository implements DirectorySearchRepository {
     }
 
     /**
-     * 직원 {@code displayName} 은 GSI2 가 속성값을 그대로 키로 쓰므로 대소문자를 가린다.
+     * 직원 {@code displayName} 은 GSI2 의 소문자 키로 찾으므로 대소문자를 가리지 않는다(운영 코드와 맞춘다).
      */
     @Override
     public Mono<Page<UserSummary>> searchUsersByDisplayName(String prefix, String cursor, int limit) {
         if (failWith != null) return Mono.error(failWith);
-        // displayName 이 없는 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
-        List<UserSummary> indexed = users.stream().filter(u -> u.displayName() != null).toList();
-        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit, false));
+        // displayName 이 없거나 빈 직원은 인덱스에 실리지 않는다 — 실제 GSI 동작과 맞춘다
+        List<UserSummary> indexed = users.stream()
+                .filter(u -> u.displayName() != null && !u.displayName().isEmpty()).toList();
+        return Mono.just(page(indexed, UserSummary::displayName, prefix, cursor, limit, true));
     }
 
     /**

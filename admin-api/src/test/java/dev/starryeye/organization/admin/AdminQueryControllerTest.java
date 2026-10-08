@@ -299,6 +299,19 @@ class AdminQueryControllerTest {
     }
 
     @Test
+    @DisplayName("조직 검색 커서가 이 검색의 것이 아니면 400 이다(점검 S16 앞쪽)")
+    void 조직_검색_커서_위조는_400이다() {
+        // given — 저장소가 검색 커서를 거절한 상황. 이 페이크는 커서를 보지 않고 무조건 실패하므로,
+        // 이 테스트가 증명하는 것은 "조직 검색 경로에서도 그 예외가 400 이 된다" 뿐이다.
+        // 어떤 커서가 실제로 거절되는지는 저장소 테스트가 못박는다.
+        search.failWith = new IllegalArgumentException("이 검색의 커서가 아니다");
+
+        // when, then
+        client.get().uri("/admin/organizations?displayName=개발&cursor=forged")
+                .exchange().expectStatus().isBadRequest();
+    }
+
+    @Test
     @DisplayName("없는 조직은 404 다")
     void 없는_조직은_404다() {
         // when, then

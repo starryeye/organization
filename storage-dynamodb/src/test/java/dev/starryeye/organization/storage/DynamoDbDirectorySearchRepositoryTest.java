@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.query.GroupSummary;
 import dev.starryeye.organization.core.query.Page;
 import dev.starryeye.organization.core.query.UserSummary;
 import java.time.Clock;
@@ -11,13 +12,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -66,8 +71,7 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     @Test
     @DisplayName("같은 표시명 인덱스를 공유하는 조직은 직원 표시명 검색에 섞이지 않는다")
     void 조직은_직원_표시명_검색에_안_섞인다() {
-        // given — GSI2 는 GSI1PK 를 파티션키로 공유하므로 조직 META 도 이 인덱스에 실린다.
-        // 이름까지 같은 접두사로 겹치게 두어, 파티션으로 갈리는지 실제로 확인한다.
+        // given — 조직 META 에는 소문자 표시명 키가 없어 GSI2 에 실리지 않는다. 이름까지 같은 접두사로 겹치게 두어 확인한다.
         state.saveUser(new DirectoryUser("gd.hong", "e1", "gd.hong", "홍길동", null, true)).block();
         state.saveGroup(new DirectoryGroup("PR001", "g1", "홍보팀", Set.of())).block();
 
@@ -78,6 +82,77 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // then — 직원 검색에는 직원만, 조직 검색에는 조직만
         assertThat(users.items()).extracting(UserSummary::employeeId).containsExactly("gd.hong");
         assertThat(groups.items()).extracting("orgCode").containsExactly("PR001");
+    }
+
+    @Test
+    @DisplayName("표시명 검색은 대소문자를 가리지 않는다 — 결과의 표시명은 저장한 그대로다(점검 S19)")
+    void 표시명_검색은_대소문자를_가리지_않는다() {
+        // given — 대소문자만 다른 두 직원
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+        state.saveUser(new DirectoryUser("u2", "e2", "u2", "kim younghee", null, true)).block();
+
+        // when
+        var 대문자 = search.searchUsersByDisplayName("KIM", null, 20).block();
+        var 소문자 = search.searchUsersByDisplayName("kim", null, 20).block();
+
+        // then — 프로젝션이 표시명을 실어 온다(정렬키가 아니게 된 displayName)
+        assertThat(대문자.items()).extracting(UserSummary::displayName)
+                .containsExactlyInAnyOrder("Kim Chulsoo", "kim younghee");
+        assertThat(소문자.items()).extracting(UserSummary::employeeId).containsExactlyInAnyOrder("u1", "u2");
+    }
+
+    @Test
+    @DisplayName("직원 META 에는 소문자 표시명 키가 있고, 조직 META 에는 없다 — 조직은 GSI2 에 실리지 않는다")
+    void 소문자_표시명_키는_직원에만_있다() {
+        // given
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+        state.saveGroup(new DirectoryGroup("PR001", "g1", "Kim Team", Set.of())).block();
+
+        // when
+        Map<String, AttributeValue> 직원 = 원본("USER#u1");
+        Map<String, AttributeValue> 조직 = 원본("GROUP#PR001");
+
+        // then
+        assertThat(직원.get("displayNameKey").s()).isEqualTo("kim chulsoo");
+        assertThat(직원.get("displayName").s()).isEqualTo("Kim Chulsoo");
+        assertThat(조직).doesNotContainKey("displayNameKey");
+    }
+
+    @Test
+    @DisplayName("표시명을 바꾸면 소문자 키도 따라 바뀐다 — 옛 이름으로는 안 찾힌다")
+    void 표시명을_바꾸면_키도_바뀐다() {
+        // given
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Kim Chulsoo", null, true)).block();
+
+        // when
+        state.saveUser(new DirectoryUser("u1", "e1", "u1", "Lee Chulsoo", null, true)).block();
+
+        // then
+        assertThat(search.searchUsersByDisplayName("kim", null, 20).block().items()).isEmpty();
+        assertThat(search.searchUsersByDisplayName("LEE", null, 20).block().items())
+                .extracting(UserSummary::employeeId).containsExactly("u1");
+    }
+
+    @Test
+    @DisplayName("표시명이 빈 문자열인 직원도 저장되고, 소문자 표시명 키는 쓰이지 않는다 — 인덱스 키에 빈 문자열을 쓰지 않는다")
+    void 빈_표시명은_키를_쓰지_않는다() {
+        // given — 표시명이 빈 문자열인 직원
+        DirectoryUser 빈_표시명 = new DirectoryUser("blank", "e9", "blank", "", null, true);
+
+        // when — DynamoDB 는 인덱스 키 속성의 빈 문자열을 거절한다. 쓰면 이 저장이 ValidationException 이다
+        state.saveUser(빈_표시명).block();
+
+        // then
+        assertThat(원본("USER#blank")).doesNotContainKey("displayNameKey");
+    }
+
+    /** 본 테이블의 META 아이템 원본. */
+    private Map<String, AttributeValue> 원본(String pk) {
+        return client.getItem(GetItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                .consistentRead(true)
+                .build()).join().item();
     }
 
     @Test
@@ -147,6 +222,52 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("정상 커서는 세 검색 모두에서 커서 검사를 지나 끝까지 이어진다 — 저장값과 대소문자가 다른 접두사로 물어도 중복도 누락도 없다(점검 S16 앞쪽)")
+    void 세_검색의_정상_다음_쪽이_이어진다() {
+        // given — 검색마다 같은 접두사를 가진 대상 셋. 계정명 "Ab1".."Ab3", 표시명 "Kim A".."Kim C", 조직명 "Dev A".."Dev C"
+        for (String 계정명 : List.of("Ab1", "Ab2", "Ab3")) {
+            state.saveUser(new DirectoryUser(계정명, "x-" + 계정명, 계정명, null, null, true)).block();
+        }
+        for (String 글자 : List.of("A", "B", "C")) {
+            state.saveUser(new DirectoryUser("k" + 글자, "xk" + 글자, "kim." + 글자, "Kim " + 글자, null, true)).block();
+            state.saveGroup(new DirectoryGroup("D" + 글자, "xd" + 글자, "Dev " + 글자, Set.of())).block();
+        }
+
+        // when — 접두사를 저장값과 대소문자가 다르게("AB"·"KIM"·"DEV") 물어 limit 1 로 끝까지 따라 읽는다. 중간에 예외가 나면 여기서 실패한다
+        이어_읽기<UserSummary> 계정명_결과 = 끝까지_읽는다(c -> search.searchUsersByUserName("AB", c, 1).block());
+        이어_읽기<UserSummary> 직원_표시명_결과 = 끝까지_읽는다(c -> search.searchUsersByDisplayName("KIM", c, 1).block());
+        이어_읽기<GroupSummary> 조직명_결과 = 끝까지_읽는다(c -> search.searchGroupsByDisplayName("DEV", c, 1).block());
+
+        // then — 셋 다 빠짐없이 중복 없이 모이고, 쪽이 여럿이었으며(커서를 실제로 따라갔다), 마지막 쪽의 커서는 없다.
+        // 쪽이 정확히 끝나면 DynamoDB 가 빈 쪽을 하나 더 줄 수 있어 쪽 수의 위쪽은 막지 않는다
+        assertThat(계정명_결과.항목()).extracting(UserSummary::userName).containsExactly("Ab1", "Ab2", "Ab3");
+        assertThat(직원_표시명_결과.항목()).extracting(UserSummary::displayName).containsExactly("Kim A", "Kim B", "Kim C");
+        assertThat(조직명_결과.항목()).extracting(GroupSummary::displayName).containsExactly("Dev A", "Dev B", "Dev C");
+        for (이어_읽기<?> 결과 : List.of(계정명_결과, 직원_표시명_결과, 조직명_결과)) {
+            assertThat(결과.쪽수()).isGreaterThanOrEqualTo(3);
+            assertThat(결과.마지막_커서()).isNull();
+        }
+    }
+
+    /** 커서를 따라 끝까지 읽은 결과 — 모은 항목, 읽은 쪽 수, 마지막 쪽의 nextCursor(끝까지 읽었으면 null). */
+    private record 이어_읽기<T>(List<T> 항목, int 쪽수, String 마지막_커서) {
+    }
+
+    /** limit 1 로 읽은 쪽의 커서를 다음 요청에 그대로 넘긴다. 끝나지 않는 검색에 매달리지 않도록 열 쪽에서 멈춘다(그러면 마지막 커서가 남는다). */
+    private static <T> 이어_읽기<T> 끝까지_읽는다(Function<String, Page<T>> 묻기) {
+        List<T> 모은것 = new ArrayList<>();
+        String cursor = null;
+        int 쪽수 = 0;
+        do {
+            Page<T> page = 묻기.apply(cursor);
+            모은것.addAll(page.items());
+            cursor = page.nextCursor();
+            쪽수++;
+        } while (cursor != null && 쪽수 < 10);
+        return new 이어_읽기<>(모은것, 쪽수, cursor);
+    }
+
+    @Test
     @DisplayName("결과가 없으면 빈 페이지이고 커서도 없다")
     void 결과가_없으면_빈_페이지다() {
         // when
@@ -188,6 +309,74 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // then — 구독해야 비로소 IllegalArgumentException 이 onError 신호로 나온다
         assertThatThrownBy(() -> built.get().block())
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("검색어를 바꾼 채 이전 커서를 다시 보내면 IllegalArgumentException 이다 — DynamoDB 오류(500)로 새지 않는다(점검 S16 앞쪽)")
+    void 검색어를_바꾼_커서는_거절한다() {
+        // given — "u" 검색이 발급한 진짜 커서
+        for (int i = 1; i <= 3; i++) {
+            state.saveUser(new DirectoryUser("u" + i, "e" + i, "u" + i, "가나다" + i, null, true)).block();
+        }
+        String 커서 = search.searchUsersByUserName("u", null, 1).block().nextCursor();
+        assertThat(커서).isNotNull();
+
+        // when, then — 같은 인덱스·파티션이라 범위 검사는 통과하지만 시작 키가 "v" 접두 밖이다
+        assertThatThrownBy(() -> search.searchUsersByUserName("v", 커서, 1).block())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("이 검색의 커서가 아니다");
+    }
+
+    @Test
+    @DisplayName("범위는 맞아도 시작 키가 이 검색의 것이 아니면 IllegalArgumentException 이다 — 검색 셋 모두(점검 S16 앞쪽)")
+    void 위조한_검색_시작_키는_거절한다() {
+        // given — 검색마다 범위(인덱스/파티션)는 맞춘 위조 커서들
+        record 검색(String 범위, String 파티션키, String 정렬키, String 파티션, String 종류_PK, Function<String, Page<?>> 묻기) {
+        }
+        List<검색> 검색들 = List.of(
+                new 검색("GSI1/USER_INDEX", Keys.GSI1PK, Keys.GSI1SK, Keys.USER_INDEX, Keys.userPk("u1"),
+                        c -> search.searchUsersByUserName("u", c, 1).block()),
+                new 검색("GSI2/USER_INDEX", Keys.GSI2PK, Keys.GSI2SK, Keys.USER_INDEX, Keys.userPk("u1"),
+                        c -> search.searchUsersByDisplayName("u", c, 1).block()),
+                new 검색("GSI1/GROUP_INDEX", Keys.GSI1PK, Keys.GSI1SK, Keys.GROUP_INDEX, Keys.groupPk("G1"),
+                        c -> search.searchGroupsByDisplayName("u", c, 1).block()));
+
+        for (검색 s : 검색들) {
+            Map<String, AttributeValue> 정상 = Map.of(
+                    Keys.PK, Attrs.s(s.종류_PK()), Keys.SK, Attrs.s(Keys.META),
+                    s.파티션키(), Attrs.s(s.파티션()), s.정렬키(), Attrs.s("u1"));
+            List<Map<String, AttributeValue>> 위조들 = List.of(
+                    바꾼다(정상, s.파티션키(), Attrs.s(Keys.USER_INDEX.equals(s.파티션()) ? Keys.GROUP_INDEX : Keys.USER_INDEX)), // 다른 파티션
+                    뺀다(정상, Keys.SK),                                                                                  // 키가 모자람
+                    바꾼다(정상, "extra", Attrs.s("x")),                                                                    // 키가 남음
+                    바꾼다(정상, s.정렬키(), Attrs.s("x1")),                                                                  // 다른 접두사
+                    바꾼다(정상, s.정렬키(), Attrs.s("u" + "x".repeat(1100))),                                                // 정렬키 한도 초과
+                    바꾼다(정상, Keys.PK, Attrs.s(Keys.USER_INDEX.equals(s.파티션()) ? Keys.groupPk("G1") : Keys.userPk("u1"))), // 다른 종류의 PK
+                    바꾼다(정상, Keys.SK, Attrs.s("MEMBER#USER#u1")),                                                      // META 가 아닌 SK
+                    바꾼다(정상, Keys.PK, Attrs.s(Keys.USER_INDEX.equals(s.파티션())                                            // 파티션키 한도(2048바이트) 초과
+                            ? Keys.userPk("x".repeat(2100)) : Keys.groupPk("x".repeat(2100)))));
+
+            // when, then
+            for (Map<String, AttributeValue> 위조 : 위조들) {
+                String 커서 = Cursor.encode(s.범위(), 위조);
+                assertThatThrownBy(() -> s.묻기().apply(커서))
+                        .as("%s / %s", s.범위(), 위조)
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessage("이 검색의 커서가 아니다");
+            }
+        }
+    }
+
+    private static Map<String, AttributeValue> 바꾼다(Map<String, AttributeValue> 원래, String 이름, AttributeValue 값) {
+        Map<String, AttributeValue> 새것 = new HashMap<>(원래);
+        새것.put(이름, 값);
+        return 새것;
+    }
+
+    private static Map<String, AttributeValue> 뺀다(Map<String, AttributeValue> 원래, String 이름) {
+        Map<String, AttributeValue> 새것 = new HashMap<>(원래);
+        새것.remove(이름);
+        return 새것;
     }
 
     private void 조직을_심는다(String orgCode, int 직원수, String... 하위조직) {

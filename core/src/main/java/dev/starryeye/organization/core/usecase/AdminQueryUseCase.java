@@ -197,6 +197,8 @@ public class AdminQueryUseCase {
      * 위의 {@code truncated} 검사는 <b>다음</b> 단계로 넘어가는 것만 막지, 지금 이 단계 안에서
      * 상한을 넘긴 뒤의 상위 조직들까지 막지는 못한다. 자르지 않으면 상위 조직이 수천 개 달린
      * 조직 하나가 한 단계 만에 그만큼의 읽기를 전부 치른다.
+     *
+     * <p>이름표는 동시에 {@code LOAD_CONCURRENCY} 개씩 읽되 결과 순서는 id 순서를 지킨다(점검 S27).
      */
     private Flux<Step> expandParents(Step step, Reached reached) {
         if (reached.truncated) {
@@ -206,7 +208,8 @@ public class AdminQueryUseCase {
         // 허용하지 않으므로(NullPointerException) flatMap + Mono.justOrEmpty 로 흡수한다.
         return state.findGroupIdsContaining(MemberRef.group(step.group().orgCode()))
                 .take(MAX_PATHS + 1)
-                .concatMap(this::loadGroupOrEmpty)
+                // flatMapSequential 이라 병렬로 읽으면서도 순서를 지킨다 — acceptParent 는 결과를 하나씩 차례로 받는다(점검 S27)
+                .flatMapSequential(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                 .flatMap(parent -> Mono.justOrEmpty(acceptParent(parent, step.path(), reached)));
     }
 
@@ -303,7 +306,8 @@ public class AdminQueryUseCase {
     /**
      * 직속 하위 조직만(1 depth). 멤버 참조에는 조직코드밖에 없으므로 표시명을 채우려면
      * 각 하위 조직을 읽어야 한다 — 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다.
-     * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이다.
+     * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이고,
+     * 동시에 {@code LOAD_CONCURRENCY} 개씩 읽되 순서는 지킨다(점검 S27).
      * 하위 조직 아이디는 {@code MEMBER#GROUP#} 줄만 상한까지 읽는다.
      *
      * <p><b>여기에도 상한을 둔다.</b> "보통 수십 개" 는 정상 조직도의 이야기이고, 이 엔드포인트는
@@ -321,7 +325,8 @@ public class AdminQueryUseCase {
                         childIds = childIds.subList(0, MAX_PATHS);
                     }
                     return Flux.fromIterable(childIds)
-                            .concatMap(this::loadGroupOrEmpty)
+                            // flatMapSequential 이라 병렬로 읽으면서도 하위 조직 순서를 지킨다(점검 S27)
+                            .flatMapSequential(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                             .collectList();
                 });
     }

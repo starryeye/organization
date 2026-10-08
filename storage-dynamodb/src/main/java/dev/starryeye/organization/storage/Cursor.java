@@ -17,7 +17,7 @@ import java.util.stream.Collectors;
  * <p><b>어느 검색이 발급한 커서인지도 함께 담는다.</b> 담지 않으면 형식만 멀쩡한 다른 검색의
  * 커서가 그대로 해석돼 DynamoDB 까지 내려가고, 거기서 나는 ValidationException 은 500 이
  * 된다 — 설계 §9 는 손상된 커서를 400 으로 규정한다. 예를 들어 GSI1 커서는
- * {@code {PK, SK, GSI1PK, GSI1SK}} 인데 GSI2 질의는 {@code {PK, SK, GSI1PK, displayName}} 을
+ * {@code {PK, SK, GSI1PK, GSI1SK}} 인데 GSI2 질의는 {@code {PK, SK, GSI1PK, displayNameKey}} 를
  * 요구하므로 저장소가 거절한다. 같은 인덱스라도 파티션이 다르면(GSI1 의 USER_INDEX 와
  * GROUP_INDEX) 거절되지도 않고 엉뚱한 자리에서 읽기 시작하므로, 인덱스가 아니라
  * <b>검색 범위</b>(인덱스 + 파티션)를 통째로 담는다.

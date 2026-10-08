@@ -7,12 +7,11 @@ import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.BillingMode;
-import software.amazon.awssdk.services.dynamodb.model.CreateGlobalSecondaryIndexAction;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTableResponse;
 import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
-import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndexUpdate;
+import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndexDescription;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.Projection;
@@ -20,8 +19,9 @@ import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveSpecification;
-import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTimeToLiveRequest;
+
+import java.util.List;
 
 @Slf4j
 @RequiredArgsConstructor
@@ -43,7 +43,7 @@ public class TableInitializer implements InitializingBean {
                         .tableName(table).build()))
                 .flatMap(response -> {
                     log.info("DynamoDB 테이블 '{}' 이 이미 존재한다", table);
-                    return addMissingIndex(table, response);
+                    return requireCurrentDisplayNameIndex(table, response);
                 })
                 .onErrorResume(ResourceNotFoundException.class, notFound -> createTable(table));
     }
@@ -92,14 +92,14 @@ public class TableInitializer implements InitializingBean {
     }
 
     /**
-     * 직원 표시명 접두사 검색용 인덱스. 키 속성을 새로 만들지 않고 기존 속성
-     * ({@link Keys#GSI1PK}, {@code displayName})을 그대로 키로 쓰는 이유는
-     * {@link Keys#GSI2PK} 의 설명을 보라 — 기존 아이템의 백필이 걸린 문제다.
+     * 직원 표시명 접두사 검색용 인덱스. 파티션키는 {@link Keys#GSI1PK} 를 그대로 쓰고, 정렬키는 직원 META 에만 쓰는
+     * 소문자 표시명({@link Keys#GSI2SK})이다 — 그래서 조직 META 는 이 인덱스에 실리지 않는다({@link Keys#GSI2PK} 의 설명을 보라).
      *
      * <p>프로젝션이 {@code ALL} 이 아니라 {@code INCLUDE} 인 이유: 검색 결과 한 줄을 그리는 데
      * 필요한 속성만 담으면 된다. {@code KEYS_ONLY} 로 더 줄이면 결과 20건마다 GetItem 20번이
-     * 붙어 오히려 손해다. 키 속성(PK/SK/GSI1PK/displayName)은 자동으로 실리므로 여기 적으면
+     * 붙어 오히려 손해다. 키 속성(PK/SK/GSI1PK/displayNameKey)은 자동으로 실리므로 여기 적으면
      * 안 된다 — 인덱스 키 속성을 {@code NonKeyAttributes} 에 적으면 ValidationException 이다.
+     * {@code displayName} 은 이제 키가 아니므로 여기 적어야 검색 결과의 표시명 칸이 채워진다.
      *
      * <p><b>프로젝션 목록은 인덱스가 <em>생성될 때</em> 한 번 굳는다.</b> 나중에 속성 이름을
      * 바꾸면 새로 만드는 테이블에서는 통과하지만 이미 인덱스가 있는 기존 테이블에서는 검색
@@ -116,7 +116,7 @@ public class TableInitializer implements InitializingBean {
                         KeySchemaElement.builder().attributeName(Keys.GSI2SK).keyType(KeyType.RANGE).build())
                 .projection(Projection.builder()
                         .projectionType(ProjectionType.INCLUDE)
-                        .nonKeyAttributes("userName", "active")
+                        .nonKeyAttributes("userName", "displayName", "active")
                         .build())
                 .build();
     }
@@ -125,7 +125,7 @@ public class TableInitializer implements InitializingBean {
      * {@code externalId} 로 찾는 인덱스. {@code KEYS_ONLY} 인 이유 — 찾은 {@code PK} 로 본 테이블을 GetItem 해
      * 최신 값을 읽는다. 인덱스가 늦어도 낡은 속성을 돌려주지 않고, 인덱스가 작다(S-1 설계 §5.2).
      *
-     * <p>기존 테이블에 없으면 더하는 경로({@link #addMissingIndex})는 두지 않는다 — S-1 은 GSI1 키 값도 바꾸므로
+     * <p>기존 테이블에 없으면 더하는 경로는 두지 않는다 — S-1 은 GSI1 키 값도 바꾸므로
      * 기존 테이블은 어차피 재생성해야 한다(설계 §5.4).
      */
     private static GlobalSecondaryIndex externalIdIndex() {
@@ -139,39 +139,28 @@ public class TableInitializer implements InitializingBean {
     }
 
     /**
-     * 이미 있는 테이블에 GSI2 가 없으면 더한다. 기존 배포에서 표시명 검색이
-     * ValidationException 으로 죽는 것을 막는다.
+     * 이미 있는 테이블의 GSI2 가 이 버전의 모양인지 본다(설계 2026-10-08 §3.4). 없거나 정렬키가 {@link Keys#GSI2SK} 가 아니면 기동을 멈춘다.
      *
-     * <p>완료를 기다리지 않는다 — 백필 중에도 테이블 쓰기는 계속되고, 검색만 잠시 비어 보인다.
-     * DynamoDB 는 한 번에 하나의 GSI 만 만들 수 있으므로 이미 만드는 중이면 그대로 둔다.
-     *
-     * <p>기존 아이템은 DynamoDB 의 백필이 그대로 실어 준다. 별도의 재기록 잡이 없어도 되는
-     * 것은 GSI2 가 기존 아이템이 이미 갖고 있는 속성만 키로 쓰기 때문이다({@link Keys#GSI2PK}).
+     * <p>더해 주지 않는 까닭: 새 키 속성은 옛 아이템에 없어 인덱스를 더해도 백필이 옛 직원을 싣지 못한다 — 표시명 검색이 조용히 빈다.
+     * 옛 GSI2 를 그대로 두면 표시명 검색만 실행 중에 {@code ValidationException}(500)이다. 운영 배포 전이라 테이블을 다시 만든다.
      */
-    private Mono<Void> addMissingIndex(String table, DescribeTableResponse response) {
-        boolean present = response.table().globalSecondaryIndexes() != null
-                && response.table().globalSecondaryIndexes().stream()
-                        .anyMatch(index -> Keys.GSI2.equals(index.indexName()));
-        if (present) {
+    private Mono<Void> requireCurrentDisplayNameIndex(String table, DescribeTableResponse response) {
+        List<GlobalSecondaryIndexDescription> indexes = response.table().globalSecondaryIndexes() == null
+                ? List.of() : response.table().globalSecondaryIndexes();
+        String sortKey = indexes.stream()
+                .filter(index -> Keys.GSI2.equals(index.indexName()))
+                .findFirst()
+                .flatMap(index -> index.keySchema().stream()
+                        .filter(key -> key.keyType() == KeyType.RANGE)
+                        .findFirst())
+                .map(KeySchemaElement::attributeName)
+                .orElse(null);
+        if (Keys.GSI2SK.equals(sortKey)) {
             return Mono.empty();
         }
-        log.info("DynamoDB 테이블 '{}' 에 인덱스 '{}' 를 추가한다", table, Keys.GSI2);
-        GlobalSecondaryIndex index = userDisplayNameIndex();
-        UpdateTableRequest request = UpdateTableRequest.builder()
-                .tableName(table)
-                .attributeDefinitions(attribute(Keys.GSI2PK), attribute(Keys.GSI2SK))
-                .globalSecondaryIndexUpdates(GlobalSecondaryIndexUpdate.builder()
-                        .create(CreateGlobalSecondaryIndexAction.builder()
-                                .indexName(index.indexName())
-                                .keySchema(index.keySchema())
-                                .projection(index.projection())
-                                .build())
-                        .build())
-                .build();
-        return Mono.fromFuture(() -> client.updateTable(request))
-                .doOnError(error -> log.warn("인덱스 '{}' 추가 실패 — 표시명 검색이 동작하지 않는다", Keys.GSI2, error))
-                .onErrorResume(error -> Mono.empty())
-                .then();
+        return Mono.error(new IllegalStateException(
+                "테이블 '%s' 의 인덱스 %s 가 이 버전과 다르다(정렬키 %s) — 테이블을 다시 만들어야 한다".formatted(
+                        table, Keys.GSI2, sortKey == null ? "인덱스 없음" : sortKey)));
     }
 
     private static AttributeDefinition attribute(String name) {
