@@ -512,6 +512,10 @@ read-timeout 이 아니라 connect-timeout 으로 재기 때문이다. **인증 
 읽는다 — 그래도 안 되면 그 회차는 FAILED 이고 다음 회차는 정상으로 돈다. 읽기 기본값은 AD 가 검색 하나에 허용하는 최대 시간
 (120초, `MaxQueryDuration`)보다 길게 잡았다. 한 페이지 응답이 이보다 오래 걸리는 디렉터리라면 늘린다.
 
+**페이징 응답 컨트롤이 없으면 회차를 멈춘다.** 페이징(`ldap.page-size`, 기본 500)은 paged results 컨트롤(RFC 2696)을 critical 로 보낸다. 표준을 지키는
+서버는 응답에 컨트롤을 붙이거나 오류로 답한다(RFC 4511 §4.1.11). 컨트롤 없이 답하는 서버·프록시를 만나면 받은 목록이 전부인지 알 수 없으므로 그 회차는
+재시도 없이 FAILED(데이터 오류)다 — 전에는 같은 요청을 작업 기한까지 끝없이 되풀이하며 같은 엔트리를 쌓았다. 그런 서버라면 `ldap.page-size=0` 으로 페이징을 끈다.
+
 **이름은 표준 속성에서 읽는다** — `givenName`→이름, `sn`→성, `generationQualifier`→접미(Jr. 등), AD 의 `middleName`→중간
 이름. 속성이 없으면 빈칸이다. admin 직원 상세(`GET /admin/employees/{employeeId}`)의 `name` 에 나온다.
 
