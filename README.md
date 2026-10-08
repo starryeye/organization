@@ -130,8 +130,12 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 페이지 책갈피뿐 아니라 동기화 실행 이력·쓰기 락 아이템도 함께 만료시킨다(튜플 스냅샷은 TTL 을 쓰지 않는다 — 위 "스냅샷이 왜 있는가").
 기존 테이블은 다시 만들어야 한다.
 
+**⑥-3(관리자 표시명 검색)도 키를 바꾼다** — GSI2 의 정렬키가 직원 META 에만 쓰는 소문자 표시명(`displayNameKey`)이 되고, 조직은 GSI2 에
+실리지 않는다(`2026-10-08-audit-finish-design.md`). 기존 테이블은 다시 만들어야 한다. `create-table-on-startup` 이 켜져 있으면 GSI2 가
+옛 모양(정렬키 `displayName`)이거나 없는 테이블에서 서버가 "테이블을 다시 만들어야 한다" 며 기동을 멈춘다.
+
 직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
-GSI2(파티션키 `GSI1PK`, 정렬키 `displayName`, 프로젝션 `INCLUDE` — `userName`·`active`), GSI3(파티션키
+GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` — `userName`·`displayName`·`active`), GSI3(파티션키
 `externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
 
 | 서비스 | 주소 |
@@ -287,6 +291,7 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 끝나면 `items` 가 빈 쪽이 한 번 더 오고, 거기서 `nextCursor` 가 null 이다. 다른 조직·다른 검색이 발급한 커서, 형식이 깨진 커서, 이 조직의 직원
 멤버 키가 아닌 값으로 고친 커서(정렬키가 DynamoDB 한도인 1024바이트를 넘는 것 포함)는 400 이다. 커서에 서명하지는 않으므로 같은 조직 안의 다른 위치로
 고친 커서는 그 위치부터 읽는다. **조직 상세는 멤버 첫 쪽만 읽는다** — 조직 파티션 전체를 읽지 않으므로 멤버가 10만 명인 조직도 멤버는 쪽 크기(20명)만큼만 읽는다.
+직원·조직 검색의 `cursor` 도 같다 — 다른 검색이 발급했거나, 검색어를 바꾼 채 이전 커서를 다시 보냈거나, 이 검색의 키가 아닌 값으로 고친 커서는 400 이다.
 
 **식별자 셋.** 직원에는 이름이 다른 세 값이 붙는다.
 
@@ -329,6 +334,7 @@ SCIM 조직의 `externalId`는 겹치면 409지만(아래 SCIM 절) 직원의 `e
 **검색은 접두사만 지원한다.** `displayName=홍`은 "홍"으로 시작하는 이름을 찾을 뿐, 부분일치나
 전문 검색은 지원하지 않는다(`externalId`만 정확히 일치다). 조직 id(`orgCode`) 자체의 접두사 검색도 없다 — 조직은
 표시명 접두사나 `externalId`로 찾고, 정확한 id를 안다면 `/admin/organizations/{orgCode}`로 바로 조회한다.
+세 검색(`userName`·직원 `displayName`·조직 `displayName`) 모두 대소문자를 가리지 않는다 — `displayName=KIM` 이 `Kim Chulsoo` 를 찾는다. 결과의 값은 저장한 그대로다.
 
 **`shouldHaveAccess`와 `openFgaCheck`가 갈리면.** 직원 상세(`paths`)의 각 줄은
 `shouldHaveAccess`(현재상태가 요구하는 값)와 `openFgaCheck`(OpenFGA에 실제로 Check해 받은
@@ -729,7 +735,7 @@ organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 
 
 **쓰기 요청의 판단은 전부 락 안에서 일어난다.** 직원·조직을 읽고, 존재를 확인하고, `userName`·조직 `externalId` 중복을 확인하는 일을 모두 락을
 잡은 뒤에 한다 — 동시에 온 PATCH 가 서로의 변경을 지우거나(비활성화가 되돌려져 퇴사자 권한이 되살아나는 것 포함) 방금 지운 직원을
-되살리지 않는다. 단, 연산이 모두 저장하지 않는 속성인 직원 PATCH 는 우리 상태에 아무 말도 하지 않으므로 락 없이 지금 모습을 돌려준다(아래 SCIM 절).
+되살리지 않는다. 단, 연산이 모두 저장하지 않는 속성인 직원 PATCH 는 우리 상태에 아무 말도 하지 않으므로 락 없이 지금 모습을 돌려준다(위 SCIM 절).
 직원 삭제는 소속 조직의 이름표만 읽고 그 직원의 줄만 지운다 — 조직 크기와 무관하다.
 
 **락을 못 잡았을 때의 동작은 두 경로가 다르다 — 의도적인 비대칭이다.**

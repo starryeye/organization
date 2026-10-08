@@ -42,7 +42,7 @@ public final class Keys {
     public static final String GSI2SK = "displayNameKey";
 
     /**
-     * GSI3 — {@code externalId} 로 직원·조직을 찾는다(S-1 설계 §5.2). GSI2 처럼 <b>새 속성을 만들지
+     * GSI3 — {@code externalId} 로 직원·조직을 찾는다(S-1 설계 §5.2). <b>새 속성을 만들지
      * 않는다</b> — 파티션키는 아이템이 이미 가진 {@code externalId} 속성, 정렬키는 본 테이블의 {@link #PK} 다.
      * {@code externalId} 가 없는 아이템(멤버 줄·소속 줄·스냅샷)은 인덱스에 실리지 않는다.
      */

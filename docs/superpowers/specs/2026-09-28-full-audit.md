@@ -1259,10 +1259,10 @@ AD 보안 그룹이 검색 범위에 섞여 튜플이 200만이 되면 삽입이
 | S13 | 재적재 하트비트가 일시 오류(스로틀·네트워크) 한 번에 재적재를 중단한다. 리스가 20초 남았는데도 store 를 반쯤 채운 채 FAILED, 락 반납. ③-1(2026-10-02) 뒤로 같은 성질이 큰 SCIM 쓰기(조직 삭제 등)에도 적용된다 — 갱신 한 번 실패로 멈추지만 META 가 마지막이라 재시도로 회복된다 | `ScimRebuildUseCase.java:129-138`, `DynamoDbMutationLock.java:101-119` | 코드로 확인 | R-11 |
 | S14 | 락 획득 PutItem 이 서버에서 성공했는데 응답이 유실돼 SDK 가 재시도하면, 자기 락에 막혀 30초 동안 모든 SCIM 쓰기 503·재적재 409 | `DynamoDbMutationLock.java:65-75` | 코드로 확인(SDK 재시도 경로는 추정) | R-12 **→ 해결(2026-10-02, 슬라이드 ③-1)** |
 | S15 | 락 만료 판단이 각 인스턴스의 로컬 시계다. 시계가 30초 이상 어긋나면 남의 락을 가져간다(NTP 환경이면 드묾) | `DynamoDbMutationLock.java:53-54,69-71,104` | 코드로 확인 | R-13 |
-| S16 | 형식만 맞춘 위조 커서가 400 이 아니라 500 이다(파티션 밖을 읽지는 못한다). 조직 멤버 목록 커서는 오프셋이라 페이지 사이에 멤버가 바뀌면 건너뛰거나 두 번 준다 | `Cursor.java:50-78`, `AdminQueryUseCase.java:305-348` | 코드로 확인 | R-14 **→ 뒤쪽(멤버 목록 오프셋) 해결·앞쪽(위조 커서)은 멤버 목록에서만 해결(2026-10-06, 슬라이드 ⑥-1)** |
+| S16 | 형식만 맞춘 위조 커서가 400 이 아니라 500 이다(파티션 밖을 읽지는 못한다). 조직 멤버 목록 커서는 오프셋이라 페이지 사이에 멤버가 바뀌면 건너뛰거나 두 번 준다 | `Cursor.java:50-78`, `AdminQueryUseCase.java:305-348` | 코드로 확인 | R-14 **→ 뒤쪽(멤버 목록 오프셋) 해결·앞쪽(위조 커서)은 멤버 목록에서만 해결(2026-10-06, 슬라이드 ⑥-1)** **→ 앞쪽 나머지(검색 커서)도 해결(2026-10-08, 슬라이드 ⑥-3)** |
 | S17 | 재적재·wipe 가 최종 일관성 GSI 로 대상을 열거한다. 락 직전(1초 안) 만든 직원이 빠질 수 있다 — `tuples` 는 튜플을 안 쓰고, `wipe` 는 안 지운다. DynamoDB Local 로는 재현 불가 | `DynamoDbDirectoryStateRepository.java:591-659` | 코드로 확인(GSI 지연은 추정) | R-15 |
 | S18 | 스냅샷 포인터 GetItem 과 스냅샷 Query 가 최종 일관성이다. 직전 회차 직후 `/full` 을 누르면 약 1초 창에서 낡은 기준선을 볼 수 있다 | `DynamoDbTupleSnapshotRepository.java:117-120,270-277` | 코드로 확인 | cost-batch D2 |
-| S19 | 관리자 검색 `?displayName=` 이 대소문자를 가린다(`userName`·조직명은 소문자 키로 찾는다) | `DynamoDbDirectorySearchRepository.java:44-45` | 코드로 확인 | cost-batch D3 |
+| S19 | 관리자 검색 `?displayName=` 이 대소문자를 가린다(`userName`·조직명은 소문자 키로 찾는다) | `DynamoDbDirectorySearchRepository.java:44-45` | 코드로 확인 | cost-batch D3 **→ 해결(2026-10-08, 슬라이드 ⑥-3)** |
 | S20 | LDAP 쓰기 순서가 "삭제 배치 전부 → 쓰기 배치 전부"라, 5,000명 OU 개명 때 그 사이 5,000명이 어느 조직에도 없다. 쓰기가 실패하면 다음 회차(최대 하루)까지. 주석도 "순서가 뒤집히면 결과가 달라진다"고 틀리게 적는다 | `OpenFgaRelationTupleWriter.java:60-71` | 코드로 확인 | L-12 **→ 해결(2026-10-05, 슬라이드 ④-2)** |
 | S21 | referral 로 인한 "불완전한 결과"를 DEBUG 로 삼킨다. 검색 범위가 자식 도메인·위임 서브트리를 걸치면 그 부분이 **항상** 빠지는데 운영자는 알 수 없다 | `LdapTemplates.java:52` | 코드·문서로 확인 | L-13 **→ 해결(2026-10-05, 슬라이드 ④-2)** |
 | S22 | DIT: AD 기본 컨테이너 `CN=Users`(OU 가 아니다) 아래 사용자는 경고만 남기고 소속 없이 적재된다. 전원이 그래도 막는 가드가 없어 "아무도 권한 없이 SUCCEEDED"가 가능하다 | `DitStrategy.java:50-54,122-126` | 코드로 확인 | L-14 **→ 해결(2026-10-05, 슬라이드 ④-2)** |
@@ -1270,7 +1270,7 @@ AD 보안 그룹이 검색 범위에 섞여 튜플이 200만이 되면 삽입이
 | S24 | OpenLDAP ppolicy 의 관리자 영구 잠금(`pwdAccountLockedTime: 000001010000Z`)을 활성으로 읽는다. 이 값은 일시 잠금이 아니라 사실상 비활성화다 | `AdAccountStatus.java:28-29,42-44` | 문서로 확인 · 알려진 것(README 270) | L-16 **→ 해결(2026-10-05, 슬라이드 ④-2)** |
 | S25 | LDAP 직원의 `userName` 이 원본이 아니라 정규화된 아이디다(`uid: hong gd` → `hong_gd`). README 설명과 다르다 | `GroupOfNamesStrategy.java:75-77`, `DitStrategy.java:110-113` | 코드로 확인 | L-17 **→ 해결(2026-10-04, 슬라이드 ④-1)** |
 | S26 | 만료 스냅샷 정리 잡은 AWS 에서도 일을 한다(TTL 이 "며칠 안에" 지우므로 먼저 지운다, 하루 약 11만 WRU 추정). 설계·주석의 "0건" 설명과 어긋날 뿐 해는 없다. 포인터 대상까지 지우는 것은 C1 | `SyncScheduler.java:43-53`, `ArchiveScheduler.java:36-43` | 코드로 확인 | cost-batch P13 |
-| S27 | 아카이빙의 BatchCheck 약 2,200번과 조직 상세의 하위 조직 이름표 GetItem 최대 200번이 차례다(SDK 는 병렬 10 지원) | `OpenFgaRelationTupleChecker.java:71`, `AdminQueryUseCase.java:300-302` | 코드로 셈 | cost-batch P14 |
+| S27 | 아카이빙의 BatchCheck 약 2,200번과 조직 상세의 하위 조직 이름표 GetItem 최대 200번이 차례다(SDK 는 병렬 10 지원) | `OpenFgaRelationTupleChecker.java:71`, `AdminQueryUseCase.java:300-302` | 코드로 셈 | cost-batch P14 **→ 해결 — 아카이빙 BatchCheck 는 ③-1(2026-10-03, `openfga.request-concurrency`), 조직 상세 이름표는 ⑥-3(2026-10-08)** |
 | S28 | 직원 쓰기가 락 안에서 같은 직원 META 를 세 번 읽는다(조직 PATCH 도 두 번). 차례 왕복 6~8개 중 2개라, 없애면 직원 쓰기 처리량이 약 30~40% 는다(추정) | `IncrementalSyncUseCase.java:190,221,237`, `DynamoDbDirectoryStateRepository.java:129,321` | 코드로 셈 | cost-scim 후보 4 **→ 해결(2026-10-03, 슬라이드 ③-2)** |
 
 ---

@@ -439,7 +439,7 @@ class AdminQueryUseCaseTest {
             useCase.organizationDetail("P", 20).subscribe(결과::set);
             시간.advanceTimeBy(Duration.ofMillis(400));
 
-            // then — 완료 순서가 아니라 소스 순서다. 순서를 안 지키는 flatMap 이면 C20 이 앞선다
+            // then — 완료 순서가 아니라 소스 순서다. 앞쪽이 더 느려 flatMap 이면 순서가 깨진다
             assertThat(결과.get()).as("400ms 안에 끝난다").isNotNull();
             assertThat(결과.get().childOrganizations()).extracting("orgCode")
                     .containsExactlyElementsOf(IntStream.rangeClosed(1, 20).mapToObj("C%02d"::formatted).toList());
