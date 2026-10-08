@@ -9,12 +9,14 @@ import dev.starryeye.organization.core.query.UserSummary;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -53,10 +55,28 @@ public class FakeSearchRepository implements DirectorySearchRepository {
         this.state = state;
     }
 
+    /** {@link #findGroupSummary} 한 번이 걸리는 시간. 병렬로 읽는지 가상 시간으로 재는 데 쓴다. */
+    public Duration summaryDelay = Duration.ZERO;
+
+    /** {@link #findGroupSummary} 가 동시에 몇 개까지 진행 중이었나. */
+    public final AtomicInteger summaryInFlightMax = new AtomicInteger();
+
+    private final AtomicInteger summaryInFlight = new AtomicInteger();
+
     @Override
     public Mono<GroupSummary> findGroupSummary(String orgCode) {
-        return Mono.fromRunnable(() -> findGroupSummaryCalls.add(orgCode))
-                .then(Mono.justOrEmpty(lookupGroup(orgCode)));
+        return Mono.fromRunnable(() -> {
+                    findGroupSummaryCalls.add(orgCode);
+                    summaryInFlightMax.accumulateAndGet(summaryInFlight.incrementAndGet(), Math::max);
+                })
+                .then(summaryDelay.isZero() ? Mono.<Void>empty() : Mono.delay(summaryDelay).then())
+                // 결과를 내려보내기 전에 센다. doFinally 로 세면 안 된다 — 그쪽은 종료 신호를 먼저 전파하고
+                // 나서 콜백을 돌리므로, 다음 읽기가 시작된 뒤에 감소가 일어나 동시 개수가 하나 더 크게 보인다
+                // (FakeTupleChecker 가 같은 이유로 이렇게 센다).
+                .then(Mono.defer(() -> {
+                    summaryInFlight.decrementAndGet();
+                    return Mono.justOrEmpty(lookupGroup(orgCode));
+                }));
     }
 
     private GroupSummary lookupGroup(String orgCode) {

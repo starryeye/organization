@@ -9,15 +9,19 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.query.AccessPath;
 import dev.starryeye.organization.core.query.GroupSummary;
+import dev.starryeye.organization.core.query.OrganizationDetail;
 import dev.starryeye.organization.core.query.UserSummary;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.test.scheduler.VirtualTimeScheduler;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -414,6 +418,63 @@ class AdminQueryUseCaseTest {
         // then — 인증이 없는 엔드포인트라 이 팬아웃을 익명 호출자가 조종할 수 있다
         assertThat(detail.childOrganizations()).hasSize(AdminQueryUseCase.MAX_PATHS);
         assertThat(search.findGroupSummaryCalls).hasSize(AdminQueryUseCase.MAX_PATHS);
+    }
+
+    @Test
+    @DisplayName("조직 상세는 하위 조직 이름표를 동시에 8개까지 읽고, 순서는 그대로다(점검 S27)")
+    void 하위_조직_이름표를_병렬로_읽는다() {
+        // given — 하위 조직 20개, 이름표 읽기마다 100ms
+        MemberRef[] 하위 = IntStream.rangeClosed(1, 20)
+                .mapToObj(i -> MemberRef.group("C%02d".formatted(i))).toArray(MemberRef[]::new);
+        for (MemberRef child : 하위) {
+            state.saveGroup(조직(child.id())).block();
+        }
+        state.saveGroup(조직("P", 하위)).block();
+        search.summaryDelay = Duration.ofMillis(100);
+        VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
+        try {
+            AtomicReference<OrganizationDetail> 결과 = new AtomicReference<>();
+
+            // when — 8개씩 세 번이면 300ms 다. 하나씩이면 2초다
+            useCase.organizationDetail("P", 20).subscribe(결과::set);
+            시간.advanceTimeBy(Duration.ofMillis(300));
+
+            // then
+            assertThat(결과.get()).as("300ms 안에 끝난다").isNotNull();
+            assertThat(결과.get().childOrganizations()).extracting("orgCode")
+                    .containsExactlyElementsOf(IntStream.rangeClosed(1, 20).mapToObj("C%02d"::formatted).toList());
+            assertThat(search.summaryInFlightMax).hasValue(8);
+        } finally {
+            VirtualTimeScheduler.reset();
+        }
+    }
+
+    @Test
+    @DisplayName("조직 상세는 상위 조직 이름표도 동시에 읽고, 결과(순서·상한)는 하나씩 읽을 때와 같다(점검 S27)")
+    void 상위_조직_이름표를_병렬로_읽는다() {
+        // given — X 를 담은 상위 조직 10개
+        state.saveGroup(조직("X")).block();
+        for (int i = 1; i <= 10; i++) {
+            state.saveGroup(조직("P%02d".formatted(i), MemberRef.group("X"))).block();
+        }
+        var 기대 = useCase.organizationDetail("X", 20).block().ancestors();
+        search.summaryDelay = Duration.ofMillis(100);
+        VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
+        try {
+            AtomicReference<OrganizationDetail> 결과 = new AtomicReference<>();
+
+            // when
+            useCase.organizationDetail("X", 20).subscribe(결과::set);
+            시간.advanceTimeBy(Duration.ofMillis(300));
+
+            // then
+            assertThat(결과.get()).isNotNull();
+            assertThat(결과.get().ancestors()).isEqualTo(기대);
+            assertThat(결과.get().ancestors()).hasSize(10);
+            assertThat(search.summaryInFlightMax.get()).as("하나씩 읽지 않는다").isGreaterThan(1);
+        } finally {
+            VirtualTimeScheduler.reset();
+        }
     }
 
     @Test
