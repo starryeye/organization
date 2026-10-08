@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap.strategy;
 import dev.starryeye.organization.ldap.LdapTemplates;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ldap.PartialResultException;
+import org.springframework.ldap.control.PagedResultsCookie;
 import org.springframework.ldap.control.PagedResultsDirContextProcessor;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.ContextMapperCallbackHandler;
@@ -68,21 +69,52 @@ final class PagedLdapSearch {
             return handler.getList();
         }
         return LdapTemplates.한_커넥션에서(template, paged -> {
-            PagedResultsDirContextProcessor processor = new PagedResultsDirContextProcessor(pageSize);
+            페이징_처리기 processor = new 페이징_처리기(pageSize, null);
             boolean hasMore;
             do {
-                PagedResultsDirContextProcessor 이번 = processor;
+                페이징_처리기 이번 = processor;
                 참조.검색한다(() -> paged.search(base, filter, controls, handler, 이번));
                 // 페이지마다 본다 — 베이스가 참조인 응답(결과 코드 10)에는 페이징 컨트롤이 없어 hasMore() 가 처음 값(true)으로 남는다.
                 // 반복이 끝난 뒤에 보면 같은 요청을 끝없이 되풀이한다
                 참조.확인한다(handler.getList().size());
+                if (!이번.응답_컨트롤을_받았다()) {
+                    throw new DirectoryDataException(("LDAP 서버가 페이징 요청(RFC 2696, critical)에 페이징 응답 컨트롤을 붙이지 않았다 — "
+                            + "받은 목록이 전부인지 알 수 없어 회차를 멈춘다. 서버(또는 사이의 프록시)가 paged results 를 지원하는지 확인하라 "
+                            + "(페이징을 끄려면 ldap.page-size=0): base=%s, filter=%s").formatted(base, filter));
+                }
                 hasMore = processor.hasMore();
                 if (hasMore) {
-                    processor = new PagedResultsDirContextProcessor(pageSize, processor.getCookie());
+                    processor = new 페이징_처리기(pageSize, processor.getCookie());
                 }
             } while (hasMore);
             return handler.getList();
         });
+    }
+
+    /**
+     * 응답 컨트롤을 받았는지 기억하는 페이징 처리기.
+     *
+     * <p>Spring 의 처리기는 응답 컨트롤을 받아야만 {@code hasMore()} 를 거짓으로 바꾼다. 컨트롤이 없으면 처음 값(참)과 지난 쿠키가 그대로 남아, 같은
+     * 요청을 끝없이 되풀이하고 같은 엔트리를 끝없이 쌓는다. 우리는 페이징 요청을 critical 로 보내므로(Spring 기본값) 표준을 지키는 서버는 컨트롤을 붙이거나
+     * 오류로 답한다(RFC 4511 §4.1.11) — 컨트롤 없는 응답은 서버·프록시의 표준 위반이라 {@link #search} 가 회차를 실패시킨다.
+     */
+    private static final class 페이징_처리기 extends PagedResultsDirContextProcessor {
+
+        private boolean 응답_컨트롤을_받았다;
+
+        페이징_처리기(int pageSize, PagedResultsCookie cookie) {
+            super(pageSize, cookie);
+        }
+
+        @Override
+        protected void handleResponse(Object control) {
+            응답_컨트롤을_받았다 = true;
+            super.handleResponse(control);
+        }
+
+        boolean 응답_컨트롤을_받았다() {
+            return 응답_컨트롤을_받았다;
+        }
     }
 
     /**
