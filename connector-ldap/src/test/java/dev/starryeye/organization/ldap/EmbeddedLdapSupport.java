@@ -65,6 +65,11 @@ public abstract class EmbeddedLdapSupport {
     protected void 서버설정을_고친다(InMemoryDirectoryServerConfig config) {
     }
 
+    /** 템플릿의 접속·읽기 한도를 정하는 설정. 기본은 운영 기본값({@link LdapProperties})이다 — 한도를 시험하는 테스트만 줄인다. */
+    protected LdapProperties 접속_한도() {
+        return new LdapProperties();
+    }
+
     @BeforeEach
     void LDAP서버를_띄운다() throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
@@ -87,6 +92,9 @@ public abstract class EmbeddedLdapSupport {
         contextSource.setBase(BASE_DN);
         contextSource.setUserDn(BIND_DN);
         contextSource.setPassword(BIND_PASSWORD);
+        // 접속·읽기 한도는 운영과 같은 도우미로 건다 — 없으면 응답이 오지 않는 읽기 하나가 테스트를 끝없이 붙잡는다.
+        // 이진 속성 선언은 일부러 싣지 않는다(아래 LdapConfig로_만든_템플릿 참고)
+        contextSource.setBaseEnvironmentProperties(LdapConfig.타임아웃_환경(접속_한도()));
         contextSource.afterPropertiesSet();
 
         // 운영(LdapConfig)과 같은 자리에서 만든다. 설정을 여기 따로 적으면 운영과 검증이

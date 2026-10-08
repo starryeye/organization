@@ -40,10 +40,19 @@ public class LdapConfig {
      * 늘 더한다 — 그룹의 RID 를 읽는 데({@link ActiveDirectoryPrimaryGroup}) 쓰고, 그 속성이 없는 디렉터리(OpenLDAP)에는 해가 없다.
      */
     static Map<String, Object> jndiEnvironment(LdapProperties properties) {
+        Map<String, Object> 환경 = 타임아웃_환경(properties);
+        환경.put("java.naming.ldap.attributes.binary", 이진_속성들(properties));
+        return 환경;
+    }
+
+    /**
+     * 접속·읽기 한도(밀리초 문자열)만 담은 JNDI 환경. 운영 결선과 테스트의 임베디드 LDAP 템플릿이 함께 쓴다 — 테스트에 한도가 없으면 응답이 오지 않는
+     * 읽기 하나가 테스트를 끝없이 붙잡는다(2026-10-08 전체 test 가 connector-ldap 에서 한 시간 멈춘 적이 있다).
+     */
+    static Map<String, Object> 타임아웃_환경(LdapProperties properties) {
         Map<String, Object> 환경 = new LinkedHashMap<>();
         환경.put("com.sun.jndi.ldap.connect.timeout", String.valueOf(properties.getConnectTimeout().toMillis()));
         환경.put("com.sun.jndi.ldap.read.timeout", String.valueOf(properties.getReadTimeout().toMillis()));
-        환경.put("java.naming.ldap.attributes.binary", 이진_속성들(properties));
         return 환경;
     }
 
