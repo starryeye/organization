@@ -466,7 +466,7 @@ class AdminQueryUseCaseTest {
             useCase.organizationDetail("X", 20).subscribe(결과::set);
             시간.advanceTimeBy(Duration.ofMillis(200));
 
-            // then — 상태 저장소가 돌려주는 순서(P01..P10)가 그대로다. 순서를 안 지키는 flatMap 이면 P10 이 앞선다
+            // then — 상태 저장소가 돌려주는 순서(P01..P10)가 그대로다. 앞쪽이 더 느려 flatMap 이면 순서가 깨진다
             assertThat(결과.get()).as("200ms 안에 끝난다").isNotNull();
             assertThat(결과.get().ancestors()).extracting("orgCode")
                     .containsExactly("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10");
