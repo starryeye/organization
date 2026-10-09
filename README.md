@@ -617,6 +617,10 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 
 - PATCH 의 `active` 는 JSON boolean 이나 문자열 `"true"`/`"false"`(대소문자 무관 — Entra 가 문자열로 보낸다는 문서 근거가 있다)만 받는다. 그 밖(`"yes"`·`"1"`·`" true"`)은 400
   `invalidValue` 이고 비활성화하지 않는다. POST·PUT 본문의 `active` 가 `"yes"` 처럼 boolean 으로 읽히지 않는 문자열이어도 400 이다.
 - 직원·조직 POST 의 201 에는 `Location` 헤더가 붙는다. 값은 본문 `meta.location` 과 같은 상대 경로(`/scim/v2/Users/<id>`, `/scim/v2/Groups/<id>`)다(RFC 7644 §3.3).
+- 직원·조직 응답의 `meta` 에는 `created`·`lastModified` 가 있다(RFC 7643 §3.1, ISO-8601 UTC). 처음 만들면 둘이 같고, `lastModified` 는 저장하는 속성이
+  실제로 바뀔 때만 움직인다 — 같은 값을 다시 보내면 그대로다. 조직은 멤버만 바뀌어도(하위 조직이 지워져도) 움직인다. 직원의 소속 변경은 직원의 변경이
+  아니다(User `groups` 를 내보내지 않는다). 이 기능 전에 만든 아이템에는 `created` 가 없고 다음 변경 시각이 생성 시각으로 들어간다 — 운영 배포 전이라
+  이관하지 않는다(테이블을 다시 만든다). `meta.lastModified` 로 거르는 필터는 받지 않는다(400). 설계: `docs/superpowers/specs/2026-10-09-updated-at-export-design.md`.
 
 **`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 무작위 UUID(v4, 소문자 하이픈)를 새로 만들어 응답으로 돌려주고,
 요청 본문의 `id` 는 무시한다. IdP 는 이 `id` 를 저장해 PATCH·PUT·DELETE 의 경로와 조직의 `members[].value` 에 쓴다. PUT 도 경로의 `id` 가
