@@ -671,6 +671,11 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         return meta(pk).get("updatedAt").s();
     }
 
+    /** META 의 createdAt 을 직접 읽는다. 저장소 API 는 이 값을 노출하지 않는다(조회 포트가 내보낸다 — 과제 2·3). */
+    private String createdAt(String pk) {
+        return meta(pk).get("createdAt").s();
+    }
+
     private Map<String, AttributeValue> meta(String pk) {
         return client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
@@ -701,7 +706,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveUser(kim).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
         assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo(처음);
     }
 
@@ -719,7 +724,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveUser(빈칸).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     @Test
@@ -769,37 +774,37 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // when — externalId 변경
         세는.saveUser(new DirectoryUser("kim", "e2", "kim", "김철수", "kim@example.com", true)).block();
         // then
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — externalId → null
         세는.saveUser(new DirectoryUser("kim", null, "kim", "김철수", "kim@example.com", true)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — userName 대소문자만 변경("kim" → "Kim")
         세는.saveUser(new DirectoryUser("kim", null, "Kim", "김철수", "kim@example.com", true)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — displayName 변경
         세는.saveUser(new DirectoryUser("kim", null, "Kim", "김철수2", "kim@example.com", true)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — displayName → null
         세는.saveUser(new DirectoryUser("kim", null, "Kim", null, "kim@example.com", true)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — email → null
         세는.saveUser(new DirectoryUser("kim", null, "Kim", null, null, true)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — active 반전
         세는.saveUser(new DirectoryUser("kim", null, "Kim", null, null, false)).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
     }
 
     @Test
@@ -814,12 +819,12 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // when — displayName 변경(개명)
         세는.saveGroup(new DirectoryGroup("DEV", "cn=dev", "플랫폼팀", Set.of())).block();
         // then
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
         counter.reset();
 
         // when — externalId 변경
         세는.saveGroup(new DirectoryGroup("DEV", "cn=dev-changed", "플랫폼팀", Set.of())).block();
-        assertThat(counter.puts()).isEqualTo(1);
+        assertThat(counter.writes()).isEqualTo(1);
     }
 
     @Test
@@ -859,7 +864,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveGroup(개발팀).block();
 
         // then — 아무것도 쓰지 않는다
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo(처음);
 
         // when — 멤버만 바꾼다
@@ -888,7 +893,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveGroup(빈조직).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     /** 직원 n명(u000…)과 조직 셋 — 조직 G1 은 u000·u001, G2 는 이름 없는 조직, G3 은 멤버 없는 조직. */
@@ -918,7 +923,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.replaceWith(조직도(50)).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     @Test
@@ -945,7 +950,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.replaceWith(new DirectorySnapshot(users, groups)).block();
 
         // then — 직원 5명 + 새 직원 1명 + 조직 G3 (META 1 + 소속 줄 1 + 멤버 줄 1)
-        assertThat(counter.puts()).isEqualTo(5 + 1 + 3);
+        assertThat(counter.writes()).isEqualTo(5 + 1 + 3);
         assertThat(updatedAt(Keys.userPk("u010"))).isEqualTo("2026-01-01T01:00:00Z");
         assertThat(updatedAt(Keys.userPk("u020"))).isEqualTo("2026-01-01T00:00:00Z");
         assertThat(updatedAt(Keys.groupPk("G3"))).isEqualTo("2026-01-01T01:00:00Z");
@@ -1037,7 +1042,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(meta(Keys.userPk("kim"))).doesNotContainKeys(
                 "givenName", "familyName", "middleName", "honorificPrefix", "honorificSuffix", "nameFormatted");
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     @Test
@@ -1070,7 +1075,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveUser(이름있음).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     @Test
@@ -1089,7 +1094,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.replaceWith(조직도).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
     }
 
     // ---------- 묶음 읽기: 멤버 종류 판정·직원 (설계 2026-10-03 §3.1) ----------
@@ -1267,7 +1272,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발본부"), Set.of(MemberRef.user("new")), Set.of()).block();
 
         // then
-        assertThat(counter.puts()).isEqualTo(3);
+        assertThat(counter.writes()).isEqualTo(3);
         assertThat(addedAt("DEV", MemberRef.user("u00"))).isEqualTo(처음합류);
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T01:00:00Z");
     }
@@ -1286,7 +1291,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         세는.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발본부"), Set.of(), Set.of()).block();
 
         // then
-        assertThat(counter.puts()).isZero();
+        assertThat(counter.writes()).isZero();
         assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo(처음);
     }
 
@@ -1321,14 +1326,14 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(gets.gets()).isZero();
-        assertThat(writes.puts()).isZero();
+        assertThat(writes.writes()).isZero();
 
         // when — 바뀐 값
         세는.saveUser(저장본, 직원("kim").withDisplayName("새 이름")).block();
 
         // then
         assertThat(gets.gets()).isZero();
-        assertThat(writes.puts()).isEqualTo(1);
+        assertThat(writes.writes()).isEqualTo(1);
         assertThat(repository.findUser("kim").block().displayName()).isEqualTo("새 이름");
     }
 
@@ -1384,5 +1389,130 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         // then
         assertThat(전체.groups()).containsOnlyKeys("A");
         assertThat(전체.users()).isEmpty();
+    }
+
+    // ---------- 생성 시각·변경 시각 (설계 2026-10-09 §3) ----------
+
+    @Test
+    @DisplayName("직원·조직을 처음 만들면 생성 시각과 변경 시각이 같다")
+    void 처음_만들면_두_시각이_같다() {
+        // when
+        repository.saveUser(직원("kim")).block();
+        repository.saveGroup(조직("DEV", "개발")).block();
+
+        // then
+        assertThat(createdAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(createdAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T00:00:00Z");
+    }
+
+    @Test
+    @DisplayName("직원이 바뀌면 변경 시각만 움직이고 생성 시각은 그대로다 — 이전 값을 넘기는 쓰기도 같다")
+    void 직원이_바뀌어도_생성_시각은_그대로다() {
+        // given
+        repository.saveUser(직원("kim")).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when — 저장본을 다시 읽지 않는 쓰기(이전 값을 넘긴다)
+        repository.saveUser(직원("kim"), 직원("kim").withDisplayName("새 이름")).block();
+
+        // then
+        assertThat(createdAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("조직은 멤버만 바뀌어도 변경 시각이 움직이고 생성 시각은 그대로다")
+    void 조직_멤버만_바뀌어도_생성_시각은_그대로다() {
+        // given
+        repository.saveGroup(조직("DEV", "개발", MemberRef.user("kim"))).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.saveGroupChange(new GroupHeader("DEV", "cn=DEV", "개발"), Set.of(MemberRef.user("lee")), Set.of()).block();
+
+        // then
+        assertThat(createdAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("전체 동기화도 생성 시각을 지키고, 같은 조직도를 다시 동기화하면 쓰기가 없다")
+    void 전체_동기화도_생성_시각을_지킨다() {
+        // given
+        repository.replaceWith(new DirectorySnapshot(Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+        clock.앞으로(Duration.ofHours(1));
+        WriteCounter counter = new WriteCounter();
+        var 세는 = 세는_저장소(counter);
+
+        // when — 같은 조직도
+        세는.replaceWith(new DirectorySnapshot(Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // then
+        assertThat(counter.writes()).isZero();
+
+        // when — 직원 표시명만 바뀐 조직도
+        clock.앞으로(Duration.ofHours(1));
+        세는.replaceWith(new DirectorySnapshot(Map.of("kim", 직원("kim").withDisplayName("새 이름")),
+                Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // then
+        assertThat(createdAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.userPk("kim"))).isEqualTo("2026-01-01T02:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("DEV"))).isEqualTo("2026-01-01T00:00:00Z");
+    }
+
+    @Test
+    @DisplayName("선택 속성을 모두 비우면 META 에는 늘 있는 속성과 두 시각만 남는다 — externalId 로도 더는 찾히지 않는다")
+    void 비운_선택_속성은_지워진다() {
+        // given — 모든 선택 속성을 채운 직원과 조직
+        DirectoryUser 전부 = new DirectoryUser("kim", "ext-kim", "kim", "김철수", "kim@example.com", true, 홍길동);
+        repository.saveUser(전부).block();
+        repository.saveGroup(new DirectoryGroup("DEV", "ext-DEV", "개발", Set.of())).block();
+
+        // when — 모두 비운다
+        repository.saveUser(전부, new DirectoryUser("kim", null, null, null, null, true, PersonName.EMPTY)).block();
+        repository.saveGroup(new DirectoryGroup("DEV", null, null, Set.of())).block();
+
+        // then
+        assertThat(meta(Keys.userPk("kim")).keySet()).containsExactlyInAnyOrder(
+                Keys.PK, Keys.SK, Keys.GSI1PK, Keys.GSI1SK, "active", "updatedAt", "createdAt");
+        assertThat(meta(Keys.groupPk("DEV")).keySet()).containsExactlyInAnyOrder(
+                Keys.PK, Keys.SK, Keys.GSI1PK, Keys.GSI1SK, "updatedAt", "createdAt");
+        assertThat(repository.findUserIdsByExternalId("ext-kim").collectList().block()).isEmpty();
+        assertThat(repository.findGroupIdsByExternalId("ext-DEV").collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("하위 조직을 지우면 상위 조직의 변경 시각이 움직이고 생성 시각은 그대로다")
+    void 하위_조직을_지우면_상위_조직이_바뀐다() {
+        // given — 본부 ⊃ 팀 ⊃ kim
+        repository.saveGroup(조직("TEAM", "팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("HQ", "본부", MemberRef.group("TEAM"))).block();
+        clock.앞으로(Duration.ofHours(1));
+
+        // when
+        repository.deleteGroup("TEAM", Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(repository.findGroup("HQ").block().members()).isEmpty();
+        assertThat(createdAt(Keys.groupPk("HQ"))).isEqualTo("2026-01-01T00:00:00Z");
+        assertThat(updatedAt(Keys.groupPk("HQ"))).isEqualTo("2026-01-01T01:00:00Z");
+    }
+
+    @Test
+    @DisplayName("상위 조직의 META 가 이미 없으면 하위 조직을 지워도 META 를 만들지 않는다")
+    void 없는_상위_조직_META_는_만들지_않는다() {
+        // given — 본부의 META 만 사라진 모양(중간에 멈춘 삭제)
+        repository.saveGroup(조직("TEAM", "팀", MemberRef.user("kim"))).block();
+        repository.saveGroup(조직("HQ", "본부", MemberRef.group("TEAM"))).block();
+        지운다(Keys.groupPk("HQ"), Keys.META);
+
+        // when
+        repository.deleteGroup("TEAM", Set.of(MemberRef.user("kim"))).block();
+
+        // then
+        assertThat(meta(Keys.groupPk("HQ"))).isEmpty();
     }
 }

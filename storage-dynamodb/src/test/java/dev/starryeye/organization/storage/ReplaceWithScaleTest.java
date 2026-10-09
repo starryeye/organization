@@ -54,7 +54,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         long 시작 = System.currentTimeMillis();
         repository.replaceWith(최초).block(Duration.ofMinutes(30));
         long 적재 = System.currentTimeMillis() - 시작;
-        long 적재쓰기 = counter.puts();
+        long 적재쓰기 = counter.writes();
 
         // when — 같은 조직도
         DirectorySnapshot 그대로 = 조직도(Map.of());
@@ -62,7 +62,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         시작 = System.currentTimeMillis();
         repository.replaceWith(그대로).block(Duration.ofMinutes(30));
         long 같음 = System.currentTimeMillis() - 시작;
-        long 같음쓰기 = counter.puts();
+        long 같음쓰기 = counter.writes();
 
         // when — 100명만 바뀜
         Map<String, DirectoryUser> 바뀐직원 = new LinkedHashMap<>();
@@ -75,10 +75,10 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         시작 = System.currentTimeMillis();
         repository.replaceWith(일부변경).block(Duration.ofMinutes(30));
         long 일부 = System.currentTimeMillis() - 시작;
-        long 일부쓰기 = counter.puts();
+        long 일부쓰기 = counter.writes();
 
         // then — 최초 적재는 직원 10만 + 조직 META 100 + 소속 줄 1,000 + 멤버 줄 1,000 = 102,100건
-        System.out.printf("적재: %,dms PutItem %,d / 같은 조직도: %,dms PutItem %,d / 100명 변경: %,dms PutItem %,d%n",
+        System.out.printf("적재: %,dms 쓰기 %,d / 같은 조직도: %,dms 쓰기 %,d / 100명 변경: %,dms 쓰기 %,d%n",
                 적재, 적재쓰기, 같음, 같음쓰기, 일부, 일부쓰기);
         assertThat(적재쓰기).isEqualTo(102_100);
         assertThat(같음쓰기).isZero();
