@@ -7,6 +7,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -178,5 +179,28 @@ class KeysTest {
         // then
         assertThat(sk).isEqualTo("EDGE#개발본부|백엔드팀");
         assertThat(Keys.parseCutEdgeSk(sk)).isEqualTo(edge);
+    }
+
+    @Test
+    @DisplayName("묶음 정렬키는 네 자리 번호라 정렬키 순서가 번호 순서다")
+    void 묶음_정렬키는_번호_순서로_정렬된다() {
+        // when
+        var 키들 = List.of(Keys.chunkSk(10), Keys.chunkSk(2), Keys.chunkSk(0), Keys.chunkSk(9_999));
+
+        // then
+        assertThat(키들).containsExactly("CHUNK#0010", "CHUNK#0002", "CHUNK#0000", "CHUNK#9999");
+        assertThat(키들.stream().sorted().toList())
+                .containsExactly("CHUNK#0000", "CHUNK#0002", "CHUNK#0010", "CHUNK#9999");
+        assertThat(Keys.isChunkSk("CHUNK#0000")).isTrue();
+        assertThat(Keys.isChunkSk(Keys.META)).isFalse();
+        assertThat(Keys.isChunkSk("TUPLE#user:kim|direct_member|group:DEV")).isFalse();
+    }
+
+    @Test
+    @DisplayName("묶음 번호가 네 자리를 넘거나 음수면 정렬키를 만들지 않는다")
+    void 네_자리를_넘는_묶음_번호는_거절한다() {
+        // when, then
+        assertThatThrownBy(() -> Keys.chunkSk(10_000)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.chunkSk(-1)).isInstanceOf(IllegalArgumentException.class);
     }
 }

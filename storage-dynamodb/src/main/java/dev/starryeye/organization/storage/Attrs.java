@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 import java.time.Instant;
@@ -21,6 +22,10 @@ public final class Attrs {
 
     public static AttributeValue bool(boolean value) {
         return AttributeValue.builder().bool(value).build();
+    }
+
+    public static AttributeValue b(byte[] value) {
+        return AttributeValue.builder().b(SdkBytes.fromByteArray(value)).build();
     }
 
     public static String str(Map<String, AttributeValue> item, String name) {
@@ -46,6 +51,12 @@ public final class Attrs {
     public static Instant instant(Map<String, AttributeValue> item, String name) {
         String raw = str(item, name);
         return raw == null ? null : Instant.parse(raw);
+    }
+
+    /** 이진 속성. 없거나 이진이 아니면 null. */
+    public static byte[] bytes(Map<String, AttributeValue> item, String name) {
+        AttributeValue value = item.get(name);
+        return value == null || value.b() == null ? null : value.b().asByteArray();
     }
 
     /** null 이면 아예 넣지 않는다. DynamoDB 는 빈 문자열을 허용하지만 null 은 허용하지 않는다. */
