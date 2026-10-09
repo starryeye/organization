@@ -78,6 +78,13 @@ class ScimRebuildLockScaleTest {
     private static final Duration 읽기_지연 = 리스_TTL.plusSeconds(1);
 
     /**
+     * 재적재 도중 쓰기를 두드리는 횟수의 안전 상한 — 헛도는 반복을 끊을 뿐이다. 반복은 재적재가 끝나서 끝나야 한다.
+     * 읽기 지연({@link #읽기_지연}) 동안 쓰기 시도가 100번 넘게 쓰이므로(503 은 24ms 안팎), 상한이 작으면 장부를 고치는 뒷부분을
+     * 두드리기 전에 시도를 멈춰 "기존 권한은 내내 참" 의 확인이 장부가 바뀌는 구간에서 빠진다.
+     */
+    private static final int 최대_시도 = 2_000;
+
+    /**
      * renew 가 이만큼 불렸다면 리스가 제 TTL 을 넘겨 살아있었다는 뜻이다 — TTL 을 갱신 주기로
      * 나눈 몫만큼 갱신 주기가 지나야 TTL 이 넘어가고, 거기에 한 번을 더해야 "넘겼다" 를 증명한다.
      */
@@ -144,7 +151,7 @@ class ScimRebuildLockScaleTest {
         // 도는 동안 SCIM 쓰기를 두드리고, 기존 권한이 내내 참인지 본다 — 장부를 비우는 순간이 없어야 한다(설계 2026-09-29 §3.1)
         List<Integer> 응답들 = new ArrayList<>();
         List<Boolean> 권한들 = new ArrayList<>();
-        while (도는_중이다(runId) && 응답들.size() < 200) {
+        while (도는_중이다(runId) && 응답들.size() < 최대_시도) {
             응답들.add(쓰기를_시도한다());
             권한들.add(ScaleVerification.성립하는가(checker, 기존권한));
         }
