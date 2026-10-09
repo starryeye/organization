@@ -31,6 +31,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 
 /**
@@ -51,7 +53,8 @@ import static org.mockito.Mockito.verify;
  *
  * <p><b>리스 TTL 을 2초로 줄인다.</b> 기본값 30초로는 재적재가 그보다 빨리 끝나
  * 하트비트가 한 번도 필요하지 않다 — 갱신이 통째로 망가져 있어도 테스트가 통과한다.
- * TTL 을 재적재 소요보다 짧게 만들어야 <b>갱신이 실제로 일을 한다.</b>
+ * TTL 을 재적재 소요보다 짧게 만들어야 <b>갱신이 실제로 일을 한다.</b> 재적재가 TTL 보다 오래 걸린다는 전제가 재적재 속도에
+ * 기대지 않도록, 재적재의 읽기 단계(락 안)도 스파이로 TTL 보다 길게 늦춘다({@link #읽기_지연}).
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -67,6 +70,12 @@ class ScimRebuildLockScaleTest {
 
     private static final Duration 리스_TTL = Duration.ofSeconds(2);
     private static final Duration 갱신_주기 = Duration.ofMillis(500);
+
+    /**
+     * 재적재의 읽기 단계(락 안)를 이만큼 늦춘다 — 재적재가 리스 TTL 보다 오래 락을 쥐어야 갱신이 실제로 일을 한다.
+     * 재적재 속도에 기대지 않는다: 직원을 BatchGet 으로 읽게 된 뒤(설계 2026-10-09 §4) 5천 명 재적재가 1.7초로 TTL(2초)보다 짧아졌다.
+     */
+    private static final Duration 읽기_지연 = 리스_TTL.plusSeconds(1);
 
     /**
      * renew 가 이만큼 불렸다면 리스가 제 TTL 을 넘겨 살아있었다는 뜻이다 — TTL 을 갱신 주기로
@@ -93,7 +102,6 @@ class ScimRebuildLockScaleTest {
     }
 
     @Autowired WebTestClient client;
-    @Autowired DirectoryStateRepository state;
     @Autowired RelationTupleChecker checker;
     @Autowired StoreBootstrapper bootstrapper;
 
@@ -102,6 +110,12 @@ class ScimRebuildLockScaleTest {
      * 운영 코드에 지표를 더하지 않는다.
      */
     @MockitoSpyBean MutationLock lock;
+
+    /**
+     * 실제 상태 저장소를 감싼 스파이. 동작은 그대로다(callRealMethod) — S18-b 에서만 {@code loadAll} 을 늦춘다({@link #읽기_지연}).
+     * 스파이의 스텁은 테스트가 끝나면 풀리므로 다른 테스트는 늦춤 없이 돈다.
+     */
+    @MockitoSpyBean DirectoryStateRepository state;
 
     @Test
     @Order(1)
@@ -117,6 +131,9 @@ class ScimRebuildLockScaleTest {
     void S18b_재적재_중_쓰기와_리스() {
         // given — 앞선 기준 적재에서 쓰기가 renew 를 불렀을 수 있다. 이 시나리오의 호출만 센다
         clearInvocations(lock);
+        // 재적재가 리스 TTL 보다 오래 락을 쥐게 읽기 단계를 늦춘다 — 실제 읽기는 그대로 한다
+        doAnswer(invocation -> ((Mono<?>) invocation.callRealMethod()).delayElement(읽기_지연))
+                .when(state).loadAll();
         RelationTuple 기존권한 = 번역부.번역한다(
                 RelationTuple.member(기대.landmarks().L6직속직원(), 기대.landmarks().회사()));
 
