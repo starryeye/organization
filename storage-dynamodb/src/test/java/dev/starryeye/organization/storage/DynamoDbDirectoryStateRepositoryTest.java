@@ -293,6 +293,28 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("전체 조회는 직원을 한 명씩 GetItem 하지 않고 100명씩 BatchGet 으로 읽는다")
+    void 전체_조회는_직원을_묶어_읽는다() {
+        // given — 직원 250명(묶음 셋), 조직 둘
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        IntStream.range(0, 250).forEach(i -> users.put("u" + i, 직원("u" + i)));
+        var snapshot = new DirectorySnapshot(users,
+                Map.of("DEV001", 조직("DEV001", "개발본부", MemberRef.group("DEV002"), MemberRef.user("u0")),
+                       "DEV002", 조직("DEV002", "백엔드팀", MemberRef.user("u1"))));
+        repository.replaceWith(snapshot).block();
+        GetCounter gets = new GetCounter();
+        var 세는 = new DynamoDbDirectoryStateRepository(gets.wrap(client), properties, clock);
+
+        // when
+        var loaded = 세는.loadAll().block();
+
+        // then
+        assertThat(loaded).isEqualTo(snapshot);
+        assertThat(gets.gets()).isZero();
+        assertThat(gets.batchGets()).isEqualTo(3);
+    }
+
+    @Test
     @DisplayName("userName 은 대소문자를 가리지 않고 찾는다 — 저장된 값은 보낸 그대로다")
     void userName_은_대소문자를_가리지_않는다() {
         // given

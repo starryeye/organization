@@ -683,10 +683,15 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .collectMap(stored -> idOf.apply(stored.value()), stored -> stored);
     }
 
+    /**
+     * 직원은 GSI1 로 아이디를 훑은 뒤 {@link #findUsers}(BatchGet 100개씩, 강한 일관성)로 읽는다 — 직원마다 GetItem 을 하면 10만 명에
+     * 10만 번 왕복이었다(설계 2026-10-09 §4). 훑은 뒤 읽기 전에 지워진 직원은 결과에 없다. 조직은 멤버 목록이 필요해 조직마다 파티션을 읽는다.
+     */
     @Override
     public Mono<DirectorySnapshot> loadAll() {
         Mono<Map<String, DirectoryUser>> users = enumerateIds(Keys.USER_INDEX, Keys::parseUserPk)
-                .flatMap(this::findUser, QUERY_CONCURRENCY)
+                .collect(Collectors.toCollection(LinkedHashSet::new))
+                .flatMapMany(this::findUsers)
                 .collect(LinkedHashMap::new, (map, user) -> map.put(user.id(), user));
 
         Mono<Map<String, DirectoryGroup>> groups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
