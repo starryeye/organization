@@ -16,17 +16,17 @@ import reactor.core.publisher.Mono;
 public interface TupleSnapshotRepository {
 
     /**
-     * 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono(처음 설치). 포인터가 가리키는 스냅샷의 메타가 없거나 튜플 수가 메타와 다르면
+     * 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono(처음 설치). 포인터가 가리키는 스냅샷의 메타가 없거나 본문을 온전히 읽지 못하면(빠진 조각, 풀 수 없는 본문, 메타와 다른 튜플 수 등)
      * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다.
      */
     Mono<TupleSnapshot> findLatest();
 
-    /** 메타 → 튜플 → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이 되지 않는다. */
+    /** 메타 → 본문 → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이 되지 않는다. */
     Mono<Void> save(TupleSnapshot snapshot);
 
     Flux<SnapshotMeta> listRecent(int days);
 
-    /** 메타가 없으면 빈 Mono. 튜플 수가 메타와 다르면 {@link SnapshotIntegrityException}. */
+    /** 메타가 없으면 빈 Mono. 본문을 온전히 읽지 못하면 {@link SnapshotIntegrityException}. */
     Mono<TupleSnapshot> findById(String snapshotId);
 
     /**

@@ -70,6 +70,8 @@ public final class Keys {
     public static final String BELONGS_TO_PREFIX = "BELONGS_TO#";
     public static final String SNAPSHOT_PREFIX = "SNAPSHOT#";
     public static final String TUPLE_PREFIX = "TUPLE#";
+    /** 튜플 스냅샷 본문 묶음의 정렬키 접두사(설계 2026-10-09 §3.1). */
+    public static final String CHUNK_PREFIX = "CHUNK#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
 
     /** SCIM 목록 책갈피 파티션 접두사 (S-1 설계 §5.3). */
@@ -244,6 +246,22 @@ public final class Keys {
         String body = sk.substring(TUPLE_PREFIX.length());
         String[] parts = body.split("\\" + TUPLE_SEPARATOR, 3);
         return new RelationTuple(parts[0], parts[1], parts[2]);
+    }
+
+    /**
+     * 튜플 스냅샷 본문 묶음의 정렬키(설계 2026-10-09 §3.1). 번호가 네 자리라 정렬키 순서가 곧 이어 붙일 순서다 — 묶음 하나가 350KB 이하라
+     * 1만 개(3.5GB)를 넘을 일은 없다.
+     */
+    public static String chunkSk(int index) {
+        if (index < 0 || index > 9_999) {
+            throw new IllegalArgumentException("묶음 번호는 0~9999 다: " + index);
+        }
+        return CHUNK_PREFIX + "%04d".formatted(index);
+    }
+
+    /** 정렬키가 {@link #chunkSk} 로 만들어진 묶음 아이템인지 판별한다. */
+    public static boolean isChunkSk(String sk) {
+        return sk.startsWith(CHUNK_PREFIX);
     }
 
     /** {@code EDGE#<부모>|<자식>}. 아이디에는 {@code |} 가 없다({@code IdNormalizer}). */
