@@ -307,24 +307,43 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     /**
      * 메타가 아닌 줄(묶음, 옛 형식의 튜플 줄) 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다. 저장 순서
-     * (메타 → 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 배치 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     * (메타 → 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 지우는 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
      *
-     * <p>묶음을 지우는 것도 묶음 크기만큼 쓰기 용량을 쓴다. 배치가 한 파티션 한도에 걸려 재시도 끝에 실패해도 메타가 남으므로, 다음 정리가
-     * 남은 것을 이어 지운다(설계 2026-10-09 §8).
+     * <p>묶음은 쓸 때와 같은 까닭으로 번호 순서로 하나씩 DeleteItem 으로 지운다(설계 2026-10-09 §3.3, §8). DeleteItem 도 지우는 아이템의
+     * 크기만큼 쓰기 용량을 써서(묶음 하나가 최대 약 350 WCU) 묶음 열몇 개를 BatchWriteItem 에 담으면 한 파티션의 쓰기 한도(초당 1,000)에
+     * 걸려 {@link BatchRequests} 의 재시도 예산이 모자라고, 그 실패가 {@link #purgeExpired()} 의 다른 스냅샷 정리까지 끊는다. 하나씩이면
+     * 스로틀이 요청 전체의 오류로 와 SDK 재시도가 받는다. 끝내 실패해도 메타가 남으므로 다음 정리가 남은 것을 이어 지운다.
+     * 묶음이 아닌 줄(옛 형식의 튜플 줄)은 용량이 작아 지금처럼 묶음 요청(BatchWriteItem)으로 지운다.
      */
     private Mono<Void> deleteSnapshot(String snapshotId) {
+        String pk = Keys.snapshotPk(snapshotId);
+        return queryPartition(pk)
+                .map(item -> Attrs.str(item, Keys.SK))
+                .filter(sk -> !Keys.META.equals(sk))
+                .collectList()
+                .flatMap(sks -> deleteChunks(pk, sks).then(deleteOldFormatRows(pk, sks)))
+                .then(Mono.defer(() -> deleteItem(pk, Keys.META)));
+    }
+
+    private Mono<Void> deleteChunks(String pk, List<String> sks) {
+        return Flux.fromIterable(sks)
+                .filter(Keys::isChunkSk)
+                .concatMap(sk -> deleteItem(pk, sk))
+                .then();
+    }
+
+    private Mono<Void> deleteOldFormatRows(String pk, List<String> sks) {
         BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
-        return queryPartition(Keys.snapshotPk(snapshotId))
-                .filter(item -> !Keys.META.equals(Attrs.str(item, Keys.SK)))
-                .map(item -> WriteRequest.builder()
+        return Flux.fromIterable(sks)
+                .filter(sk -> !Keys.isChunkSk(sk))
+                .map(sk -> WriteRequest.builder()
                         .deleteRequest(DeleteRequest.builder()
-                                .key(Map.of(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)),
-                                        Keys.SK, Attrs.s(Attrs.str(item, Keys.SK))))
+                                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
                                 .build())
                         .build())
                 .buffer(BATCH_SIZE)
                 .concatMap(묶음::write)
-                .then(Mono.defer(() -> deleteItem(Keys.snapshotPk(snapshotId), Keys.META)));
+                .then();
     }
 
     // ---------- 공통 ----------

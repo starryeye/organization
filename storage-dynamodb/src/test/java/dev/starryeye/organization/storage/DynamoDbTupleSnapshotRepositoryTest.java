@@ -296,6 +296,36 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                 });
     }
 
+    /** deleteItem·batchWriteItem 호출 수를 센다. 호출은 진짜 클라이언트로 그대로 보낸다. */
+    private DynamoDbAsyncClient 지우기_호출을_세는_클라이언트(AtomicInteger deleteItem수, AtomicInteger batchWriteItem수) {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("deleteItem")) {
+                        deleteItem수.incrementAndGet();
+                    }
+                    if (method.getName().equals("batchWriteItem")) {
+                        batchWriteItem수.incrementAndGet();
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
+    /** 두 번째 묶음(정렬키 CHUNK#) DeleteItem 만 실패시키고 나머지는 진짜 클라이언트로 보낸다. */
+    private DynamoDbAsyncClient 두번째_묶음_지우기가_실패하는_클라이언트() {
+        AtomicInteger 묶음_지우기_수 = new AtomicInteger();
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("deleteItem") && args != null && args[0] instanceof DeleteItemRequest request
+                            && Keys.isChunkSk(request.key().get(Keys.SK).s())
+                            && 묶음_지우기_수.incrementAndGet() == 2) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("묶음 지우기 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
     private void 아이템을_지운다(String snapshotId, String sk) {
         client.deleteItem(DeleteItemRequest.builder()
                 .tableName(properties.getTableName())
@@ -439,6 +469,29 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("묶음이 메타보다 많으면 오류다 — 코덱은 뒤에 붙은 묶음을 못 잡으니 저장소가 묶음 수로 막는다")
+    void 묶음이_남으면_오류다() {
+        // given — 번호는 0부터 이어지지만 메타의 묶음 수보다 하나 더 많다(마지막 묶음을 한 번 더 복사했다)
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(30))).block();
+        var 묶음들 = 파티션("20260814T030000-LDAP").stream()
+                .filter(item -> Keys.isChunkSk(item.get(Keys.SK).s()))
+                .toList();
+        int 묶음_수 = 묶음들.size();
+        assertThat(묶음_수).isGreaterThan(1);
+        Map<String, AttributeValue> 남는_묶음 = new HashMap<>(묶음들.get(묶음_수 - 1));
+        남는_묶음.put(Keys.SK, AttributeValue.fromS(Keys.chunkSk(묶음_수)));
+        아이템을_쓴다(남는_묶음);
+        assertThat(묶음_키들(파티션("20260814T030000-LDAP"))).hasSize(묶음_수 + 1);
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타 묶음 %d · 읽음 %d".formatted(묶음_수, 묶음_수 + 1))
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+    }
+
+    @Test
     @DisplayName("묶음 번호가 0부터 이어지지 않으면 오류다")
     void 묶음_번호가_건너뛰면_오류다() {
         // given — 마지막 묶음이 다른 번호로 옮겨졌다(묶음 수는 그대로)
@@ -553,29 +606,49 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("삭제 중 튜플 배치 하나가 실패해도 메타는 남아 다음 정리가 다시 찾는다")
-    void 삭제_중_실패해도_메타는_남는다() {
-        // given — 만료된 후보(묶음 25개 넘게 → 지우기 배치 둘 이상)와, 정리 대상이 아닌 최신 스냅샷을 따로 둔다
-        작은_묶음_저장소(4).saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), SyncSource.LDAP, 튜플들(60))).block();
+    @DisplayName("정리는 묶음을 하나씩 DeleteItem 으로 지운다 — 묶음 요청에 담지 않는다")
+    void 정리는_묶음을_하나씩_지운다() {
+        // given — 만료된 후보(묶음 여럿)와, 정리 대상이 아닌 최신 스냅샷을 따로 둔다
+        작은_묶음_저장소(16).saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), SyncSource.LDAP, 튜플들(30))).block();
         repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
-        assertThat(묶음_키들(파티션("20260804T030000-LDAP"))).hasSizeGreaterThan(BatchRequests.WRITE_LIMIT);
+        int 묶음_수 = 묶음_키들(파티션("20260804T030000-LDAP")).size();
+        assertThat(묶음_수).isGreaterThanOrEqualTo(2);
 
-        AtomicInteger 배치_호출_수 = new AtomicInteger();
-        DynamoDbAsyncClient 두번째_배치만_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
-                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
-                (proxy, method, args) -> {
-                    if (method.getName().equals("batchWriteItem") && 배치_호출_수.incrementAndGet() == 2) {
-                        return CompletableFuture.failedFuture(new IllegalStateException("batchWriteItem 실패(테스트)"));
-                    }
-                    return method.invoke(client, args);
-                });
+        AtomicInteger deleteItem수 = new AtomicInteger();
+        AtomicInteger batchWriteItem수 = new AtomicInteger();
+        var 세는_저장소 = new DynamoDbTupleSnapshotRepository(
+                지우기_호출을_세는_클라이언트(deleteItem수, batchWriteItem수), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        var purged = 세는_저장소.purgeExpired().block();
+
+        // then — 묶음마다 DeleteItem 하나 + 메타 하나, 묶음 요청(BatchWriteItem)은 없다
+        assertThat(purged).isEqualTo(1);
+        assertThat(deleteItem수.get()).isEqualTo(묶음_수 + 1);
+        assertThat(batchWriteItem수.get()).isZero();
+        assertThat(파티션("20260804T030000-LDAP")).isEmpty();
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    @Test
+    @DisplayName("정리 중 묶음 하나를 못 지워도 메타는 남아 다음 정리가 다시 찾는다")
+    void 삭제_중_실패해도_메타는_남는다() {
+        // given — 만료된 후보(묶음 셋 넘게)와, 정리 대상이 아닌 최신 스냅샷을 따로 둔다
+        작은_묶음_저장소(16).saveWithCreatedAt(new TupleSnapshot("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), SyncSource.LDAP, 튜플들(30))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
+        var 묶음_키 = 묶음_키들(파티션("20260804T030000-LDAP"));
+        assertThat(묶음_키).hasSizeGreaterThanOrEqualTo(3);
+
         var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
-                두번째_배치만_실패하는_클라이언트, properties, Clock.fixed(지금, ZoneOffset.UTC));
+                두번째_묶음_지우기가_실패하는_클라이언트(), properties, Clock.fixed(지금, ZoneOffset.UTC));
 
         // when
         assertThatThrownBy(() -> 실패하는_저장소.purgeExpired().block());
 
-        // then — 메타는 목록에 남아 있어 다음 정리가 이 스냅샷을 다시 찾는다
+        // then — 묶음은 차례로 하나씩 지우므로 첫 묶음만 없어졌다. 메타는 목록에 남아 있어 다음 정리가 이 스냅샷을 다시 찾는다
+        var 남은_파티션 = 파티션("20260804T030000-LDAP");
+        assertThat(메타(남은_파티션)).isNotEmpty();
+        assertThat(묶음_키들(남은_파티션)).isEqualTo(묶음_키.subList(1, 묶음_키.size()));
         assertThat(repository.listRecent(30).collectList().block())
                 .extracting(m -> m.id())
                 .contains("20260804T030000-LDAP");
