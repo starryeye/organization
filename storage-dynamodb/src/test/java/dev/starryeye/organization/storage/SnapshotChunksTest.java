@@ -77,7 +77,7 @@ class SnapshotChunksTest {
     @Test
     @DisplayName("튜플이 없어도 조각은 하나다 — 풀면 빈 목록이다")
     void 빈_목록도_조각_하나다() throws IOException {
-        // when
+        // given, when
         var chunks = SnapshotChunks.encode(List.of(), 350_000);
 
         // then
@@ -100,7 +100,7 @@ class SnapshotChunksTest {
     @Test
     @DisplayName("조각 크기가 0 이하면 나누지 않는다")
     void 조각_크기가_0_이하면_거절한다() {
-        // when, then
+        // given, when, then
         assertThatThrownBy(() -> SnapshotChunks.encode(튜플들(3), 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }

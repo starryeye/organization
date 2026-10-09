@@ -184,7 +184,7 @@ class KeysTest {
     @Test
     @DisplayName("묶음 정렬키는 네 자리 번호라 정렬키 순서가 번호 순서다")
     void 묶음_정렬키는_번호_순서로_정렬된다() {
-        // when
+        // given, when
         var 키들 = List.of(Keys.chunkSk(10), Keys.chunkSk(2), Keys.chunkSk(0), Keys.chunkSk(9_999));
 
         // then
@@ -199,7 +199,7 @@ class KeysTest {
     @Test
     @DisplayName("묶음 번호가 네 자리를 넘거나 음수면 정렬키를 만들지 않는다")
     void 네_자리를_넘는_묶음_번호는_거절한다() {
-        // when, then
+        // given, when, then
         assertThatThrownBy(() -> Keys.chunkSk(10_000)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> Keys.chunkSk(-1)).isInstanceOf(IllegalArgumentException.class);
     }
