@@ -3,9 +3,11 @@ package dev.starryeye.organization.scim;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,7 +18,8 @@ class ScimAttributeProjectionTest {
 
     private static ObjectNode 김철수() {
         return ScimJson.tree(ScimMapper.toScimUser(
-                new DirectoryUser("kim", "emp-1", "kim", "김철수", "kim@example.com", true)));
+                new DirectoryUser("kim", "emp-1", "kim", "김철수", "kim@example.com", true),
+                new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T04:00:00Z"))));
     }
 
     private static List<String> 필드(ObjectNode node) {
@@ -75,7 +78,7 @@ class ScimAttributeProjectionTest {
     void name_하위_속성도_고르거나_뺀다() {
         // given
         ObjectNode 홍길동 = ScimJson.tree(ScimMapper.toScimUser(new DirectoryUser("hong", null, "hong", "홍길동", null,
-                true, new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr."))));
+                true, new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr.")), ResourceTimes.UNKNOWN));
 
         // when
         ObjectNode 골라남김 = 선택(List.of("name.middleName"), List.of()).apply(홍길동.deepCopy());
@@ -131,5 +134,26 @@ class ScimAttributeProjectionTest {
     void 쉼표_목록을_나눈다() {
         assertThat(ScimAttributeProjection.split("userName, emails.value,,")).containsExactly("userName", "emails.value");
         assertThat(ScimAttributeProjection.split(null)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("attributes 로 meta.lastModified 만 고를 수 있다")
+    void meta_lastModified_만_고른다() {
+        // when
+        ObjectNode node = 선택(List.of("meta.lastModified"), List.of()).apply(김철수());
+
+        // then
+        assertThat(필드(node)).containsExactlyInAnyOrder("schemas", "id", "meta");
+        assertThat(필드((ObjectNode) node.get("meta"))).containsExactly("lastModified");
+    }
+
+    @Test
+    @DisplayName("excludedAttributes 로 meta.created 만 뺄 수 있다")
+    void meta_created_만_뺀다() {
+        // when
+        ObjectNode node = 선택(List.of(), List.of("meta.created")).apply(김철수());
+
+        // then
+        assertThat(필드((ObjectNode) node.get("meta"))).containsExactlyInAnyOrder("resourceType", "lastModified", "location");
     }
 }

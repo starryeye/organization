@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.jayway.jsonpath.JsonPath;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
@@ -12,6 +13,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +24,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -48,9 +51,9 @@ class ScimUserHandlerTest {
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
-                ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
                                 new ScimGroupListing(state, query, bookmarks)))).build();
     }
 
@@ -742,6 +745,32 @@ class ScimUserHandlerTest {
         assertThat(state.users).isEmpty();
     }
 
+    @Test
+    @DisplayName("직원 GET 은 조회 포트가 준 생성·변경 시각을 meta 에 싣는다")
+    void GET_은_meta_에_시각을_싣는다() {
+        // given
+        state.users.put("kim", new DirectoryUser("kim", null, "kim", "김철수", null, true));
+        var query = new FakeQueryRepository(state);
+        query.times.put("kim", new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T04:00:00Z")));
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
+                IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var bookmarks = new FakePageBookmarkRepository();
+        WebTestClient 시각이_있는 = WebTestClient.bindToRouterFunction(
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
+                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
+                                new ScimGroupListing(state, query, bookmarks)))).build();
+
+        // when
+        JsonNode body = 시각이_있는.get().uri("/scim/v2/Users/kim").exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class).returnResult().getResponseBody();
+
+        // then
+        assertThat(body.get("meta").get("created").asText()).isEqualTo("2026-10-09T03:00:00Z");
+        assertThat(body.get("meta").get("lastModified").asText()).isEqualTo("2026-10-09T04:00:00Z");
+    }
+
     /** POST 응답의 서버 발급 id. */
     private String 만든_아이디(WebTestClient.ResponseSpec 응답) {
         return 응답.expectStatus().isCreated().expectBody(Map.class).returnResult().getResponseBody().get("id").toString();
@@ -753,9 +782,9 @@ class ScimUserHandlerTest {
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
         return WebTestClient.bindToRouterFunction(
-                ScimRouter.scimRoutes(new ScimUserHandler(state, useCase, 관찰자),
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase, 관찰자),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
                                 new ScimGroupListing(state, query, bookmarks)))).build();
     }
 

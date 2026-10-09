@@ -290,9 +290,9 @@ class ScimErrorTranslationTest {
                 new FakeMutationLock(), Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
-        return ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
+        return ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
                 new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                new ScimListHandler(new ScimUserListing(state, query, bookmarks), new ScimGroupListing(state, query, bookmarks)),
+                new ScimListHandler(new ScimUserListing(query, bookmarks), new ScimGroupListing(state, query, bookmarks)),
                 TemporaryFailureClassifier.표지만(), 한도);
     }
 }

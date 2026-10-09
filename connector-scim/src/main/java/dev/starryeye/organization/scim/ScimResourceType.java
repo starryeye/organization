@@ -16,7 +16,7 @@ public enum ScimResourceType {
             "name", "name.formatted", "name.familyname", "name.givenname",
             "name.middlename", "name.honorificprefix", "name.honorificsuffix",
             "displayname", "emails", "emails.value", "emails.type", "emails.primary",
-            "active", "meta", "meta.resourcetype", "meta.location")),
+            "active", "meta", "meta.resourcetype", "meta.created", "meta.lastmodified", "meta.location")),
 
     GROUP(ScimSchemas.GROUP, "displayName", Set.of(
             "schemas", "id", "externalid", "displayname",

@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -295,6 +296,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** 조직 META 아이템을 읽는다. 조회 저장소가 함께 쓴다. */
     static GroupHeader toGroupHeader(String groupId, Map<String, AttributeValue> item) {
         return new GroupHeader(groupId, Attrs.str(item, EXTERNAL_ID), Attrs.str(item, DISPLAY_NAME));
+    }
+
+    /** META(또는 GSI1 ALL 프로젝션) 아이템의 두 시각. 없으면 null(설계 2026-10-09 §3.3). 조회 저장소가 쓴다. */
+    static ResourceTimes timesOf(Map<String, AttributeValue> item) {
+        return new ResourceTimes(Attrs.instant(item, CREATED_AT), Attrs.instant(item, UPDATED_AT));
     }
 
     // ---------- 조직 ----------

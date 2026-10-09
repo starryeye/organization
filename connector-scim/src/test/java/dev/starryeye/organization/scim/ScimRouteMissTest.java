@@ -38,9 +38,9 @@ class ScimRouteMissTest {
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
-                ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
                         new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
                                 new ScimGroupListing(state, query, bookmarks)))).build();
     }
 

@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.scim.dto.ScimEmail;
 import dev.starryeye.organization.scim.dto.ScimGroup;
@@ -15,6 +16,7 @@ import dev.starryeye.organization.scim.dto.ScimName;
 import dev.starryeye.organization.scim.dto.ScimUser;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -137,7 +139,7 @@ public final class ScimMapper {
 
     // ---------- 도메인 → SCIM ----------
 
-    public static ScimUser toScimUser(DirectoryUser user) {
+    public static ScimUser toScimUser(DirectoryUser user, ResourceTimes times) {
         List<ScimEmail> emails = user.email() == null
                 ? List.of()
                 : List.of(new ScimEmail(user.email(), "work", true));
@@ -150,7 +152,7 @@ public final class ScimMapper {
                 user.displayName(),
                 emails,
                 user.active(),
-                new ScimMeta("User", userLocation(user.id())));
+                meta("User", times, userLocation(user.id())));
     }
 
     public static ScimGroup toScimGroup(DirectoryGroup group) {
@@ -163,7 +165,7 @@ public final class ScimMapper {
                 group.externalId(),
                 group.displayName(),
                 members,
-                new ScimMeta("Group", groupLocation(group.id())));
+                meta("Group", ResourceTimes.UNKNOWN, groupLocation(group.id())));
     }
 
     /** 멤버 하나 — 조직 응답과 흘려 쓰는 응답이 같은 모양을 쓴다. */
@@ -179,7 +181,7 @@ public final class ScimMapper {
                 header.externalId(),
                 header.displayName(),
                 null,
-                new ScimMeta("Group", groupLocation(header.id())));
+                meta("Group", ResourceTimes.UNKNOWN, groupLocation(header.id())));
     }
 
     /** 리소스 위치 — 본문 {@code meta.location} 과 POST 201 의 {@code Location} 이 같은 값을 쓴다(RFC 7644 §3.3). 아이디는 서버 발급 UUID 라 인코딩할 글자가 없다(④-1). */
@@ -189,6 +191,15 @@ public final class ScimMapper {
 
     public static String groupLocation(String id) {
         return "/scim/v2/Groups/" + id;
+    }
+
+    /** 리소스 메타 — 시각은 모르면 싣지 않는다(설계 2026-10-09 §4.4). */
+    private static ScimMeta meta(String resourceType, ResourceTimes times, String location) {
+        return new ScimMeta(resourceType, text(times.created()), text(times.lastModified()), location);
+    }
+
+    private static String text(Instant at) {
+        return at == null ? null : at.toString();
     }
 
     private static String firstNonBlank(String... candidates) {

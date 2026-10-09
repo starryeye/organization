@@ -3,6 +3,8 @@ package dev.starryeye.organization.core.fake;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.ResourceTimes;
+import dev.starryeye.organization.core.model.Timestamped;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.query.Page;
 import reactor.core.publisher.Flux;
@@ -11,8 +13,10 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * {@link FakeStateRepository} 의 맵을 그대로 읽는 조회 저장소. 실제 저장소처럼 {@code userName}·조직명은
@@ -26,22 +30,27 @@ public class FakeQueryRepository implements DirectoryQueryRepository {
     /** 불린 메서드와 인자. 책갈피가 먹는지(세기·건너뛰기가 다시 불리지 않는지) 단언하는 데 쓴다. */
     public final List<String> calls = new ArrayList<>();
 
+    /** 아이디(직원·조직) → 시각. 넣지 않은 아이디는 {@link ResourceTimes#UNKNOWN} 이다. */
+    public final Map<String, ResourceTimes> times = new HashMap<>();
+
     public FakeQueryRepository(FakeStateRepository state) {
         this.state = state;
     }
 
     @Override
-    public Flux<DirectoryUser> findUsersByUserName(String userName) {
+    public Flux<Timestamped<DirectoryUser>> findUsersByUserName(String userName) {
         calls.add("findUsersByUserName:" + userName);
         return Flux.fromIterable(sortedUsers(false))
-                .filter(user -> same(user.userName(), userName));
+                .filter(user -> same(user.userName(), userName))
+                .map(this::timed);
     }
 
     @Override
-    public Flux<DirectoryUser> findUsersByExternalId(String externalId) {
+    public Flux<Timestamped<DirectoryUser>> findUsersByExternalId(String externalId) {
         calls.add("findUsersByExternalId:" + externalId);
         return Flux.fromIterable(sortedUsers(false))
-                .filter(user -> externalId.equals(user.externalId()));
+                .filter(user -> externalId.equals(user.externalId()))
+                .map(this::timed);
     }
 
     @Override
@@ -59,9 +68,19 @@ public class FakeQueryRepository implements DirectoryQueryRepository {
     }
 
     @Override
-    public Mono<Page<DirectoryUser>> listUsers(String from, int limit, boolean descending) {
+    public Mono<Page<Timestamped<DirectoryUser>>> listUsers(String from, int limit, boolean descending) {
         calls.add("listUsers:" + from + ":" + limit);
-        return Mono.just(slice(sortedUsers(descending), from, limit));
+        return Mono.just(slice(sortedUsers(descending).stream().map(this::timed).toList(), from, limit));
+    }
+
+    @Override
+    public Mono<Timestamped<DirectoryUser>> findUser(String userId) {
+        calls.add("findUser:" + userId);
+        return Mono.justOrEmpty(state.users.get(userId)).map(this::timed);
+    }
+
+    private Timestamped<DirectoryUser> timed(DirectoryUser user) {
+        return new Timestamped<>(user, times.getOrDefault(user.id(), ResourceTimes.UNKNOWN));
     }
 
     @Override
