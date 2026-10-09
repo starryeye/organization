@@ -685,7 +685,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
                 .join().item();
     }
 
-    /** PutItem 을 세는 저장소. 같은 테이블·시계를 쓴다. */
+    /** 아이템 쓰기(PutItem·UpdateItem)를 세는 저장소. 같은 테이블·시계를 쓴다. */
     private DynamoDbDirectoryStateRepository 세는_저장소(WriteCounter counter) {
         return new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, clock);
     }
@@ -762,8 +762,8 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("직원 속성이 하나 바뀔 때마다 PutItem 이 정확히 한 번씩만 나간다")
-    void 직원_속성_변경마다_PutItem이_한번이다() {
+    @DisplayName("직원 속성이 하나 바뀔 때마다 쓰기가 정확히 한 번씩만 나간다")
+    void 직원_속성_변경마다_쓰기가_한번이다() {
         // given
         WriteCounter counter = new WriteCounter();
         var 세는 = 세는_저장소(counter);
@@ -808,8 +808,8 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("조직 속성이 하나 바뀔 때마다 PutItem 이 정확히 한 번씩만 나간다")
-    void 조직_속성_변경마다_PutItem이_한번이다() {
+    @DisplayName("조직 속성이 하나 바뀔 때마다 쓰기가 정확히 한 번씩만 나간다")
+    void 조직_속성_변경마다_쓰기가_한번이다() {
         // given
         WriteCounter counter = new WriteCounter();
         var 세는 = 세는_저장소(counter);
@@ -1257,7 +1257,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("멤버 변경 저장은 다른 멤버 줄을 건드리지 않는다 — 한 명 넣으면 PutItem 은 소속 줄·멤버 줄·META 셋이다")
+    @DisplayName("멤버 변경 저장은 다른 멤버 줄을 건드리지 않는다 — 한 명 넣으면 쓰기는 소속 줄·멤버 줄·META 셋이다")
     void 다른_멤버는_건드리지_않는다() {
         // given
         Set<MemberRef> members = new LinkedHashSet<>();

@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 직원 10만 명의 전체 교체 (GSI 설계 §6). 실제 운영 규모가 10만 명 이상이라, 매 동기화가 GSI1 한 파티션키로 몰아
- * 쓰던 양이 변경 수로 줄었는지를 PutItem 수로 단정한다. 변경은 저장소 한 곳이라 LDAP 서버 없이 저장소 수준에서 본다.
+ * 쓰던 양이 변경 수로 줄었는지를 쓰기 수로 단정한다. 변경은 저장소 한 곳이라 LDAP 서버 없이 저장소 수준에서 본다.
  */
 @ScaleTest
 class ReplaceWithScaleTest extends DynamoDbTestSupport {
@@ -45,7 +45,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("10만 명을 적재한 뒤 같은 조직도는 PutItem 0번, 100명을 바꾸면 PutItem 100번이다")
+    @DisplayName("10만 명을 적재한 뒤 같은 조직도는 쓰기 0번, 100명을 바꾸면 쓰기 100번이다")
     void 바뀐_만큼만_쓴다() {
         // given — 스냅샷 구성은 시계에 넣지 않는다. replaceWith 만 잰다
         WriteCounter counter = new WriteCounter();

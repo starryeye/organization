@@ -99,11 +99,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /**
      * 직원 META 에서 없을 수 있는 속성 — 이번 값에 없으면 REMOVE 한다(설계 2026-10-09 §3.1). {@link #userItem} 이
      * {@code putIfPresent} 로 넣는 것과 같아야 한다. 빠지면 값을 비워도 옛 값이 남는다 — 테스트("비운 선택 속성은 지워진다")가 지킨다.
+     * 아이템에서 속성을 빼더라도 이 목록에서는 빼지 않는다 — UpdateItem 은 목록에 없는 속성을 지우지 않아, 옛 아이템에 남은 속성 때문에
+     * {@link #sameContent} 가 늘 "다르다" 가 되고 매 전체 동기화가 다시 쓴다(설계 2026-10-09 §3.1).
      */
     private static final Set<String> USER_OPTIONAL = Set.of(EXTERNAL_ID, USER_NAME, DISPLAY_NAME, Keys.GSI2SK, EMAIL,
             NAME_FORMATTED, FAMILY_NAME, GIVEN_NAME, MIDDLE_NAME, HONORIFIC_PREFIX, HONORIFIC_SUFFIX);
 
-    /** 조직 META 에서 없을 수 있는 속성. {@link #groupMeta} 와 같아야 한다. */
+    /** 조직 META 에서 없을 수 있는 속성. {@link #groupMeta} 와 같아야 하고, 빼는 속성도 남겨 둔다({@link #USER_OPTIONAL} 참고). */
     private static final Set<String> GROUP_OPTIONAL = Set.of(EXTERNAL_ID, DISPLAY_NAME);
 
     private final DynamoDbAsyncClient client;
@@ -804,6 +806,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * <p>아이템 맵을 그대로 들지 않는 이유 — 전체 동기화는 직원 10만 명의 저장본을 한꺼번에 들고 비교하는데,
      * {@code AttributeValue} 맵은 한 건에 1KB 를 넘게 먹는다. "도메인 값이 같고 {@code current}" 는 "updatedAt 을 뺀
      * 아이템 전체가 같다" 와 같은 판단이다 — 키 규칙이 바뀌면 {@code current} 가 거짓이 되어 값이 같아도 다시 쓴다.
+     * 두 시각({@code updatedAt}·{@code createdAt})은 비교에서 뺀다. META 를 UpdateItem 으로 쓰므로, 모델에서 뺀 속성은 선택 속성 목록에 남겨야
+     * 옛 아이템에서 지워진다 — 아니면 그 아이템은 늘 "다르다" 로 보인다.
      */
     record Stored<T>(T value, boolean current) {
 

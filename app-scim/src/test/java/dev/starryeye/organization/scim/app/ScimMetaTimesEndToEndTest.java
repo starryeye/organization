@@ -185,12 +185,15 @@ class ScimMetaTimesEndToEndTest {
         // when
         JsonNode 직원필터 = 읽는다("/scim/v2/Users?filter={f}", "userName eq \"meta-list\"");
         JsonNode 조직필터 = 읽는다("/scim/v2/Groups?filter={f}", "displayName eq \"메타목록팀\"");
+        JsonNode 조직필터_멤버제외 = 읽는다("/scim/v2/Groups?filter={f}&excludedAttributes=members", "displayName eq \"메타목록팀\"");
         JsonNode 고름 = 읽는다("/scim/v2/Users/" + 직원.get("id").asText() + "?attributes=meta.lastModified");
         JsonNode 뺌 = 읽는다("/scim/v2/Groups/" + 조직.get("id").asText() + "?excludedAttributes=meta.created");
 
         // then
         assertThat(lastModified(직원필터.get("Resources").get(0))).isEqualTo(lastModified(직원));
         assertThat(created(조직필터.get("Resources").get(0))).isEqualTo(created(조직));
+        assertThat(created(조직필터_멤버제외.get("Resources").get(0))).isEqualTo(created(조직));
+        assertThat(lastModified(조직필터_멤버제외.get("Resources").get(0))).isEqualTo(lastModified(조직));
         assertThat(고름.get("meta").has("lastModified")).isTrue();
         assertThat(고름.get("meta").has("created")).isFalse();
         assertThat(뺌.get("meta").has("created")).isFalse();
