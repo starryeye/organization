@@ -3,6 +3,8 @@ package dev.starryeye.organization.scim;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.Timestamped;
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
@@ -39,24 +41,27 @@ final class ScimGroupStream {
     private static final DataBufferFactory BUFFERS = DefaultDataBufferFactory.sharedInstance;
 
     private final DirectoryStateRepository state;
+    /** 머리(이름표와 시각)를 읽는다 — 응답의 meta 가 생성·변경 시각을 싣는다(설계 2026-10-09 §4.3). 멤버 줄은 상태 저장소에서 읽는다. */
+    private final DirectoryQueryRepository query;
 
-    ScimGroupStream(DirectoryStateRepository state) {
+    ScimGroupStream(DirectoryStateRepository state, DirectoryQueryRepository query) {
         this.state = state;
+        this.query = query;
     }
 
     /**
      * 조직 하나. 헤더는 호출자가 이미 읽었다 — 없는 조직이면 응답을 쓰기 전에 404 를 냈다.
      * 이 부품은 늘 {@code members} 를 쓴다 — 부른 쪽이 {@code projection.includes("members")} 일 때만 부른다. 아니면 이름표 트리 응답을 쓴다.
      */
-    Flux<DataBuffer> group(GroupHeader header, ScimAttributeProjection projection) {
+    Flux<DataBuffer> group(Timestamped<GroupHeader> header, ScimAttributeProjection projection) {
         return group("", header, projection);
     }
 
     /** {@code prefix} 는 응답 앞에 붙는 글자다 — 목록에서 앞 조직과 이을 쉼표. 빈 버퍼를 따로 내보내지 않으려고 앞부분에 합친다. */
-    private Flux<DataBuffer> group(String prefix, GroupHeader header, ScimAttributeProjection projection) {
+    private Flux<DataBuffer> group(String prefix, Timestamped<GroupHeader> header, ScimAttributeProjection projection) {
         return Flux.concat(
                 Mono.fromSupplier(() -> buffer(prefix + head(header, projection))),
-                members(header.id(), projection),
+                members(header.value().id(), projection),
                 Mono.fromSupplier(() -> buffer("]}")));
     }
 
@@ -65,30 +70,30 @@ final class ScimGroupStream {
      * 목록을 만든 뒤 지워진 조직은 헤더가 비어 건너뛴다. 조직 사이의 쉼표는 입력 순번이 아니라 실제로 쓴 수를 따른다.
      * {@link #group} 처럼 늘 {@code members} 를 쓴다 — 부른 쪽이 {@code projection.includes("members")} 일 때만 부른다. 아니면 이름표 트리 응답을 쓴다.
      */
-    Flux<DataBuffer> list(ScimQuery query, long totalResults, List<GroupHeader> headers) {
+    Flux<DataBuffer> list(ScimQuery request, long totalResults, List<Timestamped<GroupHeader>> headers) {
         return Flux.defer(() -> {
             AtomicInteger 쓴_수 = new AtomicInteger();
             Flux<DataBuffer> resources = Flux.fromIterable(headers)
-                    .concatMap(listed -> state.findGroupHeader(listed.id())
-                            .flatMapMany(header -> group(쓴_수.getAndIncrement() == 0 ? "" : ",", header, query.projection())));
+                    .concatMap(listed -> query.findGroupHeader(listed.value().id())
+                            .flatMapMany(header -> group(쓴_수.getAndIncrement() == 0 ? "" : ",", header, request.projection())));
             return Flux.concat(
-                    Mono.fromSupplier(() -> buffer(listHead(query, totalResults))),
+                    Mono.fromSupplier(() -> buffer(listHead(request, totalResults))),
                     resources,
                     Mono.fromSupplier(() -> buffer("],\"itemsPerPage\":" + 쓴_수.get() + "}")));
         });
     }
 
-    private static String head(GroupHeader header, ScimAttributeProjection projection) {
+    private static String head(Timestamped<GroupHeader> header, ScimAttributeProjection projection) {
         // 헤더로 만든 조직에는 members 가 없다(null 은 쓰지 않는다). id·schemas 는 늘 남아 객체가 비지 않는다
-        String json = ScimJson.string(projection.apply(ScimJson.tree(ScimMapper.toScimGroup(header))));
+        String json = ScimJson.string(projection.apply(ScimJson.tree(ScimMapper.toScimGroup(header.value(), header.times()))));
         return json.substring(0, json.length() - 1) + ",\"members\":[";
     }
 
-    private static String listHead(ScimQuery query, long totalResults) {
+    private static String listHead(ScimQuery request, long totalResults) {
         ObjectNode head = JsonNodeFactory.instance.objectNode();
         head.putArray("schemas").add(ScimSchemas.LIST_RESPONSE);
         head.put("totalResults", totalResults);
-        head.put("startIndex", query.startIndex());
+        head.put("startIndex", request.startIndex());
         String json = ScimJson.string(head);
         return json.substring(0, json.length() - 1) + ",\"Resources\":[";
     }

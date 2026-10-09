@@ -54,13 +54,13 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByDisplayName(String displayName) {
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByDisplayName(String displayName) {
         return exact(Keys.GROUP_INDEX, displayName).map(DynamoDbDirectoryQueryRepository::group);
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByExternalId(String externalId) {
-        return state.findGroupIdsByExternalId(externalId).concatMap(state::findGroupHeader);
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByExternalId(String externalId) {
+        return state.findGroupIdsByExternalId(externalId).concatMap(this::findGroupHeader);
     }
 
     @Override
@@ -75,8 +75,14 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
     }
 
     @Override
-    public Mono<Page<GroupHeader>> listGroupHeaders(String from, int limit, boolean descending) {
+    public Mono<Page<Timestamped<GroupHeader>>> listGroupHeaders(String from, int limit, boolean descending) {
         return page(GROUPS_SCOPE, Keys.GROUP_INDEX, from, limit, descending, DynamoDbDirectoryQueryRepository::group);
+    }
+
+    /** 강한 일관성 GetItem — 쓰기 직후 응답이 방금 쓴 값을 읽는다(설계 2026-10-09 §4.2). */
+    @Override
+    public Mono<Timestamped<GroupHeader>> findGroupHeader(String groupId) {
+        return meta(Keys.groupPk(groupId)).map(DynamoDbDirectoryQueryRepository::group);
     }
 
     @Override
@@ -116,8 +122,10 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
                 .map(GetItemResponse::item);
     }
 
-    private static GroupHeader group(Map<String, AttributeValue> item) {
-        return DynamoDbDirectoryStateRepository.toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item);
+    private static Timestamped<GroupHeader> group(Map<String, AttributeValue> item) {
+        return new Timestamped<>(
+                DynamoDbDirectoryStateRepository.toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item),
+                DynamoDbDirectoryStateRepository.timesOf(item));
     }
 
     /** GSI1 정렬키가 값의 소문자와 같은 아이템. 대소문자만 다른 둘이 있으면 둘 다 돌려준다. */

@@ -291,7 +291,7 @@ class ScimErrorTranslationTest {
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
         return ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
-                new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                new ScimGroupHandler(state, query, useCase, new StateMemberTypeResolver(state)),
                 new ScimListHandler(new ScimUserListing(query, bookmarks), new ScimGroupListing(state, query, bookmarks)),
                 TemporaryFailureClassifier.표지만(), 한도);
     }

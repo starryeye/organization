@@ -54,17 +54,19 @@ public class FakeQueryRepository implements DirectoryQueryRepository {
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByDisplayName(String displayName) {
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByDisplayName(String displayName) {
         calls.add("findGroupHeadersByDisplayName:" + displayName);
         return Flux.fromIterable(sortedGroups(false))
-                .filter(group -> same(group.displayName(), displayName));
+                .filter(group -> same(group.displayName(), displayName))
+                .map(this::timed);
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByExternalId(String externalId) {
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByExternalId(String externalId) {
         calls.add("findGroupHeadersByExternalId:" + externalId);
         return Flux.fromIterable(sortedGroups(false))
-                .filter(group -> externalId.equals(group.externalId()));
+                .filter(group -> externalId.equals(group.externalId()))
+                .map(this::timed);
     }
 
     @Override
@@ -84,9 +86,19 @@ public class FakeQueryRepository implements DirectoryQueryRepository {
     }
 
     @Override
-    public Mono<Page<GroupHeader>> listGroupHeaders(String from, int limit, boolean descending) {
+    public Mono<Page<Timestamped<GroupHeader>>> listGroupHeaders(String from, int limit, boolean descending) {
         calls.add("listGroupHeaders:" + from + ":" + limit);
-        return Mono.just(slice(sortedGroups(descending), from, limit));
+        return Mono.just(slice(sortedGroups(descending).stream().map(this::timed).toList(), from, limit));
+    }
+
+    @Override
+    public Mono<Timestamped<GroupHeader>> findGroupHeader(String groupId) {
+        calls.add("findGroupHeader:" + groupId);
+        return Mono.justOrEmpty(state.groups.get(groupId)).map(FakeQueryRepository::header).map(this::timed);
+    }
+
+    private Timestamped<GroupHeader> timed(GroupHeader header) {
+        return new Timestamped<>(header, times.getOrDefault(header.id(), ResourceTimes.UNKNOWN));
     }
 
     @Override

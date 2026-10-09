@@ -21,7 +21,7 @@ public enum ScimResourceType {
     GROUP(ScimSchemas.GROUP, "displayName", Set.of(
             "schemas", "id", "externalid", "displayname",
             "members", "members.value", "members.type", "members.display",
-            "meta", "meta.resourcetype", "meta.location"));
+            "meta", "meta.resourcetype", "meta.created", "meta.lastmodified", "meta.location"));
 
     private final String schemaUrn;
     private final String sortAttribute;

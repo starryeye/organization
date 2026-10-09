@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.Timestamped;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.PageBookmarkRepository;
@@ -25,22 +26,20 @@ public class ScimGroupListing {
     private static final Set<String> ATTRIBUTES = Set.of("id", "externalid", "displayname");
     private static final List<String> INDEXED = List.of("id", "displayname", "externalid");
 
-    private final DirectoryStateRepository state;
     private final DirectoryQueryRepository query;
     private final PageBookmarkRepository bookmarks;
     private final ScimGroupStream stream;
 
     public ScimGroupListing(DirectoryStateRepository state, DirectoryQueryRepository query, PageBookmarkRepository bookmarks) {
-        this.state = state;
         this.query = query;
         this.bookmarks = bookmarks;
-        this.stream = new ScimGroupStream(state);
+        this.stream = new ScimGroupStream(state, query);
     }
 
     /** 이름표만 싣는 목록을 한 번에 만든다. 멤버를 싣는 목록은 {@link #streamed} 다. */
     public Mono<ScimListResponse> list(ScimQuery request) {
         return slice(request).map(page -> ScimListResponse.of(request, page.totalResults(), page.items().stream()
-                .map(header -> request.projection().apply(ScimJson.tree(ScimMapper.toScimGroup(header))))
+                .map(found -> request.projection().apply(ScimJson.tree(ScimMapper.toScimGroup(found.value(), found.times()))))
                 .toList()));
     }
 
@@ -50,7 +49,7 @@ public class ScimGroupListing {
     }
 
     /** 조회가 가리키는 쪽의 조직 이름표와 전체 수. 멤버는 읽지 않는다. */
-    Mono<ScimPager.Slice<GroupHeader>> slice(ScimQuery request) {
+    Mono<ScimPager.Slice<Timestamped<GroupHeader>>> slice(ScimQuery request) {
         return request.filter() == null
                 ? ScimPager.unfiltered(ListingKind.GROUP, request, bookmarks, query::countGroups,
                         n -> query.skipGroups(n, request.descending()),
@@ -58,13 +57,13 @@ public class ScimGroupListing {
                 : filtered(request);
     }
 
-    private Mono<ScimPager.Slice<GroupHeader>> filtered(ScimQuery request) {
+    private Mono<ScimPager.Slice<Timestamped<GroupHeader>>> filtered(ScimQuery request) {
         List<ScimFilter.Term> terms = request.filter().terms();
         terms.forEach(ScimGroupListing::check);
         ScimFilter.Term driver = request.filter().first(INDEXED).orElseThrow(() ->
                 ScimException.invalidFilter("id·displayName·externalId 중 하나의 eq 가 있어야 합니다"));
         return candidates(driver)
-                .filter(group -> terms.stream().allMatch(term -> matches(group, term)))
+                .filter(found -> terms.stream().allMatch(term -> matches(found.value(), term)))
                 .collectList()
                 .map(groups -> ScimPager.filtered(sort(groups, request.descending()), request));
     }
@@ -78,10 +77,10 @@ public class ScimGroupListing {
         }
     }
 
-    private Flux<GroupHeader> candidates(ScimFilter.Term driver) {
+    private Flux<Timestamped<GroupHeader>> candidates(ScimFilter.Term driver) {
         String value = (String) driver.value();
         return switch (driver.attribute()) {
-            case "id" -> state.findGroupHeader(value).flux();
+            case "id" -> query.findGroupHeader(value).flux();
             case "displayname" -> query.findGroupHeadersByDisplayName(value);
             default -> query.findGroupHeadersByExternalId(value);
         };
@@ -96,10 +95,11 @@ public class ScimGroupListing {
         };
     }
 
-    private static List<GroupHeader> sort(List<GroupHeader> groups, boolean descending) {
-        Comparator<GroupHeader> order = Comparator
-                .comparing((GroupHeader group) -> ScimText.lower(group.displayName() == null ? group.id() : group.displayName()))
-                .thenComparing(GroupHeader::id);
+    private static List<Timestamped<GroupHeader>> sort(List<Timestamped<GroupHeader>> groups, boolean descending) {
+        Comparator<Timestamped<GroupHeader>> order = Comparator
+                .comparing((Timestamped<GroupHeader> found) -> ScimText.lower(
+                        found.value().displayName() == null ? found.value().id() : found.value().displayName()))
+                .thenComparing(found -> found.value().id());
         return groups.stream().sorted(descending ? order.reversed() : order).toList();
     }
 }

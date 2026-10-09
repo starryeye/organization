@@ -1,6 +1,7 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.GroupChange;
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
@@ -20,16 +21,18 @@ import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 
 public class ScimGroupHandler {
 
-    private final DirectoryStateRepository state;
+    /** 응답을 만드는 읽기 — 생성·변경 시각을 함께 준다(설계 2026-10-09 §4.3). 쓰기 판단 읽기는 락 안의 유스케이스가 한다. */
+    private final DirectoryQueryRepository query;
     private final IncrementalSyncUseCase sync;
     private final MemberTypeResolver memberTypes;
     private final ScimGroupStream stream;
 
-    public ScimGroupHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync, MemberTypeResolver memberTypes) {
-        this.state = state;
+    public ScimGroupHandler(DirectoryStateRepository state, DirectoryQueryRepository query, IncrementalSyncUseCase sync,
+                            MemberTypeResolver memberTypes) {
+        this.query = query;
         this.sync = sync;
         this.memberTypes = memberTypes;
-        this.stream = new ScimGroupStream(state);
+        this.stream = new ScimGroupStream(state, query);
     }
 
     public Mono<ServerResponse> create(ServerRequest request) {
@@ -116,11 +119,12 @@ public class ScimGroupHandler {
      */
     private Mono<ServerResponse> body(HttpStatus status, String id, ScimAttributeProjection projection,
                                       ScimException missing) {
-        return state.findGroupHeader(id)
+        return query.findGroupHeader(id)
                 .switchIfEmpty(Mono.error(missing))
-                .flatMap(header -> projection.includes("members")
-                        ? builder(status, id).body(BodyInserters.fromDataBuffers(stream.group(header, projection)))
-                        : builder(status, id).bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimGroup(header)))));
+                .flatMap(found -> projection.includes("members")
+                        ? builder(status, id).body(BodyInserters.fromDataBuffers(stream.group(found, projection)))
+                        : builder(status, id).bodyValue(projection.apply(ScimJson.tree(
+                                ScimMapper.toScimGroup(found.value(), found.times())))));
     }
 
     /** 생성(201)이면 {@code Location} 을 단다 — RFC 7644 §3.3 SHALL(설계 2026-10-06 §5.3). */

@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -172,7 +173,7 @@ class ScimMapperTest {
                 Set.of(MemberRef.group("DEV002"), MemberRef.user("park")));
 
         // when
-        ScimGroup scim = ScimMapper.toScimGroup(group);
+        ScimGroup scim = ScimMapper.toScimGroup(group, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(scim.schemas()).containsExactly(ScimSchemas.GROUP);
@@ -424,5 +425,19 @@ class ScimMapperTest {
         assertThat(있음).contains("\"meta\":{\"resourceType\":\"User\",\"created\":\"2026-10-09T03:00:00Z\","
                 + "\"lastModified\":\"2026-10-09T04:30:00.123456Z\",\"location\":\"/scim/v2/Users/kim\"}");
         assertThat(없음).contains("\"meta\":{\"resourceType\":\"User\",\"location\":\"/scim/v2/Users/kim\"}");
+    }
+
+    @Test
+    @DisplayName("조직 meta 도 resourceType·created·lastModified·location 순이다")
+    void 조직_meta_에_두_시각을_싣는다() {
+        // given
+        ResourceTimes times = new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T05:00:00Z"));
+
+        // when
+        String 헤더 = ScimJson.string(ScimJson.tree(ScimMapper.toScimGroup(new GroupHeader("DEV", null, "개발"), times)));
+
+        // then
+        assertThat(헤더).contains("\"meta\":{\"resourceType\":\"Group\",\"created\":\"2026-10-09T03:00:00Z\","
+                + "\"lastModified\":\"2026-10-09T05:00:00Z\",\"location\":\"/scim/v2/Groups/DEV\"}");
     }
 }

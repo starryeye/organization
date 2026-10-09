@@ -155,7 +155,7 @@ public final class ScimMapper {
                 meta("User", times, userLocation(user.id())));
     }
 
-    public static ScimGroup toScimGroup(DirectoryGroup group) {
+    public static ScimGroup toScimGroup(DirectoryGroup group, ResourceTimes times) {
         List<ScimMember> members = group.members().stream()
                 .map(ScimMapper::toScimMember)
                 .toList();
@@ -165,7 +165,7 @@ public final class ScimMapper {
                 group.externalId(),
                 group.displayName(),
                 members,
-                meta("Group", ResourceTimes.UNKNOWN, groupLocation(group.id())));
+                meta("Group", times, groupLocation(group.id())));
     }
 
     /** 멤버 하나 — 조직 응답과 흘려 쓰는 응답이 같은 모양을 쓴다. */
@@ -174,14 +174,14 @@ public final class ScimMapper {
     }
 
     /** 멤버 없이 조직을 그린다 — {@code members} 가 응답에 필요 없을 때 멤버 줄을 읽지 않기 위해서다. */
-    public static ScimGroup toScimGroup(GroupHeader header) {
+    public static ScimGroup toScimGroup(GroupHeader header, ResourceTimes times) {
         return new ScimGroup(
                 List.of(ScimSchemas.GROUP),
                 header.id(),
                 header.externalId(),
                 header.displayName(),
                 null,
-                meta("Group", ResourceTimes.UNKNOWN, groupLocation(header.id())));
+                meta("Group", times, groupLocation(header.id())));
     }
 
     /** 리소스 위치 — 본문 {@code meta.location} 과 POST 201 의 {@code Location} 이 같은 값을 쓴다(RFC 7644 §3.3). 아이디는 서버 발급 UUID 라 인코딩할 글자가 없다(④-1). */

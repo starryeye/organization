@@ -41,7 +41,7 @@ class ScimListHandlerTest {
         var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
                 ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
-                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
+                        new ScimGroupHandler(state, query, useCase, new StateMemberTypeResolver(state)),
                         new ScimListHandler(new ScimUserListing(query, bookmarks),
                                 new ScimGroupListing(state, query, bookmarks)))).build();
 

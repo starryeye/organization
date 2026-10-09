@@ -28,15 +28,15 @@ public interface DirectoryQueryRepository {
 
     Flux<Timestamped<DirectoryUser>> findUsersByExternalId(String externalId);
 
-    Flux<GroupHeader> findGroupHeadersByDisplayName(String displayName);
+    Flux<Timestamped<GroupHeader>> findGroupHeadersByDisplayName(String displayName);
 
-    Flux<GroupHeader> findGroupHeadersByExternalId(String externalId);
+    Flux<Timestamped<GroupHeader>> findGroupHeadersByExternalId(String externalId);
 
     /** {@code userName} 소문자 순(내림차순이면 역순)으로 {@code from} 다음부터 {@code limit} 건. */
     Mono<Page<Timestamped<DirectoryUser>>> listUsers(String from, int limit, boolean descending);
 
     /** 조직명 소문자 순(내림차순이면 역순)으로 {@code from} 다음부터 {@code limit} 건. 멤버는 담지 않는다. */
-    Mono<Page<GroupHeader>> listGroupHeaders(String from, int limit, boolean descending);
+    Mono<Page<Timestamped<GroupHeader>>> listGroupHeaders(String from, int limit, boolean descending);
 
     Mono<Long> countUsers();
 
@@ -44,6 +44,9 @@ public interface DirectoryQueryRepository {
 
     /** 직원 하나를 <b>강한 일관성</b>으로 읽는다 — 쓰기 직후 응답이 방금 쓴 값을 읽어야 한다(설계 2026-10-09 §4.2). 없으면 빈 Mono. */
     Mono<Timestamped<DirectoryUser>> findUser(String userId);
+
+    /** 조직 이름표 하나를 <b>강한 일관성</b>으로 읽는다(멤버 없음). 없으면 빈 Mono. */
+    Mono<Timestamped<GroupHeader>> findGroupHeader(String groupId);
 
     /** 앞의 {@code n} 건을 건너뛴 위치. {@code n} 이 0 이하이거나 아무도 없으면 빈 Mono. 전원보다 많으면 끝 위치. */
     Mono<String> skipUsers(long n, boolean descending);
