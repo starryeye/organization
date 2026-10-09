@@ -6,7 +6,6 @@ import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -16,14 +15,15 @@ import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.PutRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -33,7 +33,11 @@ import java.util.Set;
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
  *
- * <p>저장 순서는 메타 → 튜플 → 포인터다. 메타가 먼저라 튜플을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
+ * <p><b>본문은 압축 묶음이다</b>(설계 2026-10-09 §3). 튜플 목록을 gzip 으로 압축해 {@value #CHUNK_SIZE}바이트 이하 묶음 아이템 몇 개로
+ * 나눈다({@link SnapshotChunks}). 튜플 한 줄을 아이템 하나로 쓰던 때는 10만 명(튜플 약 15만 줄)에 한 파티션으로 아이템 약 15만 개,
+ * 쓰기 약 15만 WCU 가 몰렸다. 메타는 튜플 수({@code tupleCount})와 묶음 수({@code chunkCount})를 갖는다.
+ *
+ * <p>저장 순서는 메타 → 묶음 → 포인터다. 메타가 먼저라 묶음을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
  * 포인터가 마지막이라 반쪽 스냅샷이 기준선이 되지 않는다.
  *
  * <p><b>스냅샷은 테이블 TTL({@link Keys#EXPIRES_AT})을 쓰지 않는다.</b> TTL 은 아이템마다 붙은 시각만 보고 지워 최신인지
@@ -41,8 +45,10 @@ import java.util.Set;
  * {@code retainUntil} 에만 적고, {@link #purgeExpired()} 가 최신을 건너뛰며 지운다.
  */
 @Slf4j
-@RequiredArgsConstructor
 public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository {
+
+    /** 묶음 하나의 본문 상한(바이트). 아이템 한도(400KB)에서 키와 속성 이름이 들어갈 자리를 남긴다. */
+    static final int CHUNK_SIZE = 350_000;
 
     private static final int BATCH_SIZE = BatchRequests.WRITE_LIMIT;
     private static final int DELETE_CONCURRENCY = 4;
@@ -50,6 +56,8 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String CREATED_AT = "createdAt";
     private static final String SOURCE = "source";
     private static final String TUPLE_COUNT = "tupleCount";
+    private static final String CHUNK_COUNT = "chunkCount";
+    private static final String DATA = "data";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String RETAIN_UNTIL = "retainUntil";
     private static final String WRITING_SINCE = "writingSince";
@@ -57,6 +65,19 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
     private final Clock clock;
+    private final int chunkSize;
+
+    public DynamoDbTupleSnapshotRepository(DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
+        this(client, properties, clock, CHUNK_SIZE);
+    }
+
+    /** 묶음 크기를 줄여 작은 스냅샷도 여러 묶음으로 만드는 테스트용. */
+    DynamoDbTupleSnapshotRepository(DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock, int chunkSize) {
+        this.client = client;
+        this.properties = properties;
+        this.clock = clock;
+        this.chunkSize = chunkSize;
+    }
 
     @Override
     public Mono<Void> save(TupleSnapshot snapshot) {
@@ -71,30 +92,32 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private Mono<Void> doSave(TupleSnapshot snapshot, Instant retentionBase) {
         long retainUntil = retentionBase.plus(Duration.ofDays(properties.getSnapshotRetentionDays())).getEpochSecond();
 
-        return writeMeta(snapshot, retainUntil)
-                .then(writeTuples(snapshot))
-                .then(writePointer(snapshot.id()));
+        return Mono.fromCallable(() -> SnapshotChunks.encode(snapshot.tuples(), chunkSize))
+                .flatMap(chunks -> writeMeta(snapshot, retainUntil, chunks.size())
+                        .then(writeChunks(snapshot.id(), chunks))
+                        .then(writePointer(snapshot.id())));
     }
 
-    private Mono<Void> writeTuples(TupleSnapshot snapshot) {
-        BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
-        return Flux.fromIterable(snapshot.tuples())
-                .map(tuple -> WriteRequest.builder()
-                        .putRequest(PutRequest.builder().item(tupleItem(snapshot.id(), tuple)).build())
-                        .build())
-                .buffer(BATCH_SIZE)
-                .concatMap(묶음::write)
+    /**
+     * 묶음은 번호 순서로 하나씩 PutItem 으로 보낸다(설계 2026-10-09 §3.3). 묶음 하나가 최대 350 WCU 라, 여러 개를 BatchWriteItem 에 담으면
+     * 한 파티션의 쓰기 한도(초당 1,000)에 걸려 일부만 처리되고 {@link BatchRequests} 의 재시도 예산(약 1.5초)이 모자랄 수 있다. 하나씩이면
+     * 스로틀이 요청 전체의 오류로 와 SDK 재시도(이 클라이언트의 DynamoDB 기본값, 최대 9번·지수 백오프)가 받는다.
+     */
+    private Mono<Void> writeChunks(String snapshotId, List<byte[]> chunks) {
+        return Flux.range(0, chunks.size())
+                .concatMap(index -> putItem(chunkItem(snapshotId, index, chunks.get(index))))
                 .then();
     }
 
-    private Map<String, AttributeValue> tupleItem(String snapshotId, RelationTuple tuple) {
+    private static Map<String, AttributeValue> chunkItem(String snapshotId, int index, byte[] data) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)));
-        item.put(Keys.SK, Attrs.s(Keys.tupleSk(tuple)));
+        item.put(Keys.SK, Attrs.s(Keys.chunkSk(index)));
+        item.put(DATA, Attrs.b(data));
         return item;
     }
 
-    private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil) {
+    private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil, int chunkCount) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
@@ -103,6 +126,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
         item.put(SOURCE, Attrs.s(snapshot.source().name()));
         item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
+        item.put(CHUNK_COUNT, Attrs.n(chunkCount));
         item.put(RETAIN_UNTIL, Attrs.n(retainUntil));
         return putItem(item);
     }
@@ -173,24 +197,50 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         if (meta == null) {
             return null;
         }
-        Set<RelationTuple> tuples = new LinkedHashSet<>();
-        for (Map<String, AttributeValue> item : items) {
-            String sk = Attrs.str(item, Keys.SK);
-            if (Keys.isTupleSk(sk)) {
-                tuples.add(Keys.parseTupleSk(sk));
-            }
-        }
+        Set<RelationTuple> tuples = new LinkedHashSet<>(본문(snapshotId, meta, items));
         int expected = Attrs.integer(meta, TUPLE_COUNT);
         if (tuples.size() != expected) {
-            throw new SnapshotIntegrityException(
-                    "스냅샷 %s 를 온전히 읽지 못했습니다(메타 튜플 %d · 읽음 %d) — POST /admin/sync/rebuild 로 복구하세요"
-                            .formatted(snapshotId, expected, tuples.size()));
+            throw 온전하지_않다(snapshotId, "메타 튜플 %d · 읽음 %d".formatted(expected, tuples.size()));
         }
         return new TupleSnapshot(
                 snapshotId,
                 Attrs.instant(meta, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(meta, SOURCE)),
                 tuples);
+    }
+
+    /**
+     * 묶음을 번호 순서로 모아 푼다(설계 2026-10-09 §3.2). Query 는 정렬키 순서로 주고, 번호가 네 자리라 그 순서가 곧 번호 순서다.
+     * 메타에 묶음 수가 없으면 옛 형식(튜플 한 줄이 아이템 하나)이다 — 운영 배포 전이라 이관하지 않고 재적재로 고친다.
+     */
+    private List<RelationTuple> 본문(String snapshotId, Map<String, AttributeValue> meta, List<Map<String, AttributeValue>> items) {
+        if (!meta.containsKey(CHUNK_COUNT)) {
+            throw 온전하지_않다(snapshotId, "메타에 묶음 수가 없다 — 옛 형식");
+        }
+        int expected = Attrs.integer(meta, CHUNK_COUNT);
+        List<Map<String, AttributeValue>> chunks = items.stream()
+                .filter(item -> Keys.isChunkSk(Attrs.str(item, Keys.SK)))
+                .toList();
+        if (chunks.size() != expected) {
+            throw 온전하지_않다(snapshotId, "메타 묶음 %d · 읽음 %d".formatted(expected, chunks.size()));
+        }
+        List<byte[]> data = new ArrayList<>(chunks.size());
+        for (int index = 0; index < chunks.size(); index++) {
+            if (!Keys.chunkSk(index).equals(Attrs.str(chunks.get(index), Keys.SK))) {
+                throw 온전하지_않다(snapshotId, "묶음 번호가 %d 에서 끊긴다".formatted(index));
+            }
+            data.add(Attrs.bytes(chunks.get(index), DATA));
+        }
+        try {
+            return SnapshotChunks.decode(data);
+        } catch (IOException e) {
+            throw 온전하지_않다(snapshotId, "본문을 풀 수 없다: " + e);
+        }
+    }
+
+    private static SnapshotIntegrityException 온전하지_않다(String snapshotId, String 사정) {
+        return new SnapshotIntegrityException(
+                "스냅샷 %s 를 온전히 읽지 못했습니다(%s) — POST /admin/sync/rebuild 로 복구하세요".formatted(snapshotId, 사정));
     }
 
     @Override
@@ -256,8 +306,11 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     /**
-     * 튜플 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다. 저장 순서(메타 → 튜플 → 포인터)를
-     * 그대로 뒤집은 순서다 — 메타를 먼저 지우면 튜플 배치 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     * 메타가 아닌 줄(묶음, 옛 형식의 튜플 줄) 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다. 저장 순서
+     * (메타 → 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 배치 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     *
+     * <p>묶음을 지우는 것도 묶음 크기만큼 쓰기 용량을 쓴다. 배치가 한 파티션 한도에 걸려 재시도 끝에 실패해도 메타가 남으므로, 다음 정리가
+     * 남은 것을 이어 지운다(설계 2026-10-09 §8).
      */
     private Mono<Void> deleteSnapshot(String snapshotId) {
         BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
