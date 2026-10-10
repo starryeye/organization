@@ -8,18 +8,21 @@ import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.time.Clock;
@@ -87,9 +90,23 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     private static final String ACTIVE = "active";
     /** 마지막 <b>변경</b> 시각. 바뀐 META 에만 찍는다(GSI 설계 §3). */
     private static final String UPDATED_AT = "updatedAt";
+    /** 처음 만든 시각. 처음 쓸 때만 넣고 이후로는 DynamoDB 가 지킨다(if_not_exists, 설계 2026-10-09 §3.1). */
+    private static final String CREATED_AT = "createdAt";
     /** 보류 목록 줄의 속성(설계 2026-10-03 §4.1). 키에도 담겨 있지만 줄만 보고 읽을 수 있게 둔다. */
     private static final String CUT_PARENT = "parent";
     private static final String CUT_CHILD = "child";
+
+    /**
+     * 직원 META 에서 없을 수 있는 속성 — 이번 값에 없으면 REMOVE 한다(설계 2026-10-09 §3.1). {@link #userItem} 이
+     * {@code putIfPresent} 로 넣는 것과 같아야 한다. 빠지면 값을 비워도 옛 값이 남는다 — 테스트("비운 선택 속성은 지워진다")가 지킨다.
+     * 아이템에서 속성을 빼더라도 이 목록에서는 빼지 않는다 — UpdateItem 은 목록에 없는 속성을 지우지 않아, 옛 아이템에 남은 속성 때문에
+     * {@link #sameContent} 가 늘 "다르다" 가 되고 매 전체 동기화가 다시 쓴다(설계 2026-10-09 §3.1).
+     */
+    private static final Set<String> USER_OPTIONAL = Set.of(EXTERNAL_ID, USER_NAME, DISPLAY_NAME, Keys.GSI2SK, EMAIL,
+            NAME_FORMATTED, FAMILY_NAME, GIVEN_NAME, MIDDLE_NAME, HONORIFIC_PREFIX, HONORIFIC_SUFFIX);
+
+    /** 조직 META 에서 없을 수 있는 속성. {@link #groupMeta} 와 같아야 하고, 빼는 속성도 남겨 둔다({@link #USER_OPTIONAL} 참고). */
+    private static final Set<String> GROUP_OPTIONAL = Set.of(EXTERNAL_ID, DISPLAY_NAME);
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -129,7 +146,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         if (before != null && before.equals(toUser(after.id(), userItem(after)))) {
             return Mono.empty();
         }
-        return putItem(stamped(userItem(after)));
+        return writeMeta(userItem(after), USER_OPTIONAL);
     }
 
     /**
@@ -145,10 +162,10 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         if (stored != null && stored.sameAs(toUser(user.id(), userItem(user)))) {
             return Mono.empty();
         }
-        return putItem(stamped(userItem(user)));
+        return writeMeta(userItem(user), USER_OPTIONAL);
     }
 
-    /** 직원 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다 — 바뀌었을 때만 {@link #stamped} 가 넣는다. */
+    /** 직원 META 에 쓸 아이템. 두 시각은 넣지 않는다 — 바뀌었을 때만 {@link #writeMeta} 가 넣는다. */
     private Map<String, AttributeValue> userItem(DirectoryUser user) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.userPk(user.id())));
@@ -283,6 +300,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return new GroupHeader(groupId, Attrs.str(item, EXTERNAL_ID), Attrs.str(item, DISPLAY_NAME));
     }
 
+    /** META(또는 GSI1 ALL 프로젝션) 아이템의 두 시각. 없으면 null(설계 2026-10-09 §3.3). 조회 저장소가 쓴다. */
+    static ResourceTimes timesOf(Map<String, AttributeValue> item) {
+        return new ResourceTimes(Attrs.instant(item, CREATED_AT), Attrs.instant(item, UPDATED_AT));
+    }
+
     // ---------- 조직 ----------
 
     /** <b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고. */
@@ -391,7 +413,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                                        List<MemberRef> 새로온멤버, List<MemberRef> 떠난멤버) {
         boolean 바뀜 = stored == null || !stored.sameAs(toGroupHeader(header.id(), groupMeta(header)))
                 || !떠난멤버.isEmpty() || !새로온멤버.isEmpty();
-        Mono<Void> meta = 바뀜 ? putItem(stamped(groupMeta(header))) : Mono.empty();
+        Mono<Void> meta = 바뀜 ? writeMeta(groupMeta(header), GROUP_OPTIONAL) : Mono.empty();
 
         return Flux.fromIterable(떠난멤버)
                 .flatMap(ref -> deleteItem(Keys.groupPk(header.id()), Keys.memberSk(ref))
@@ -476,7 +498,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return Paginator.queryAll(client, request).map(item -> Attrs.str(item, Keys.SK));
     }
 
-    /** 조직 META 에 쓸 아이템. {@code updatedAt} 은 넣지 않는다. */
+    /** 조직 META 에 쓸 아이템. 두 시각은 넣지 않는다 — {@link #writeMeta} 가 넣는다. */
     private Map<String, AttributeValue> groupMeta(GroupHeader header) {
         Map<String, AttributeValue> meta = new HashMap<>();
         meta.put(Keys.PK, Attrs.s(Keys.groupPk(header.id())));
@@ -508,9 +530,29 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             Flux.fromIterable(소속_정렬키).map(sk -> 지우기(pk, sk)),
                             Flux.fromIterable(members).map(member -> 지우기(Keys.memberPk(member), Keys.belongsToSk(groupId))));
 
-                    // 단계 순서: 멤버 줄 → 소속 줄 → META 맨 마지막
-                    return Flux.concat(묶어_보낸다(멤버_줄), 묶어_보낸다(소속_줄), deleteItem(pk, Keys.META)).then();
+                    // 단계 순서: 멤버 줄 → 상위 조직의 변경 시각 → 소속 줄 → META 맨 마지막. 상위 조직은 멤버(이 조직)가 빠졌으니
+                    // 바뀐 것이다(SCIM Group 은 members 를 담는다, 설계 2026-10-09 §3.2)
+                    Flux<Void> 상위_조직 = Flux.fromIterable(소속_정렬키)
+                            .flatMap(sk -> 변경_시각을_올린다(Keys.parseBelongsToSk(sk)), QUERY_CONCURRENCY);
+                    return Flux.concat(묶어_보낸다(멤버_줄), 상위_조직, 묶어_보낸다(소속_줄), deleteItem(pk, Keys.META)).then();
                 });
+    }
+
+    /**
+     * 조직의 변경 시각만 올린다 — 멤버(지운 하위 조직)가 빠졌다(설계 2026-10-09 §3.2). META 가 없으면(이미 지워진 조직) 만들지 않는다 —
+     * UpdateItem 은 없는 아이템을 만들기 때문에 조건을 단다. 조건이 깨지면 그 조직은 이미 없으니 넘어간다.
+     */
+    private Mono<Void> 변경_시각을_올린다(String groupId) {
+        return Mono.fromFuture(() -> client.updateItem(UpdateItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)), Keys.SK, Attrs.s(Keys.META)))
+                        .updateExpression("SET #updatedAt = :now")
+                        .conditionExpression("attribute_exists(#pk)")
+                        .expressionAttributeNames(Map.of("#updatedAt", UPDATED_AT, "#pk", Keys.PK))
+                        .expressionAttributeValues(Map.of(":now", Attrs.s(Instant.now(clock).toString())))
+                        .build()))
+                .then()
+                .onErrorResume(ConditionalCheckFailedException.class, 없는_조직 -> Mono.empty());
     }
 
     private static WriteRequest 지우기(String pk, String sk) {
@@ -764,6 +806,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * <p>아이템 맵을 그대로 들지 않는 이유 — 전체 동기화는 직원 10만 명의 저장본을 한꺼번에 들고 비교하는데,
      * {@code AttributeValue} 맵은 한 건에 1KB 를 넘게 먹는다. "도메인 값이 같고 {@code current}" 는 "updatedAt 을 뺀
      * 아이템 전체가 같다" 와 같은 판단이다 — 키 규칙이 바뀌면 {@code current} 가 거짓이 되어 값이 같아도 다시 쓴다.
+     * 두 시각({@code updatedAt}·{@code createdAt})은 비교에서 뺀다. META 를 UpdateItem 으로 쓰므로, 모델에서 뺀 속성은 선택 속성 목록에 남겨야
+     * 옛 아이템에서 지워진다 — 아니면 그 아이템은 늘 "다르다" 로 보인다.
      */
     record Stored<T>(T value, boolean current) {
 
@@ -787,18 +831,63 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return value == null || value.isEmpty() ? fallback : value;
     }
 
-    /** {@code updatedAt} 을 뺀 저장 아이템이 쓰려는 아이템과 같은가. */
+    /**
+     * 두 시각({@code updatedAt}·{@code createdAt})을 뺀 저장 아이템이 쓰려는 아이템과 같은가. 둘 다 빼야 한다 — 하나라도 남기면 모든 저장본이
+     * 다르게 보여 매 동기화가 전원을 다시 쓴다(GSI 쏠림, 설계 2026-10-09 §3.1).
+     */
     private static boolean sameContent(Map<String, AttributeValue> expected, Map<String, AttributeValue> stored) {
-        Map<String, AttributeValue> withoutStamp = new HashMap<>(stored);
-        withoutStamp.remove(UPDATED_AT);
-        return expected.equals(withoutStamp);
+        Map<String, AttributeValue> withoutStamps = new HashMap<>(stored);
+        withoutStamps.remove(UPDATED_AT);
+        withoutStamps.remove(CREATED_AT);
+        return expected.equals(withoutStamps);
     }
 
-    /** 바뀐 아이템에만 쓰는 시각. 이 값은 이제 "마지막 동기화" 가 아니라 "마지막 변경" 이다. */
-    private Map<String, AttributeValue> stamped(Map<String, AttributeValue> item) {
-        Map<String, AttributeValue> copy = new HashMap<>(item);
-        copy.put(UPDATED_AT, Attrs.s(Instant.now(clock).toString()));
-        return copy;
+    /**
+     * META 를 쓴다 — PutItem 처럼 통째로 바꾸되 생성 시각은 지킨다(설계 2026-10-09 §3.1).
+     *
+     * <p>키를 뺀 속성은 모두 SET 하고, {@code optional} 가운데 이번 아이템에 없는 것은 REMOVE 한다 — PutItem 의 "통째 교체" 와 같은 결과다.
+     * {@code updatedAt} 은 지금, {@code createdAt} 은 처음 한 번만({@code if_not_exists}) 넣는다. 쓰기 경로는 저장본을 다시 읽지 않으므로
+     * (설계 2026-10-03 §3.5) 옛 생성 시각을 손에 쥐고 있지 않다 — 보존을 DynamoDB 에 맡긴다. 처음 만들 때 두 시각은 같은 값이다
+     * (RFC 7643 §3.1 MUST). 쓰기 용량·GSI 쓰기는 PutItem 과 같다.
+     */
+    private Mono<Void> writeMeta(Map<String, AttributeValue> item, Set<String> optional) {
+        Map<String, String> names = new HashMap<>();
+        Map<String, AttributeValue> values = new HashMap<>();
+        List<String> sets = new ArrayList<>();
+        for (Map.Entry<String, AttributeValue> attribute : item.entrySet()) {
+            if (attribute.getKey().equals(Keys.PK) || attribute.getKey().equals(Keys.SK)) {
+                continue;
+            }
+            String name = "#a" + sets.size();
+            String value = ":a" + sets.size();
+            names.put(name, attribute.getKey());
+            values.put(value, attribute.getValue());
+            sets.add(name + " = " + value);
+        }
+        names.put("#updatedAt", UPDATED_AT);
+        names.put("#createdAt", CREATED_AT);
+        values.put(":now", Attrs.s(Instant.now(clock).toString()));
+        sets.add("#updatedAt = :now");
+        sets.add("#createdAt = if_not_exists(#createdAt, :now)");
+
+        List<String> removes = new ArrayList<>();
+        for (String attribute : optional) {
+            if (!item.containsKey(attribute)) {
+                String name = "#r" + removes.size();
+                names.put(name, attribute);
+                removes.add(name);
+            }
+        }
+        String expression = "SET " + String.join(", ", sets)
+                + (removes.isEmpty() ? "" : " REMOVE " + String.join(", ", removes));
+        return Mono.fromFuture(() -> client.updateItem(UpdateItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, item.get(Keys.PK), Keys.SK, item.get(Keys.SK)))
+                        .updateExpression(expression)
+                        .expressionAttributeNames(names)
+                        .expressionAttributeValues(values)
+                        .build()))
+                .then();
     }
 
     /** META 한 건을 <b>강한 일관성</b>으로 읽는다. 쓰기 전 비교용이다. */

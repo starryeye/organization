@@ -31,7 +31,7 @@ class ScimUserListingTest {
         state = new FakeStateRepository();
         query = new FakeQueryRepository(state);
         bookmarks = new FakePageBookmarkRepository();
-        listing = new ScimUserListing(state, query, bookmarks);
+        listing = new ScimUserListing(query, bookmarks);
     }
 
     /** u000 … u(n-1). 아이디와 userName 이 같고 externalId 는 ext-i 다. */
@@ -115,7 +115,7 @@ class ScimUserListingTest {
         // given
         직원들을_둔다(250);
         ScimUserListing listingWithFailingFind =
-                new ScimUserListing(state, query, new FindFailingBookmarkRepository());
+                new ScimUserListing(query, new FindFailingBookmarkRepository());
 
         // when
         ScimListResponse page = listingWithFailingFind.list(ScimQuery.of(ScimResourceType.USER, null, 101L, 100L,
@@ -132,7 +132,7 @@ class ScimUserListingTest {
         // given
         직원들을_둔다(250);
         ScimUserListing listingWithFailingSave =
-                new ScimUserListing(state, query, new SaveFailingBookmarkRepository());
+                new ScimUserListing(query, new SaveFailingBookmarkRepository());
 
         // when
         ScimListResponse page = listingWithFailingSave.list(ScimQuery.of(ScimResourceType.USER, null, 1L, 100L,

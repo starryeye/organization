@@ -2,6 +2,7 @@ package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.Timestamped;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.query.Page;
@@ -10,6 +11,8 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 import software.amazon.awssdk.services.dynamodb.model.Select;
@@ -37,37 +40,49 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
-    /** GSI3 로 찾은 키를 본 테이블에서 강한 일관성으로 다시 읽는다. */
+    /** GSI3(externalId)로 아이디를 찾는다. 아이템은 이 저장소가 본 테이블에서 강한 일관성으로 다시 읽는다. */
     private final DirectoryStateRepository state;
 
     @Override
-    public Flux<DirectoryUser> findUsersByUserName(String userName) {
+    public Flux<Timestamped<DirectoryUser>> findUsersByUserName(String userName) {
         return exact(Keys.USER_INDEX, userName).map(DynamoDbDirectoryQueryRepository::user);
     }
 
     @Override
-    public Flux<DirectoryUser> findUsersByExternalId(String externalId) {
-        return state.findUserIdsByExternalId(externalId).concatMap(state::findUser);
+    public Flux<Timestamped<DirectoryUser>> findUsersByExternalId(String externalId) {
+        return state.findUserIdsByExternalId(externalId).concatMap(this::findUser);
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByDisplayName(String displayName) {
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByDisplayName(String displayName) {
         return exact(Keys.GROUP_INDEX, displayName).map(DynamoDbDirectoryQueryRepository::group);
     }
 
     @Override
-    public Flux<GroupHeader> findGroupHeadersByExternalId(String externalId) {
-        return state.findGroupIdsByExternalId(externalId).concatMap(state::findGroupHeader);
+    public Flux<Timestamped<GroupHeader>> findGroupHeadersByExternalId(String externalId) {
+        return state.findGroupIdsByExternalId(externalId).concatMap(this::findGroupHeader);
     }
 
     @Override
-    public Mono<Page<DirectoryUser>> listUsers(String from, int limit, boolean descending) {
+    public Mono<Page<Timestamped<DirectoryUser>>> listUsers(String from, int limit, boolean descending) {
         return page(USERS_SCOPE, Keys.USER_INDEX, from, limit, descending, DynamoDbDirectoryQueryRepository::user);
     }
 
+    /** 강한 일관성 GetItem — 쓰기 직후 응답이 방금 쓴 값을 읽는다(설계 2026-10-09 §4.2). */
     @Override
-    public Mono<Page<GroupHeader>> listGroupHeaders(String from, int limit, boolean descending) {
+    public Mono<Timestamped<DirectoryUser>> findUser(String userId) {
+        return meta(Keys.userPk(userId)).map(DynamoDbDirectoryQueryRepository::user);
+    }
+
+    @Override
+    public Mono<Page<Timestamped<GroupHeader>>> listGroupHeaders(String from, int limit, boolean descending) {
         return page(GROUPS_SCOPE, Keys.GROUP_INDEX, from, limit, descending, DynamoDbDirectoryQueryRepository::group);
+    }
+
+    /** 강한 일관성 GetItem — 쓰기 직후 응답이 방금 쓴 값을 읽는다(설계 2026-10-09 §4.2). */
+    @Override
+    public Mono<Timestamped<GroupHeader>> findGroupHeader(String groupId) {
+        return meta(Keys.groupPk(groupId)).map(DynamoDbDirectoryQueryRepository::group);
     }
 
     @Override
@@ -90,12 +105,27 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
         return skip(GROUPS_SCOPE, Keys.GROUP_INDEX, n, descending);
     }
 
-    private static DirectoryUser user(Map<String, AttributeValue> item) {
-        return DynamoDbDirectoryStateRepository.toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item);
+    private static Timestamped<DirectoryUser> user(Map<String, AttributeValue> item) {
+        return new Timestamped<>(
+                DynamoDbDirectoryStateRepository.toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item),
+                DynamoDbDirectoryStateRepository.timesOf(item));
     }
 
-    private static GroupHeader group(Map<String, AttributeValue> item) {
-        return DynamoDbDirectoryStateRepository.toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item);
+    /** META 한 건을 <b>강한 일관성</b>으로 읽는다. 없으면 빈 Mono. */
+    private Mono<Map<String, AttributeValue>> meta(String pk) {
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .map(GetItemResponse::item);
+    }
+
+    private static Timestamped<GroupHeader> group(Map<String, AttributeValue> item) {
+        return new Timestamped<>(
+                DynamoDbDirectoryStateRepository.toGroupHeader(Keys.parseGroupPk(Attrs.str(item, Keys.PK)), item),
+                DynamoDbDirectoryStateRepository.timesOf(item));
     }
 
     /** GSI1 정렬키가 값의 소문자와 같은 아이템. 대소문자만 다른 둘이 있으면 둘 다 돌려준다. */

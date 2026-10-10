@@ -115,10 +115,10 @@ class BulkPathScaleTest extends DynamoDbTestSupport {
                 .collectList().block();
         long 압축_바이트 = 묶음들.stream().mapToLong(item -> item.get("data").b().asByteArray().length).sum();
         System.out.printf("스냅샷: 튜플 %,d · 원본 %,d바이트 → 압축 %,d바이트(%.1f배) · 묶음 %d — 저장 %,dms(PutItem %d) · 읽기 %,dms%n",
-                tuples.size(), 원본_바이트, 압축_바이트, (double) 원본_바이트 / 압축_바이트, 묶음들.size(), 저장, writes.puts(), 읽기);
+                tuples.size(), 원본_바이트, 압축_바이트, (double) 원본_바이트 / 압축_바이트, 묶음들.size(), 저장, writes.writes(), 읽기);
         assertThat(tuples).hasSize(150_000);
         assertThat(latest.tuples()).isEqualTo(tuples);
-        assertThat(writes.puts()).isEqualTo(묶음들.size() + 2);
+        assertThat(writes.writes()).isEqualTo(묶음들.size() + 2);
         assertThat(묶음들.size()).isLessThan((int) (원본_바이트 / DynamoDbTupleSnapshotRepository.CHUNK_SIZE));
     }
 }

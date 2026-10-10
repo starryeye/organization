@@ -2,10 +2,13 @@ package dev.starryeye.organization.scim;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.starryeye.organization.core.fake.FakeQueryRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.ResourceTimes;
+import dev.starryeye.organization.core.model.Timestamped;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -17,6 +20,7 @@ import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -35,6 +39,10 @@ class ScimGroupStreamTest {
             DataBufferUtils.release(buffer);
             return text;
         }).block();
+    }
+
+    private static Timestamped<GroupHeader> 시각_없이(GroupHeader header) {
+        return new Timestamped<>(header, ResourceTimes.UNKNOWN);
     }
 
     /** 트리 방식(지금까지의 응답)과 흘려 쓴 응답을 값으로 견준다 — 필드 순서와 멤버 순서는 보지 않는다. */
@@ -76,10 +84,10 @@ class ScimGroupStreamTest {
                 ScimAttributeProjection.split(attributes), ScimAttributeProjection.split(excluded));
 
         // when
-        String 흘려쓴 = 모은다(new ScimGroupStream(state).group(new GroupHeader("DEV", "ext-DEV", "개발본부"), projection));
+        String 흘려쓴 = 모은다(new ScimGroupStream(state, new FakeQueryRepository(state)).group(시각_없이(new GroupHeader("DEV", "ext-DEV", "개발본부")), projection));
 
         // then
-        같은_값이다(흘려쓴, projection.apply(ScimJson.tree(ScimMapper.toScimGroup(group))));
+        같은_값이다(흘려쓴, projection.apply(ScimJson.tree(ScimMapper.toScimGroup(group, ResourceTimes.UNKNOWN))));
     }
 
     @Test
@@ -90,7 +98,7 @@ class ScimGroupStreamTest {
         state.saveGroup(new DirectoryGroup("EMPTY", null, "빈 조직", Set.of())).block();
 
         // when
-        String 흘려쓴 = 모은다(new ScimGroupStream(state).group(new GroupHeader("EMPTY", null, "빈 조직"),
+        String 흘려쓴 = 모은다(new ScimGroupStream(state, new FakeQueryRepository(state)).group(시각_없이(new GroupHeader("EMPTY", null, "빈 조직")),
                 ScimAttributeProjection.all()));
 
         // then
@@ -113,7 +121,7 @@ class ScimGroupStreamTest {
         };
 
         // when — 앞부분과 첫 묶음만 받는다
-        new ScimGroupStream(state).group(new GroupHeader("ALL", null, "전 직원"), ScimAttributeProjection.all())
+        new ScimGroupStream(state, new FakeQueryRepository(state)).group(시각_없이(new GroupHeader("ALL", null, "전 직원")), ScimAttributeProjection.all())
                 .take(2)
                 .doOnNext(DataBufferUtils::release)
                 .blockLast();
@@ -135,7 +143,7 @@ class ScimGroupStreamTest {
         };
 
         // when, then
-        StepVerifier.create(new ScimGroupStream(state).group(new GroupHeader("ALL", null, "전 직원"),
+        StepVerifier.create(new ScimGroupStream(state, new FakeQueryRepository(state)).group(시각_없이(new GroupHeader("ALL", null, "전 직원")),
                         ScimAttributeProjection.all()))
                 .thenConsumeWhile(buffer -> {
                     String text = buffer.toString(StandardCharsets.UTF_8);
@@ -152,10 +160,10 @@ class ScimGroupStreamTest {
         var state = new FakeStateRepository();
         state.saveGroup(new DirectoryGroup("DEV", null, "개발", Set.of(MemberRef.user("kim")))).block();
         var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
-        List<GroupHeader> headers = List.of(new GroupHeader("DEV", null, "개발"), new GroupHeader("GONE", null, "사라짐"));
+        List<Timestamped<GroupHeader>> headers = List.of(시각_없이(new GroupHeader("DEV", null, "개발")), 시각_없이(new GroupHeader("GONE", null, "사라짐")));
 
         // when
-        JsonNode 목록 = JSON.readTree(모은다(new ScimGroupStream(state).list(query, 2, headers)));
+        JsonNode 목록 = JSON.readTree(모은다(new ScimGroupStream(state, new FakeQueryRepository(state)).list(query, 2, headers)));
 
         // then
         assertThat(목록.get("schemas").get(0).asText()).isEqualTo(ScimSchemas.LIST_RESPONSE);
@@ -180,7 +188,7 @@ class ScimGroupStreamTest {
         };
 
         // when
-        String 흘려쓴 = 모은다(new ScimGroupStream(state).group(new GroupHeader("ALL", null, "전 직원"),
+        String 흘려쓴 = 모은다(new ScimGroupStream(state, new FakeQueryRepository(state)).group(시각_없이(new GroupHeader("ALL", null, "전 직원")),
                 ScimAttributeProjection.all()));
 
         // then
@@ -198,11 +206,11 @@ class ScimGroupStreamTest {
         state.saveGroup(new DirectoryGroup("A", null, "가", Set.of(MemberRef.user("kim")))).block();
         state.saveGroup(new DirectoryGroup("B", null, "나", Set.of())).block();
         var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
-        List<GroupHeader> headers = List.of(new GroupHeader("GONE", null, "사라짐"),
-                new GroupHeader("A", null, "가"), new GroupHeader("B", null, "나"));
+        List<Timestamped<GroupHeader>> headers = List.of(시각_없이(new GroupHeader("GONE", null, "사라짐")),
+                시각_없이(new GroupHeader("A", null, "가")), 시각_없이(new GroupHeader("B", null, "나")));
 
         // when
-        JsonNode 목록 = JSON.readTree(모은다(new ScimGroupStream(state).list(query, 3, headers)));
+        JsonNode 목록 = JSON.readTree(모은다(new ScimGroupStream(state, new FakeQueryRepository(state)).list(query, 3, headers)));
 
         // then
         List<String> 받은_아이디 = new ArrayList<>();
@@ -219,10 +227,10 @@ class ScimGroupStreamTest {
         state.saveGroup(new DirectoryGroup("A", null, "가", Set.of(MemberRef.user("kim")))).block();
         state.saveGroup(new DirectoryGroup("B", null, "나", Set.of())).block();
         var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
-        List<GroupHeader> headers = List.of(new GroupHeader("A", null, "가"), new GroupHeader("B", null, "나"));
+        List<Timestamped<GroupHeader>> headers = List.of(시각_없이(new GroupHeader("A", null, "가")), 시각_없이(new GroupHeader("B", null, "나")));
 
         // when
-        List<Integer> 길이들 = new ScimGroupStream(state).list(query, 2, headers)
+        List<Integer> 길이들 = new ScimGroupStream(state, new FakeQueryRepository(state)).list(query, 2, headers)
                 .map(buffer -> {
                     int length = buffer.readableByteCount();
                     DataBufferUtils.release(buffer);
@@ -232,5 +240,25 @@ class ScimGroupStreamTest {
 
         // then
         assertThat(길이들).isNotEmpty().allMatch(length -> length > 0);
+    }
+
+    @Test
+    @DisplayName("멤버를 흘려 쓰는 조직 응답도 meta 에 생성·변경 시각을 싣는다 — 목록은 조직마다 다시 읽은 시각이다")
+    void 흘려_쓰는_응답도_시각을_싣는다() throws Exception {
+        // given
+        var state = new FakeStateRepository();
+        state.saveGroup(new DirectoryGroup("DEV", null, "개발", Set.of(MemberRef.user("kim")))).block();
+        var 조회 = new FakeQueryRepository(state);
+        조회.times.put("DEV", new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T04:00:00Z")));
+        var stream = new ScimGroupStream(state, 조회);
+        var query = new ScimQuery(null, 1, 100, false, ScimAttributeProjection.all());
+
+        // when — 목록은 넘겨받은 머리(시각 없음)가 아니라 다시 읽은 머리의 시각을 쓴다
+        JsonNode 하나 = JSON.readTree(모은다(stream.group(조회.findGroupHeader("DEV").block(), ScimAttributeProjection.all())));
+        JsonNode 목록 = JSON.readTree(모은다(stream.list(query, 1, List.of(시각_없이(new GroupHeader("DEV", null, "개발"))))));
+
+        // then
+        assertThat(하나.get("meta").get("lastModified").asText()).isEqualTo("2026-10-09T04:00:00Z");
+        assertThat(목록.get("Resources").get(0).get("meta").get("created").asText()).isEqualTo("2026-10-09T03:00:00Z");
     }
 }

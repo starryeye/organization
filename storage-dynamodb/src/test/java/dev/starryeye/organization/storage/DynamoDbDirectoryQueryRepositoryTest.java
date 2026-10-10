@@ -3,15 +3,23 @@ package dev.starryeye.organization.storage;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
+import dev.starryeye.organization.core.model.Timestamped;
 import dev.starryeye.organization.core.query.Page;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -46,8 +54,8 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         List<String> seen = new ArrayList<>();
         String from = null;
         do {
-            Page<DirectoryUser> page = query.listUsers(from, limit, descending).block();
-            page.items().forEach(user -> seen.add(user.id()));
+            Page<Timestamped<DirectoryUser>> page = query.listUsers(from, limit, descending).block();
+            page.items().forEach(user -> seen.add(user.value().id()));
             from = page.nextCursor();
         } while (from != null);
         return seen;
@@ -61,7 +69,7 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         직원("park", "park", "ext-park");
 
         // when
-        List<DirectoryUser> found = query.findUsersByUserName("kIM.lEE").collectList().block();
+        List<DirectoryUser> found = query.findUsersByUserName("kIM.lEE").map(Timestamped::value).collectList().block();
 
         // then
         assertThat(found).extracting(DirectoryUser::userName).containsExactly("Kim.Lee");
@@ -74,7 +82,7 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         조직("DEV001", "Dev Team", "grp-dev");
 
         // when
-        List<GroupHeader> found = query.findGroupHeadersByDisplayName("DEV TEAM").collectList().block();
+        List<GroupHeader> found = query.findGroupHeadersByDisplayName("DEV TEAM").map(Timestamped::value).collectList().block();
 
         // then
         assertThat(found).containsExactly(new GroupHeader("DEV001", "grp-dev", "Dev Team"));
@@ -88,8 +96,8 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         조직("G1", "조직 1", "X-1");
 
         // when
-        List<DirectoryUser> users = query.findUsersByExternalId("X-1").collectList().block();
-        List<GroupHeader> groups = query.findGroupHeadersByExternalId("X-1").collectList().block();
+        List<DirectoryUser> users = query.findUsersByExternalId("X-1").map(Timestamped::value).collectList().block();
+        List<GroupHeader> groups = query.findGroupHeadersByExternalId("X-1").map(Timestamped::value).collectList().block();
 
         // then
         assertThat(users).extracting(DirectoryUser::id).containsExactly("u1");
@@ -103,7 +111,7 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         직원("u1", "u1", "X-1");
 
         // when
-        List<DirectoryUser> found = query.findUsersByExternalId("x-1").collectList().block();
+        List<DirectoryUser> found = query.findUsersByExternalId("x-1").map(Timestamped::value).collectList().block();
 
         // then
         assertThat(found).isEmpty();
@@ -117,7 +125,7 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         state.saveUser(new DirectoryUser("u1", "X-1", "u1", "새 이름", null, false)).block();
 
         // when
-        DirectoryUser found = query.findUsersByExternalId("X-1").blockFirst();
+        DirectoryUser found = query.findUsersByExternalId("X-1").map(Timestamped::value).blockFirst();
 
         // then
         assertThat(found.displayName()).isEqualTo("새 이름");
@@ -159,10 +167,10 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
 
         // when
         String position = query.skipUsers(3, false).block();
-        Page<DirectoryUser> page = query.listUsers(position, 2, false).block();
+        Page<Timestamped<DirectoryUser>> page = query.listUsers(position, 2, false).block();
 
         // then
-        assertThat(page.items()).extracting(DirectoryUser::id).containsExactly("D", "e");
+        assertThat(page.items()).extracting(found -> found.value().id()).containsExactly("D", "e");
         assertThat(query.skipUsers(0, false).blockOptional()).isEmpty();
         assertThat(query.listUsers(query.skipUsers(100, false).block(), 2, false).block().items()).isEmpty();
     }
@@ -189,12 +197,12 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         조직("G3", "gamma", "grp-3");
 
         // when
-        Page<GroupHeader> first = query.listGroupHeaders(null, 2, false).block();
-        Page<GroupHeader> second = query.listGroupHeaders(first.nextCursor(), 2, false).block();
+        Page<Timestamped<GroupHeader>> first = query.listGroupHeaders(null, 2, false).block();
+        Page<Timestamped<GroupHeader>> second = query.listGroupHeaders(first.nextCursor(), 2, false).block();
 
         // then
-        assertThat(first.items()).extracting(GroupHeader::id).containsExactly("G2", "G1");
-        assertThat(second.items()).extracting(GroupHeader::id).containsExactly("G3");
+        assertThat(first.items()).extracting(found -> found.value().id()).containsExactly("G2", "G1");
+        assertThat(second.items()).extracting(found -> found.value().id()).containsExactly("G3");
     }
 
     @Test
@@ -202,14 +210,14 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
     void 이어_읽을_위치가_지워져도_이어_읽는다() {
         // given — 첫 페이지의 마지막 직원(c)을 페이지 사이에 지운다
         일곱_명을_둔다();
-        Page<DirectoryUser> first = query.listUsers(null, 3, false).block();
+        Page<Timestamped<DirectoryUser>> first = query.listUsers(null, 3, false).block();
         state.deleteUser("c").block();
 
         // when
-        Page<DirectoryUser> second = query.listUsers(first.nextCursor(), 3, false).block();
+        Page<Timestamped<DirectoryUser>> second = query.listUsers(first.nextCursor(), 3, false).block();
 
         // then
-        assertThat(second.items()).extracting(DirectoryUser::id).containsExactly("D", "e", "F");
+        assertThat(second.items()).extracting(found -> found.value().id()).containsExactly("D", "e", "F");
     }
 
     @Test
@@ -220,7 +228,84 @@ class DynamoDbDirectoryQueryRepositoryTest extends DynamoDbTestSupport {
         state.saveUser(new DirectoryUser("hong", "ext-hong", "hong", "홍길동", null, true, 이름)).block();
 
         // when, then
-        assertThat(query.findUsersByUserName("HONG").blockFirst().name()).isEqualTo(이름);
-        assertThat(query.listUsers(null, 10, false).block().items().get(0).name()).isEqualTo(이름);
+        assertThat(query.findUsersByUserName("HONG").blockFirst().value().name()).isEqualTo(이름);
+        assertThat(query.listUsers(null, 10, false).block().items().get(0).value().name()).isEqualTo(이름);
+    }
+
+    /** 이 시각으로 쓰는 상태 저장소. 같은 테이블을 쓴다. */
+    private DynamoDbDirectoryStateRepository 시각을_정한_저장소(String at) {
+        return new DynamoDbDirectoryStateRepository(client, properties, Clock.fixed(Instant.parse(at), ZoneOffset.UTC));
+    }
+
+    @Test
+    @DisplayName("직원 단건·목록·userName·externalId 찾기가 생성 시각과 변경 시각을 함께 준다")
+    void 직원_읽기가_두_시각을_준다() {
+        // given — 처음 만들고 한 시간 뒤 표시명을 바꾼다
+        DirectoryUser 처음 = new DirectoryUser("kim", "ext-kim", "kim", "김철수", null, true);
+        시각을_정한_저장소("2026-01-01T00:00:00Z").saveUser(처음).block();
+        시각을_정한_저장소("2026-01-01T01:00:00Z").saveUser(처음, 처음.withDisplayName("새 이름")).block();
+        ResourceTimes 기대 = new ResourceTimes(Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-01T01:00:00Z"));
+
+        // when
+        Timestamped<DirectoryUser> 단건 = query.findUser("kim").block();
+        Timestamped<DirectoryUser> 이름 = query.findUsersByUserName("KIM").blockFirst();
+        Timestamped<DirectoryUser> 외부 = query.findUsersByExternalId("ext-kim").blockFirst();
+        Timestamped<DirectoryUser> 목록 = query.listUsers(null, 10, false).block().items().get(0);
+
+        // then
+        assertThat(단건.value().displayName()).isEqualTo("새 이름");
+        assertThat(List.of(단건.times(), 이름.times(), 외부.times(), 목록.times())).containsOnly(기대);
+    }
+
+    @Test
+    @DisplayName("없는 직원의 단건 읽기는 빈 결과다")
+    void 없는_직원은_빈_결과다() {
+        // when, then
+        assertThat(query.findUser("없음").blockOptional()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("생성 시각이 없는 옛 아이템은 생성 시각이 null 이고 변경 시각은 있다")
+    void 옛_아이템은_생성_시각이_없다() {
+        // given — 이 설계 전의 모양(createdAt 없음)을 직접 쓴다
+        client.putItem(PutItemRequest.builder()
+                .tableName(properties.getTableName())
+                .item(Map.of(
+                        Keys.PK, AttributeValue.fromS(Keys.userPk("old")),
+                        Keys.SK, AttributeValue.fromS(Keys.META),
+                        Keys.GSI1PK, AttributeValue.fromS(Keys.USER_INDEX),
+                        Keys.GSI1SK, AttributeValue.fromS("old"),
+                        "userName", AttributeValue.fromS("old"),
+                        "active", AttributeValue.fromBool(true),
+                        "updatedAt", AttributeValue.fromS("2025-12-31T00:00:00Z")))
+                .build()).join();
+
+        // when
+        Timestamped<DirectoryUser> found = query.findUser("old").block();
+
+        // then
+        assertThat(found.times()).isEqualTo(new ResourceTimes(null, Instant.parse("2025-12-31T00:00:00Z")));
+    }
+
+    @Test
+    @DisplayName("조직 단건·목록·조직명·externalId 찾기가 생성 시각과 변경 시각을 함께 준다")
+    void 조직_읽기가_두_시각을_준다() {
+        // given — 처음 만들고 한 시간 뒤 멤버를 넣는다(멤버만 바뀌어도 조직이 바뀐 것이다)
+        시각을_정한_저장소("2026-01-01T00:00:00Z").saveGroup(new DirectoryGroup("DEV", "ext-DEV", "개발", Set.of())).block();
+        시각을_정한_저장소("2026-01-01T01:00:00Z")
+                .saveGroupChange(new GroupHeader("DEV", "ext-DEV", "개발"), Set.of(MemberRef.user("kim")), Set.of())
+                .block();
+        ResourceTimes 기대 = new ResourceTimes(Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-01T01:00:00Z"));
+
+        // when
+        Timestamped<GroupHeader> 단건 = query.findGroupHeader("DEV").block();
+        Timestamped<GroupHeader> 이름 = query.findGroupHeadersByDisplayName("개발").blockFirst();
+        Timestamped<GroupHeader> 외부 = query.findGroupHeadersByExternalId("ext-DEV").blockFirst();
+        Timestamped<GroupHeader> 목록 = query.listGroupHeaders(null, 10, false).block().items().get(0);
+
+        // then
+        assertThat(단건.value()).isEqualTo(new GroupHeader("DEV", "ext-DEV", "개발"));
+        assertThat(List.of(단건.times(), 이름.times(), 외부.times(), 목록.times())).containsOnly(기대);
+        assertThat(query.findGroupHeader("없음").blockOptional()).isEmpty();
     }
 }

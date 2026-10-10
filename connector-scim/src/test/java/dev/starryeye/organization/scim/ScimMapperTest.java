@@ -2,10 +2,12 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.scim.dto.ScimEmail;
 import dev.starryeye.organization.scim.dto.ScimGroup;
 import dev.starryeye.organization.scim.dto.ScimMember;
@@ -14,6 +16,7 @@ import dev.starryeye.organization.scim.dto.ScimUser;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -151,7 +154,7 @@ class ScimMapperTest {
         var user = new DirectoryUser("kim", "emp-1001", "kim", "김철수", "kim@example.com", true);
 
         // when
-        ScimUser scim = ScimMapper.toScimUser(user);
+        ScimUser scim = ScimMapper.toScimUser(user, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(scim.schemas()).containsExactly(ScimSchemas.USER);
@@ -170,7 +173,7 @@ class ScimMapperTest {
                 Set.of(MemberRef.group("DEV002"), MemberRef.user("park")));
 
         // when
-        ScimGroup scim = ScimMapper.toScimGroup(group);
+        ScimGroup scim = ScimMapper.toScimGroup(group, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(scim.schemas()).containsExactly(ScimSchemas.GROUP);
@@ -188,7 +191,7 @@ class ScimMapperTest {
         var user = new DirectoryUser("kim", null, "kim", "김철수", null, true);
 
         // when
-        ScimUser scim = ScimMapper.toScimUser(user);
+        ScimUser scim = ScimMapper.toScimUser(user, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(scim.emails()).isEmpty();
@@ -371,7 +374,7 @@ class ScimMapperTest {
         var user = new DirectoryUser("kim", "emp-1001", "kim.lee", "김철수", "kim@example.com", true);
 
         // when
-        ScimUser scim = ScimMapper.toScimUser(user);
+        ScimUser scim = ScimMapper.toScimUser(user, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(scim.id()).isEqualTo("kim");
@@ -388,7 +391,7 @@ class ScimMapperTest {
 
         // when
         DirectoryUser user = ScimMapper.toDirectoryUser(scim, ID);
-        ScimUser 응답 = ScimMapper.toScimUser(user);
+        ScimUser 응답 = ScimMapper.toScimUser(user, ResourceTimes.UNKNOWN);
 
         // then
         assertThat(user.name()).isEqualTo(new PersonName("홍길동", "홍", "길동", "철", "Mr.", "Jr."));
@@ -400,10 +403,41 @@ class ScimMapperTest {
     @DisplayName("이름이 없으면 응답에 name 을 넣지 않는다 — formatted 를 지어내지 않는다")
     void 이름이_없으면_name_이_없다() {
         // when
-        ScimUser 응답 = ScimMapper.toScimUser(new DirectoryUser("kim", null, "kim", "김철수", null, true));
+        ScimUser 응답 = ScimMapper.toScimUser(new DirectoryUser("kim", null, "kim", "김철수", null, true), ResourceTimes.UNKNOWN);
 
         // then
         assertThat(응답.name()).isNull();
         assertThat(응답.displayName()).isEqualTo("김철수");
+    }
+
+    @Test
+    @DisplayName("직원 meta 는 resourceType·created·lastModified·location 순이고 시각은 ISO-8601 UTC 다 — 모르면 싣지 않는다")
+    void 직원_meta_에_두_시각을_싣는다() {
+        // given
+        DirectoryUser user = new DirectoryUser("kim", null, "kim", "김철수", null, true);
+        ResourceTimes times = new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T04:30:00.123456Z"));
+
+        // when
+        String 있음 = ScimJson.string(ScimJson.tree(ScimMapper.toScimUser(user, times)));
+        String 없음 = ScimJson.string(ScimJson.tree(ScimMapper.toScimUser(user, ResourceTimes.UNKNOWN)));
+
+        // then
+        assertThat(있음).contains("\"meta\":{\"resourceType\":\"User\",\"created\":\"2026-10-09T03:00:00Z\","
+                + "\"lastModified\":\"2026-10-09T04:30:00.123456Z\",\"location\":\"/scim/v2/Users/kim\"}");
+        assertThat(없음).contains("\"meta\":{\"resourceType\":\"User\",\"location\":\"/scim/v2/Users/kim\"}");
+    }
+
+    @Test
+    @DisplayName("조직 meta 도 resourceType·created·lastModified·location 순이다")
+    void 조직_meta_에_두_시각을_싣는다() {
+        // given
+        ResourceTimes times = new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T05:00:00Z"));
+
+        // when
+        String 헤더 = ScimJson.string(ScimJson.tree(ScimMapper.toScimGroup(new GroupHeader("DEV", null, "개발"), times)));
+
+        // then
+        assertThat(헤더).contains("\"meta\":{\"resourceType\":\"Group\",\"created\":\"2026-10-09T03:00:00Z\","
+                + "\"lastModified\":\"2026-10-09T05:00:00Z\",\"location\":\"/scim/v2/Groups/DEV\"}");
     }
 }

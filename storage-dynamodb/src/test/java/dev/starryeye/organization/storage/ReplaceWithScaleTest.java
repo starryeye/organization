@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 직원 10만 명의 전체 교체 (GSI 설계 §6). 실제 운영 규모가 10만 명 이상이라, 매 동기화가 GSI1 한 파티션키로 몰아
- * 쓰던 양이 변경 수로 줄었는지를 PutItem 수로 단정한다. 변경은 저장소 한 곳이라 LDAP 서버 없이 저장소 수준에서 본다.
+ * 쓰던 양이 변경 수로 줄었는지를 쓰기 수로 단정한다. 변경은 저장소 한 곳이라 LDAP 서버 없이 저장소 수준에서 본다.
  */
 @ScaleTest
 class ReplaceWithScaleTest extends DynamoDbTestSupport {
@@ -45,7 +45,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("10만 명을 적재한 뒤 같은 조직도는 PutItem 0번, 100명을 바꾸면 PutItem 100번이다")
+    @DisplayName("10만 명을 적재한 뒤 같은 조직도는 쓰기 0번, 100명을 바꾸면 쓰기 100번이다")
     void 바뀐_만큼만_쓴다() {
         // given — 스냅샷 구성은 시계에 넣지 않는다. replaceWith 만 잰다
         WriteCounter counter = new WriteCounter();
@@ -54,7 +54,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         long 시작 = System.currentTimeMillis();
         repository.replaceWith(최초).block(Duration.ofMinutes(30));
         long 적재 = System.currentTimeMillis() - 시작;
-        long 적재쓰기 = counter.puts();
+        long 적재쓰기 = counter.writes();
 
         // when — 같은 조직도
         DirectorySnapshot 그대로 = 조직도(Map.of());
@@ -62,7 +62,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         시작 = System.currentTimeMillis();
         repository.replaceWith(그대로).block(Duration.ofMinutes(30));
         long 같음 = System.currentTimeMillis() - 시작;
-        long 같음쓰기 = counter.puts();
+        long 같음쓰기 = counter.writes();
 
         // when — 100명만 바뀜
         Map<String, DirectoryUser> 바뀐직원 = new LinkedHashMap<>();
@@ -75,10 +75,10 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         시작 = System.currentTimeMillis();
         repository.replaceWith(일부변경).block(Duration.ofMinutes(30));
         long 일부 = System.currentTimeMillis() - 시작;
-        long 일부쓰기 = counter.puts();
+        long 일부쓰기 = counter.writes();
 
         // then — 최초 적재는 직원 10만 + 조직 META 100 + 소속 줄 1,000 + 멤버 줄 1,000 = 102,100건
-        System.out.printf("적재: %,dms PutItem %,d / 같은 조직도: %,dms PutItem %,d / 100명 변경: %,dms PutItem %,d%n",
+        System.out.printf("적재: %,dms 쓰기 %,d / 같은 조직도: %,dms 쓰기 %,d / 100명 변경: %,dms 쓰기 %,d%n",
                 적재, 적재쓰기, 같음, 같음쓰기, 일부, 일부쓰기);
         assertThat(적재쓰기).isEqualTo(102_100);
         assertThat(같음쓰기).isZero();

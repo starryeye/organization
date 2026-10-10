@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.jayway.jsonpath.JsonPath;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
@@ -11,6 +12,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.ResourceTimes;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockObserver;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +24,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -46,9 +49,9 @@ class ScimGroupHandlerTest {
         var query = new FakeQueryRepository(state);
         var bookmarks = new FakePageBookmarkRepository();
         client = WebTestClient.bindToRouterFunction(
-                ScimRouter.scimRoutes(new ScimUserHandler(state, useCase),
-                        new ScimGroupHandler(state, useCase, new StateMemberTypeResolver(state)),
-                        new ScimListHandler(new ScimUserListing(state, query, bookmarks),
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
+                        new ScimGroupHandler(state, query, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
                                 new ScimGroupListing(state, query, bookmarks)))).build();
     }
 
@@ -642,5 +645,32 @@ class ScimGroupHandlerTest {
                 .jsonPath("$.patch.supported").isEqualTo(true)
                 .jsonPath("$.filter.supported").isEqualTo(true)
                 .jsonPath("$.bulk.supported").isEqualTo(false);
+    }
+
+    @Test
+    @DisplayName("조직 GET 은 멤버를 싣든 빼든 조회 포트가 준 생성·변경 시각을 meta 에 싣는다")
+    void GET_은_meta_에_시각을_싣는다() {
+        // given
+        state.groups.put("DEV", new DirectoryGroup("DEV", null, "개발", Set.of()));
+        var query = new FakeQueryRepository(state);
+        query.times.put("DEV", new ResourceTimes(Instant.parse("2026-10-09T03:00:00Z"), Instant.parse("2026-10-09T04:00:00Z")));
+        var useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
+                IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
+        var bookmarks = new FakePageBookmarkRepository();
+        WebTestClient 시각이_있는 = WebTestClient.bindToRouterFunction(
+                ScimRouter.scimRoutes(new ScimUserHandler(query, useCase),
+                        new ScimGroupHandler(state, query, useCase, new StateMemberTypeResolver(state)),
+                        new ScimListHandler(new ScimUserListing(query, bookmarks),
+                                new ScimGroupListing(state, query, bookmarks)))).build();
+
+        // when
+        JsonNode 멤버포함 = 시각이_있는.get().uri("/scim/v2/Groups/DEV").exchange()
+                .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody();
+        JsonNode 멤버제외 = 시각이_있는.get().uri("/scim/v2/Groups/DEV?excludedAttributes=members").exchange()
+                .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody();
+
+        // then
+        assertThat(멤버포함.get("meta").get("lastModified").asText()).isEqualTo("2026-10-09T04:00:00Z");
+        assertThat(멤버제외.get("meta").get("created").asText()).isEqualTo("2026-10-09T03:00:00Z");
     }
 }

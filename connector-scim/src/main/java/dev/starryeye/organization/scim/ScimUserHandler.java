@@ -1,7 +1,8 @@
 package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.model.DirectoryUser;
-import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.model.Timestamped;
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
@@ -24,17 +25,18 @@ import static dev.starryeye.organization.scim.ScimRouter.SCIM_JSON;
 @Slf4j
 public class ScimUserHandler {
 
-    private final DirectoryStateRepository state;
+    /** 응답을 만드는 읽기 — 생성·변경 시각을 함께 준다(설계 2026-10-09 §4.3). 쓰기 판단 읽기는 락 안의 유스케이스가 한다. */
+    private final DirectoryQueryRepository query;
     private final IncrementalSyncUseCase sync;
     private final IgnoredAttributeObserver ignoredAttributes;
 
-    public ScimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync) {
-        this(state, sync, IgnoredAttributeObserver.NOOP);
+    public ScimUserHandler(DirectoryQueryRepository query, IncrementalSyncUseCase sync) {
+        this(query, sync, IgnoredAttributeObserver.NOOP);
     }
 
-    public ScimUserHandler(DirectoryStateRepository state, IncrementalSyncUseCase sync,
+    public ScimUserHandler(DirectoryQueryRepository query, IncrementalSyncUseCase sync,
                            IgnoredAttributeObserver ignoredAttributes) {
-        this.state = state;
+        this.query = query;
         this.sync = sync;
         this.ignoredAttributes = ignoredAttributes;
     }
@@ -51,10 +53,10 @@ public class ScimUserHandler {
 
     public Mono<ServerResponse> get(ServerRequest request) {
         String id = request.pathVariable("id");
-        return projection(request).flatMap(projection -> state.findUser(id)
+        return projection(request).flatMap(projection -> query.findUser(id)
                 .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
-                .flatMap(user -> ServerResponse.ok().contentType(SCIM_JSON)
-                        .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(user))))));
+                .flatMap(found -> ServerResponse.ok().contentType(SCIM_JSON)
+                        .bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(found.value(), found.times()))))));
     }
 
     /** PUT — 본문으로 통째로 교체한다. 직원 읽기·존재 확인·userName 중복 확인은 락 안에서 한다(SCIM 쓰기 락 설계 §3). */
@@ -82,7 +84,7 @@ public class ScimUserHandler {
                     // 락 안의 계산이 다시 돌 수 있어 집합으로 모은다
                     Set<String> 버린것 = ConcurrentHashMap.newKeySet();
                     if (ScimPatchApplier.touchesNoStoredUserAttribute(patch, 버린것::add)) {
-                        return state.findUser(id)
+                        return query.findUser(id)
                                 .switchIfEmpty(Mono.error(ScimException.notFound("직원을 찾을 수 없습니다: " + id)))
                                 .doOnNext(user -> 버린것을_알린다(id, 버린것))
                                 .flatMap(user -> 본문으로(HttpStatus.OK, id, user, projection));
@@ -126,18 +128,19 @@ public class ScimUserHandler {
             return Mono.error(ScimException.temporarilyUnavailable(
                     "일부 튜플 적용에 실패했습니다 — 잠시 뒤 다시 보내 주세요: " + id, TemporaryFailureException.기본_대기));
         }
-        return state.findUser(id)
+        return query.findUser(id)
                 .switchIfEmpty(Mono.error(ScimException.internal("저장된 리소스를 다시 읽지 못했습니다: " + id)))
                 .flatMap(saved -> 본문으로(status, id, saved, projection));
     }
 
     /** 직원 하나의 SCIM 응답 — 생성은 Location 을 단다(RFC 7644 §3.3 SHALL, 설계 2026-10-06 §5.3). */
-    private static Mono<ServerResponse> 본문으로(HttpStatus status, String id, DirectoryUser user, ScimAttributeProjection projection) {
+    private static Mono<ServerResponse> 본문으로(HttpStatus status, String id, Timestamped<DirectoryUser> found,
+                                               ScimAttributeProjection projection) {
         ServerResponse.BodyBuilder builder = ServerResponse.status(status).contentType(SCIM_JSON);
         if (status == HttpStatus.CREATED) {
             builder.location(URI.create(ScimMapper.userLocation(id)));
         }
-        return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(user))));
+        return builder.bodyValue(projection.apply(ScimJson.tree(ScimMapper.toScimUser(found.value(), found.times()))));
     }
 
     /** 응답에 담을 속성(RFC 7644 §3.9). 쓰기 전에 검사해 잘못된 파라미터로 상태가 바뀌지 않게 한다. */

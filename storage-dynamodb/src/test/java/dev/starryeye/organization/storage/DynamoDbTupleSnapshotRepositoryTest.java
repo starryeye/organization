@@ -151,7 +151,7 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(items).noneMatch(item -> Keys.isTupleSk(item.get(Keys.SK).s()));
 
         // and — 메타 1 + 묶음마다 1 + 포인터 1. 묶음을 BatchWriteItem 에 담지 않는다(spec §3.3)
-        assertThat(writes.puts()).isEqualTo(묶음_키.size() + 2);
+        assertThat(writes.writes()).isEqualTo(묶음_키.size() + 2);
     }
 
     @Test
