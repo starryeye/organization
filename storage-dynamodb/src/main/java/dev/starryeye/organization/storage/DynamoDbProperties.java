@@ -19,6 +19,9 @@ public class DynamoDbProperties {
     private int snapshotRetentionDays = 7;
     private int syncrunRetentionDays = 30;
 
+    /** 변경 이력 보관 일수(설계 2026-10-10 §6). 동기화 이력과 같게 둔다 — 줄의 원인 회차로 거슬러 갈 곳이 끝까지 있어야 한다. */
+    private int auditRetentionDays = 30;
+
     /** 락 리스 길이. SCIM 쓰기 p99 보다 한참 길어야 한다 — 짧으면 살아있는데 만료된다. */
     private Duration lockTtl = Duration.ofSeconds(30);
 

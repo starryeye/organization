@@ -30,6 +30,8 @@ dynamodb:
   create-table-on-startup: true
   snapshot-retention-days: 7
   syncrun-retention-days: 30
+  # 변경 이력 보관 일수. 늘리려면 syncrun-retention-days 와 함께 늘린다 — 이력의 원인 회차가 먼저 사라지면 거슬러 갈 곳이 없다
+  audit-retention-days: 30
 
 sync:
   archive-cron: "0 0 3 * * *"

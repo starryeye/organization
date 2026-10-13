@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -15,6 +16,7 @@ import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -33,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
@@ -1514,5 +1517,167 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(meta(Keys.groupPk("HQ"))).isEmpty();
+    }
+
+    // ---------- 전체 교체의 비교 결과(설계 2026-10-10 §4.3) ----------
+
+    @Test
+    @DisplayName("전체 교체는 처음 쓴 직원·조직을 생성으로 돌려준다")
+    void 처음_쓴_것은_생성이다() {
+        // when
+        DirectoryChanges changes = repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // then
+        assertThat(changes.users()).containsExactly(new DirectoryChanges.UserDiff(null, 직원("kim")));
+        assertThat(changes.groups()).containsExactly(new DirectoryChanges.GroupDiff(
+                null, new GroupHeader("DEV", "cn=DEV", "개발"), Set.of(MemberRef.user("kim")), Set.of()));
+    }
+
+    @Test
+    @DisplayName("같은 조직도면 빈 결과다")
+    void 같은_조직도면_비었다() {
+        // given
+        DirectorySnapshot 조직도 = new DirectorySnapshot(
+                Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))));
+        repository.replaceWith(조직도).block();
+
+        // when
+        DirectoryChanges changes = repository.replaceWith(조직도).block();
+
+        // then
+        assertThat(changes.isEmpty()).isTrue();
+    }
+
+    @Test
+    @DisplayName("바뀐 직원·조직은 이전과 이후를, 멤버는 들어오고 나간 것을 돌려준다")
+    void 바뀐_것() {
+        // given
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")),
+                Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // when
+        DirectoryChanges changes = repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim").withDisplayName("김철수"), "lee", 직원("lee")),
+                Map.of("DEV", 조직("DEV", "개발본부", MemberRef.user("lee"))))).block();
+
+        // then
+        assertThat(changes.users()).containsExactly(
+                new DirectoryChanges.UserDiff(직원("kim"), 직원("kim").withDisplayName("김철수")));
+        assertThat(changes.groups()).containsExactly(new DirectoryChanges.GroupDiff(
+                new GroupHeader("DEV", "cn=DEV", "개발"), new GroupHeader("DEV", "cn=DEV", "개발본부"),
+                Set.of(MemberRef.user("lee")), Set.of(MemberRef.user("kim"))));
+    }
+
+    @Test
+    @DisplayName("사라진 직원·조직은 삭제로 돌려준다 — 조직은 그때의 멤버를 나간 멤버로")
+    void 사라진_것은_삭제다() {
+        // given
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")),
+                Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim")),
+                        "OLD", 조직("OLD", "옛조직", MemberRef.user("kim"))))).block();
+
+        // when — lee 와 OLD 가 사라진다
+        DirectoryChanges changes = repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // then
+        assertThat(changes.users()).containsExactly(new DirectoryChanges.UserDiff(직원("lee"), null));
+        assertThat(changes.groups()).containsExactly(new DirectoryChanges.GroupDiff(
+                new GroupHeader("OLD", "cn=OLD", "옛조직"), null, Set.of(), Set.of(MemberRef.user("kim"))));
+    }
+
+    @Test
+    @DisplayName("상위·하위 조직이 함께 사라지면 지우기 전에 둘의 멤버를 모두 읽어, 상위 조직의 나간 멤버에 하위 조직이 든다")
+    void 함께_사라진_상위_하위_조직() {
+        // given — P 의 멤버는 하위 조직 C 와 kim, C 의 멤버는 lee 다
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")),
+                Map.of("P", 조직("P", "상위", MemberRef.group("C"), MemberRef.user("kim")),
+                        "C", 조직("C", "하위", MemberRef.user("lee"))))).block();
+        // P 의 멤버 줄 읽기를 늦춘다 — C 를 지우며 P 의 멤버 줄(C)도 지우므로, 읽기 전에 지우기가 끼면 P 의 나간 멤버에서 C 가 빠진다
+        DynamoDbAsyncClient 상위_멤버_읽기가_늦는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("query") && args != null && args.length == 1
+                            && args[0] instanceof QueryRequest request && P의_멤버_줄_읽기(request)) {
+                        return CompletableFuture.runAsync(() -> {
+                                }, CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS))
+                                .thenCompose(ignored -> client.query(request));
+                    }
+                    try {
+                        return method.invoke(client, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        var 늦는_저장소 = new DynamoDbDirectoryStateRepository(상위_멤버_읽기가_늦는_클라이언트, properties, clock);
+
+        // when — 직원은 그대로, P 와 C 가 함께 사라진다
+        DirectoryChanges changes = 늦는_저장소.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")), Map.of())).block();
+
+        // then
+        assertThat(changes.users()).isEmpty();
+        assertThat(changes.groups()).containsExactlyInAnyOrder(
+                new DirectoryChanges.GroupDiff(new GroupHeader("P", "cn=P", "상위"), null, Set.of(),
+                        Set.of(MemberRef.group("C"), MemberRef.user("kim"))),
+                new DirectoryChanges.GroupDiff(new GroupHeader("C", "cn=C", "하위"), null, Set.of(),
+                        Set.of(MemberRef.user("lee"))));
+        assertThat(repository.findGroup("P").block()).isNull();
+        assertThat(repository.findGroup("C").block()).isNull();
+    }
+
+    /** 조직 P 파티션의 멤버 줄 읽기인가. */
+    private static boolean P의_멤버_줄_읽기(QueryRequest request) {
+        Map<String, AttributeValue> values = request.expressionAttributeValues();
+        return values != null
+                && values.containsKey(":pk") && Keys.groupPk("P").equals(values.get(":pk").s())
+                && values.containsKey(":prefix") && Keys.MEMBER_PREFIX.equals(values.get(":prefix").s());
+    }
+
+    @Test
+    @DisplayName("직원 목록에서 빠졌지만 조직이 아직 멤버로 적은 직원을 지우면, 그 조직의 멤버 변경으로 돌려준다")
+    void 직원을_지우며_뺀_멤버_줄() {
+        // given
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim")), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // when — kim 은 직원 목록에서 빠지고, DEV 는 여전히 kim 을 적었다
+        DirectoryChanges changes = repository.replaceWith(new DirectorySnapshot(
+                Map.of(), Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim"))))).block();
+
+        // then — 직원을 지우며 DEV 의 멤버 줄도 지웠다
+        GroupHeader 개발 = new GroupHeader("DEV", "cn=DEV", "개발");
+        assertThat(changes.users()).containsExactly(new DirectoryChanges.UserDiff(직원("kim"), null));
+        assertThat(changes.groups()).containsExactly(
+                new DirectoryChanges.GroupDiff(개발, 개발, Set.of(), Set.of(MemberRef.user("kim"))));
+        assertThat(repository.findMemberRefs("DEV").collectList().block()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("키 규칙만 바뀌어 다시 쓴 직원·조직은 키를 고치지만 비교 결과에는 넣지 않는다")
+    void 키만_고친_것은_결과에_없다() {
+        // given — GSI1 정렬키가 소문자가 되기 전(원문 대소문자)의 저장본을 흉내낸다
+        DirectoryUser kim = new DirectoryUser("Kim", "e1", "Kim", "김철수", null, true);
+        DirectoryGroup dev = new DirectoryGroup("DEV", "g1", "DevTeam", Set.of());
+        DirectorySnapshot 조직도 = new DirectorySnapshot(Map.of("Kim", kim), Map.of("DEV", dev));
+        repository.replaceWith(조직도).block();
+        Map<String, AttributeValue> 예전직원 = new HashMap<>(meta(Keys.userPk("Kim")));
+        예전직원.put(Keys.GSI1SK, Attrs.s("Kim"));
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(예전직원).build()).join();
+        Map<String, AttributeValue> 예전조직 = new HashMap<>(meta(Keys.groupPk("DEV")));
+        예전조직.put(Keys.GSI1SK, Attrs.s("DevTeam"));
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(예전조직).build()).join();
+
+        // when
+        DirectoryChanges changes = repository.replaceWith(조직도).block();
+
+        // then — 키는 고쳤고, 값이 같아 이력에 남길 변경은 없다
+        assertThat(meta(Keys.userPk("Kim")).get(Keys.GSI1SK).s()).isEqualTo("kim");
+        assertThat(meta(Keys.groupPk("DEV")).get(Keys.GSI1SK).s()).isEqualTo("devteam");
+        assertThat(changes.isEmpty()).isTrue();
     }
 }

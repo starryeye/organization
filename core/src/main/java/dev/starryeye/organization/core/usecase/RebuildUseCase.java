@@ -1,5 +1,8 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.AuditCause;
+import dev.starryeye.organization.core.audit.AuditKind;
+import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
@@ -28,6 +31,8 @@ import java.util.function.Consumer;
  *
  * <p><b>삭제 가드를 지킨다(설계 2026-09-30 §4.3).</b> LDAP 이 설정 실수로 0명을 돌려주면 장부 전체를 지우게 된다 — 지울 줄이 훑은 장부의
  * 임계치를 넘으면 지우지 않고 ABORTED 다. 사람이 확인한 뒤 {@code force} 로 넘긴다.
+ *
+ * <p><b>이력(설계 2026-10-10 §4.2).</b> 회차 id 로, 현재상태가 바뀐 것과 지운 줄을 남긴다. 락을 반납한 뒤에 쓴다.
  */
 @Slf4j
 public class RebuildUseCase {
@@ -36,12 +41,19 @@ public class RebuildUseCase {
     private final SyncJobs jobs;
     private final LedgerAlignment alignment;
 
+    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 이력을 받는 생성자다. */
     public RebuildUseCase(DirectorySnapshotSource source, TupleSnapshotRepository snapshots,
                           DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
                           DeletionGuard guard, SyncJobs jobs, Clock clock) {
+        this(source, snapshots, state, writer, scanner, guard, jobs, clock, AuditRecorder.NONE);
+    }
+
+    public RebuildUseCase(DirectorySnapshotSource source, TupleSnapshotRepository snapshots,
+                          DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
+                          DeletionGuard guard, SyncJobs jobs, Clock clock, AuditRecorder audit) {
         this.source = source;
         this.jobs = jobs;
-        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock);
+        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock, audit);
     }
 
     /**
@@ -51,15 +63,16 @@ public class RebuildUseCase {
      * @param onFinished 끝난 기록으로 불린다(지표)
      */
     public Mono<SyncRun> start(boolean force, Consumer<SyncRun> onFinished) {
-        return jobs.startLocked(SyncSource.LDAP, SyncTrigger.REBUILD, MutationLock.LockPurpose.REBUILD,
-                Mono.defer(() -> rebuild(force)), onFinished);
+        return jobs.startLockedThen(SyncSource.LDAP, SyncTrigger.REBUILD, MutationLock.LockPurpose.REBUILD,
+                run -> Mono.defer(() -> rebuild(force, run.runId())), onFinished);
     }
 
-    private Mono<SyncOutcome> rebuild(boolean force) {
+    private Mono<Mono<SyncOutcome>> rebuild(boolean force, String runId) {
         return source.fetchAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
-            return alignment.align(directory, mapping.tuples(), force);
+            return alignment.align(directory, mapping.tuples(), force,
+                    AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, runId));
         });
     }
 }

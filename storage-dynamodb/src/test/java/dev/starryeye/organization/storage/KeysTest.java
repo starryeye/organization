@@ -203,4 +203,18 @@ class KeysTest {
         assertThatThrownBy(() -> Keys.chunkSk(10_000)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> Keys.chunkSk(-1)).isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("이력 키 — 대상 종류별 파티션과, 시각·원인·네 자리 조각 번호의 정렬키")
+    void 이력_키() {
+        // given
+        Instant at = Instant.parse("2026-10-10T03:00:00Z");
+
+        // when, then
+        assertThat(Keys.auditPk(MemberRef.user("kim"))).isEqualTo("AUDIT#USER#kim");
+        assertThat(Keys.auditPk(MemberRef.group("DEV"))).isEqualTo("AUDIT#GROUP#DEV");
+        assertThat(Keys.auditSk(at, "run-1", 2)).isEqualTo("2026-10-10T03:00:00.000Z#run-1#0002");
+        assertThat(Keys.auditRecordKey("2026-10-10T03:00:00.000Z#run-1#0002"))
+                .isEqualTo("2026-10-10T03:00:00.000Z#run-1");
+    }
 }

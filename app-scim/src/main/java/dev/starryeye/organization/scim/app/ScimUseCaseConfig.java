@@ -1,5 +1,7 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.core.audit.AuditRecorder;
+import dev.starryeye.organization.core.port.AuditLog;
 import dev.starryeye.organization.core.port.DailyJobClaims;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
@@ -7,6 +9,7 @@ import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.port.TraceIds;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.DailyOnce;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
@@ -14,7 +17,12 @@ import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
 import dev.starryeye.organization.storage.DynamoDbProperties;
+import io.micrometer.context.ContextSnapshot;
+import io.micrometer.context.ContextSnapshotFactory;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -22,6 +30,7 @@ import org.springframework.context.annotation.Configuration;
 import java.time.Clock;
 import java.time.Duration;
 
+@Slf4j
 @Configuration
 public class ScimUseCaseConfig {
 
@@ -30,15 +39,45 @@ public class ScimUseCaseConfig {
         return new ScimSyncMetrics(registry);
     }
 
+    /** 변경 이력을 남긴다(설계 2026-10-10 §4). 쓰지 못한 줄은 {@code audit.write.failures} 로 센다(§4.5). */
+    @Bean
+    public AuditRecorder auditRecorder(AuditLog auditLog, MeterRegistry registry, Clock clock) {
+        return new AuditRecorder(auditLog, lines -> registry.counter("audit.write.failures").increment(lines), clock);
+    }
+
+    /**
+     * 요청의 traceId — SCIM 쓰기 이력의 원인 id 다(설계 2026-10-10 §4.2). SCIM 쓰기는 요청과 떼어 돌지만 요청의 Reactor Context 를 이어받는다
+     * ({@code IncrementalSyncUseCase.withLock}). 그 Context 의 관측을 잠깐 ThreadLocal 로 옮겨 지금 span 을 읽는다 — 로그의 traceId 와 같은 값이다.
+     *
+     * <p>Context 에 관측이 없으면 ThreadLocal 도 비운다({@code clearMissing}) — 그 스레드에 남아 있던 다른 요청의 span 을 읽지 않는다. 읽다 던지면
+     * 경고만 남기고 모른다(null)고 답한다 — 원인 id 는 임의 UUID 가 되고, 이력 때문에 SCIM 쓰기가 막히지 않는다.
+     */
+    @Bean
+    public TraceIds traceIds(Tracer tracer) {
+        ContextSnapshotFactory snapshots = ContextSnapshotFactory.builder().clearMissing(true).build();
+        return context -> {
+            try (ContextSnapshot.Scope ignored = snapshots.captureFrom(context).setThreadLocals()) {
+                Span span = tracer.currentSpan();
+                return span == null ? null : span.context().traceId();
+            } catch (RuntimeException e) {
+                log.warn("요청의 traceId 를 읽지 못했다 — 이력의 원인 id 는 임의 값이 된다", e);
+                return null;
+            }
+        };
+    }
+
     @Bean
     public IncrementalSyncUseCase incrementalSyncUseCase(DirectoryStateRepository state,
                                                           RelationTupleWriter writer,
                                                           RelationTupleChecker checker,
                                                           MutationLock lock,
                                                           DynamoDbProperties dynamoDb,
-                                                          ScimSyncMetrics metrics) {
+                                                          ScimSyncMetrics metrics,
+                                                          AuditRecorder auditRecorder,
+                                                          TraceIds traceIds) {
         return new IncrementalSyncUseCase(state, writer, checker, lock,
-                dynamoDb.getLockAcquireTimeout(), dynamoDb.getLockRenewInterval(), metrics, metrics);
+                dynamoDb.getLockAcquireTimeout(), dynamoDb.getLockRenewInterval(), metrics, metrics,
+                auditRecorder, traceIds);
     }
 
     /**
@@ -58,8 +97,9 @@ public class ScimUseCaseConfig {
                                                  RelationTupleScanner scanner,
                                                  TupleSnapshotRepository snapshots,
                                                  SyncJobs jobs,
-                                                 Clock clock) {
-        return new ScimRebuildUseCase(state, writer, scanner, snapshots, jobs, clock);
+                                                 Clock clock,
+                                                 AuditRecorder auditRecorder) {
+        return new ScimRebuildUseCase(state, writer, scanner, snapshots, jobs, clock, auditRecorder);
     }
 
     @Bean

@@ -1,7 +1,9 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.port.AuditLog;
 import dev.starryeye.organization.core.port.DailyJobClaims;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
@@ -16,6 +18,7 @@ import dev.starryeye.organization.core.usecase.LockObserver;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
 import dev.starryeye.organization.storage.DynamoDbProperties;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -51,6 +54,12 @@ public class UseCaseConfig {
         return new DailyOnce(claims, clock);
     }
 
+    /** 변경 이력을 남긴다(설계 2026-10-10 §4). 쓰지 못한 줄은 {@code audit.write.failures} 로 센다(§4.5). */
+    @Bean
+    public AuditRecorder auditRecorder(AuditLog auditLog, MeterRegistry registry, Clock clock) {
+        return new AuditRecorder(auditLog, lines -> registry.counter("audit.write.failures").increment(lines), clock);
+    }
+
     @Bean
     public FullSyncUseCase fullSyncUseCase(DirectorySnapshotSource source,
                                            TupleSnapshotRepository snapshots,
@@ -59,8 +68,9 @@ public class UseCaseConfig {
                                            RelationTupleScanner scanner,
                                            DeletionGuard guard,
                                            SyncJobs jobs,
-                                           Clock clock) {
-        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
+                                           Clock clock,
+                                           AuditRecorder auditRecorder) {
+        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock, auditRecorder);
     }
 
     @Bean
@@ -71,7 +81,8 @@ public class UseCaseConfig {
                                          RelationTupleScanner scanner,
                                          DeletionGuard guard,
                                          SyncJobs jobs,
-                                         Clock clock) {
-        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
+                                         Clock clock,
+                                         AuditRecorder auditRecorder) {
+        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock, auditRecorder);
     }
 }
