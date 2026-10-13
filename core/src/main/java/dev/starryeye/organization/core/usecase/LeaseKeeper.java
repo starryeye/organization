@@ -78,8 +78,10 @@ final class LeaseKeeper {
                             .jitter(0)
                             // 남이 가져간 것은 다시 시도하지 않는다 — 그대로 아래로 흘러 곧바로 멈춘다
                             .filter(error -> !(error instanceof LockUnavailableException))
-                            .doBeforeRetry(signal -> log.warn("{} — 락 리스 갱신이 실패해 다시 시도한다({}번째 실패): {}",
-                                    상실_사유, signal.totalRetries() + 1, signal.failure().toString())))
+                            .doBeforeRetry(signal -> log.warn("{} — 락 리스 갱신이 실패해 다시 시도한다({}번째 실패, 한도까지 {}ms): {}",
+                                    상실_사유, signal.totalRetries() + 1,
+                                    마지막_성공.get() + 2 * renewInterval.toMillis() - 지금(),
+                                    signal.failure().toString())))
                     .timeout(Duration.ofMillis(남은_밀리초))
                     .doOnNext(renewed -> 마지막_성공.set(지금()));
         });
