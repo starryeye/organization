@@ -2,7 +2,6 @@ package dev.starryeye.organization.ldap.app;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldap.sdk.LDAPException;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.admin.fixture.SyncJobClient;
@@ -12,6 +11,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -82,14 +82,14 @@ class LdapDitImmutableIdEndToEndTest {
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("immutable-dit", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("immutable-dit"));
         config.setSchema(null);
         LDAP = new InMemoryDirectoryServer(config);
         LDAP.importFromLDIF(true, new LDIFReader(
                 new ByteArrayInputStream(ldif().getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
         registry.add("ldap.strategy", () -> "dit");
         // 프로필이 못박은 이름 기반 id 를 운영 기본값으로 되돌린다
         registry.add("ldap.dit.group-id-attribute", () -> "entryUUID");

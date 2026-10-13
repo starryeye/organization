@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Clock;
@@ -59,7 +60,9 @@ class LdapTimeoutTest {
     @Test
     @DisplayName("인증(bind) 응답이 없으면 connect-timeout 으로 끝나고 다시 읽는다")
     void 인증_응답이_없으면_연결_타임아웃으로_끝난다() throws IOException {
-        try (ServerSocket 침묵하는_서버 = new ServerSocket(0)) {
+        // 127.0.0.1 에만 뜬다 — 모든 주소에 뜨면 127.0.0.1 전용 리스너(IntelliJ 등)와 포트를 함께 쓸 수 있고, 그쪽이 접속을 받아 닫으면
+        // 타임아웃이 아닌 다른 실패가 난다(EmbeddedLdapListener 와 같은 이유)
+        try (ServerSocket 침묵하는_서버 = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
             // given — 접속은 받아 두기만 하고 아무것도 쓰지 않는다
             List<Socket> 받은_접속 = new CopyOnWriteArrayList<>();
             Thread 받기 = new Thread(() -> {
@@ -75,7 +78,7 @@ class LdapTimeoutTest {
             받기.start();
 
             LdapProperties properties = new LdapProperties();
-            properties.setUrl("ldap://localhost:" + 침묵하는_서버.getLocalPort());
+            properties.setUrl("ldap://127.0.0.1:" + 침묵하는_서버.getLocalPort());
             properties.setBindDn("cn=admin,dc=example,dc=com");
             properties.setBindPassword("password");
             // bindDn 을 쓰면 컨텍스트 생성이 곧 동기 bind 다 — JNDI LDAP provider 는 그 응답

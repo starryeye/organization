@@ -2,13 +2,13 @@ package dev.starryeye.organization.ldap;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchRequest;
 import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
 import com.unboundid.ldap.sdk.Control;
 import com.unboundid.ldap.sdk.LDAPException;
 import com.unboundid.ldap.sdk.controls.SimplePagedResultsControl;
 import com.unboundid.ldif.LDIFReader;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ldap.core.support.LdapContextSource;
@@ -50,7 +50,7 @@ class LdapReadTimeoutDuringPagingTest {
 
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("test", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("test"));
         config.setSchema(null);
         config.addInMemoryOperationInterceptor(interceptor);
 
@@ -61,7 +61,7 @@ class LdapReadTimeoutDuringPagingTest {
 
         try {
             LdapProperties properties = new LdapProperties();
-            properties.setUrl("ldap://localhost:" + server.getListenPort());
+            properties.setUrl(EmbeddedLdapListener.접속_주소(server));
             properties.setBaseDn(BASE_DN);
             properties.setBindDn(BIND_DN);
             properties.setBindPassword(BIND_PASSWORD);

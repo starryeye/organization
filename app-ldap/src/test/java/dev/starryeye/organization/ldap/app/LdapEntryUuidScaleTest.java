@@ -2,7 +2,6 @@ package dev.starryeye.organization.ldap.app;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldap.sdk.LDAPException;
 import com.unboundid.ldap.sdk.SearchResultEntry;
 import com.unboundid.ldap.sdk.SearchScope;
@@ -17,6 +16,7 @@ import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import dev.starryeye.organization.ldap.fixture.LdifRenderer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -73,7 +73,7 @@ class LdapEntryUuidScaleTest {
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("entryuuid", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("entryuuid"));
         // 스키마 검사를 켜 둔다 — LdapScaleSyncCostTest 와 같은 이유다(임베디드 서버가 실제 서버보다 관대하면 존재할 수 없는 형태를 검증하게 된다)
 
         LDAP = new InMemoryDirectoryServer(config);
@@ -81,7 +81,7 @@ class LdapEntryUuidScaleTest {
                 new LdifRenderer(BASE_DN).render(CHART).getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
         // 프로필이 못박은 이름 기반 id 를 운영 기본값으로 되돌린다
         registry.add("ldap.group-of-names.user-id-attribute", () -> "entryUUID");
         registry.add("ldap.group-of-names.group-id-attribute", () -> "entryUUID");
