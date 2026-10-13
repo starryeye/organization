@@ -393,7 +393,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - **한 줄은 대상 하나 × 사건 하나다.** 사건은 동기화·재적재 회차 하나, 또는 SCIM 요청 하나다.
 - **원인(`cause`).**
   - `source` 는 `LDAP`·`SCIM` 이다.
-  - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(기록 전에 멈춘 회차 뒤의 동기화)·`SCIM_REQUEST` 다.
+  - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(지난 회차가 장부·스냅샷을 기록하다 멈춘 뒤의 동기화)·`SCIM_REQUEST` 다.
   - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청이면 로그의 traceId 다.
 - **조직도 변경.**
   - `created`·`deleted`.
@@ -907,7 +907,7 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 ./gradlew scaleTest   # 규모 테스트만 — 머지 전에 돌린다
 ```
 
-**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 17개 클래스(`@ScaleTest`
+**규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 20개 클래스(`@ScaleTest`
 가 붙은 것)가 전체 시간의 대부분(약 9분)을 차지해서다. 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
 않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
 테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.
