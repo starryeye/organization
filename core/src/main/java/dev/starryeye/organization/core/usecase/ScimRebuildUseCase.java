@@ -141,6 +141,8 @@ public class ScimRebuildUseCase {
                     return desired;
                 }
                 TupleMappingResult 다시 = TupleMapper.toTuples(보강된);
+                // 처음 변환과 같이 남기되 앞에 붙여 두 번을 가른다 — 보강으로 새로 끊긴 순환 연결은 여기서만 보인다
+                다시.warnings().forEach(warning -> log.warn("튜플 변환 경고: 다시 계산한 조직도 — {}", warning));
                 최종.set(다시);
                 return 다시.tuples();
             });

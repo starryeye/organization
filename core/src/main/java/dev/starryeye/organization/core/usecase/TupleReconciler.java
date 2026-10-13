@@ -118,6 +118,10 @@ final class TupleReconciler {
      */
     private static Mono<다시_정함> 다시_정한다(RelationTupleWriter writer, Set<RelationTuple> desired, TupleWriteResult written,
                                         Scan scan, Set<RelationTuple> revised) {
+        // 같은 객체면 바뀐 것이 없다 — 평소(LDAP 장부 맞춤·초기화·바뀐 것 없는 SCIM 재적재)에는 |D| 크기의 집합 둘을 만들지 않는다
+        if (revised == desired) {
+            return Mono.just(new 다시_정함(desired, written, scan));
+        }
         Set<RelationTuple> 더한 = new HashSet<>(revised);
         더한.removeAll(desired);
         Set<RelationTuple> 뺀 = new HashSet<>(desired);

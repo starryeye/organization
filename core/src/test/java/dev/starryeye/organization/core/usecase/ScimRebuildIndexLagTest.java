@@ -1,5 +1,8 @@
 package dev.starryeye.organization.core.usecase;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.starryeye.organization.core.audit.AttributeChange;
 import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditObserver;
@@ -21,9 +24,11 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
@@ -137,9 +142,15 @@ class ScimRebuildIndexLagTest {
     private FakeSyncRunRepository runs;
     private FakeAuditLog auditLog;
     private ScimRebuildUseCase useCase;
+    private ListAppender<ILoggingEvent> 로그;
+    private Logger logger;
 
     @BeforeEach
     void setUp() {
+        logger = (Logger) LoggerFactory.getLogger(ScimRebuildUseCase.class);
+        로그 = new ListAppender<>();
+        로그.start();
+        logger.addAppender(로그);
         state = new 열거가_늦은_저장소();
         writer = new FakeTupleWriter();
         runs = new FakeSyncRunRepository(NOW);
@@ -148,6 +159,12 @@ class ScimRebuildIndexLagTest {
         useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), new FakeSnapshotRepository(),
                 new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 clock, new AuditRecorder(auditLog, AuditObserver.NOOP, clock));
+    }
+
+    @AfterEach
+    void 원복한다() {
+        logger.detachAppender(로그);
+        로그.stop();
     }
 
     private static DirectoryUser 직원(String id) {
@@ -256,6 +273,9 @@ class ScimRebuildIndexLagTest {
         assertThat(writer.deleted).containsExactly(비_에이);
         assertThat(writer.stored).containsExactlyInAnyOrder(비_영, 팀_비, 에이_팀);
         assertThat(state.cutEdges).containsExactly(new GroupEdge("A", "B"));
+        // 다시 계산한 조직도의 변환 경고도 남긴다 — 보강으로 새로 끊긴 순환 연결은 여기서만 보이고, 처음 변환의 경고와 앞말로 가른다
+        assertThat(로그.list).extracting(ILoggingEvent::getFormattedMessage)
+                .anySatisfy(message -> assertThat(message).startsWith("튜플 변환 경고: 다시 계산한 조직도 — ").contains("A", "B"));
     }
 
     @Test
