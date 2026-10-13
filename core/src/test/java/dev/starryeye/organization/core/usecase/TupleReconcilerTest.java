@@ -89,7 +89,7 @@ class TupleReconcilerTest {
 
         // when
         var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
-                stale -> Mono.just(Set.of(김, 이, 박)), TupleReconciler.DeleteCheck.NONE).block();
+                (desired, stale) -> Mono.just(Set.of(김, 이, 박)), TupleReconciler.DeleteCheck.NONE).block();
 
         // then
         assertThat(writer.deleted).containsExactly(유령);
@@ -111,11 +111,90 @@ class TupleReconcilerTest {
 
         // when
         var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(),
-                stale -> Mono.just(Set.of(이)), 빈_조직도면_멈춘다).block();
+                (desired, stale) -> Mono.just(Set.of(이)), 빈_조직도면_멈춘다).block();
 
         // then
         assertThat(reconciliation.held()).isFalse();
         assertThat(writer.deleted).isEmpty();
         assertThat(writer.stored).containsExactly(이);
+    }
+
+    @Test
+    @DisplayName("다시 정해 더한 줄의 쓰기가 실패하면 장부에 있다고 보지 않고 실패로 남긴다")
+    void 더한_줄의_쓰기가_실패하면_장부에_남지_않는다() {
+        // given — D 는 kim 하나. 다시 정하기가 park 을 더하는데 park 의 쓰기가 실패한다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.failFor(tuple -> tuple.equals(박));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
+                (desired, stale) -> Mono.just(Set.of(김, 박)), TupleReconciler.DeleteCheck.NONE).block();
+
+        // then
+        assertThat(reconciliation.ledger()).containsExactly(김);
+        assertThat(reconciliation.result().failures()).extracting(TupleFailure::tuple).containsExactly(박);
+        assertThat(writer.stored).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("다시 정한 D' 에 없는 줄은 D 에 있었어도 지운다 — 장부에 있던 줄이 지울 후보로 넘어가고 장부 목록에서 빠진다")
+    void 다시_정하며_빠진_줄은_지운다() {
+        // given — D 는 kim·lee, 장부에도 둘 다 있다. 다시 정한 D' 는 kim 하나다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김, 이),
+                (desired, stale) -> Mono.just(Set.of(김)), TupleReconciler.DeleteCheck.NONE).block();
+
+        // then
+        assertThat(writer.deleted).containsExactly(이);
+        assertThat(writer.stored).containsExactly(김);
+        assertThat(reconciliation.result().deleted()).containsExactly(이);
+        assertThat(reconciliation.ledger()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("다시 정하며 빠진 줄이 애초에 장부에 없었으면(처음 쓰기가 실패했다) 지울 후보에도 장부 목록에도 넣지 않는다")
+    void 다시_정하며_빠진_줄이_장부에_없었으면_지우지_않는다() {
+        // given — D 는 kim·lee, lee 의 처음 쓰기가 실패해 장부에 없다. 다시 정한 D' 는 kim 하나다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+        writer.failFor(tuple -> tuple.equals(이));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김, 이),
+                (desired, stale) -> Mono.just(Set.of(김)), TupleReconciler.DeleteCheck.NONE).block();
+
+        // then
+        assertThat(writer.deleted).isEmpty();
+        assertThat(reconciliation.ledger()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("지우기 전 확인은 다시 정한 D' 와 넘어간 후보를 본다 — D' 가 비면 D 의 줄도 후보라 멈춘다")
+    void 지우기_전_확인은_다시_정한_D와_넘어간_후보를_본다() {
+        // given — D 는 kim 하나고 장부에 있다. 다시 정한 D' 는 비었다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
+                desired.isEmpty() && !stale.isEmpty() ? Optional.of("빈 조직도") : Optional.empty();
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
+                (desired, stale) -> Mono.just(Set.of()), 빈_조직도면_멈춘다).block();
+
+        // then
+        assertThat(reconciliation.held()).isTrue();
+        assertThat(writer.deleted).isEmpty();
+        assertThat(writer.stored).containsExactly(김);
     }
 }

@@ -123,17 +123,17 @@ public class ScimRebuildUseCase {
 
     /**
      * 장부를 맞춘 뒤 보류 목록을 버린 연결로 바꾼다 — 락 안이다. 멈춘 경우(빈 조직도)는 목록을 두고 간다. 지우기 전에 GSI 열거를 장부로 보강하고
-     * (설계 2026-10-13 §4.3), 보류 목록은 보강한 조직도로 정한다.
+     * (설계 2026-10-13 §4.3), 있어야 할 줄(D')과 보류 목록이 함께 보강한 조직도를 따른다 — 보강한 조직도가 순환이라 버린 연결은 장부에서도 지운다.
      */
     private Mono<Mono<SyncOutcome>> reloadTuples(AuditCause cause) {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
-            // 보강한 조직도의 결과 — 보류 목록은 이것으로 정한다. 보강할 것이 없으면 처음 결과 그대로다
+            // 보강한 조직도의 결과 — 있어야 할 줄(D')과 보류 목록이 함께 이것을 따른다. 보강할 것이 없으면 처음 결과 그대로다
             AtomicReference<TupleMappingResult> 최종 = new AtomicReference<>(mapping);
-            TupleReconciler.DesiredRevision 보강 = stale -> 열거를_보강한다(directory, stale).map(보강된 -> {
+            TupleReconciler.DesiredRevision 보강 = (desired, stale) -> 열거를_보강한다(directory, stale).map(보강된 -> {
                 if (보강된 == directory) {
-                    return Set.<RelationTuple>of();
+                    return desired;
                 }
                 TupleMappingResult 다시 = TupleMapper.toTuples(보강된);
                 최종.set(다시);

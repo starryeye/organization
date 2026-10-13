@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditObserver;
 import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.fake.FakeAuditLog;
@@ -12,6 +13,7 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncRun;
@@ -27,6 +29,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -163,6 +166,38 @@ class ScimRebuildIndexLagTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(writer.stored).contains(김_팀, 박_팀, 이_백엔드);
         assertThat(writer.written).contains(박_팀);
+        // 재적재가 쓴 줄은 이력에 남기지 않는다 — 지운 줄만 남긴다
+        List<AuditEntry> 이력의_줄 = auditLog.events.stream().flatMap(event -> event.entries().stream()).toList();
+        assertThat(이력의_줄).flatExtracting(AuditEntry::granted).doesNotContain(박_팀);
+        assertThat(이력의_줄).flatExtracting(AuditEntry::revoked).doesNotContain(박_팀);
+    }
+
+    @Test
+    @DisplayName("tuples — 다시 계산한 조직도가 순환이라 버린 연결은 장부에서도 지우고, 보류 목록도 다시 계산한 조직도를 따른다")
+    void 다시_계산한_조직도의_순환_연결을_장부와_보류_목록이_함께_따른다() {
+        // given — TEAM 이 GSI 에 아직 없다. 조직 0 ∋ B, A ∋ B, B ∋ TEAM, TEAM ∋ A 이고 장부에는 네 연결이 다 있다.
+        //         TEAM 없이 정한 D 에는 순환이 없어 child(B,A) 가 들어 있다. TEAM 을 넣은 D' 는 DFS(0→B→TEAM→A)가 A→B 를 순환으로 버린다
+        MemberRef 에이 = MemberRef.group("A");
+        MemberRef 비 = MemberRef.group("B");
+        조직을_심는다("0", 비);
+        조직을_심는다("A", 비);
+        조직을_심는다("B", 팀);
+        조직을_심는다("TEAM", 에이);
+        RelationTuple 비_영 = RelationTuple.child("B", "0");
+        RelationTuple 비_에이 = RelationTuple.child("B", "A");
+        RelationTuple 팀_비 = RelationTuple.child("TEAM", "B");
+        RelationTuple 에이_팀 = RelationTuple.child("A", "TEAM");
+        writer.stored.addAll(Set.of(비_영, 비_에이, 팀_비, 에이_팀));
+        state.숨긴_조직.add("TEAM");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — 장부와 보류 목록이 함께 D' 를 따른다. 버린 A→B 는 장부에 없고 보류 목록에 있다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.deleted).containsExactly(비_에이);
+        assertThat(writer.stored).containsExactlyInAnyOrder(비_영, 팀_비, 에이_팀);
+        assertThat(state.cutEdges).containsExactly(new GroupEdge("A", "B"));
     }
 
     @Test
