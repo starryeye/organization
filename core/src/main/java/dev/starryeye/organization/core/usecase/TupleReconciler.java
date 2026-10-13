@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p><b>지우기 전에 확인한다(설계 2026-09-30 §4.3).</b> 훑은 뒤 {@link DeleteCheck} 가 멈출 이유를 주면 지우지 않는다 — 삭제 가드(LDAP)나
  * 빈 조직도 규칙(SCIM)이 여기서 걸린다. 쓴 줄은 그대로 둔다(권한을 더하는 쪽이라 해가 없다).
  *
+ * <p><b>지우기 전에 다시 정할 수 있다(설계 2026-10-13 §4.3).</b> {@link DesiredRevision} 이 더한 줄은 지우지 않고, 장부에 없으면 쓴다 — SCIM 재적재가
+ * GSI 열거에서 빠진 대상을 본 테이블로 다시 읽어 쓴다. LDAP 장부 맞추기는 쓰지 않는다.
+ *
  * <p><b>훑기는 흘려 보내며 비교한다.</b> 장부 전체를 메모리에 모으지 않는다 — 드는 것은 D 와 지울 후보뿐이다.
  *
  * <p>호출자는 D 를 <b>다 읽은 뒤에만</b> 부른다. 읽기가 실패했는데 부르면 빈 D 로 장부를 비운다(점검 M13).
@@ -47,27 +50,89 @@ final class TupleReconciler {
         DeleteCheck NONE = (desired, stale, scanned) -> Optional.empty();
     }
 
+    /**
+     * 훑은 뒤·지우기 전에 있어야 할 줄을 다시 정한다(설계 2026-10-13 §4.3). 지울 후보를 보고 있어야 할 줄에 더할 것을 준다 — 없으면 빈 집합.
+     * 더한 줄 중 장부에 있는 것(지울 후보에 든 것)은 지우지 않고, 장부에 없는 것은 쓴다. SCIM 재적재가 GSI 열거에서 빠진 대상을 다시 읽어 쓴다.
+     */
+    @FunctionalInterface
+    interface DesiredRevision {
+
+        Mono<Set<RelationTuple>> additionalDesired(Set<RelationTuple> stale);
+
+        DesiredRevision NONE = stale -> Mono.just(Set.of());
+    }
+
     static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
                                           Set<RelationTuple> desired) {
-        return reconcile(writer, scanner, desired, DeleteCheck.NONE);
+        return reconcile(writer, scanner, desired, DesiredRevision.NONE, DeleteCheck.NONE);
     }
 
     static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
                                           Set<RelationTuple> desired, DeleteCheck check) {
+        return reconcile(writer, scanner, desired, DesiredRevision.NONE, check);
+    }
+
+    /**
+     * D 를 쓰고, 장부를 훑어 지울 후보를 가르고, 지우기 전에 {@code revision} 으로 D 를 다시 정한 뒤, {@code check} 를 거쳐 지운다. {@code check} 는
+     * 다시 정한 D 와 남은 후보를 본다.
+     */
+    static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
+                                          Set<RelationTuple> desired, DesiredRevision revision, DeleteCheck check) {
         return Mono.defer(() -> 쓴다(writer, desired)
                 .flatMap(written -> 훑는다(scanner, desired)
-                        .flatMap(scan -> {
-                            Optional<String> hold = check.holdReason(desired, scan.stale(), scan.scanned());
-                            if (hold.isPresent()) {
-                                log.warn("장부를 훑었지만 지우지 않는다: {}", hold.get());
-                                return Mono.just(Reconciliation.held(written, hold.get()));
-                            }
-                            return 지운다(writer, scan.stale())
-                                    .map(deleted -> Reconciliation.of(written, deleted, scan.present()))
-                                    .onErrorResume(TupleWriteAbortedException.class,
-                                            stopped -> Mono.just(
-                                                    Reconciliation.stopped(written, stopped, scan.present())));
-                        })));
+                        .flatMap(scan -> revision.additionalDesired(scan.stale())
+                                .flatMap(extra -> 더한다(writer, desired, written, scan, extra))))
+                .flatMap(revised -> {
+                    Scan scan = revised.scan();
+                    Optional<String> hold = check.holdReason(revised.desired(), scan.stale(), scan.scanned());
+                    if (hold.isPresent()) {
+                        log.warn("장부를 훑었지만 지우지 않는다: {}", hold.get());
+                        return Mono.just(Reconciliation.held(revised.written(), hold.get()));
+                    }
+                    return 지운다(writer, scan.stale())
+                            .map(deleted -> Reconciliation.of(revised.written(), deleted, scan.present()))
+                            .onErrorResume(TupleWriteAbortedException.class,
+                                    stopped -> Mono.just(Reconciliation.stopped(revised.written(), stopped, scan.present())));
+                }));
+    }
+
+    /** 다시 정한 결과 — 더한 줄을 넣은 D, 쓰기 결과(더 쓴 줄 포함), 지울 후보와 장부에 있다고 볼 줄. */
+    private record 다시_정함(Set<RelationTuple> desired, TupleWriteResult written, Scan scan) {
+    }
+
+    /** 더할 줄 중 장부에 있는 것은 후보에서 빼 있어야 할 줄로 옮기고, 장부에 없는 것은 쓴다. 쓴 줄은 장부에 있다고 본다. */
+    private static Mono<다시_정함> 더한다(RelationTupleWriter writer, Set<RelationTuple> desired, TupleWriteResult written,
+                                      Scan scan, Set<RelationTuple> extra) {
+        Set<RelationTuple> 새로 = new HashSet<>(extra);
+        새로.removeAll(desired);
+        if (새로.isEmpty()) {
+            return Mono.just(new 다시_정함(desired, written, scan));
+        }
+        Set<RelationTuple> 장부에_있던 = new HashSet<>(새로);
+        장부에_있던.retainAll(scan.stale());
+        Set<RelationTuple> 쓸것 = new HashSet<>(새로);
+        쓸것.removeAll(장부에_있던);
+        Set<RelationTuple> 남은_후보 = new HashSet<>(scan.stale());
+        남은_후보.removeAll(새로);
+        Set<RelationTuple> 다시_정한_D = new HashSet<>(desired);
+        다시_정한_D.addAll(새로);
+        log.warn("지우기 전에 있어야 할 줄 {}개를 더했다 — 장부에 있던 {}줄은 지우지 않고 {}줄은 새로 쓴다",
+                새로.size(), 장부에_있던.size(), 쓸것.size());
+        return 쓴다(writer, 쓸것).map(더_쓴 -> {
+            Set<RelationTuple> present = new HashSet<>(scan.present());
+            present.addAll(장부에_있던);
+            present.addAll(더_쓴.written());
+            return new 다시_정함(다시_정한_D, 합친다(written, 더_쓴), new Scan(남은_후보, present, scan.scanned()));
+        });
+    }
+
+    /** 처음 쓰기와 더 쓴 결과를 합친다 — 지운 것은 아직 없다. */
+    private static TupleWriteResult 합친다(TupleWriteResult first, TupleWriteResult more) {
+        Set<RelationTuple> written = new HashSet<>(first.written());
+        written.addAll(more.written());
+        List<TupleFailure> failures = new ArrayList<>(first.failures());
+        failures.addAll(more.failures());
+        return new TupleWriteResult(written, first.deleted(), failures);
     }
 
     private static Mono<TupleWriteResult> 쓴다(RelationTupleWriter writer, Set<RelationTuple> desired) {

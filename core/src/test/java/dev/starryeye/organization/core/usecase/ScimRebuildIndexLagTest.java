@@ -1,0 +1,201 @@
+package dev.starryeye.organization.core.usecase;
+
+import dev.starryeye.organization.core.audit.AuditObserver;
+import dev.starryeye.organization.core.audit.AuditRecorder;
+import dev.starryeye.organization.core.fake.FakeAuditLog;
+import dev.starryeye.organization.core.fake.FakeMutationLock;
+import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
+import dev.starryeye.organization.core.fake.FakeStateRepository;
+import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
+import dev.starryeye.organization.core.fake.FakeTupleScanner;
+import dev.starryeye.organization.core.fake.FakeTupleWriter;
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncRun;
+import dev.starryeye.organization.core.model.SyncStatus;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * SCIM 재적재가 GSI 열거를 장부로 보강한다(설계 2026-10-13 §4). 락 직전에 커밋돼 아직 GSI 에 없는 대상의 권한을 지우지 않는다. DynamoDB Local 은 GSI 가
+ * 즉시 반영돼 지연을 재현할 수 없어(§7) 가짜 저장소로 본다.
+ */
+class ScimRebuildIndexLagTest {
+
+    private static final Instant NOW = Instant.parse("2026-10-13T03:00:00Z");
+    private static final MemberRef 김 = MemberRef.user("kim");
+    private static final MemberRef 이 = MemberRef.user("lee");
+    private static final MemberRef 박 = MemberRef.user("park");
+    private static final MemberRef 팀 = MemberRef.group("TEAM");
+    private static final MemberRef 백엔드 = MemberRef.group("DEV002");
+    private static final RelationTuple 김_백엔드 = RelationTuple.directMember("kim", "DEV002");
+    private static final RelationTuple 이_백엔드 = RelationTuple.directMember("lee", "DEV002");
+    private static final RelationTuple 백엔드_개발본부 = RelationTuple.child("DEV002", "DEV001");
+    private static final RelationTuple 김_팀 = RelationTuple.directMember("kim", "TEAM");
+    private static final RelationTuple 박_팀 = RelationTuple.directMember("park", "TEAM");
+    private static final RelationTuple 팀_개발본부 = RelationTuple.child("TEAM", "DEV001");
+    private static final RelationTuple 유령_백엔드 = RelationTuple.directMember("ghost", "DEV002");
+
+    /** GSI 지연을 흉내 낸다 — 숨긴 대상은 열거(loadAll)에서만 빠지고 강한 읽기(findUsers·findGroup)에서는 보인다. 조직 파티션은 강한 읽기라 멤버로는 보인다. */
+    static class 열거가_늦은_저장소 extends FakeStateRepository {
+
+        final Set<String> 숨긴_직원 = new LinkedHashSet<>();
+        final Set<String> 숨긴_조직 = new LinkedHashSet<>();
+
+        @Override
+        public Mono<DirectorySnapshot> loadAll() {
+            return super.loadAll().map(all -> new DirectorySnapshot(
+                    보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직)));
+        }
+
+        private static <T> Map<String, T> 보이는_것(Map<String, T> all, Set<String> hidden) {
+            Map<String, T> visible = new LinkedHashMap<>(all);
+            visible.keySet().removeAll(hidden);
+            return visible;
+        }
+    }
+
+    private 열거가_늦은_저장소 state;
+    private FakeTupleWriter writer;
+    private FakeSyncRunRepository runs;
+    private FakeAuditLog auditLog;
+    private ScimRebuildUseCase useCase;
+
+    @BeforeEach
+    void setUp() {
+        state = new 열거가_늦은_저장소();
+        writer = new FakeTupleWriter();
+        runs = new FakeSyncRunRepository(NOW);
+        auditLog = new FakeAuditLog();
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), new FakeSnapshotRepository(),
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
+                clock, new AuditRecorder(auditLog, AuditObserver.NOOP, clock));
+    }
+
+    private static DirectoryUser 직원(String id) {
+        return new DirectoryUser(id, "emp-" + id, id, id, null, true);
+    }
+
+    private void 조직을_심는다(String id, MemberRef... members) {
+        state.saveGroup(new DirectoryGroup(id, id, id + "-조직", Set.of(members))).block();
+    }
+
+    private SyncRun 재적재한다(ScimRebuildMode mode) {
+        SyncRun started = useCase.start(mode).block();
+        return runs.awaitFinished(started.runId());
+    }
+
+    @Test
+    @DisplayName("tuples — 락 직전에 만들어져 GSI 에 아직 없는 직원의 권한을 지우지 않는다")
+    void 막_만든_직원의_권한을_지우지_않는다() {
+        // given — kim 은 오래된 직원, lee 는 GSI 에 아직 없다. 둘 다 DEV002 의 멤버고 장부에 권한이 있다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("DEV002", 김, 이);
+        조직을_심는다("DEV001", 백엔드);
+        writer.stored.addAll(Set.of(김_백엔드, 이_백엔드, 백엔드_개발본부));
+        state.숨긴_직원.add("lee");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.deleted).doesNotContain(이_백엔드);
+        assertThat(writer.stored).contains(김_백엔드, 이_백엔드, 백엔드_개발본부);
+    }
+
+    @Test
+    @DisplayName("tuples — GSI 에 아직 없는 조직의 멤버 권한과 상위 연결을 지우지 않는다")
+    void 막_만든_조직의_권한을_지우지_않는다() {
+        // given — TEAM 은 GSI 에 아직 없다. DEV001 은 TEAM 을 하위 조직으로 적었고, 장부에 kim→TEAM, TEAM→DEV001 이 있다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("TEAM", 김);
+        조직을_심는다("DEV001", 팀);
+        조직을_심는다("DEV002", 이);
+        writer.stored.addAll(Set.of(김_팀, 팀_개발본부, 이_백엔드));
+        state.숨긴_조직.add("TEAM");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.deleted).doesNotContain(김_팀, 팀_개발본부);
+        assertThat(writer.stored).contains(김_팀, 팀_개발본부, 이_백엔드);
+    }
+
+    @Test
+    @DisplayName("tuples — 다시 읽은 조직의 새 멤버 줄이 장부에 아직 없으면 써 준다")
+    void 새_멤버의_줄은_써진다() {
+        // given — TEAM 과 park 이 GSI 에 아직 없다. 장부에는 kim→TEAM 만 있고 park→TEAM 은 아직 없다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("park")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("TEAM", 김, 박);
+        조직을_심는다("DEV002", 이);
+        writer.stored.addAll(Set.of(김_팀, 이_백엔드));
+        state.숨긴_조직.add("TEAM");
+        state.숨긴_직원.add("park");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).contains(김_팀, 박_팀, 이_백엔드);
+        assertThat(writer.written).contains(박_팀);
+    }
+
+    @Test
+    @DisplayName("tuples — 다시 읽어도 없는 대상(찌꺼기)의 줄은 지운다")
+    void 다시_읽어도_없는_대상의_줄은_지운다() {
+        // given
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("DEV002", 김);
+        writer.stored.addAll(Set.of(김_백엔드, 유령_백엔드));
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.deleted).containsExactly(유령_백엔드);
+        assertThat(state.findUsersCalls).contains(Set.of("ghost"));
+    }
+
+    @Test
+    @DisplayName("tuples — 열거에서 빠진 것이 없으면 다시 읽지 않는다")
+    void 평소에는_다시_읽지_않는다() {
+        // given
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("DEV002", 김);
+        writer.stored.add(김_백엔드);
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.findUsersCalls).isEmpty();
+        assertThat(state.findGroupCalls).isEmpty();
+    }
+}

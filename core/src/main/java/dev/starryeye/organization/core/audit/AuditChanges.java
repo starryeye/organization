@@ -7,6 +7,7 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.tuple.TupleSubjects;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,7 +15,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -78,13 +78,13 @@ public final class AuditChanges {
 
     /** 사건이 OpenFGA 에 실제로 쓰고 지운 튜플. */
     public synchronized AuditChanges tuples(TupleWriteResult result) {
-        result.written().forEach(tuple -> 튜플의_대상(tuple).ifPresent(subject -> 대상(subject).granted.add(tuple)));
+        result.written().forEach(tuple -> TupleSubjects.userSide(tuple).ifPresent(subject -> 대상(subject).granted.add(tuple)));
         return revoked(result.deleted());
     }
 
     /** 지운 튜플만 — 재적재·장부 맞추기는 쓴 줄을 남기지 않는다(설계 2026-10-10 §3.5). */
     public synchronized AuditChanges revoked(Set<RelationTuple> deleted) {
-        deleted.forEach(tuple -> 튜플의_대상(tuple).ifPresent(subject -> 대상(subject).revoked.add(tuple)));
+        deleted.forEach(tuple -> TupleSubjects.userSide(tuple).ifPresent(subject -> 대상(subject).revoked.add(tuple)));
         return this;
     }
 
@@ -110,23 +110,6 @@ public final class AuditChanges {
 
     private 모음 대상(MemberRef subject) {
         return 대상들.computeIfAbsent(subject, ignored -> new 모음());
-    }
-
-    /** {@code user:kim} → 직원 kim, {@code group:DEV} → 조직 DEV. 다른 종류나 {@code #관계} 가 붙은 user 쪽은 대상이 아니다. */
-    private static Optional<MemberRef> 튜플의_대상(RelationTuple tuple) {
-        String user = tuple.user();
-        String 직원 = RelationTuple.USER_TYPE + ":";
-        String 조직 = RelationTuple.GROUP_TYPE + ":";
-        if (user.contains("#")) {
-            return Optional.empty();
-        }
-        if (user.startsWith(직원)) {
-            return Optional.of(MemberRef.user(user.substring(직원.length())));
-        }
-        if (user.startsWith(조직)) {
-            return Optional.of(MemberRef.group(user.substring(조직.length())));
-        }
-        return Optional.empty();
     }
 
     private static Map<String, String> 속성(DirectoryUser user) {
