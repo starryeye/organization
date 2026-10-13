@@ -112,17 +112,19 @@ public class ScimRebuildUseCase {
             return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
                     .flatMap(reconciliation -> reconciliation.held()
                             ? Mono.just(Mono.just(SyncOutcome.failed(reconciliation.heldReason())))
-                            // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6)
-                            : state.replaceCutEdges(mapping.cutEdges()).thenReturn(commitTuples(reconciliation, cause)));
+                            // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6).
+                            // 이력의 시각은 락 안의 일이 끝난 이때 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
+                            : state.replaceCutEdges(mapping.cutEdges())
+                                    .then(Mono.fromSupplier(() -> commitTuples(reconciliation, cause, audit.now()))));
         });
     }
 
     /**
      * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다.
      * <b>락을 반납한 뒤에 돈다</b>(설계 2026-10-02 §5) — SCIM 쓰기 경로는 이 스냅샷을 읽지 않는다. 저장이 실패하면 FAILED 다 — 장부는 이미 맞췄다.
-     * 저장한 뒤 지운 줄을 이력에 남긴다(설계 2026-10-10 §4.2).
+     * 저장한 뒤 지운 줄을 이력에 남긴다(설계 2026-10-10 §4.2). 이력의 시각 {@code at} 은 락 안의 일이 끝났을 때 잡은 것이다(§4.4).
      */
-    private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation, AuditCause cause) {
+    private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation, AuditCause cause, Instant at) {
         return Mono.defer(() -> {
                     Instant now = clock.instant();
                     TupleSnapshot snapshot = new TupleSnapshot(
@@ -131,7 +133,7 @@ public class ScimRebuildUseCase {
                 })
                 .onErrorMap(error -> new IllegalStateException("장부는 맞췄다 — 스냅샷 저장 실패: "
                         + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()), error))
-                .flatMap(outcome -> audit.recordRun(cause,
+                .flatMap(outcome -> audit.recordRun(cause, at,
                         new AuditChanges().revoked(reconciliation.result().deleted()).entries(), outcome));
     }
 
@@ -155,9 +157,13 @@ public class ScimRebuildUseCase {
                     .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
                     .doOnSuccess(changes -> log.warn(
                             "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
-                    .map(changes -> Mono.defer(() -> audit.recordRun(cause,
-                            new AuditChanges().directory(changes).revoked(result.deleted()).entries(),
-                            SyncOutcome.succeeded(result, null))));
+                    .map(changes -> {
+                        // 시각은 락 안에서 조직도를 지운 직후에 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
+                        Instant at = audit.now();
+                        return Mono.defer(() -> audit.recordRun(cause, at,
+                                new AuditChanges().directory(changes).revoked(result.deleted()).entries(),
+                                SyncOutcome.succeeded(result, null)));
+                    });
         });
     }
 }

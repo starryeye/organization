@@ -20,6 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AuditRecorderTest {
 
     private static final Instant 지금 = Instant.parse("2026-10-10T03:00:00Z");
+    /** 부르는 쪽이 락 안에서 커밋한 직후 잡은 시각 — 시계의 지금과 일부러 다르게 둔다. */
+    private static final Instant 커밋시각 = Instant.parse("2026-10-10T02:59:00Z");
     private static final AuditCause 원인 = AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1");
 
     private final FakeAuditLog auditLog = new FakeAuditLog();
@@ -32,19 +34,29 @@ class AuditRecorderTest {
     }
 
     @Test
-    @DisplayName("사건을 지금 시각과 원인으로 한 번에 쓴다")
-    void 지금_시각과_원인으로_쓴다() {
+    @DisplayName("사건을 쓰는 때의 시계가 아니라 넘겨받은 커밋 시각과 원인으로 한 번에 쓴다")
+    void 넘겨받은_시각과_원인으로_쓴다() {
         // given, when
-        Integer 빠진 = recorder.record(원인, List.of(김의_줄())).block();
+        Integer 빠진 = recorder.record(원인, 커밋시각, List.of(김의_줄())).block();
 
         // then
         assertThat(빠진).isZero();
         assertThat(auditLog.events).singleElement().satisfies(event -> {
-            assertThat(event.at()).isEqualTo(지금);
+            assertThat(event.at()).isEqualTo(커밋시각);
             assertThat(event.cause()).isEqualTo(원인);
             assertThat(event.entries()).containsExactly(김의_줄());
         });
         assertThat(빠진_줄_지표).hasValue(0);
+    }
+
+    @Test
+    @DisplayName("부르는 쪽이 커밋 시각을 잡을 지금은 서버 시계다")
+    void 지금은_서버_시계다() {
+        // given, when
+        Instant now = recorder.now();
+
+        // then
+        assertThat(now).isEqualTo(지금);
     }
 
     @Test
@@ -54,7 +66,7 @@ class AuditRecorderTest {
         AuditEntry 빈_줄 = new AuditEntry(MemberRef.user("kim"), false, false, null, null, null, null, null, null, null);
 
         // when
-        Integer 빠진 = recorder.record(원인, List.of(빈_줄)).block();
+        Integer 빠진 = recorder.record(원인, 커밋시각, List.of(빈_줄)).block();
 
         // then
         assertThat(빠진).isZero();
@@ -68,11 +80,28 @@ class AuditRecorderTest {
         auditLog.failWith = new IllegalStateException("DynamoDB 장애");
 
         // when
-        Integer 빠진 = recorder.record(원인, List.of(김의_줄())).block();
+        Integer 빠진 = recorder.record(원인, 커밋시각, List.of(김의_줄())).block();
 
         // then
         assertThat(빠진).isEqualTo(1);
         assertThat(빠진_줄_지표).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("지표로 알리다 던져도 오류를 내지 않고 빠진 줄 수를 돌려준다")
+    void 지표가_던져도_빠진_줄을_돌려준다() {
+        // given
+        auditLog.missingLines = 1;
+        AuditObserver 던지는_지표 = lines -> {
+            throw new IllegalStateException("지표 장애");
+        };
+        AuditRecorder 던지는_지표의_기록기 = new AuditRecorder(auditLog, 던지는_지표, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        Integer 빠진 = 던지는_지표의_기록기.record(원인, 커밋시각, List.of(김의_줄())).block();
+
+        // then
+        assertThat(빠진).isEqualTo(1);
     }
 
     @Test
@@ -82,7 +111,7 @@ class AuditRecorderTest {
         auditLog.missingLines = 3;
 
         // when
-        SyncOutcome outcome = recorder.recordRun(원인, List.of(김의_줄()), SyncOutcome.noChange()).block();
+        SyncOutcome outcome = recorder.recordRun(원인, 커밋시각, List.of(김의_줄()), SyncOutcome.noChange()).block();
 
         // then
         assertThat(outcome.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -94,10 +123,11 @@ class AuditRecorderTest {
     @DisplayName("다 쓰면 회차 결과는 그대로다")
     void 다_쓰면_그대로() {
         // given, when
-        SyncOutcome outcome = recorder.recordRun(원인, List.of(김의_줄()), SyncOutcome.noChange()).block();
+        SyncOutcome outcome = recorder.recordRun(원인, 커밋시각, List.of(김의_줄()), SyncOutcome.noChange()).block();
 
         // then
         assertThat(outcome).isEqualTo(SyncOutcome.noChange());
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(커밋시각));
     }
 
     @Test

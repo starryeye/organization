@@ -133,4 +133,49 @@ class ScimRebuildAuditTest {
         assertThat(auditLog.events).hasSize(1);
         assertThat(쓸때_락을_쥠).isFalse();
     }
+
+    /** 반납하는 순간 시계가 가는 락으로 재적재한다 — 이력과 스냅샷이 그 락의 시계를 본다. */
+    private SyncRun 시계가_가는_락으로_재적재한다(ClockAdvancingLock 시계가_가는_락, ScimRebuildMode mode) {
+        Clock 시계 = 시계가_가는_락.clock();
+        ScimRebuildUseCase 시계를_보는_재적재 = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer),
+                new FakeSnapshotRepository(),
+                new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
+                시계, new AuditRecorder(auditLog, AuditObserver.NOOP, 시계));
+        SyncRun started = 시계를_보는_재적재.start(mode).block();
+        return runs.awaitFinished(started.runId());
+    }
+
+    @Test
+    @DisplayName("tuples 모드 이력의 시각은 반납 뒤 쓴 시각이 아니라 락 안에서 끝낸 시각이다")
+    void tuples_모드_시각은_락_안의_시각이다() {
+        // given — 반납하는 순간 시계가 1분 간다. 이력은 반납 뒤에 쓴다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(NOW);
+        조직도를_심는다();
+        writer.stored.add(찌꺼기);
+
+        // when
+        SyncRun run = 시계가_가는_락으로_재적재한다(시계가_가는_락, ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(NOW.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(NOW));
+    }
+
+    @Test
+    @DisplayName("wipe 이력의 시각은 반납 뒤 쓴 시각이 아니라 락 안에서 조직도를 지운 시각이다")
+    void wipe_시각은_락_안의_시각이다() {
+        // given — 반납하는 순간 시계가 1분 간다. 이력은 반납 뒤에 쓴다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(NOW);
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+
+        // when
+        SyncRun run = 시계가_가는_락으로_재적재한다(시계가_가는_락, ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(NOW.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(NOW));
+    }
 }

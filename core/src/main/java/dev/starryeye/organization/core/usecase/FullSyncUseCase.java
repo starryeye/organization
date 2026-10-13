@@ -132,7 +132,7 @@ public class FullSyncUseCase {
             if (delta.isEmpty()) {
                 log.info("변경 없음. OpenFGA 를 호출하지 않는다");
                 return state.replaceWith(directory)
-                        .map(changes -> 남긴다(cause, changes, TupleWriteResult.empty(), SyncOutcome.noChange()));
+                        .map(changes -> 남긴다(cause, audit.now(), changes, TupleWriteResult.empty(), SyncOutcome.noChange()));
             }
             if (trigger != SyncTrigger.FORCED) {
                 GuardDecision decision = guard.evaluate(delta, baseline);
@@ -147,7 +147,7 @@ public class FullSyncUseCase {
                     .flatMap(result -> commit(directory, baseline, result, cause))
                     .onErrorResume(TupleWriteAbortedException.class, stopped ->
                             saveSnapshotAndState(directory, baseline, stopped.partial())
-                                    .map(saved -> 남긴다(cause, saved.changes(), stopped.partial(),
+                                    .map(saved -> 남긴다(cause, saved.at(), saved.changes(), stopped.partial(),
                                             SyncOutcome.stopped(stopped.partial(), saved.snapshotId(), stopped.getMessage()))));
         });
     }
@@ -161,22 +161,23 @@ public class FullSyncUseCase {
     private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, Set<RelationTuple> baseline,
                                            TupleWriteResult result, AuditCause cause) {
         return saveSnapshotAndState(directory, baseline, result)
-                .map(saved -> 남긴다(cause, saved.changes(), result, result.hasFailure()
+                .map(saved -> 남긴다(cause, saved.at(), saved.changes(), result, result.hasFailure()
                         ? SyncOutcome.partial(result, saved.snapshotId())
                         : SyncOutcome.succeeded(result, saved.snapshotId())));
     }
 
     /**
-     * 반납 뒤 할 일 — 회차가 커밋한 조직도 변경과 쓰고 지운 튜플을 회차 id 로 남긴다(설계 2026-10-10 §4.4). 줄은 락을 반납한 뒤에 만든다. 이력을 쓰지
-     * 못해도 회차는 그대로이고, 메시지 앞에 빠진 줄이 붙는다(§4.5).
+     * 반납 뒤 할 일 — 회차가 커밋한 조직도 변경과 쓰고 지운 튜플을 회차 id 로 남긴다(설계 2026-10-10 §4.4). 시각 {@code at} 은 락 안에서 커밋한 직후에
+     * 잡은 것이고, 줄은 락을 반납한 뒤에 만든다. 이력을 쓰지 못해도 회차는 그대로이고, 메시지 앞에 빠진 줄이 붙는다(§4.5).
      */
-    private Mono<SyncOutcome> 남긴다(AuditCause cause, DirectoryChanges changes, TupleWriteResult result, SyncOutcome outcome) {
-        return Mono.defer(() -> audit.recordRun(cause,
+    private Mono<SyncOutcome> 남긴다(AuditCause cause, Instant at, DirectoryChanges changes, TupleWriteResult result,
+                                  SyncOutcome outcome) {
+        return Mono.defer(() -> audit.recordRun(cause, at,
                 new AuditChanges().directory(changes).tuples(result).entries(), outcome));
     }
 
-    /** 저장한 스냅샷 아이디와, 현재상태가 실제로 바뀐 것. */
-    private record 저장함(String snapshotId, DirectoryChanges changes) {
+    /** 저장한 스냅샷 아이디와, 현재상태가 실제로 바뀐 것과, 그 커밋을 마친 시각(이력의 시각, §4.4). */
+    private record 저장함(String snapshotId, DirectoryChanges changes, Instant at) {
     }
 
     /**
@@ -184,7 +185,7 @@ public class FullSyncUseCase {
      * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
      *
      * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
-     * 스냅샷 저장이 "기록 중" 표시를 지운다. 저장한 스냅샷 아이디와 현재상태가 바뀐 것을 준다.
+     * 스냅샷 저장이 "기록 중" 표시를 지운다. 저장한 스냅샷 아이디와 현재상태가 바뀐 것, 현재상태 교체를 마친 시각을 준다.
      */
     private Mono<저장함> saveSnapshotAndState(DirectorySnapshot directory,
                                             Set<RelationTuple> baseline,
@@ -202,6 +203,6 @@ public class FullSyncUseCase {
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory)))
-                .map(changes -> new 저장함(snapshot.id(), changes));
+                .map(changes -> new 저장함(snapshot.id(), changes, audit.now()));
     }
 }

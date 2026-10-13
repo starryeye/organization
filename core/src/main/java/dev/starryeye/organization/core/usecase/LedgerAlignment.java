@@ -32,7 +32,7 @@ import java.util.Set;
  *       표시가 남아 다음 회차도 다시 확인한다.</li>
  *   <li>끝나면 스냅샷(표시가 사라진다)과 현재상태를 남긴다.</li>
  *   <li>락을 반납한 뒤 이력을 남긴다 — 현재상태가 바뀐 것과 <b>지운 줄만</b>. 쓴 줄은 중복 무시로 써 이미 있던 줄과 가를 수 없다(설계 2026-10-10
- *       §3.5).</li>
+ *       §3.5). 시각은 락 안에서 커밋한 직후에 잡는다(§4.4).</li>
  * </ol>
  */
 @RequiredArgsConstructor
@@ -71,8 +71,12 @@ final class LedgerAlignment {
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory)))
-                .map(changes -> Mono.defer(() -> audit.recordRun(cause,
-                        new AuditChanges().directory(changes).revoked(reconciliation.result().deleted()).entries(),
-                        reconciliation.outcome(snapshot.id()))));
+                .map(changes -> {
+                    // 시각은 락 안에서 커밋한 직후에 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
+                    Instant at = audit.now();
+                    return Mono.defer(() -> audit.recordRun(cause, at,
+                            new AuditChanges().directory(changes).revoked(reconciliation.result().deleted()).entries(),
+                            reconciliation.outcome(snapshot.id())));
+                });
     }
 }

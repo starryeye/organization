@@ -30,6 +30,7 @@ import reactor.core.publisher.Signal;
 import reactor.core.publisher.Sinks;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -37,6 +38,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -667,16 +669,19 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>이력(설계 2026-10-10 §4.4).</b> 요청마다 원인(traceId)과 변경 모음 하나를 만들어 커밋 자리들에 넘긴다. 락을 반납하고 다음 요청에 차례를
      * 넘긴 뒤, 응답하기 전에 모은 것을 한 번에 남긴다. 값을 낸 요청만 남긴다 — 오류로 끝난 요청은 커밋을 마치지 못했을 수 있다. 이력 쓰기는
-     * 실패해도 요청을 실패시키지 않는다({@link AuditRecorder}).
+     * 실패해도 요청을 실패시키지 않는다({@link AuditRecorder}). 시각은 일이 락 안에서 값을 낸 때(커밋 직후) 잡는다 — 반납 뒤에 잡으면 그 사이 락을
+     * 잡고 커밋한 다른 요청·회차보다 늦은 시각이 되어 최신순이 뒤집힌다.
      */
     private Mono<IncrementalSyncResult> withLock(BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
             AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context));
             AuditChanges 기록 = new AuditChanges();
+            AtomicReference<Instant> 커밋_시각 = new AtomicReference<>();
             Sinks.One<IncrementalSyncResult> 결과 = Sinks.one();
             AtomicBoolean 요청이_떠났다 = new AtomicBoolean();
             // 알리기 전에 본다 — 값을 받은 뒤에 오는 취소는 떠난 것이 아니다.
-            잡고_돌린다(lease -> work.apply(lease, 기록), () -> audit.record(원인, 기록.entries()))
+            잡고_돌린다(lease -> work.apply(lease, 기록).doOnNext(ignored -> 커밋_시각.set(audit.now())),
+                    () -> audit.record(원인, 커밋_시각.get(), 기록.entries()))
                     .contextWrite(context)
                     .subscribe(value -> {
                         if (요청이_떠났다.get() && !value.fullyApplied()) {
@@ -694,7 +699,10 @@ public class IncrementalSyncUseCase {
         });
     }
 
-    /** {@code 반납_뒤} 는 반납하고 차례를 넘긴 뒤, 값을 낸 요청에서만 부른다 — 이력이다. */
+    /**
+     * {@code 반납_뒤} 는 반납하고 차례를 넘긴 뒤, 값을 낸 요청에서만 부른다 — 이력이다. 그것이 오류로 끝나도 요청은 그대로 값을 낸다 — 변경은 이미
+     * 커밋됐다(설계 2026-10-10 §4.5).
+     */
     private Mono<IncrementalSyncResult> 잡고_돌린다(Function<LockLease, Mono<IncrementalSyncResult>> work,
                                              Supplier<Mono<Integer>> 반납_뒤) {
         return Mono.defer(() -> {
@@ -722,7 +730,14 @@ public class IncrementalSyncUseCase {
                                 // 끝이 오지 않고 취소돼도 차례를 쥔 채 사라지지 않는다 — 넘긴다는 한 번만 넘긴다
                                 .doFinally(signal -> 차례.넘긴다())
                                 // 반납하고 차례를 넘긴 뒤, 응답하기 전에 이력을 남긴다(설계 2026-10-10 §4.4)
-                                .flatMap(끝 -> 끝.isOnNext() ? Mono.defer(반납_뒤).thenReturn(끝) : Mono.just(끝))
+                                .flatMap(끝 -> 끝.isOnNext()
+                                        ? Mono.defer(반납_뒤)
+                                                .onErrorResume(error -> {
+                                                    log.error("이력을 남기지 못했다 — 요청은 이미 커밋됐다", error);
+                                                    return Mono.empty();
+                                                })
+                                                .thenReturn(끝)
+                                        : Mono.just(끝))
                                 .<IncrementalSyncResult>dematerialize();
                     });
         });

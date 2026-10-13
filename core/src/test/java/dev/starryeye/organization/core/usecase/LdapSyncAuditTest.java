@@ -198,6 +198,54 @@ class LdapSyncAuditTest {
         assertThat(쓸때_락을_쥠).isFalse();
     }
 
+    /** 반납하는 순간 시계가 가는 락으로 동기화한다 — 이력과 스냅샷이 그 락의 시계를 본다. */
+    private SyncRun 시계가_가는_락으로_동기화한다(ClockAdvancingLock 시계가_가는_락, SyncTrigger trigger) {
+        Clock 시계 = 시계가_가는_락.clock();
+        SyncJobs jobs = new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
+        FullSyncUseCase 시계를_보는_동기화 = new FullSyncUseCase(source, snapshots, state, writer, new FakeTupleScanner(writer),
+                new DeletionGuard(DeletionGuardPolicy.defaults()), jobs, 시계, new AuditRecorder(auditLog, 빠진_줄_지표::addAndGet, 시계));
+        SyncRun started = 시계를_보는_동기화.start(trigger, run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
+    }
+
+    @Test
+    @DisplayName("동기화 이력의 시각은 반납 뒤 쓴 시각이 아니라 락 안에서 커밋한 시각이다")
+    void 동기화_시각은_커밋한_시각이다() {
+        // given — 반납하는 순간 시계가 1분 간다. 이력은 반납 뒤에 쓴다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(고정시각);
+        source.willReturn(조직도(직원("kim")));
+
+        // when
+        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, SyncTrigger.SCHEDULED);
+
+        // then — 반납이 시계를 옮겼고, 이력은 그 전 시각이다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(고정시각.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(고정시각));
+    }
+
+    @Test
+    @DisplayName("장부 맞추기 이력의 시각도 락 안에서 커밋한 시각이다")
+    void 장부_맞추기_시각은_커밋한_시각이다() {
+        // given — 지난 회차가 쓰다 멈췄다. 반납하는 순간 시계가 1분 간다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(고정시각);
+        writer.stored.add(유령_개발);
+        snapshots.writing.set(true);
+        source.willReturn(조직도(직원("kim")));
+
+        // when
+        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, SyncTrigger.FORCED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(고정시각.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> {
+            assertThat(event.cause().kind()).isEqualTo(AuditKind.LEDGER_ALIGNMENT);
+            assertThat(event.at()).isEqualTo(고정시각);
+        });
+    }
+
     @Test
     @DisplayName("이력 쓰기가 실패해도 회차는 성공하고, 회차 메시지와 지표에 빠진 줄이 남는다")
     void 이력_쓰기가_실패해도_회차는_성공하고_메시지에_남는다() {

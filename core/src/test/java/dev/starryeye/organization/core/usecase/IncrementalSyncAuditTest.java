@@ -194,6 +194,24 @@ class IncrementalSyncAuditTest {
     }
 
     @Test
+    @DisplayName("이력의 시각은 반납 뒤 쓴 시각이 아니라 락 안에서 커밋한 시각이다")
+    void 시각은_커밋한_시각이다() {
+        // given — 반납하는 순간 시계가 1분 간다. 이력은 반납 뒤에 쓴다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(고정시각);
+        AuditRecorder audit = new AuditRecorder(auditLog, AuditObserver.NOOP, 시계가_가는_락.clock());
+        IncrementalSyncUseCase 시계를_보는_유스케이스 = new IncrementalSyncUseCase(state, new FakeTupleWriter(), checker,
+                시계가_가는_락, Duration.ZERO, Duration.ofSeconds(10), IncrementalSyncUseCase.DriftObserver.NOOP,
+                LockObserver.NOOP, audit, context -> "trace-1");
+
+        // when
+        시계를_보는_유스케이스.createUser(직원("kim", true)).block();
+
+        // then — 반납이 시계를 옮겼고, 이력은 그 전 시각이다
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(고정시각.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(고정시각));
+    }
+
+    @Test
     @DisplayName("바뀐 것이 없는 요청은 남기지 않는다")
     void 바뀐_것이_없으면_남기지_않는다() {
         // given
