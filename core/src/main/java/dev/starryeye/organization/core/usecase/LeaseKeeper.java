@@ -22,7 +22,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p><b>잃었다고 보는 것은 둘뿐이다(설계 2026-10-13 §3.1).</b>
  * <ul>
  *   <li>갱신이 {@link LockUnavailableException} 으로 끝났다 — 저장소의 토큰 조건이 깨졌다, 곧 남이 가져갔다. 곧바로 멈춘다.</li>
- *   <li>마지막으로 갱신에 성공한 때(처음에는 일을 시작한 때)부터 갱신 주기 두 번 안에 성공하지 못했다 — TTL(30초)보다 먼저 멈춘다.</li>
+ *   <li>마지막으로 성공한 갱신을 보낸 때(처음에는 일을 시작한 때)부터 갱신 주기 두 번 안에 성공하지 못했다 — TTL(30초)보다 먼저 멈춘다.
+ *       저장소가 만료 시각을 요청을 보낸 때 + TTL 로 정하므로 답이 온 때가 아니라 보낸 때로 잰다 — 답이 온 때로 재면 느린 성공 하나가 TTL 전 여유를 줄인다.</li>
  * </ul>
  * 그 밖의 실패(스로틀·네트워크·SDK 오류)와 한 번 시도의 시간 초과는 잃었다고 단정하지 않는다 — 그 한도 안에서 쉬며 다시 시도한다. 한 번 시도는
  * 주기의 절반 안에 답해야 하고(매달린 연결 하나가 한도를 다 쓰지 않게), 쉬는 시간은 주기의 1/50 에서 두 배씩 늘려 주기의 1/5 까지다(기본 10초면
@@ -39,6 +40,9 @@ final class LeaseKeeper {
     private final Duration renewInterval;
     private final LockObserver lockObserver;
 
+    /** 한도를 넘겨 멈추는 두 길(남은 시간이 0 이하인 채 시작한 갱신, 다시 시도하는 동안 한도에 닿은 갱신)이 함께 쓰는 말 */
+    private static final String 한도_초과_사유 = "마지막 갱신 성공에서 갱신 주기 두 번이 지났다";
+
     /**
      * {@code work} 를 돌리며 리스를 갱신한다. 리스를 잃으면 {@code work} 를 취소하고 {@link LockUnavailableException} 으로 끝난다.
      * {@code work} 가 어떻게 끝나든 갱신도 멈춘다.
@@ -50,7 +54,7 @@ final class LeaseKeeper {
             Sinks.One<T> 상실 = Sinks.one();
             AtomicLong 마지막_성공 = new AtomicLong(지금());
             Disposable heartbeat = Flux.interval(renewInterval, renewInterval)
-                    // 갱신(다시 시도 포함)이 이어지는 동안 온 tick 은 버린다 — 한도는 마지막 성공에서 재므로 tick 을 놓쳐도 늦어지지 않는다
+                    // 갱신(다시 시도 포함)이 이어지는 동안 온 tick 은 버린다 — 한도는 마지막 성공한 갱신을 보낸 때에서 재므로 tick 을 놓쳐도 늦어지지 않는다
                     .onBackpressureDrop()
                     .concatMap(tick -> 갱신한다(lease, 마지막_성공, 상실_사유))
                     .subscribe(renewed -> {
@@ -64,14 +68,20 @@ final class LeaseKeeper {
         });
     }
 
-    /** 한 tick 의 갱신. 조건 실패면 곧바로 오류다. 그 밖의 실패는 마지막 성공 + 2×주기 까지 쉬며 다시 시도한다. */
+    /**
+     * 한 tick 의 갱신. 조건 실패면 곧바로 오류다. 그 밖의 실패는 마지막으로 성공한 갱신을 보낸 때 + 2×주기 까지 쉬며 다시 시도한다.
+     * 성공하면 {@code 마지막_성공} 을 <b>그 갱신을 보낸 때</b>로 옮긴다 — 시도마다(다시 시도도 새 시도다) 보낸 때를 따로 잡는다.
+     */
     private Mono<LockLease> 갱신한다(LockLease lease, AtomicLong 마지막_성공, String 상실_사유) {
         return Mono.defer(() -> {
-            long 남은_밀리초 = 마지막_성공.get() + 2 * renewInterval.toMillis() - 지금();
+            long 남은_밀리초 = 한도까지_남은_밀리초(마지막_성공);
             if (남은_밀리초 <= 0) {
-                return Mono.error(new TimeoutException("마지막 갱신 성공에서 갱신 주기 두 번이 지났다"));
+                return Mono.error(new TimeoutException(한도_초과_사유));
             }
-            return Mono.defer(() -> lock.renew(lease))
+            return Mono.defer(() -> {
+                        long 보낸_때 = 지금();
+                        return lock.renew(lease).doOnNext(renewed -> 마지막_성공.set(보낸_때));
+                    })
                     .timeout(renewInterval.dividedBy(2))
                     .retryWhen(Retry.backoff(Long.MAX_VALUE, renewInterval.dividedBy(50))
                             .maxBackoff(renewInterval.dividedBy(5))
@@ -79,12 +89,15 @@ final class LeaseKeeper {
                             // 남이 가져간 것은 다시 시도하지 않는다 — 그대로 아래로 흘러 곧바로 멈춘다
                             .filter(error -> !(error instanceof LockUnavailableException))
                             .doBeforeRetry(signal -> log.warn("{} — 락 리스 갱신이 실패해 다시 시도한다({}번째 실패, 한도까지 {}ms): {}",
-                                    상실_사유, signal.totalRetries() + 1,
-                                    마지막_성공.get() + 2 * renewInterval.toMillis() - 지금(),
+                                    상실_사유, signal.totalRetries() + 1, 한도까지_남은_밀리초(마지막_성공),
                                     signal.failure().toString())))
-                    .timeout(Duration.ofMillis(남은_밀리초))
-                    .doOnNext(renewed -> 마지막_성공.set(지금()));
+                    .timeout(Duration.ofMillis(남은_밀리초), Mono.error(new TimeoutException(한도_초과_사유)));
         });
+    }
+
+    /** 한도까지 남은 시간 — 마지막으로 성공한 갱신을 보낸 때 + 2×주기 − 지금. 0 이하면 한도가 지났다. */
+    private long 한도까지_남은_밀리초(AtomicLong 마지막_성공) {
+        return 마지막_성공.get() + 2 * renewInterval.toMillis() - 지금();
     }
 
     private static long 지금() {

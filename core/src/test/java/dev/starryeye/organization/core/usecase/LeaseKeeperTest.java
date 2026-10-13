@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -157,11 +158,46 @@ class LeaseKeeperTest {
                 .thenAwait(Duration.ofSeconds(1))
                 .expectErrorSatisfies(error -> assertThat(error)
                         .isInstanceOf(LockUnavailableException.class)
-                        .hasCauseInstanceOf(TimeoutException.class))
+                        .hasCauseInstanceOf(TimeoutException.class)
+                        .cause().hasMessage("마지막 갱신 성공에서 갱신 주기 두 번이 지났다"))
                 .verify(Duration.ofSeconds(5));
         assertThat(취소됨).isTrue();
         assertThat(상실).containsExactly("테스트 도중 리스 상실");
-        assertThat(lock.renewAttempted.get()).as("한도 안에서 여러 번 시도했다").isGreaterThan(5);
+        // 시도는 10, 10.2, 10.6, 11.4, 13, 15, 17, 19초 — 시작값(주기의 1/50)·두 배씩 늘기·상한(주기의 1/5)·지터 없음을 한꺼번에 붙든다
+        assertThat(lock.renewAttempted.get()).as("한도 안에서 8번 시도했다").isEqualTo(8);
+    }
+
+    @Test
+    @DisplayName("갱신 한도는 성공한 갱신을 보낸 때부터 잰다 — 느린 성공의 답이 온 때가 아니다")
+    void 한도는_성공한_갱신을_보낸_때부터_잰다() {
+        // given — 10초에 보낸 갱신이 4.9초 뒤(14.9초)에 성공으로 답한다. 저장소는 만료 시각을 보낸 때 + TTL 로 정하므로 만료는 40초다. 그 뒤의 시도는 모두 일시 오류다
+        AtomicInteger 시도 = new AtomicInteger();
+        FakeMutationLock 느리게_성공하는_락 = new FakeMutationLock() {
+            @Override
+            public Mono<LockLease> renew(LockLease lease) {
+                if (시도.incrementAndGet() == 1) {
+                    return Mono.just(lease).delayElement(Duration.ofMillis(4_900));
+                }
+                return Mono.error(new IllegalStateException("갱신 일시 오류(테스트) — 스로틀 흉내"));
+            }
+        };
+        LockLease lease = 느리게_성공하는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        AtomicBoolean 취소됨 = new AtomicBoolean();
+        LeaseKeeper keeper = new LeaseKeeper(느리게_성공하는_락, Duration.ofSeconds(10), observer);
+
+        // when, then — 한도는 보낸 때(10초) + 2×주기 = 30초다. 답이 온 때(14.9초)로 재면 34.9초라 TTL 전 여유가 5초로 줄어든다
+        StepVerifier.withVirtualTime(() -> keeper.keep(lease, Mono.<String>never().doOnCancel(() -> 취소됨.set(true)),
+                        "테스트 도중 리스 상실"))
+                .expectSubscription()
+                .expectNoEvent(Duration.ofMillis(29_900))
+                .thenAwait(Duration.ofMillis(100))
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(LockUnavailableException.class)
+                        .hasCauseInstanceOf(TimeoutException.class)
+                        .cause().hasMessage("마지막 갱신 성공에서 갱신 주기 두 번이 지났다"))
+                .verify(Duration.ofSeconds(5));
+        assertThat(취소됨).isTrue();
+        assertThat(상실).containsExactly("테스트 도중 리스 상실");
     }
 
     @Test
