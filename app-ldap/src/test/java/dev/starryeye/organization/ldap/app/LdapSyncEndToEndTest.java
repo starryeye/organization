@@ -386,6 +386,41 @@ class LdapSyncEndToEndTest {
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
     }
 
+    // ---------- 변경 이력 (설계 2026-10-10) ----------
+
+    @Test
+    @Order(14)
+    @DisplayName("동기화 이력이 직원별로 남는다 — 회차 id, 바뀐 속성, 다시 얻은 권한, 장부 맞추기가 지운 줄")
+    void 직원별_이력이_남는다() throws Exception {
+        // given — kim 의 표시명을 바꾼다
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "displayName", "김철수2"));
+
+        // when
+        String runId = SyncJobClient.건다(client, "/admin/sync/full").runId();
+        SyncJobClient.기다린다(client, runId, Duration.ofMinutes(2));
+
+        // then — 맨 위는 이번 회차, 그 아래는 다시 활성화한 회차(@Order(9))
+        client.get().uri("/admin/employees/kim/history?limit=5").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].cause.source").isEqualTo("LDAP")
+                .jsonPath("$.items[0].cause.kind").isEqualTo("SYNC")
+                .jsonPath("$.items[0].cause.id").isEqualTo(runId)
+                .jsonPath("$.items[0].attributes[0].name").isEqualTo("displayName")
+                .jsonPath("$.items[0].attributes[0].before").isEqualTo("김철수")
+                .jsonPath("$.items[0].attributes[0].after").isEqualTo("김철수2")
+                .jsonPath("$.items[1].attributes[0].name").isEqualTo("active")
+                .jsonPath("$.items[1].granted[0]").isEqualTo("user:kim direct_member group:DEV002");
+
+        // then — 기록 중 표시가 남은 회차(@Order(12))가 지운 찌꺼기 줄
+        client.get().uri("/admin/employees/ghost/history").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].cause.kind").isEqualTo("LEDGER_ALIGNMENT")
+                .jsonPath("$.items[0].revoked[0]").isEqualTo("user:ghost direct_member group:DEV001");
+    }
+
     private void 동기화한다() {
         SyncJobClient.끝까지(client, "/admin/sync/full").jsonPath("$.status").isEqualTo("SUCCEEDED");
     }

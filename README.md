@@ -287,6 +287,8 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 | `GET /admin/organizations?externalId=` | `externalId`가 정확히 같은 조직 검색 |
 | `GET /admin/organizations/{orgCode}` | 조직 상세 — 상위 계층, 직속 하위 조직, 직속 소속 직원 첫 페이지 |
 | `GET /admin/organizations/{orgCode}/members` | 조직의 직속 소속 직원 목록 (커서 페이징) |
+| `GET /admin/employees/{employeeId}/history` | 직원의 변경 이력 — 최신순, `limit`(기본 20, 최대 100)·`cursor`. 아래 "변경 이력" |
+| `GET /admin/organizations/{orgCode}/history` | 조직의 변경 이력 — 같은 규칙 |
 
 검색은 `?cursor=`로 이어 읽고, `?limit=`(기본 20, 최대 100)로 페이지 크기를 조절한다.
 직원 검색은 `userName`·`displayName`·`externalId` 중 **정확히 하나**를, 조직 검색은 `displayName`·`externalId` 중
@@ -374,6 +376,51 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 **인증이 없다.** `/admin/sync`와 마찬가지로 `/admin/employees`, `/admin/organizations`도
 누구나 호출할 수 있게 열려 있다. 조직도와 소속 정보를 그대로 노출하므로, 실제 운영에
 투입하기 전에 반드시 앞단에서 보호해야 한다.
+
+### 변경 이력(감사 로그)
+
+직원·조직마다 "언제, 무엇 때문에, 무엇이 바뀌었나" 를 남긴다(설계 `docs/superpowers/specs/2026-10-10-audit-log-design.md`).
+
+```json
+{"items":[{"at":"2026-10-10T03:00:00.123Z",
+  "cause":{"source":"SCIM","kind":"SCIM_REQUEST","id":"4bf92f3577b34da6a3ce929d0e0e4736"},
+  "created":false,"deleted":false,
+  "attributes":[{"name":"displayName","before":"김철수","after":"김철수2"}],
+  "joined":[],"left":[],"granted":[],"revoked":[]}],
+ "nextCursor":null}
+```
+
+- **한 줄은 대상 하나 × 사건 하나다.** 사건은 동기화·재적재 회차 하나, 또는 SCIM 요청 하나다.
+- **원인(`cause`).**
+  - `source` 는 `LDAP`·`SCIM` 이다.
+  - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(기록 전에 멈춘 회차 뒤의 동기화)·`SCIM_REQUEST` 다.
+  - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청이면 로그의 traceId 다.
+- **조직도 변경.**
+  - `created`·`deleted`.
+  - 바뀐 속성(`attributes`): 직원은 `externalId`·`userName`·`displayName`·`email`·`active`·`name.*`, 조직은 `externalId`·`displayName`.
+  - 들어간·나간 조직(`joined`·`left`).
+  - 조직 줄만 멤버 들어옴·나감(`membersAdded`·`membersRemoved` — `count` 와 `items`).
+- **권한 변경.** 이 대상이 user 쪽인 튜플 중 실제로 쓴 것(`granted`)과 지운 것(`revoked`)이다.
+- **남기지 않는 것.**
+  - 재적재·장부 맞추기가 "쓴" 튜플. 중복 무시로 써서 이미 있던 줄과 가를 수 없다. 지운 줄은 남긴다.
+  - 아카이빙. 상태를 바꾸지 않는다.
+- **보관.**
+  - 보관 기간은 `dynamodb.audit-retention-days`(기본 30일)다. 늘리려면 `dynamodb.syncrun-retention-days` 와 함께 늘린다.
+  - 테이블 TTL 이 지우므로, 기한이 막 지난 줄이 며칠 보일 수 있다.
+  - 지운 직원·조직의 이력도 그동안 보인다. `wipe` 도 이력을 지우지 않는다.
+  - 기록이 없는 아이디는 404 가 아니라 빈 목록이다.
+- **빠질 수 있다.**
+  - 이력은 커밋한 뒤, 락을 반납한 뒤에 쓴다.
+  - 쓰기가 끝내 실패해도 동기화·SCIM 요청은 실패하지 않는다. 대신 셋이 남는다.
+    - ERROR 로그.
+    - 지표 `audit.write.failures`.
+    - 회차 메시지 앞의 `감사 기록 N건 실패`.
+  - 이력은 회차·요청이 성공으로 끝나야 쓴다. 도중에 실패한 회차·요청이 이미 한 변경(조직도 변경, 쓰고 지운 튜플)은 이력에 없고, 다음 회차·재시도는 "바뀐 것 없음" 을 보므로 다시 만들지도 않는다.
+  - 반납 뒤 이력을 쓰는 동안 회차는 RUNNING 이다(큰 회차는 시간이 든다). 그 사이 서버가 내려가면 남은 줄이 빠지고 `감사 기록 N건 실패` 도 남지 않을 수 있다.
+- **SCIM 의 확인 없는 지우기.** 조직 멤버 빼기와 조직 삭제는 줄을 확인 없이 지운다. 그래서 비활성 직원처럼 원래 없던 줄도 `revoked` 에 나올 수 있다.
+- **큰 조직.** 10만 명 조직이 한 회차에 통째로 바뀐 줄(초기 적재·`wipe`)은 응답 하나가 수 MB 다.
+- **다음 쪽.** 쪽이 `limit` 줄로 차면 `nextCursor` 를 준다. 그래서 마지막 쪽 뒤에 빈 쪽이 하나 올 수 있다.
+- **인증이 없다.** 이력에는 이전 값(이름·이메일 등)이 담긴다. 다른 관리 API 처럼 앞단에서 보호해야 한다.
 
 ## LDAP
 
