@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -54,6 +55,7 @@ class ScimRebuildIndexLagTest {
     private static final RelationTuple 박_팀 = RelationTuple.directMember("park", "TEAM");
     private static final RelationTuple 팀_개발본부 = RelationTuple.child("TEAM", "DEV001");
     private static final RelationTuple 유령_백엔드 = RelationTuple.directMember("ghost", "DEV002");
+    private static final RelationTuple 이_팀 = RelationTuple.directMember("lee", "TEAM");
 
     /** GSI 지연을 흉내 낸다 — 숨긴 대상은 열거(loadAll)에서만 빠지고 강한 읽기(findUsers·findGroup)에서는 보인다. 조직 파티션은 강한 읽기라 멤버로는 보인다. */
     static class 열거가_늦은_저장소 extends FakeStateRepository {
@@ -65,6 +67,21 @@ class ScimRebuildIndexLagTest {
         public Mono<DirectorySnapshot> loadAll() {
             return super.loadAll().map(all -> new DirectorySnapshot(
                     보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직)));
+        }
+
+        /** 실제 저장소처럼 숨긴 대상은 열거되지 않아 비교·삭제에서 빠지고, 끝난 뒤에도 남는다. */
+        @Override
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+            Map<String, DirectoryUser> 숨은_직원 = new LinkedHashMap<>(users);
+            숨은_직원.keySet().retainAll(숨긴_직원);
+            Map<String, DirectoryGroup> 숨은_조직 = new LinkedHashMap<>(groups);
+            숨은_조직.keySet().retainAll(숨긴_조직);
+            users.keySet().removeAll(숨긴_직원);
+            groups.keySet().removeAll(숨긴_조직);
+            DirectoryChanges changes = super.replaceWith(snapshot).block();
+            users.putAll(숨은_직원);
+            groups.putAll(숨은_조직);
+            return Mono.just(changes);
         }
 
         private static <T> Map<String, T> 보이는_것(Map<String, T> all, Set<String> hidden) {
@@ -230,6 +247,48 @@ class ScimRebuildIndexLagTest {
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.findUsersCalls).isEmpty();
+        assertThat(state.findGroupCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("wipe — GSI 열거에서 빠진 직원·조직도 장부로 찾아 지우고, 이력에 삭제로 남긴다")
+    void wipe_는_빠진_대상도_지운다() {
+        // given — lee 와 TEAM 은 락 직전에 만들어져 GSI 에 없다. 장부에는 둘의 권한이 있다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("DEV002", 김);
+        조직을_심는다("TEAM", 이);
+        writer.stored.addAll(Set.of(김_백엔드, 이_팀));
+        state.숨긴_직원.add("lee");
+        state.숨긴_조직.add("TEAM");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
+        assertThat(state.groups).isEmpty();
+        assertThat(auditLog.lastOf(이).deleted()).isTrue();
+        assertThat(auditLog.lastOf(팀).deleted()).isTrue();
+        assertThat(auditLog.lastOf(팀).membersRemoved()).containsExactly(이);
+    }
+
+    @Test
+    @DisplayName("wipe — 열거에서 빠진 것이 없으면 다시 읽지 않는다")
+    void 평소_wipe_는_다시_읽지_않는다() {
+        // given
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("DEV002", 김);
+        writer.stored.add(김_백엔드);
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
         assertThat(state.findUsersCalls).isEmpty();
         assertThat(state.findGroupCalls).isEmpty();
     }
