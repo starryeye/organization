@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.AttributeChange;
 import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditObserver;
 import dev.starryeye.organization.core.audit.AuditRecorder;
@@ -15,6 +16,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupEdge;
+import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncRun;
@@ -28,6 +30,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -35,6 +38,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * SCIM 재적재가 GSI 열거를 장부로 보강한다(설계 2026-10-13 §4). 락 직전에 커밋돼 아직 GSI 에 없는 대상의 권한을 지우지 않는다. DynamoDB Local 은 GSI 가
@@ -69,7 +73,10 @@ class ScimRebuildIndexLagTest {
                     보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직)));
         }
 
-        /** 실제 저장소처럼 숨긴 대상은 열거되지 않아 비교·삭제에서 빠지고, 끝난 뒤에도 남는다. */
+        /**
+         * 실제 저장소처럼 숨긴 대상은 열거되지 않아 비교·삭제에서 빠지고, 끝난 뒤에도 남는다. 보이는 직원을 지우면 실제 저장소(직원을_지운다)처럼 그 직원의
+         * 멤버 줄이 있던 조직의 멤버 줄도 지우고, 그 조직마다 이름표가 그대로인 "멤버만 빠짐" 비교 결과를 더한다 — 숨은 조직은 저장본에 없어 이름표가 비어 있다.
+         */
         @Override
         public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
             Map<String, DirectoryUser> 숨은_직원 = new LinkedHashMap<>(users);
@@ -79,9 +86,43 @@ class ScimRebuildIndexLagTest {
             users.keySet().removeAll(숨긴_직원);
             groups.keySet().removeAll(숨긴_조직);
             DirectoryChanges changes = super.replaceWith(snapshot).block();
+            List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>(changes.groups());
+            for (DirectoryChanges.UserDiff diff : changes.users()) {
+                if (diff.after() != null) {
+                    continue;
+                }
+                MemberRef 지운_직원 = MemberRef.user(diff.id());
+                for (Map.Entry<String, DirectoryGroup> hidden : 숨은_조직.entrySet()) {
+                    DirectoryGroup group = hidden.getValue();
+                    if (!group.members().contains(지운_직원)) {
+                        continue;
+                    }
+                    Set<MemberRef> 남은_멤버 = new LinkedHashSet<>(group.members());
+                    남은_멤버.remove(지운_직원);
+                    hidden.setValue(new DirectoryGroup(group.id(), group.externalId(), group.displayName(), 남은_멤버));
+                    GroupHeader 이름표 = new GroupHeader(group.id(), null, null);
+                    조직변경.add(new DirectoryChanges.GroupDiff(이름표, 이름표, Set.of(), Set.of(지운_직원)));
+                }
+            }
             users.putAll(숨은_직원);
             groups.putAll(숨은_조직);
-            return Mono.just(changes);
+            return Mono.just(new DirectoryChanges(changes.users(), 조직변경));
+        }
+
+        /** 실제 저장소처럼 직원을 지우면 그 직원이 멤버인 조직의 멤버 줄도 지운다 — 조직을 먼저 지우는지 순서를 가린다. */
+        @Override
+        public Mono<Void> deleteUser(String userId) {
+            return super.deleteUser(userId).then(Mono.fromRunnable(() -> {
+                MemberRef 지운_직원 = MemberRef.user(userId);
+                groups.replaceAll((id, group) -> {
+                    if (!group.members().contains(지운_직원)) {
+                        return group;
+                    }
+                    Set<MemberRef> 남은_멤버 = new LinkedHashSet<>(group.members());
+                    남은_멤버.remove(지운_직원);
+                    return new DirectoryGroup(group.id(), group.externalId(), group.displayName(), 남은_멤버);
+                });
+            }));
         }
 
         private static <T> Map<String, T> 보이는_것(Map<String, T> all, Set<String> hidden) {
@@ -273,6 +314,9 @@ class ScimRebuildIndexLagTest {
         assertThat(auditLog.lastOf(이).deleted()).isTrue();
         assertThat(auditLog.lastOf(팀).deleted()).isTrue();
         assertThat(auditLog.lastOf(팀).membersRemoved()).containsExactly(이);
+        // 다시 읽은 것은 빠진 대상뿐이다 — 보이는 kim 과 DEV002 는 읽지 않는다
+        assertThat(state.findUsersCalls).containsExactly(Set.of("lee"));
+        assertThat(state.findGroupCalls).containsExactly("TEAM");
     }
 
     @Test
@@ -291,5 +335,29 @@ class ScimRebuildIndexLagTest {
         assertThat(state.users).isEmpty();
         assertThat(state.findUsersCalls).isEmpty();
         assertThat(state.findGroupCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("wipe — 보이는 직원을 지우며 멤버 줄이 빠진 GSI 밖 조직도 멤버만 빠진 것이 아니라 삭제로 남긴다")
+    void wipe_는_멤버만_빠진_조직도_삭제로_남긴다() {
+        // given — TEAM 은 GSI 에 없고 멤버는 보이는 kim 하나다. 장부에는 kim→TEAM 이 있다
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("TEAM", 김);
+        writer.stored.add(김_팀);
+        state.숨긴_조직.add("TEAM");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then — kim 을 지우며 TEAM 의 멤버 줄도 빠졌지만, TEAM 은 남지 않고 삭제로 남는다. 이름표는 지우기 전 값이고 나간 멤버는 kim 이다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
+        assertThat(state.groups).doesNotContainKey("TEAM");
+        AuditEntry 팀_줄 = auditLog.lastOf(팀);
+        assertThat(팀_줄.deleted()).isTrue();
+        assertThat(팀_줄.attributes())
+                .extracting(AttributeChange::name, AttributeChange::before, AttributeChange::after)
+                .containsExactly(tuple("externalId", "TEAM", null), tuple("displayName", "TEAM-조직", null));
+        assertThat(팀_줄.membersRemoved()).containsExactly(김);
     }
 }
