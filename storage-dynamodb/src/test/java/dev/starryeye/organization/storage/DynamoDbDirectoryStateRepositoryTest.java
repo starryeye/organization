@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
@@ -1585,6 +1587,55 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(changes.users()).containsExactly(new DirectoryChanges.UserDiff(직원("lee"), null));
         assertThat(changes.groups()).containsExactly(new DirectoryChanges.GroupDiff(
                 new GroupHeader("OLD", "cn=OLD", "옛조직"), null, Set.of(), Set.of(MemberRef.user("kim"))));
+    }
+
+    @Test
+    @DisplayName("상위·하위 조직이 함께 사라지면 지우기 전에 둘의 멤버를 모두 읽어, 상위 조직의 나간 멤버에 하위 조직이 든다")
+    void 함께_사라진_상위_하위_조직() {
+        // given — P 의 멤버는 하위 조직 C 와 kim, C 의 멤버는 lee 다
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")),
+                Map.of("P", 조직("P", "상위", MemberRef.group("C"), MemberRef.user("kim")),
+                        "C", 조직("C", "하위", MemberRef.user("lee"))))).block();
+        // P 의 멤버 줄 읽기를 늦춘다 — C 를 지우며 P 의 멤버 줄(C)도 지우므로, 읽기 전에 지우기가 끼면 P 의 나간 멤버에서 C 가 빠진다
+        DynamoDbAsyncClient 상위_멤버_읽기가_늦는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("query") && args != null && args.length == 1
+                            && args[0] instanceof QueryRequest request && P의_멤버_줄_읽기(request)) {
+                        return CompletableFuture.runAsync(() -> {
+                                }, CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS))
+                                .thenCompose(ignored -> client.query(request));
+                    }
+                    try {
+                        return method.invoke(client, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        var 늦는_저장소 = new DynamoDbDirectoryStateRepository(상위_멤버_읽기가_늦는_클라이언트, properties, clock);
+
+        // when — 직원은 그대로, P 와 C 가 함께 사라진다
+        DirectoryChanges changes = 늦는_저장소.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")), Map.of())).block();
+
+        // then
+        assertThat(changes.users()).isEmpty();
+        assertThat(changes.groups()).containsExactlyInAnyOrder(
+                new DirectoryChanges.GroupDiff(new GroupHeader("P", "cn=P", "상위"), null, Set.of(),
+                        Set.of(MemberRef.group("C"), MemberRef.user("kim"))),
+                new DirectoryChanges.GroupDiff(new GroupHeader("C", "cn=C", "하위"), null, Set.of(),
+                        Set.of(MemberRef.user("lee"))));
+        assertThat(repository.findGroup("P").block()).isNull();
+        assertThat(repository.findGroup("C").block()).isNull();
+    }
+
+    /** 조직 P 파티션의 멤버 줄 읽기인가. */
+    private static boolean P의_멤버_줄_읽기(QueryRequest request) {
+        Map<String, AttributeValue> values = request.expressionAttributeValues();
+        return values != null
+                && values.containsKey(":pk") && Keys.groupPk("P").equals(values.get(":pk").s())
+                && values.containsKey(":prefix") && Keys.MEMBER_PREFIX.equals(values.get(":prefix").s());
     }
 
     @Test

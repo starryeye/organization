@@ -741,13 +741,17 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
                             .doOnNext(조직변경::add)
                             .then();
+                    // 두 단계다 — 사라지는 조직 전부의 멤버를 먼저 읽고, 그다음 지운다. 하위 조직을 지우면 상위 조직의 멤버 줄(그 하위 조직)도
+                    // 지우므로, 읽기와 지우기가 섞이면 상위 조직의 나간 멤버에서 하위 조직이 빠진다(비교 결과 = 실제로 쓴 것, 설계 2026-10-10 §9)
                     Mono<Void> removeStaleGroups = Flux.fromIterable(groups.values())
                             .filter(group -> !snapshot.groups().containsKey(group.value().id()))
                             .flatMap(group -> findMemberRefs(group.value().id()).collect(Collectors.toSet())
-                                    .flatMap(members -> deleteGroup(group.value().id(), members)
-                                            .doOnSuccess(ignored -> 조직변경.add(
-                                                    new DirectoryChanges.GroupDiff(group.value(), null, Set.of(), members)))),
+                                    .map(members -> new DirectoryChanges.GroupDiff(group.value(), null, Set.of(), members)),
                                     QUERY_CONCURRENCY)
+                            .collectList()
+                            .flatMapMany(Flux::fromIterable)
+                            .flatMap(diff -> deleteGroup(diff.id(), diff.removed())
+                                    .doOnSuccess(ignored -> 조직변경.add(diff)), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> removeStaleUsers = Flux.fromIterable(users.values())
                             .filter(user -> !snapshot.users().containsKey(user.value().id()))

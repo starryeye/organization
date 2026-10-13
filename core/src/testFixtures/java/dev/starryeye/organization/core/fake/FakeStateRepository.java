@@ -267,7 +267,10 @@ public class FakeStateRepository implements DirectoryStateRepository {
         });
     }
 
-    /** 저장소와 같은 뜻의 비교 결과를 돌려준다(설계 2026-10-10 §4.3) — 바뀐 직원·조직, 들어오고 나간 멤버, 사라진 것. */
+    /**
+     * 저장소와 같은 종류의 비교 결과를 돌려준다(설계 2026-10-10 §4.3) — 바뀐 직원·조직, 들어오고 나간 멤버, 사라진 것. 다만 사라진 직원을 지우며 그
+     * 직원을 아직 멤버로 적은 조직의 멤버 줄까지 지우는 연쇄(실제 저장소의 "멤버만 빠짐")는 흉내 내지 않는다 — 그 결과는 저장소 테스트가 본다.
+     */
     @Override
     public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
         List<DirectoryChanges.UserDiff> 직원변경 = new ArrayList<>();
