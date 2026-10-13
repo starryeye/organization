@@ -171,6 +171,27 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("범위는 맞아도 우리가 발급한 모양이 아닌 시작 키는 거절한다 — 빈 정렬키·0번 조각이 아닌 키·너무 긴 키·덧붙은 키")
+    void 발급한_모양이_아닌_시작_키는_거절한다() {
+        // given
+        String 파티션 = Keys.auditPk(김);
+        String 범위 = "AUDIT/" + 파티션;
+        String 빈_정렬키 = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(파티션), Keys.SK, Attrs.s("")));
+        String 영번이_아닌_조각 = Cursor.encode(범위,
+                Map.of(Keys.PK, Attrs.s(파티션), Keys.SK, Attrs.s(Keys.auditSk(T1, "run-1", 1))));
+        String 너무_긴_정렬키 = Cursor.encode(범위,
+                Map.of(Keys.PK, Attrs.s(파티션), Keys.SK, Attrs.s(Keys.auditSk(T1, "r".repeat(1_100), 0))));
+        String 덧붙은_키 = Cursor.encode(범위, Map.of(Keys.PK, Attrs.s(파티션),
+                Keys.SK, Attrs.s(Keys.auditSk(T1, "run-1", 0)), "GSI1PK", Attrs.s("x")));
+
+        // when, then
+        assertThatThrownBy(() -> 읽는다(auditLog, 김, 빈_정렬키, 20)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> 읽는다(auditLog, 김, 영번이_아닌_조각, 20)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> 읽는다(auditLog, 김, 너무_긴_정렬키, 20)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> 읽는다(auditLog, 김, 덧붙은_키, 20)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("큰 목록은 조각으로 나눠 쓰고, 읽을 때 순서대로 합친다")
     void 큰_목록은_조각으로_나눈다() {
         // given — 멤버 값 "USER#u0000" 은 10바이트 + 4 = 14. 한도 200 이면 조각마다 14개, 50명이면 조각 4개

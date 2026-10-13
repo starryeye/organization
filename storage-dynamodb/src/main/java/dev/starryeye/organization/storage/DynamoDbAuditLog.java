@@ -59,6 +59,8 @@ public class DynamoDbAuditLog implements AuditLog {
     /** DynamoDB 정렬키 한도. 위조 커서의 시작 키가 넘으면 ValidationException(500)이 된다. */
     private static final int MAX_SORT_KEY_BYTES = 1024;
     private static final String SCOPE_PREFIX = "AUDIT/";
+    /** 한 줄의 0번 조각 정렬키 끝({@link Keys#auditSk}). 다음 쪽 커서는 늘 이 키를 가리킨다. */
+    private static final String FIRST_PART_SUFFIX = "#0000";
 
     private static final String AT = "at";
     private static final String SOURCE = "source";
@@ -240,10 +242,12 @@ public class DynamoDbAuditLog implements AuditLog {
      * DynamoDB 가 {@code ValidationException} 을 내 500 이 된다. 이 대상의 이력 키가 아니면 400 으로 갈 예외다.
      *
      * <p>키 집합 검사가 먼저다 — 뒤의 {@code start.get(...)} 은 키가 있다는 것에 기댄다. 값이 문자열인 것은 {@link Cursor#decode} 가 지켰다.
+     * 우리가 발급하는 커서는 늘 한 줄의 0번 조각 키를 가리키므로 정렬키가 {@code #0000} 으로 끝나야 한다 — 빈 정렬키 같은 어긋난 값을 걸러낸다.
      */
     private static Map<String, AttributeValue> 시작_키를_확인한다(Map<String, AttributeValue> start, String pk) {
         if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK))
                 || !pk.equals(start.get(Keys.PK).s())
+                || !start.get(Keys.SK).s().endsWith(FIRST_PART_SUFFIX)
                 || start.get(Keys.SK).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES) {
             throw new IllegalArgumentException("이 대상의 이력 커서가 아니다");
         }
