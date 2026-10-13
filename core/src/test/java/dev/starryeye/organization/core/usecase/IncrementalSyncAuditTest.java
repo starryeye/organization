@@ -21,6 +21,7 @@ import dev.starryeye.organization.core.tuple.TupleMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -205,15 +206,31 @@ class IncrementalSyncAuditTest {
         assertThat(auditLog.events).isEmpty();
     }
 
+    /** 직원을 지우는 마지막 커밋이 실패하는 저장소 — 그 앞의 소속 조직 빼기는 이미 커밋돼 변경 모음에 들어간 뒤다. */
+    private static class 삭제가_실패하는_저장소 extends FakeStateRepository {
+        @Override
+        public Mono<Void> deleteUser(String userId) {
+            return Mono.error(new IllegalStateException("삭제 실패"));
+        }
+    }
+
     @Test
-    @DisplayName("오류로 끝난 요청은 남기지 않는다")
+    @DisplayName("커밋 자리가 기록한 뒤 오류로 끝난 요청은 남기지 않는다")
     void 오류로_끝난_요청은_남기지_않는다() {
-        // given
-        state.saveUser(직원("kim", true)).block();
+        // given — 소속 조직 빼기가 변경 모음에 들어간 뒤, 직원 삭제 커밋이 실패한다
+        FakeStateRepository 실패하는_저장소 = new 삭제가_실패하는_저장소();
+        실패하는_저장소.saveUser(직원("kim", true)).block();
+        실패하는_저장소.saveGroup(new DirectoryGroup("DEV", "DEV", "개발", Set.of(김))).block();
+        checker.allowed.addAll(TupleMapper.toTuples(실패하는_저장소.loadAll().block()).tuples());
+        AuditRecorder audit = new AuditRecorder(auditLog, AuditObserver.NOOP, Clock.fixed(고정시각, ZoneOffset.UTC));
+        IncrementalSyncUseCase 실패하는_유스케이스 = new IncrementalSyncUseCase(실패하는_저장소, new FakeTupleWriter(), checker,
+                lock, Duration.ZERO, Duration.ofSeconds(10), IncrementalSyncUseCase.DriftObserver.NOOP,
+                LockObserver.NOOP, audit, context -> "trace-1");
 
         // when, then
-        assertThatThrownBy(() -> useCase.createUser(new DirectoryUser("other", "emp-other", "kim", "다른 김", null, true)).block())
-                .isInstanceOf(DirectoryConflictException.class);
+        assertThatThrownBy(() -> 실패하는_유스케이스.removeUser("kim").block())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("삭제 실패");
         assertThat(auditLog.events).isEmpty();
     }
 
