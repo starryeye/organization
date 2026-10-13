@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.port.AuditLog;
 import dev.starryeye.organization.core.port.DailyJobClaims;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
@@ -61,6 +62,12 @@ public class DynamoDbConfig {
     public DynamoDbSyncRunRepository dynamoDbSyncRunRepository(
             DynamoDbAsyncClient client, DynamoDbProperties properties, Clock clock) {
         return new DynamoDbSyncRunRepository(client, properties, clock);
+    }
+
+    /** 변경 이력(설계 2026-10-10). 두 앱의 유스케이스가 쓰고, 관리 API 가 읽는다. */
+    @Bean
+    public AuditLog auditLog(DynamoDbAsyncClient client, DynamoDbProperties properties) {
+        return new DynamoDbAuditLog(client, properties);
     }
 
     @Bean

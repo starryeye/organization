@@ -73,15 +73,17 @@ public final class Keys {
     /** 튜플 스냅샷 본문 묶음의 정렬키 접두사(설계 2026-10-09 §3.1). */
     public static final String CHUNK_PREFIX = "CHUNK#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
+    /** 변경 이력 파티션 접두사(설계 2026-10-10 §3.2). 대상마다 하나 — {@code AUDIT#USER#kim}, {@code AUDIT#GROUP#DEV}. */
+    public static final String AUDIT_PREFIX = "AUDIT#";
 
     /** SCIM 목록 책갈피 파티션 접두사 (S-1 설계 §5.3). */
     public static final String PAGE_PREFIX = "PAGE#";
 
     /**
-     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피·동기화 실행 이력·쓰기 락 셋이
+     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피·동기화 실행 이력·쓰기 락·변경 이력 넷이
      * 이 한 속성을 공유한다 — 테이블 TTL 이 이 속성 하나만 보고 지운다. 튜플 스냅샷은 TTL 을
      * 쓰지 않는다(보관 기한은 메타의 {@code retainUntil}, 정리 작업 {@code purgeExpired} 가 지운다).
-     * 이름을 바꾸면 셋 다 조용히 만료가 멈춘다({@link TableInitializer#createTable} 이 TTL 을
+     * 이름을 바꾸면 넷 다 조용히 만료가 멈춘다({@link TableInitializer#createTable} 이 TTL 을
      * 이 상수로 켜므로).
      */
     public static final String EXPIRES_AT = "expiresAt";
@@ -291,5 +293,26 @@ public final class Keys {
     /** 하루 1회 작업 표지(설계 2026-09-30 §5.1). 날짜는 yyyy-MM-dd. */
     public static String dailyJobPk(String job, LocalDate day) {
         return "DAILY#" + job + "#" + day;
+    }
+
+    /** 변경 이력 파티션키 — 대상 종류와 id(설계 2026-10-10 §3.2). 직원·조직의 본 파티션과 따로라 직원·조직을 지워도 남는다. */
+    public static String auditPk(MemberRef subject) {
+        return AUDIT_PREFIX + subject.type().name() + "#" + subject.id();
+    }
+
+    /**
+     * 변경 이력 정렬키 — {@code <시각>#<원인 id>#<조각 번호>}(설계 2026-10-10 §3.2·§3.4). 조각이 하나여도 {@code #0000} 을 붙인다. 역순 Query 가 곧
+     * 최신순이고, 한 줄의 조각은 번호가 큰 것부터 나와 0번이 마지막이다.
+     */
+    public static String auditSk(Instant at, String causeId, int part) {
+        if (part < 0 || part > 9_999) {
+            throw new IllegalArgumentException("조각 번호는 0~9999 다: " + part);
+        }
+        return sortableTimestamp(at) + "#" + causeId + "#" + "%04d".formatted(part);
+    }
+
+    /** 조각 번호를 뗀 정렬키 — 한 줄의 조각끼리 같다. 원인 id 에는 {@code #} 이 없다(runId 는 UUID, traceId 는 16진수). */
+    public static String auditRecordKey(String sk) {
+        return sk.substring(0, sk.lastIndexOf('#'));
     }
 }
