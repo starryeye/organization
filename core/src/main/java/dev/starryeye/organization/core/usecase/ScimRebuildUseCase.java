@@ -4,7 +4,14 @@ import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.audit.AuditRecorder;
+import dev.starryeye.organization.core.model.DirectoryChanges;
+import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -19,14 +26,23 @@ import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import dev.starryeye.organization.core.tuple.TupleMappingResult;
+import dev.starryeye.organization.core.tuple.TupleSubjects;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * SCIM 인스턴스의 수동 재적재. 관리자가 어긋났다고 판단했을 때 실행한다.
@@ -39,6 +55,10 @@ import java.util.Set;
  * ({@link TupleReconciler}). 읽기가 실패하면 장부에 아무것도 하지 않는다. 장부 번호(storeId)는 바뀌지 않는다.
  *
  * <p><b>보류 목록도 맞춘다(설계 2026-10-03 §4.6).</b> 장부를 맞춘 뒤 보류 목록을 순환이라 버린 연결로 바꾸고, {@code WIPE} 는 조직도와 함께 비운다.
+ *
+ * <p><b>GSI 열거를 장부로 보강한다(설계 2026-10-13 §4).</b> 직원·조직 아이디는 GSI 로 훑는다(최종 일관성). 락 직전에 커밋된 쓰기가 아직 GSI 에 없으면
+ * 그 대상의 권한이 "있어야 할 줄에 없는 줄" 로 지워진다. 그래서 지우기 전에, 지울 후보가 가리키는 대상 중 열거에서 빠진 것을 본 테이블에서 강한 일관성으로
+ * 다시 읽어 조직도에 넣는다. {@code WIPE} 는 지운 튜플의 대상 중 남은 것을 같은 방법으로 찾아 지운다. 빠진 것이 없으면 읽기가 없다.
  *
  * <p><b>{@code WIPE} 는 장부를 비운 뒤에만 조직도를 지운다.</b> 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고 FAILED 다 —
  * 조직도가 남아 있어야 다시 실행할 수 있다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만 살아남는다.
@@ -103,20 +123,83 @@ public class ScimRebuildUseCase {
     private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
             desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
 
-    /** 장부를 맞춘 뒤 보류 목록을 버린 연결로 바꾼다 — 락 안이다. 멈춘 경우(빈 조직도)는 목록을 두고 간다. */
+    /** 열거에서 빠진 조직을 다시 읽을 때의 동시성. 평소에는 0개다. */
+    private static final int 보강_동시성 = 8;
+
+    /**
+     * 장부를 맞춘 뒤 보류 목록을 버린 연결로 바꾼다 — 락 안이다. 멈춘 경우(빈 조직도)는 목록을 두고 간다. 지우기 전에 GSI 열거를 장부로 보강하고
+     * (설계 2026-10-13 §4.3), 있어야 할 줄(D')과 보류 목록이 함께 보강한 조직도를 따른다 — 보강한 조직도가 순환이라 버린 연결은 장부에서도 지운다.
+     */
     private Mono<Mono<SyncOutcome>> reloadTuples(AuditCause cause) {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
+            // 보강한 조직도의 결과 — 있어야 할 줄(D')과 보류 목록이 함께 이것을 따른다. 보강할 것이 없으면 처음 결과 그대로다
+            AtomicReference<TupleMappingResult> 최종 = new AtomicReference<>(mapping);
+            TupleReconciler.DesiredRevision 보강 = (desired, stale) -> 열거를_보강한다(directory, stale).map(보강된 -> {
+                if (보강된 == directory) {
+                    return desired;
+                }
+                TupleMappingResult 다시 = TupleMapper.toTuples(보강된);
+                // 처음 변환과 같이 남기되 앞에 붙여 두 번을 가른다 — 보강으로 새로 끊긴 순환 연결은 여기서만 보인다
+                다시.warnings().forEach(warning -> log.warn("튜플 변환 경고: 다시 계산한 조직도 — {}", warning));
+                최종.set(다시);
+                return 다시.tuples();
+            });
 
-            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 빈_조직도면_멈춘다)
+            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 보강, 빈_조직도면_멈춘다)
                     .flatMap(reconciliation -> reconciliation.held()
                             ? Mono.just(Mono.just(SyncOutcome.failed(reconciliation.heldReason())))
                             // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6).
                             // 이력의 시각은 락 안의 일이 끝난 이때 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
-                            : state.replaceCutEdges(mapping.cutEdges())
+                            : state.replaceCutEdges(최종.get().cutEdges())
                                     .then(Mono.fromSupplier(() -> commitTuples(reconciliation, cause, audit.now()))));
         });
+    }
+
+    /**
+     * 지울 후보가 가리키는 대상 중 GSI 열거에서 빠진 것을 본 테이블에서 강한 일관성으로 다시 읽어 조직도에 넣는다(설계 2026-10-13 §4.3).
+     * 다시 읽은 조직의 멤버 중 조직도에 없는 직원도 함께 읽는다 — 장부에 아직 줄이 없는 새 멤버다. 빠진 것이 없거나 다시 읽어도 없으면 받은 조직도를
+     * 그대로 준다(같은 객체) — 평소에는 읽기가 없다.
+     */
+    private Mono<DirectorySnapshot> 열거를_보강한다(DirectorySnapshot directory, Set<RelationTuple> stale) {
+        Set<String> 빠진_직원 = new LinkedHashSet<>();
+        Set<String> 빠진_조직 = new LinkedHashSet<>();
+        for (MemberRef subject : TupleSubjects.of(stale)) {
+            if (subject.type() == MemberType.USER && !directory.users().containsKey(subject.id())) {
+                빠진_직원.add(subject.id());
+            } else if (subject.type() == MemberType.GROUP && !directory.groups().containsKey(subject.id())) {
+                빠진_조직.add(subject.id());
+            }
+        }
+        if (빠진_직원.isEmpty() && 빠진_조직.isEmpty()) {
+            return Mono.just(directory);
+        }
+        return Flux.fromIterable(빠진_조직)
+                .flatMap(state::findGroup, 보강_동시성)
+                .collectMap(DirectoryGroup::id)
+                .flatMap(groups -> {
+                    Set<String> 읽을_직원 = new LinkedHashSet<>(빠진_직원);
+                    groups.values().forEach(group -> group.members().stream()
+                            .filter(member -> member.type() == MemberType.USER
+                                    && !directory.users().containsKey(member.id()))
+                            .forEach(member -> 읽을_직원.add(member.id())));
+                    Mono<Map<String, DirectoryUser>> users = 읽을_직원.isEmpty()
+                            ? Mono.just(Map.of())
+                            : state.findUsers(읽을_직원).collectMap(DirectoryUser::id);
+                    return users.map(found -> {
+                        if (groups.isEmpty() && found.isEmpty()) {
+                            return directory;
+                        }
+                        log.warn("GSI 열거에서 빠진 대상을 본 테이블에서 찾아 조직도에 넣었다 — 직원 {}명, 조직 {}개. 락 직전에 커밋된 쓰기다",
+                                found.size(), groups.size());
+                        Map<String, DirectoryUser> 직원들 = new LinkedHashMap<>(directory.users());
+                        직원들.putAll(found);
+                        Map<String, DirectoryGroup> 조직들 = new LinkedHashMap<>(directory.groups());
+                        조직들.putAll(groups);
+                        return new DirectorySnapshot(직원들, 조직들);
+                    });
+                });
     }
 
     /**
@@ -154,6 +237,8 @@ public class ScimRebuildUseCase {
             }
             // 조직도와 함께 보류 목록도 비운다 — 연결의 멤버 줄이 사라졌으니 보류할 것도 없다
             return state.replaceWith(DirectorySnapshot.empty())
+                    // GSI 열거에서 빠져 남은 대상을 장부로 찾아 지운다(설계 2026-10-13 §4.4)
+                    .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted()))
                     .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
                     .doOnSuccess(changes -> log.warn(
                             "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
@@ -165,5 +250,85 @@ public class ScimRebuildUseCase {
                                 SyncOutcome.succeeded(result, null)));
                     });
         });
+    }
+
+    /**
+     * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상 중 방금 지운 직원·조직에 없는 것을 본 테이블에서 강한 일관성으로
+     * 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다. 지운 것을 비교 결과에
+     * 더해 이력에 삭제로 남긴다. 확인할 것이 없으면 받은 결과를 그대로 준다 — 평소에는 읽기가 없다.
+     *
+     * <p><b>"방금 지운" 은 비교 결과에서 이후가 없는 것(삭제)만이다.</b> 보이는 직원을 지우며 멤버 줄이 빠진 조직은 이름표가 그대로인 "멤버만 빠짐"
+     * 비교 결과로 오는데, 그 조직이 열거에서 빠진 것이면 남아 있다 — 지워진 것으로 세면 다시 읽지 않아 조직이 남는다. 지우는 조직의 "멤버만 빠짐" 은
+     * 비교 결과에서 빼고, 나간 멤버를 삭제에 합친다. 이력이 이름표(이전 값)와 모든 멤버를 담은 삭제 한 줄로 읽는다 — 이력은 처음 이전과 마지막 이후를
+     * 비교하므로 "멤버만 빠짐" 이 앞에 남으면 이름표가 비어 보인다.
+     */
+    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted) {
+        Set<String> 지운_직원 = changes.users().stream()
+                .filter(diff -> diff.after() == null)
+                .map(DirectoryChanges.UserDiff::id)
+                .collect(Collectors.toSet());
+        Set<String> 지운_조직 = changes.groups().stream()
+                .filter(diff -> diff.after() == null)
+                .map(DirectoryChanges.GroupDiff::id)
+                .collect(Collectors.toSet());
+        Set<String> 볼_직원 = new LinkedHashSet<>();
+        Set<String> 볼_조직 = new LinkedHashSet<>();
+        for (MemberRef subject : TupleSubjects.of(deleted)) {
+            if (subject.type() == MemberType.USER && !지운_직원.contains(subject.id())) {
+                볼_직원.add(subject.id());
+            } else if (subject.type() == MemberType.GROUP && !지운_조직.contains(subject.id())) {
+                볼_조직.add(subject.id());
+            }
+        }
+        if (볼_직원.isEmpty() && 볼_조직.isEmpty()) {
+            return Mono.just(changes);
+        }
+        // 직원을 지우며 이미 멤버 줄이 빠진 조직의 나간 멤버 — 조직을 지울 때 삭제의 나간 멤버에 합친다
+        Map<String, Set<MemberRef>> 먼저_나간_멤버 = new LinkedHashMap<>();
+        for (DirectoryChanges.GroupDiff diff : changes.groups()) {
+            if (diff.after() != null && 볼_조직.contains(diff.id())) {
+                먼저_나간_멤버.computeIfAbsent(diff.id(), id -> new LinkedHashSet<>()).addAll(diff.removed());
+            }
+        }
+        // 두 단계다 — 지울 조직 전부의 멤버를 먼저 읽고, 그다음 읽은 멤버로 지운다(replaceWith 와 같다). 하위 조직을 먼저 지우면 실제 저장소는 상위 조직의
+        // 멤버 줄에서도 그 하위 조직을 지워, 뒤에 읽는 상위 조직은 하위 조직을 멤버로 모른다 — 이력의 나간 멤버에서 빠진다. 이미 지워진 하위 조직이 멤버로 적힌
+        // 채 지워도 된다 — DeleteItem 은 없는 키에도 성공한다
+        Mono<List<DirectoryChanges.GroupDiff>> 조직 = Flux.fromIterable(볼_조직)
+                .flatMap(state::findGroup, 보강_동시성)
+                .collectList()
+                .flatMapMany(Flux::fromIterable)
+                .concatMap(group -> {
+                    Set<MemberRef> 나간_멤버 = new LinkedHashSet<>(먼저_나간_멤버.getOrDefault(group.id(), Set.of()));
+                    나간_멤버.addAll(group.members());
+                    return state.deleteGroup(group.id(), group.members())
+                            .thenReturn(new DirectoryChanges.GroupDiff(
+                                    new GroupHeader(group.id(), group.externalId(), group.displayName()),
+                                    null, Set.of(), 나간_멤버));
+                })
+                .collectList();
+        Mono<List<DirectoryChanges.UserDiff>> 직원 = Mono.defer(() -> 볼_직원.isEmpty()
+                ? Mono.just(List.<DirectoryChanges.UserDiff>of())
+                : state.findUsers(볼_직원)
+                        .concatMap(user -> state.deleteUser(user.id())
+                                .thenReturn(new DirectoryChanges.UserDiff(user, null)))
+                        .collectList());
+        return 조직.flatMap(groups -> 직원.map(users -> {
+            if (groups.isEmpty() && users.isEmpty()) {
+                return changes;
+            }
+            log.warn("GSI 열거에서 빠져 남아 있던 대상을 지웠다 — 직원 {}명, 조직 {}개. 락 직전에 만든 대상이다",
+                    users.size(), groups.size());
+            List<DirectoryChanges.UserDiff> 모든_직원 = new ArrayList<>(changes.users());
+            모든_직원.addAll(users);
+            Set<String> 지운_남은_조직 = groups.stream()
+                    .map(DirectoryChanges.GroupDiff::id)
+                    .collect(Collectors.toSet());
+            // 지운 조직의 "멤버만 빠짐" 은 삭제에 합쳤으니 뺀다
+            List<DirectoryChanges.GroupDiff> 모든_조직 = new ArrayList<>(changes.groups().stream()
+                    .filter(diff -> diff.after() == null || !지운_남은_조직.contains(diff.id()))
+                    .toList());
+            모든_조직.addAll(groups);
+            return new DirectoryChanges(모든_직원, 모든_조직);
+        }));
     }
 }

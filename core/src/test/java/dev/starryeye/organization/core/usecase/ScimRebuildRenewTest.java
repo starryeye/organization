@@ -119,4 +119,23 @@ class ScimRebuildRenewTest {
         assertThat(runs.finished).hasSize(1);
         assertThat(lock.released).as("중단해도 락은 반납을 시도한다").hasValue(1);
     }
+
+    @Test
+    @DisplayName("갱신이 일시 오류로 몇 번 실패해도 재적재는 끝까지 간다 — 리스는 아직 남아 있다")
+    void 일시_오류에도_끝까지_간다() {
+        // given — 100ms 주기면 한도는 200ms, 쉬는 시간은 2ms 에서 두 배씩이다. 세 번 실패해도 한도 안에서 성공한다
+        var lock = new FakeMutationLock();
+        var writer = new FakeTupleWriter();
+        writer.delay = Duration.ofMillis(600);
+        var runs = new FakeSyncRunRepository(NOW);
+        lock.transientRenewFailures.set(3);
+
+        // when
+        var run = 끝까지(재적재(writer, runs, lock, Duration.ofMillis(100)), runs);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(lock.renewed.get()).isGreaterThanOrEqualTo(1);
+        assertThat(lock.renewAttempted.get()).isGreaterThanOrEqualTo(lock.renewed.get() + 3);
+    }
 }

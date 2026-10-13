@@ -34,6 +34,12 @@ public class FakeMutationLock implements MutationLock {
     public boolean failRenew = false;
 
     /**
+     * 남은 일시 오류 수 — 0 보다 크면 {@link #renew} 가 스로틀·네트워크 오류를 흉내 낸 {@link IllegalStateException} 으로 끝나고 하나 준다.
+     * 리스를 잃은 것(조건 실패, {@link #failRenew})과 달리 다시 시도하면 성공할 수 있는 실패다. {@link Integer#MAX_VALUE} 면 늘 실패한다.
+     */
+    public final AtomicInteger transientRenewFailures = new AtomicInteger();
+
+    /**
      * 켜면 반납이 항상 실패한다 — 스로틀·네트워크 오류로 리스가 만료될 때까지 묶이는
      * 상황을 재현하는 데 쓴다. 이 실패는 응답에 나타나지 않으므로 지표로만 보인다.
      */
@@ -83,6 +89,9 @@ public class FakeMutationLock implements MutationLock {
     public Mono<LockLease> renew(LockLease lease) {
         return Mono.defer(() -> {
             renewAttempted.incrementAndGet();
+            if (transientRenewFailures.getAndUpdate(n -> n > 0 ? n - 1 : 0) > 0) {
+                return Mono.error(new IllegalStateException("갱신 일시 오류(테스트) — 스로틀 흉내"));
+            }
             if (failRenew) {
                 return Mono.error(new LockUnavailableException("리스를 잃었다(테스트)"));
             }
