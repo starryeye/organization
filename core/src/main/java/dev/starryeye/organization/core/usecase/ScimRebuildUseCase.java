@@ -254,7 +254,7 @@ public class ScimRebuildUseCase {
 
     /**
      * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상 중 방금 지운 직원·조직에 없는 것을 본 테이블에서 강한 일관성으로
-     * 다시 확인해, 아직 있으면 조직 먼저(그때의 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다. 지운 것을 비교 결과에
+     * 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다. 지운 것을 비교 결과에
      * 더해 이력에 삭제로 남긴다. 확인할 것이 없으면 받은 결과를 그대로 준다 — 평소에는 읽기가 없다.
      *
      * <p><b>"방금 지운" 은 비교 결과에서 이후가 없는 것(삭제)만이다.</b> 보이는 직원을 지우며 멤버 줄이 빠진 조직은 이름표가 그대로인 "멤버만 빠짐"
@@ -290,8 +290,13 @@ public class ScimRebuildUseCase {
                 먼저_나간_멤버.computeIfAbsent(diff.id(), id -> new LinkedHashSet<>()).addAll(diff.removed());
             }
         }
+        // 두 단계다 — 지울 조직 전부의 멤버를 먼저 읽고, 그다음 읽은 멤버로 지운다(replaceWith 와 같다). 하위 조직을 먼저 지우면 실제 저장소는 상위 조직의
+        // 멤버 줄에서도 그 하위 조직을 지워, 뒤에 읽는 상위 조직은 하위 조직을 멤버로 모른다 — 이력의 나간 멤버에서 빠진다. 이미 지워진 하위 조직이 멤버로 적힌
+        // 채 지워도 된다 — DeleteItem 은 없는 키에도 성공한다
         Mono<List<DirectoryChanges.GroupDiff>> 조직 = Flux.fromIterable(볼_조직)
-                .concatMap(state::findGroup)
+                .flatMap(state::findGroup, 보강_동시성)
+                .collectList()
+                .flatMapMany(Flux::fromIterable)
                 .concatMap(group -> {
                     Set<MemberRef> 나간_멤버 = new LinkedHashSet<>(먼저_나간_멤버.getOrDefault(group.id(), Set.of()));
                     나간_멤버.addAll(group.members());

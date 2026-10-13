@@ -65,12 +65,35 @@ class ScimRebuildIndexLagTest {
     private static final RelationTuple 팀_개발본부 = RelationTuple.child("TEAM", "DEV001");
     private static final RelationTuple 유령_백엔드 = RelationTuple.directMember("ghost", "DEV002");
     private static final RelationTuple 이_팀 = RelationTuple.directMember("lee", "TEAM");
+    private static final MemberRef 하위 = MemberRef.group("SUB");
+    private static final RelationTuple 이_하위 = RelationTuple.directMember("lee", "SUB");
+    private static final RelationTuple 하위_팀 = RelationTuple.child("SUB", "TEAM");
 
     /** GSI 지연을 흉내 낸다 — 숨긴 대상은 열거(loadAll)에서만 빠지고 강한 읽기(findUsers·findGroup)에서는 보인다. 조직 파티션은 강한 읽기라 멤버로는 보인다. */
     static class 열거가_늦은_저장소 extends FakeStateRepository {
 
         final Set<String> 숨긴_직원 = new LinkedHashSet<>();
         final Set<String> 숨긴_조직 = new LinkedHashSet<>();
+
+        /** 조직을 읽고 지운 순서 — {@code find:<id>}, {@code delete:<id>}. 읽기가 지우기와 섞이는지 가린다. 읽는 때(구독)에 적는다. */
+        final List<String> 조직_호출순서 = new ArrayList<>();
+
+        @Override
+        public Mono<DirectoryGroup> findGroup(String groupId) {
+            return Mono.defer(() -> {
+                조직_호출순서.add("find:" + groupId);
+                return super.findGroup(groupId);
+            });
+        }
+
+        /** 부모 클래스의 지우기가 이미 실제 저장소처럼 지운 조직을 다른 조직의 멤버에서도 뺀다 — 하위 조직을 먼저 지우면 상위 조직을 읽을 때 그 멤버가 없다. */
+        @Override
+        public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
+            return Mono.defer(() -> {
+                조직_호출순서.add("delete:" + groupId);
+                return super.deleteGroup(groupId, members);
+            });
+        }
 
         @Override
         public Mono<DirectorySnapshot> loadAll() {
@@ -379,5 +402,37 @@ class ScimRebuildIndexLagTest {
                 .extracting(AttributeChange::name, AttributeChange::before, AttributeChange::after)
                 .containsExactly(tuple("externalId", "TEAM", null), tuple("displayName", "TEAM-조직", null));
         assertThat(팀_줄.membersRemoved()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("wipe — GSI 밖에 상위·하위 조직이 함께 남아 있어도 모두 읽은 뒤 지우고, 상위 조직의 이력에 하위 조직이 나간 멤버로 남는다")
+    void wipe_는_함께_남은_상위_하위_조직을_모두_읽은_뒤_지운다() {
+        // given — 상위 TEAM ∋ 하위 SUB 둘 다 GSI 에 없다. 장부에는 child(SUB, TEAM) 과 각자의 멤버 줄(park→TEAM, lee→SUB)이 있다
+        state.saveUser(직원("park")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("SUB", 이);
+        조직을_심는다("TEAM", 박, 하위);
+        writer.stored.addAll(Set.of(박_팀, 이_하위, 하위_팀));
+        state.숨긴_조직.addAll(Set.of("TEAM", "SUB"));
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then — 둘 다 지워진다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
+        assertThat(state.groups).isEmpty();
+        // 상위 조직의 이력: 삭제, 나간 멤버는 직원 park 과 하위 조직 SUB (이름표는 지우기 전 값)
+        AuditEntry 팀_줄 = auditLog.lastOf(팀);
+        assertThat(팀_줄.deleted()).isTrue();
+        assertThat(팀_줄.membersRemoved()).containsExactlyInAnyOrder(박, 하위);
+        AuditEntry 하위_줄 = auditLog.lastOf(하위);
+        assertThat(하위_줄.deleted()).isTrue();
+        assertThat(하위_줄.membersRemoved()).containsExactly(이);
+        // 읽기가 지우기와 섞이지 않는다 — 하위 조직을 먼저 지우면 실제 저장소는 상위 조직의 멤버 줄에서도 그 하위 조직을 지워, 뒤에 읽는 상위 조직은 하위 조직을 멤버로 모른다.
+        // 어느 조직이 먼저 읽히는지는 장부 줄의 순서(실행마다 다르다)에 달려 있어 결과만으로는 가려지지 않는다 — 읽기가 모두 지우기보다 앞서는지로 가린다
+        assertThat(state.조직_호출순서).hasSize(4);
+        assertThat(state.조직_호출순서.subList(0, 2)).allMatch(call -> call.startsWith("find:"));
+        assertThat(state.조직_호출순서.subList(2, 4)).allMatch(call -> call.startsWith("delete:"));
     }
 }
