@@ -97,6 +97,15 @@ public class SyncJobs {
      */
     public Mono<SyncRun> startLockedThen(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
                                          Mono<Mono<SyncOutcome>> work, Consumer<SyncRun> onFinished) {
+        return startLockedThen(source, trigger, purpose, run -> work, onFinished);
+    }
+
+    /**
+     * {@link #startLockedThen(SyncSource, SyncTrigger, MutationLock.LockPurpose, Mono, Consumer)} 와 같되, 일이 연 실행 기록을 받는다. 회차 id 를 이력의
+     * 원인으로 적는 작업(동기화·재적재)이 쓴다(설계 2026-10-10 §4.2). {@code work} 는 기록을 연 뒤, 락을 쥔 채로 한 번 불린다.
+     */
+    public Mono<SyncRun> startLockedThen(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
+                                         Function<SyncRun, Mono<Mono<SyncOutcome>>> work, Consumer<SyncRun> onFinished) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             return lock.acquire(purpose)
@@ -119,7 +128,7 @@ public class SyncJobs {
 
     Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, Mono<SyncOutcome> work,
                         Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
-        return 띄운다(source, trigger, work.map(Mono::just), run -> Mono.empty(), UnaryOperator.identity(),
+        return 띄운다(source, trigger, run -> work.map(Mono::just), run -> Mono.empty(), UnaryOperator.identity(),
                 release, onFinished);
     }
 
@@ -134,7 +143,7 @@ public class SyncJobs {
      * @param release    겹침 검사(락·가드)를 푸는 수단. 작업이 어떻게 끝나든 정확히 한 번 부른다
      * @param onFinished 끝난 기록으로 부른다(지표·로그). 기록에 실패하면 부르지 않는다
      */
-    Mono<SyncRun> 띄운다(SyncSource source, SyncTrigger trigger, Mono<Mono<SyncOutcome>> work,
+    Mono<SyncRun> 띄운다(SyncSource source, SyncTrigger trigger, Function<SyncRun, Mono<Mono<SyncOutcome>>> work,
                         Function<SyncRun, Mono<Void>> 먼저, UnaryOperator<Mono<Mono<SyncOutcome>>> 지키기,
                         Supplier<Mono<Void>> release, Consumer<SyncRun> onFinished) {
         return Mono.deferContextual(context -> {
@@ -194,10 +203,11 @@ public class SyncJobs {
      * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다. 종료·기한은
      * 락을 쥔 구간({@code 지키기} 가 감싼 부분)만 경주 상대로 삼는다 — 반납 뒤 할 일은 그 경주 밖에서 돈다(설계 2026-10-02 §5).
      */
-    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Mono<Mono<SyncOutcome>> work, Function<SyncRun, Mono<Void>> 먼저,
+    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, Function<SyncRun, Mono<Mono<SyncOutcome>>> work,
+                                    Function<SyncRun, Mono<Void>> 먼저,
                                     UnaryOperator<Mono<Mono<SyncOutcome>>> 지키기, Supplier<Mono<Void>> release) {
         Mono<Mono<SyncOutcome>> 종료되면 = 종료.asMono().then(Mono.error(() -> new IllegalStateException(종료_사유)));
-        Mono<Mono<SyncOutcome>> 일 = 지키기.apply(Mono.defer(() -> 먼저.apply(run)).then(work));
+        Mono<Mono<SyncOutcome>> 일 = 지키기.apply(Mono.defer(() -> 먼저.apply(run)).then(Mono.defer(() -> work.apply(run))));
         return Mono.firstWithSignal(종료되면, 일)
                 .timeout(timeout, Mono.error(() -> new IllegalStateException("기한 초과 — " + 사람말로(timeout))))
                 .switchIfEmpty(Mono.error(() -> new IllegalStateException("작업이 결과 없이 끝났다")))
