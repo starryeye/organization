@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -22,6 +23,7 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
@@ -35,7 +37,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -157,12 +161,20 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * 않으므로({@link Attrs#putIfPresent}) 저장본을 되읽으면 {@code null} 이 된다. 들어온
      * {@code user} 가 빈 문자열을 그대로 들고 있으면 라운드트립 없이는 "저장했다면 나왔을 값"과
      * 영원히 달라 보여 매번 다시 쓴다 — 이 태스크가 없애려는 바로 그 재기록이다.
+     *
+     * <p>쓴 것을 돌려준다(전체 교체의 비교 결과, 설계 2026-10-10 §4.3). 키 규칙만 바뀌어 다시 쓴 것은 값이 같아 돌려주지 않는다 — 이력에 남길 변경이
+     * 아니다.
      */
-    private Mono<Void> writeUser(DirectoryUser user, Stored<DirectoryUser> stored) {
-        if (stored != null && stored.sameAs(toUser(user.id(), userItem(user)))) {
+    private Mono<DirectoryChanges.UserDiff> writeUser(DirectoryUser user, Stored<DirectoryUser> stored) {
+        DirectoryUser 저장될값 = toUser(user.id(), userItem(user));
+        if (stored != null && stored.sameAs(저장될값)) {
             return Mono.empty();
         }
-        return writeMeta(userItem(user), USER_OPTIONAL);
+        Mono<Void> 쓰기 = writeMeta(userItem(user), USER_OPTIONAL);
+        if (stored != null && stored.value().equals(저장될값)) {
+            return 쓰기.then(Mono.empty());
+        }
+        return 쓰기.thenReturn(new DirectoryChanges.UserDiff(stored == null ? null : stored.value(), 저장될값));
     }
 
     /** 직원 META 에 쓸 아이템. 두 시각은 넣지 않는다 — 바뀌었을 때만 {@link #writeMeta} 가 넣는다. */
@@ -210,6 +222,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      */
     @Override
     public Mono<Void> deleteUser(String userId) {
+        return 직원을_지운다(userId).then();
+    }
+
+    /**
+     * {@link #deleteUser} 의 몸통 — 멤버 줄을 <b>실제로 지운</b> 조직 id 를 준다. 소속 줄만 남고 멤버 줄은 이미 없던 조직은 넣지 않는다(DeleteItem 의
+     * {@code ALL_OLD} 로 안다). 전체 교체가 그 조직의 멤버 변경으로 돌려준다(설계 2026-10-10 §4.3).
+     */
+    private Mono<List<String>> 직원을_지운다(String userId) {
         return queryPartition(Keys.userPk(userId))
                 .map(item -> Attrs.str(item, Keys.SK))
                 .collectList()
@@ -220,12 +240,24 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .toList();
                     MemberRef self = MemberRef.user(userId);
                     return Flux.fromIterable(groupIds)
-                            .flatMap(groupId -> deleteItem(Keys.groupPk(groupId), Keys.memberSk(self)),
+                            .flatMap(groupId -> 지웠으면_준다(Keys.groupPk(groupId), Keys.memberSk(self), groupId),
                                     QUERY_CONCURRENCY)
-                            .thenMany(Flux.fromIterable(sks))
-                            .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
-                            .then();
+                            .collectList()
+                            .flatMap(멤버였던_조직 -> Flux.fromIterable(sks)
+                                    .flatMap(sk -> deleteItem(Keys.userPk(userId), sk), QUERY_CONCURRENCY)
+                                    .then(Mono.just(멤버였던_조직)));
                 });
+    }
+
+    /** 아이템을 지우고, 실제로 있던 것이면 {@code value} 를 준다. */
+    private <T> Mono<T> 지웠으면_준다(String pk, String sk, T value) {
+        return Mono.fromFuture(() -> client.deleteItem(DeleteItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
+                        .returnValues(ReturnValue.ALL_OLD)
+                        .build()))
+                .filter(response -> !response.attributes().isEmpty())
+                .map(response -> value);
     }
 
     /**
@@ -358,7 +390,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** 직원과 같은 규칙으로 쓴다. 조직의 변경은 META 또는 멤버 구성의 변경이다(GSI 설계 §3). */
     @Override
     public Mono<Void> saveGroup(DirectoryGroup group) {
-        return storedGroupOf(group.id()).flatMap(stored -> writeGroup(group, stored.orElse(null)));
+        return storedGroupOf(group.id()).flatMap(stored -> writeGroup(group, stored.orElse(null))).then();
     }
 
     /**
@@ -378,7 +410,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .defaultIfEmpty(Optional.empty());
     }
 
-    private Mono<Void> writeGroup(DirectoryGroup group, Stored<GroupHeader> stored) {
+    /** 이름표와 멤버 줄을 맞추고, 바뀌었으면 쓴 것을 돌려준다(설계 2026-10-10 §4.3). 키 규칙만 바뀐 이름표는 돌려주지 않는다. */
+    private Mono<DirectoryChanges.GroupDiff> writeGroup(DirectoryGroup group, Stored<GroupHeader> stored) {
         GroupHeader header = new GroupHeader(group.id(), group.externalId(), group.displayName());
         Set<String> targetSks = group.members().stream().map(Keys::memberSk).collect(Collectors.toSet());
 
@@ -396,7 +429,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                     List<MemberRef> 새로온멤버 = group.members().stream()
                             .filter(member -> !existingSks.contains(Keys.memberSk(member)))
                             .toList();
-                    return writeMembership(header, stored, 새로온멤버, 떠난멤버);
+                    GroupHeader 저장될값 = toGroupHeader(header.id(), groupMeta(header));
+                    boolean 이름표가_바뀜 = stored == null || !stored.value().equals(저장될값);
+                    Mono<Void> 쓰기 = writeMembership(header, stored, 새로온멤버, 떠난멤버);
+                    if (!이름표가_바뀜 && 새로온멤버.isEmpty() && 떠난멤버.isEmpty()) {
+                        return 쓰기.then(Mono.<DirectoryChanges.GroupDiff>empty());
+                    }
+                    return 쓰기.thenReturn(new DirectoryChanges.GroupDiff(stored == null ? null : stored.value(), 저장될값,
+                            Set.copyOf(새로온멤버), Set.copyOf(떠난멤버)));
                 });
     }
 
@@ -679,34 +719,62 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * 메서드에 내용을 넣어 부르는 것은 LDAP 의 전체 동기화(FullSyncUseCase)와 재적재(RebuildUseCase)뿐이고,
      * LDAP 앱에는 그와 동시에 직원·조직을 쓰는 경로가 없어 이전 회차는 오래전에 끝나 있다 — 인덱스는 이미
      * 맞춰져 있다. SCIM 재적재(ScimRebuildUseCase)는 이 메서드를 빈 스냅샷으로만 불러 비교할 것이 없다.
+     *
+     * <p><b>실제로 쓴 것을 돌려준다(설계 2026-10-10 §4.3).</b> 비교는 이미 손에 든 저장본({@link Stored})과 하므로 새로 읽는 것이 없다.
      */
     @Override
-    public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
+    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
         return Mono.zip(
                         storedIndex(Keys.USER_INDEX, this::storedUser, DirectoryUser::id),
                         storedIndex(Keys.GROUP_INDEX, this::storedGroup, GroupHeader::id))
                 .flatMap(stored -> {
                     Map<String, Stored<DirectoryUser>> users = stored.getT1();
                     Map<String, Stored<GroupHeader>> groups = stored.getT2();
+                    Queue<DirectoryChanges.UserDiff> 직원변경 = new ConcurrentLinkedQueue<>();
+                    Queue<DirectoryChanges.GroupDiff> 조직변경 = new ConcurrentLinkedQueue<>();
 
                     Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
                             .flatMap(user -> writeUser(user, users.get(user.id())), QUERY_CONCURRENCY)
+                            .doOnNext(직원변경::add)
                             .then();
                     Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
                             .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
+                            .doOnNext(조직변경::add)
                             .then();
-                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.keySet())
-                            .filter(id -> !snapshot.groups().containsKey(id))
-                            .flatMap(id -> findMemberRefs(id).collect(Collectors.toSet())
-                                    .flatMap(members -> deleteGroup(id, members)), QUERY_CONCURRENCY)
+                    Mono<Void> removeStaleGroups = Flux.fromIterable(groups.values())
+                            .filter(group -> !snapshot.groups().containsKey(group.value().id()))
+                            .flatMap(group -> findMemberRefs(group.value().id()).collect(Collectors.toSet())
+                                    .flatMap(members -> deleteGroup(group.value().id(), members)
+                                            .doOnSuccess(ignored -> 조직변경.add(
+                                                    new DirectoryChanges.GroupDiff(group.value(), null, Set.of(), members)))),
+                                    QUERY_CONCURRENCY)
                             .then();
-                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.keySet())
-                            .filter(id -> !snapshot.users().containsKey(id))
-                            .flatMap(this::deleteUser, QUERY_CONCURRENCY)
+                    Mono<Void> removeStaleUsers = Flux.fromIterable(users.values())
+                            .filter(user -> !snapshot.users().containsKey(user.value().id()))
+                            .flatMap(user -> 직원을_지운다(user.value().id())
+                                    .doOnNext(멤버였던_조직 -> {
+                                        직원변경.add(new DirectoryChanges.UserDiff(user.value(), null));
+                                        멤버였던_조직.forEach(groupId -> 조직변경.add(
+                                                멤버만_빠짐(groupId, user.value().id(), snapshot, groups)));
+                                    }), QUERY_CONCURRENCY)
                             .then();
 
-                    return upsertUsers.then(upsertGroups).then(removeStaleGroups).then(removeStaleUsers);
+                    return upsertUsers.then(upsertGroups).then(removeStaleGroups).then(removeStaleUsers)
+                            .then(Mono.fromSupplier(() -> new DirectoryChanges(List.copyOf(직원변경), List.copyOf(조직변경))));
                 });
+    }
+
+    /**
+     * 전체 교체가 직원을 지우며 남아 있던 멤버 줄도 지운 조직 — 조직도가 그 직원을 아직 멤버로 적었지만 직원 목록에는 없는 경우다. 이름표는 그대로다.
+     * 이름표는 이번 조직도의 것을, 없으면 저장본의 것을 쓴다.
+     */
+    private DirectoryChanges.GroupDiff 멤버만_빠짐(String groupId, String userId, DirectorySnapshot snapshot,
+                                                Map<String, Stored<GroupHeader>> groups) {
+        DirectoryGroup 목표 = snapshot.groups().get(groupId);
+        GroupHeader header = 목표 != null
+                ? toGroupHeader(groupId, groupMeta(new GroupHeader(목표.id(), 목표.externalId(), 목표.displayName())))
+                : groups.containsKey(groupId) ? groups.get(groupId).value() : new GroupHeader(groupId, null, null);
+        return new DirectoryChanges.GroupDiff(header, header, Set.of(), Set.of(MemberRef.user(userId)));
     }
 
     /** GSI1 파티션 하나를 훑어 id → 저장본. 삭제 판단과 변경 비교를 한 번의 조회로 한다. */

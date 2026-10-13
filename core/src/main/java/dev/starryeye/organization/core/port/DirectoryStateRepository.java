@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.port;
 
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -144,8 +145,12 @@ public interface DirectoryStateRepository {
     /** 보류 목록을 {@code edges} 로 통째로 바꾼다 — SCIM 재적재·wipe 가 쓴다(설계 2026-10-03 §4.6). */
     Mono<Void> replaceCutEdges(Set<GroupEdge> edges);
 
-    /** LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. */
-    Mono<Void> replaceWith(DirectorySnapshot snapshot);
+    /**
+     * LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. 저장본과 비교해 바뀐 것만 쓰고, <b>실제로 쓴 것</b>을 돌려준다(설계 2026-10-10 §4.3).
+     * 돌려주는 것은 직원의 생성·이전·이후·삭제와, 조직의 이름표 이전·이후·생성·삭제, 들어오고 나간 멤버다. 같은 조직도면 빈 결과다. 이력이 이것으로
+     * 조직도 변경을 남긴다.
+     */
+    Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot);
 
     Mono<DirectorySnapshot> loadAll();
 }

@@ -11,6 +11,7 @@ import dev.starryeye.organization.authz.fixture.ScaleVerification;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
 import dev.starryeye.organization.core.fixture.ScaleTest;
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -176,7 +177,7 @@ class LdapInterruptedSyncScaleTest {
             implements DirectoryStateRepository {
 
         @Override
-        public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
             if (상태저장을_끊는다.get()) {
                 return Mono.error(new IllegalStateException("상태 저장 직전에 프로세스가 죽었다"));
             }

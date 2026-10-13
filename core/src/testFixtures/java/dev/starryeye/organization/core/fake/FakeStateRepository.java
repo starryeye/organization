@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.fake;
 
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -266,13 +267,49 @@ public class FakeStateRepository implements DirectoryStateRepository {
         });
     }
 
+    /** 저장소와 같은 뜻의 비교 결과를 돌려준다(설계 2026-10-10 §4.3) — 바뀐 직원·조직, 들어오고 나간 멤버, 사라진 것. */
     @Override
-    public Mono<Void> replaceWith(DirectorySnapshot snapshot) {
+    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        List<DirectoryChanges.UserDiff> 직원변경 = new ArrayList<>();
+        snapshot.users().values().forEach(user -> {
+            DirectoryUser before = users.get(user.id());
+            if (!user.equals(before)) {
+                직원변경.add(new DirectoryChanges.UserDiff(before, user));
+            }
+        });
+        users.values().stream()
+                .filter(user -> !snapshot.users().containsKey(user.id()))
+                .forEach(user -> 직원변경.add(new DirectoryChanges.UserDiff(user, null)));
+
+        List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>();
+        snapshot.groups().values().forEach(group -> {
+            DirectoryGroup before = groups.get(group.id());
+            Set<MemberRef> added = new LinkedHashSet<>(group.members());
+            Set<MemberRef> removed = new LinkedHashSet<>();
+            if (before != null) {
+                added.removeAll(before.members());
+                removed.addAll(before.members());
+                removed.removeAll(group.members());
+            }
+            GroupHeader 이전 = before == null ? null : 이름표(before);
+            GroupHeader 이후 = 이름표(group);
+            if (before == null || !이후.equals(이전) || !added.isEmpty() || !removed.isEmpty()) {
+                조직변경.add(new DirectoryChanges.GroupDiff(이전, 이후, added, removed));
+            }
+        });
+        groups.values().stream()
+                .filter(group -> !snapshot.groups().containsKey(group.id()))
+                .forEach(group -> 조직변경.add(new DirectoryChanges.GroupDiff(이름표(group), null, Set.of(), group.members())));
+
         users.clear();
         groups.clear();
         users.putAll(snapshot.users());
         groups.putAll(snapshot.groups());
-        return Mono.empty();
+        return Mono.just(new DirectoryChanges(직원변경, 조직변경));
+    }
+
+    private static GroupHeader 이름표(DirectoryGroup group) {
+        return new GroupHeader(group.id(), group.externalId(), group.displayName());
     }
 
     @Override

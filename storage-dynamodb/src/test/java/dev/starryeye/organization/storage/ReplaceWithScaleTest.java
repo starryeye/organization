@@ -1,6 +1,7 @@
 package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.fixture.ScaleTest;
+import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -52,7 +53,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         var repository = new DynamoDbDirectoryStateRepository(counter.wrap(client), properties, Clock.systemUTC());
         DirectorySnapshot 최초 = 조직도(Map.of());
         long 시작 = System.currentTimeMillis();
-        repository.replaceWith(최초).block(Duration.ofMinutes(30));
+        DirectoryChanges 적재변경 = repository.replaceWith(최초).block(Duration.ofMinutes(30));
         long 적재 = System.currentTimeMillis() - 시작;
         long 적재쓰기 = counter.writes();
 
@@ -60,7 +61,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         DirectorySnapshot 그대로 = 조직도(Map.of());
         counter.reset();
         시작 = System.currentTimeMillis();
-        repository.replaceWith(그대로).block(Duration.ofMinutes(30));
+        DirectoryChanges 같음변경 = repository.replaceWith(그대로).block(Duration.ofMinutes(30));
         long 같음 = System.currentTimeMillis() - 시작;
         long 같음쓰기 = counter.writes();
 
@@ -73,7 +74,7 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         DirectorySnapshot 일부변경 = 조직도(바뀐직원);
         counter.reset();
         시작 = System.currentTimeMillis();
-        repository.replaceWith(일부변경).block(Duration.ofMinutes(30));
+        DirectoryChanges 일부변경결과 = repository.replaceWith(일부변경).block(Duration.ofMinutes(30));
         long 일부 = System.currentTimeMillis() - 시작;
         long 일부쓰기 = counter.writes();
 
@@ -83,5 +84,12 @@ class ReplaceWithScaleTest extends DynamoDbTestSupport {
         assertThat(적재쓰기).isEqualTo(102_100);
         assertThat(같음쓰기).isZero();
         assertThat(일부쓰기).isEqualTo(100);
+
+        // then — 비교 결과가 쓴 것과 같다. 같은 조직도면 비어 있어 이력도 쓰지 않는다(설계 2026-10-10 §3.6)
+        assertThat(적재변경.users()).hasSize(100_000);
+        assertThat(적재변경.groups()).hasSize(100);
+        assertThat(같음변경.isEmpty()).isTrue();
+        assertThat(일부변경결과.users()).hasSize(100);
+        assertThat(일부변경결과.groups()).isEmpty();
     }
 }
