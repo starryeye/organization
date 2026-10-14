@@ -2,7 +2,7 @@ package dev.starryeye.organization.ldap;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.ldap.core.LdapTemplate;
@@ -74,7 +74,7 @@ public abstract class EmbeddedLdapSupport {
     void LDAP서버를_띄운다() throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("test", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("test"));
         config.setSchema(null);
         if (maxSizeLimit() > 0) {
             config.setMaxSizeLimit(maxSizeLimit());
@@ -88,7 +88,7 @@ public abstract class EmbeddedLdapSupport {
         server.startListening();
 
         LdapContextSource contextSource = new LdapContextSource();
-        contextSource.setUrl("ldap://localhost:" + server.getListenPort());
+        contextSource.setUrl(EmbeddedLdapListener.접속_주소(server));
         contextSource.setBase(BASE_DN);
         contextSource.setUserDn(BIND_DN);
         contextSource.setPassword(BIND_PASSWORD);
@@ -109,7 +109,7 @@ public abstract class EmbeddedLdapSupport {
      * 접속 정보를 {@code properties} 에 채운다.
      */
     protected LdapTemplate LdapConfig로_만든_템플릿(LdapProperties properties) throws Exception {
-        properties.setUrl("ldap://localhost:" + server.getListenPort());
+        properties.setUrl(EmbeddedLdapListener.접속_주소(server));
         properties.setBindDn(BIND_DN);
         properties.setBindPassword(BIND_PASSWORD);
         LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);

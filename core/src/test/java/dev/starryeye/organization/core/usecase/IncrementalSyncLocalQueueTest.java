@@ -61,10 +61,14 @@ class IncrementalSyncLocalQueueTest {
         VirtualTimeScheduler.reset();
     }
 
-    /** acquire 를 부른 수(Mono 를 만든 수 — 토큰이 정해지는 때)와 구독한 수(DynamoDB 에 보낸 수)를 따로 센다. */
+    /**
+     * acquire 를 부른 수(Mono 를 만든 수 — 토큰이 정해지는 때)와 구독한 수(DynamoDB 에 보낸 수)를 따로 센다. {@link #막히면_반납할} 에 리스를
+     * 두면 시도가 처음 막힌 직후 그 리스를 반납한다 — 남이 놓는 순간을 재시도 대기와 상관없이 첫 시도와 둘째 시도 사이에 둔다.
+     */
     private static final class 세는_락 extends FakeMutationLock {
         final AtomicInteger 만든_수 = new AtomicInteger();
         final AtomicInteger 보낸_수 = new AtomicInteger();
+        final AtomicReference<LockLease> 막히면_반납할 = new AtomicReference<>();
 
         @Override
         public Mono<LockLease> acquire(LockPurpose purpose) {
@@ -72,7 +76,12 @@ class IncrementalSyncLocalQueueTest {
             Mono<LockLease> 실제 = super.acquire(purpose);
             return Mono.defer(() -> {
                 보낸_수.incrementAndGet();
-                return 실제;
+                return 실제.doOnError(막힘 -> {
+                    LockLease 남의_리스 = 막히면_반납할.getAndSet(null);
+                    if (남의_리스 != null) {
+                        release(남의_리스).block();
+                    }
+                });
             });
         }
     }
@@ -221,16 +230,17 @@ class IncrementalSyncLocalQueueTest {
     @Test
     @DisplayName("재시도는 acquire 가 만든 같은 Mono 를 다시 구독한다 — 실제 락에서는 같은 토큰이다(점검 S14)")
     void 재시도는_같은_Mono_다() {
-        // given — 다른 SCIM 쓰기가 쥐고 있다
+        // given — 다른 SCIM 쓰기가 쥐고 있다가 첫 시도가 막힌 직후 반납한다. 구독한 뒤 테스트 본문에서 반납하면 안 된다 — full jitter 의
+        // 첫 대기는 0ms 일 수 있고(난수 < 0.1) 가상 시간 스케줄러는 0ms 예약을 그 자리에서 돌려, 반납 전에 둘째 시도가 나가 또 막힌다
         VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
         LockLease 남의_리스 = lock.acquire(MutationLock.LockPurpose.WRITE).block();
         lock.만든_수.set(0);
         lock.보낸_수.set(0);
+        lock.막히면_반납할.set(남의_리스);
         AtomicReference<IncrementalSyncResult> 결과 = new AtomicReference<>();
 
-        // when — 첫 시도가 막힌 뒤 남이 반납한다
+        // when
         유스케이스(Duration.ofSeconds(3)).upsertUser(직원("lee", false)).subscribe(결과::set);
-        lock.release(남의_리스).block();
         시간.advanceTimeBy(Duration.ofMillis(100));
 
         // then

@@ -2,7 +2,6 @@ package dev.starryeye.organization.ldap.fixture;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.fixture.OrgChart;
 import dev.starryeye.organization.core.fixture.OrgChartFixture;
@@ -49,7 +48,7 @@ class LdifRendererTest {
 
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, BIND_PASSWORD);
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("fixture", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("fixture"));
         // 스키마 검사를 <b>켜 둔다.</b> 껐더니 실제 OpenLDAP 이 거부하는 엔트리(member 없는
         // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
         // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
@@ -61,7 +60,7 @@ class LdifRendererTest {
         server.startListening();
 
         LdapContextSource contextSource = new LdapContextSource();
-        contextSource.setUrl("ldap://localhost:" + server.getListenPort());
+        contextSource.setUrl(EmbeddedLdapListener.접속_주소(server));
         contextSource.setBase(BASE_DN);
         contextSource.setUserDn(BIND_DN);
         contextSource.setPassword(BIND_PASSWORD);

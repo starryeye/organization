@@ -2,7 +2,6 @@ package dev.starryeye.organization.ldap.app;
 
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.core.fixture.Containers;
@@ -10,6 +9,7 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.ldap.fixture.ActiveDirectorySids;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -74,14 +74,14 @@ class LdapActiveDirectoryShapeEndToEndTest {
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("active-directory-shape", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("active-directory-shape"));
         config.setSchema(null);
         LDAP = new InMemoryDirectoryServer(config);
         LDAP.importFromLDIF(true, new LDIFReader(
                 new ByteArrayInputStream(ldif().getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
         // AD 의 사람 필터와 그룹 필터 — 프로필은 inetOrgPerson/groupOfNames 라서 이 디렉터리를 읽지 못한다
         registry.add("ldap.group-of-names.user-filter", () -> "(&(objectCategory=person)(objectClass=user))");
         registry.add("ldap.group-of-names.group-filter", () -> "(objectClass=group)");

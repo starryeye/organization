@@ -3,7 +3,6 @@ package dev.starryeye.organization.ldap.app;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.fixture.ScaleContainers;
@@ -15,6 +14,7 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import dev.starryeye.organization.ldap.fixture.LdifRenderer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -73,7 +73,7 @@ class AdminQueryScaleTest {
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials("cn=admin," + BASE_DN, "adminpassword");
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("adminquery", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("adminquery"));
         // 스키마 검사를 <b>켜 둔다.</b> 껐더니 실제 OpenLDAP 이 거부하는 엔트리(member 없는
         // groupOfNames)가 임베디드 서버에서만 통과해, 규모 시드가 실제 서버에 안 올라가는 것을
         // 로컬 실측에서야 알았다. 임베디드 서버가 실제 서버보다 관대하면 테스트는 존재할 수
@@ -84,7 +84,7 @@ class AdminQueryScaleTest {
                 new LdifRenderer(BASE_DN).render(기대).getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 

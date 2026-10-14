@@ -4,11 +4,11 @@ import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.core.fixture.Containers;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
-import com.unboundid.ldap.listener.InMemoryListenerConfig;
 import com.unboundid.ldif.LDIFReader;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -90,14 +90,14 @@ class TraceCorrelationTest {
     static void 인프라_주소를_주입한다(DynamicPropertyRegistry registry) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig("dc=example,dc=com");
         config.addAdditionalBindCredentials("cn=admin,dc=example,dc=com", "adminpassword");
-        config.setListenerConfigs(InMemoryListenerConfig.createLDAPConfig("trace", 0));
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("trace"));
         config.setSchema(null);
         LDAP = new InMemoryDirectoryServer(config);
         LDAP.importFromLDIF(true, new LDIFReader(
                 new ByteArrayInputStream(LDIF.getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> "ldap://localhost:" + LDAP.getListenPort());
+        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
         registry.add("openfga.api-url",
                 () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
         registry.add("dynamodb.endpoint",
