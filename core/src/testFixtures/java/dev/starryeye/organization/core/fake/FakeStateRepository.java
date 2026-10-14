@@ -20,7 +20,6 @@ import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -116,18 +115,6 @@ public class FakeStateRepository implements DirectoryStateRepository {
             }
             return found;
         });
-    }
-
-    @Override
-    public Flux<String> findUserIdsByUserName(String userName) {
-        if (userName == null) {
-            return Flux.empty();
-        }
-        // 실제 저장소처럼 대소문자를 가리지 않는다(RFC 7643 userName caseExact=false)
-        String key = userName.toLowerCase(Locale.ROOT);
-        return Flux.fromIterable(users.values())
-                .filter(user -> user.userName() != null && key.equals(user.userName().toLowerCase(Locale.ROOT)))
-                .map(DirectoryUser::id);
     }
 
     @Override

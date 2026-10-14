@@ -262,28 +262,6 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .map(response -> value);
     }
 
-    /**
-     * {@link #saveUser} 가 GSI1 의 정렬키에 {@code userName} 을 넣어 두므로 Scan 없이
-     * 정확 일치 Query 로 찾을 수 있다. 정렬키는 소문자다({@link Keys#indexKey}) — {@code Kim}
-     * 이 있으면 {@code kim} 으로도 찾힌다.
-     */
-    @Override
-    public Flux<String> findUserIdsByUserName(String userName) {
-        if (userName == null || userName.isBlank()) {
-            return Flux.empty();
-        }
-        QueryRequest request = QueryRequest.builder()
-                .tableName(properties.getTableName())
-                .indexName(Keys.GSI1)
-                .keyConditionExpression("#pk = :pk AND #sk = :sk")
-                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK, "#sk", Keys.GSI1SK))
-                .expressionAttributeValues(Map.of(
-                        ":pk", Attrs.s(Keys.USER_INDEX), ":sk", Attrs.s(Keys.indexKey(userName))))
-                .build();
-
-        return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
-    }
-
     @Override
     public Flux<String> findUserIdsByExternalId(String externalId) {
         return pksByExternalId(externalId, Keys.USER_PREFIX).map(Keys::parseUserPk);

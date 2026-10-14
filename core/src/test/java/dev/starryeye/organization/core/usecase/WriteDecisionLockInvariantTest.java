@@ -11,6 +11,8 @@ import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -69,7 +72,6 @@ class WriteDecisionLockInvariantTest {
         @Override public Mono<DirectoryUser> findUser(String id) { return 본다("findUser " + id, () -> super.findUser(id)); }
         @Override public Flux<DirectoryUser> findUsers(Set<String> ids) { return 본다Flux("findUsers " + ids, () -> super.findUsers(ids)); }
         @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 본다("findMemberTypes " + ids, () -> super.findMemberTypes(ids)); }
-        @Override public Flux<String> findUserIdsByUserName(String n) { return 본다Flux("findUserIdsByUserName " + n, () -> super.findUserIdsByUserName(n)); }
         @Override public Flux<String> findUserIdsByExternalId(String e) { return 본다Flux("findUserIdsByExternalId " + e, () -> super.findUserIdsByExternalId(e)); }
         @Override public Flux<String> findGroupIdsByExternalId(String e) { return 본다Flux("findGroupIdsByExternalId " + e, () -> super.findGroupIdsByExternalId(e)); }
         @Override public Mono<DirectoryGroup> findGroup(String id) { return 본다("findGroup " + id, () -> super.findGroup(id)); }
@@ -78,6 +80,8 @@ class WriteDecisionLockInvariantTest {
         @Override public Flux<MemberRef> findMemberRefs(String g) { return 본다Flux("findMemberRefs " + g, () -> super.findMemberRefs(g)); }
         @Override public Flux<String> findGroupIdsContaining(MemberRef ref) { return 본다Flux("findGroupIdsContaining " + ref.id(), () -> super.findGroupIdsContaining(ref)); }
         @Override public Flux<GroupEdge> findCutEdges() { return 본다Flux("findCutEdges", super::findCutEdges); }
+        @Override public Mono<UniqueClaim> claimUnique(UniqueKind k, String key, String owner, Instant at) { return 본다("claimUnique " + key, () -> super.claimUnique(k, key, owner, at)); }
+        @Override public Mono<Boolean> takeOverUnique(UniqueKind k, String key, String owner, String prev, Instant at) { return 본다("takeOverUnique " + key, () -> super.takeOverUnique(k, key, owner, prev, at)); }
     }
 
     @BeforeEach
@@ -120,6 +124,7 @@ class WriteDecisionLockInvariantTest {
 
         // then
         assertThat(모든읽기).as("읽기가 하나도 없으면 이 테스트는 아무것도 증명하지 못한다").isNotEmpty();
+        assertThat(모든읽기).as("중복 판단은 표지판이다 — GSI 를 보지 않는다").anyMatch(읽기 -> 읽기.startsWith("claimUnique "));
         assertThat(락밖읽기).isEmpty();
     }
 
@@ -138,6 +143,8 @@ class WriteDecisionLockInvariantTest {
 
         // then
         assertThat(모든읽기).isNotEmpty();
+        assertThat(모든읽기).as("중복 판단은 표지판이다 — GSI 를 보지 않는다").anyMatch(읽기 -> 읽기.startsWith("claimUnique "));
+        assertThat(모든읽기).noneMatch(읽기 -> 읽기.startsWith("findGroupIdsByExternalId "));
         assertThat(락밖읽기).isEmpty();
     }
 }
