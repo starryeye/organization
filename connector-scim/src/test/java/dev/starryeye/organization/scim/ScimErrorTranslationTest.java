@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockObserver;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
+import dev.starryeye.organization.core.usecase.UniqueValueTooLongException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.codec.DecodingException;
@@ -164,6 +165,21 @@ class ScimErrorTranslationTest {
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("503")
                 .jsonPath("$.detail").isEqualTo("일부 튜플 적용에 실패했습니다 — 잠시 뒤 다시 보내 주세요: kim");
+    }
+
+    @Test
+    @DisplayName("유일 값이 표지판 키 한도를 넘으면 400 invalidValue 다 — 다시 보내도 늘 넘으므로 Retry-After 가 없다")
+    void 긴_유일_값은_400이다() {
+        // given
+        var 예외 = new UniqueValueTooLongException("userName 이(가) 1024바이트를 넘습니다");
+
+        // when, then
+        번역한다(예외)
+                .expectStatus().isEqualTo(400)
+                .expectHeader().doesNotExist(HttpHeaders.RETRY_AFTER)
+                .expectBody()
+                .jsonPath("$.scimType").isEqualTo("invalidValue")
+                .jsonPath("$.detail").isEqualTo("userName 이(가) 1024바이트를 넘습니다");
     }
 
     @Test
