@@ -1,5 +1,9 @@
 package dev.starryeye.organization.storage;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.UniqueClaim;
@@ -7,12 +11,17 @@ import dev.starryeye.organization.core.model.UniqueKind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 
+import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -156,6 +165,42 @@ class DynamoDbUniqueMarkersTest extends DynamoDbTestSupport {
         assertThat(직원).containsExactlyInAnyOrder("u-1", "u-2");
         assertThat(조직).containsExactly("g-1");
         assertThat(비운_뒤).isEmpty();
+    }
+
+    @Test
+    @DisplayName("조건 실패 응답에 기존 표지판이 없으면 주인을 모르는 새 표지판으로 돌려주고 경고를 남긴다 — 키 자체는 로그에 남기지 않는다")
+    void 응답에_기존_표지판이_없으면_경고한다() {
+        // given — 조건은 실패했는데 ALL_OLD 가 실려 오지 않는 응답
+        DynamoDbAsyncClient 응답이_빈_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("putItem")) {
+                        return CompletableFuture.failedFuture(
+                                ConditionalCheckFailedException.builder().message("조건 실패").build());
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        Logger logger = (Logger) LoggerFactory.getLogger(DynamoDbUniqueMarkers.class);
+        ListAppender<ILoggingEvent> 로그 = new ListAppender<>();
+        로그.start();
+        logger.addAppender(로그);
+
+        try {
+            // when
+            UniqueClaim 돌려받은 = new DynamoDbUniqueMarkers(응답이_빈_클라이언트, properties)
+                    .claim(UniqueKind.USER_NAME, "secret.key", "u-1", T2).block();
+
+            // then
+            assertThat(돌려받은).isEqualTo(new UniqueClaim("", T2));
+            assertThat(로그.list).singleElement().satisfies(event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage())
+                        .isEqualTo("표지판 조건 실패 응답에 기존 표지판이 없다 — 주인을 몰라 503 으로 본다: kind=USER_NAME, key 길이=10");
+            });
+        } finally {
+            logger.detachAppender(로그);
+            로그.stop();
+        }
     }
 
     @Test

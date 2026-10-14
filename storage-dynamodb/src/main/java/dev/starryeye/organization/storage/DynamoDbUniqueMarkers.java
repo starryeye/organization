@@ -2,6 +2,7 @@ package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.UniqueClaim;
 import dev.starryeye.organization.core.model.UniqueKind;
+import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
@@ -23,6 +24,7 @@ import java.util.Map;
  * ({@link UniqueKind#key}). GSI 키 속성을 넣지 않아 어느 인덱스에도 실리지 않는다. 쓰기는 모두 조건부라 락이 겹치는 틈에서도 남의 표지판을
  * 덮어쓰지 않는다. {@link DynamoDbDirectoryStateRepository} 가 이것에 맡긴다.
  */
+@Slf4j
 final class DynamoDbUniqueMarkers {
 
     private static final String OWNER_ID = "ownerId";
@@ -46,7 +48,7 @@ final class DynamoDbUniqueMarkers {
                         .returnValuesOnConditionCheckFailure(ReturnValuesOnConditionCheckFailure.ALL_OLD)
                         .build()))
                 .then(Mono.<UniqueClaim>empty())
-                .onErrorResume(ConditionalCheckFailedException.class, error -> Mono.just(있던_표지판(error, at)));
+                .onErrorResume(ConditionalCheckFailedException.class, error -> Mono.just(있던_표지판(kind, key, error, at)));
     }
 
     /** 주인이 아직 {@code previousOwnerId} 일 때만 바꾼다. 바꿨으면 참이다. */
@@ -124,9 +126,13 @@ final class DynamoDbUniqueMarkers {
         return item;
     }
 
-    /** 조건 실패 응답에 실린 표지판. 돌려받지 못했으면 주인을 모르는 새 표지판으로 본다 — 부르는 쪽이 503 으로 판단한다. */
-    private static UniqueClaim 있던_표지판(ConditionalCheckFailedException error, Instant at) {
+    /**
+     * 조건 실패 응답에 실린 표지판. 돌려받지 못했으면 주인을 모르는 새 표지판으로 본다 — 부르는 쪽이 503 으로 판단한다. 조건이 실패했는데 ALL_OLD 가
+     * 없는 것은 있어서는 안 되는 일이라 경고를 남긴다. 값(키)은 로그에 남기지 않는다 — 사용자 이름이다.
+     */
+    private static UniqueClaim 있던_표지판(UniqueKind kind, String key, ConditionalCheckFailedException error, Instant at) {
         if (!error.hasItem() || error.item().get(OWNER_ID) == null || error.item().get(CLAIMED_AT) == null) {
+            log.warn("표지판 조건 실패 응답에 기존 표지판이 없다 — 주인을 몰라 503 으로 본다: kind={}, key 길이={}", kind, key.length());
             return new UniqueClaim("", at);
         }
         return new UniqueClaim(Attrs.str(error.item(), OWNER_ID),
