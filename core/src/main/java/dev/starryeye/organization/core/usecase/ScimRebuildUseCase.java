@@ -239,6 +239,8 @@ public class ScimRebuildUseCase {
             return state.replaceWith(DirectorySnapshot.empty())
                     // GSI 열거에서 빠져 남은 대상을 장부로 찾아 지운다(설계 2026-10-13 §4.4)
                     .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted()))
+                    // 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)
+                    .flatMap(changes -> state.clearUniqueMarkers().thenReturn(changes))
                     .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
                     .doOnSuccess(changes -> log.warn(
                             "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))

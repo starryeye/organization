@@ -141,6 +141,10 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 실리지 않는다(`2026-10-08-audit-finish-design.md`). 기존 테이블은 다시 만들어야 한다. `create-table-on-startup` 이 켜져 있으면 GSI2 가
 옛 모양(정렬키 `displayName`)이거나 없는 테이블에서 서버가 "테이블을 다시 만들어야 한다" 며 기동을 멈춘다.
 
+**②-a(유일 값 표지판)는 SCIM 테이블에 줄을 더한다** — 직원 `userName`·조직 `externalId` 의 유일성을 `UNIQUE#USERNAME`·`UNIQUE#GROUP_EXTERNAL_ID`
+표지판 줄로 지킨다(`2026-10-14-unique-markers-design.md`). 테이블·GSI 정의는 바뀌지 않는다. 표지판 없이 저장된 직원·조직은 중복을 막지 못하므로,
+기존 SCIM 테이블은 비우고(테이블을 다시 만들거나 `mode=wipe`) IdP 에서 전체 재프로비저닝한다. LDAP 테이블은 그대로다.
+
 직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
 GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` — `userName`·`displayName`·`active`), GSI3(파티션키
 `externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
@@ -602,6 +606,11 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | `startIndex`·`count` | `count` 기본값·상한 100 |
 | `sortBy`·`sortOrder` | 직원 `userName`, 조직 `displayName` 만 |
 | `attributes`·`excludedAttributes` | 리소스를 돌려주는 모든 응답. 조직에서 `members` 를 빼면 멤버를 읽지 않는다 |
+
+**`userName`·조직 `externalId` 의 유일성은 표지판 줄로 지킨다.** 쓰기 락 안에서, OpenFGA 쓰기 전에 그 값의 표지판을 조건부로 차지한다. 그래서 응답을
+잃은 POST 를 IdP 가 곧바로 다시 보내도 409 다 — 최종 일관성 GSI 를 보지 않는다. 다른 쓰기가 차지하고 아직 저장하지 않은 값은 503(Retry-After 2초)이다.
+서버가 죽었거나 리스를 잃은 직후에는 그 값의 표지판이 남아, 락 TTL(`dynamodb.lock-ttl`, 30초)이 지날 때까지 같은 값의 쓰기가 503 일 수 있다.
+값이 1024바이트를 넘으면 400 `invalidValue` 다.
 
 필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
 동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센

@@ -16,6 +16,8 @@ import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,6 +27,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -381,6 +384,23 @@ class ScimRebuildUseCaseTest {
 
         // then
         assertThat(state.cutEdges).isEmpty();
+    }
+
+    @Test
+    @DisplayName("wipe 는 유일 값 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)")
+    void wipe는_표지판을_비운다() {
+        // given
+        조직도를_심는다();
+        state.uniqueMarkers.computeIfAbsent(UniqueKind.USER_NAME, ignored -> new LinkedHashMap<>())
+                .put("kim", new UniqueClaim("kim", NOW));
+        state.uniqueMarkers.computeIfAbsent(UniqueKind.GROUP_EXTERNAL_ID, ignored -> new LinkedHashMap<>())
+                .put("cn=DEV002", new UniqueClaim("DEV002", NOW));
+
+        // when
+        재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(state.uniqueMarkers).isEmpty();
     }
 
     @Test
