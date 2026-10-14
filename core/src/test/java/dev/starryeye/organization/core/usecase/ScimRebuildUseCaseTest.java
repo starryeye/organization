@@ -394,7 +394,7 @@ class ScimRebuildUseCaseTest {
         state.uniqueMarkers.computeIfAbsent(UniqueKind.USER_NAME, ignored -> new LinkedHashMap<>())
                 .put("kim", new UniqueClaim("kim", NOW));
         state.uniqueMarkers.computeIfAbsent(UniqueKind.GROUP_EXTERNAL_ID, ignored -> new LinkedHashMap<>())
-                .put("cn=DEV002", new UniqueClaim("DEV002", NOW));
+                .put("DEV002", new UniqueClaim("DEV002", NOW));
 
         // when
         재적재한다(ScimRebuildMode.WIPE);

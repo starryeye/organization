@@ -609,7 +609,8 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 **`userName`·조직 `externalId` 의 유일성은 표지판 줄로 지킨다.** 쓰기 락 안에서, OpenFGA 쓰기 전에 그 값의 표지판을 조건부로 차지한다. 그래서 응답을
 잃은 POST 를 IdP 가 곧바로 다시 보내도 409 다 — 최종 일관성 GSI 를 보지 않는다. 다른 쓰기가 차지하고 아직 저장하지 않은 값은 503(Retry-After 2초)이다.
-서버가 죽었거나 리스를 잃은 직후에는 그 값의 표지판이 남아, 락 TTL(`dynamodb.lock-ttl`, 30초)이 지날 때까지 같은 값의 쓰기가 503 일 수 있다.
+서버가 죽었거나, 리스를 잃었거나 커밋 직전 리스 확인이 실패했거나, 표지판 놓기마저 실패하면 그 값의 표지판이 남는다. 그러면 락 TTL(`dynamodb.lock-ttl`, 30초)이
+지날 때까지 새 직원·조직의 같은 값 쓰기는 503 일 수 있다. 같은 직원·조직의 재시도는 곧바로 통과한다.
 값이 1024바이트를 넘으면 400 `invalidValue` 다.
 
 필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
@@ -695,8 +696,8 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 
 409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
 PUT 도 같다(PATCH 도 같다 — path `externalId` 와 경로 없는 값의 `externalId` 키 모두. remove 는 비운다). RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. `externalId` 가 있는 조직이면 응답을 잃은 POST 를 IdP 가 재시도해 같은 조직이
 둘 생기고 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
-보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본
-테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만) 저장된 직원과 대소문자만 다른 이름, 방금 저장된 조직과 같은 `externalId` 는 드물게 통과할 수 있다.
+보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 표지판 줄을 조건부로 차지해
+한다 — GSI 를 보지 않으므로 방금 저장된 직원·조직과도 겹치지 않는다(위 "`userName`·조직 `externalId` 의 유일성은 표지판 줄로 지킨다" 문단).
 설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`, `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`.
 
 **`externalId` 없는 조직 POST 는 재시도를 막지 못한다.** Okta 식으로 `externalId` 없이 조직을 만들고(서버가 새 `id` 를 발급한다) IdP 가 응답을 잃어
