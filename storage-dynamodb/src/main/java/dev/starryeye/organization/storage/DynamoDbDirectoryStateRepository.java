@@ -10,6 +10,8 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.ResourceTimes;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -868,6 +870,32 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(CUT_PARENT, Attrs.s(edge.parent()));
         item.put(CUT_CHILD, Attrs.s(edge.child()));
         return item;
+    }
+
+    // ---------- 유일 값 표지판 ----------
+
+    @Override
+    public Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at) {
+        return 표지판().claim(kind, key, ownerId, at);
+    }
+
+    @Override
+    public Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at) {
+        return 표지판().takeOver(kind, key, ownerId, previousOwnerId, at);
+    }
+
+    @Override
+    public Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId) {
+        return 표지판().release(kind, key, ownerId);
+    }
+
+    @Override
+    public Mono<Void> clearUniqueMarkers() {
+        return 표지판().clear();
+    }
+
+    private DynamoDbUniqueMarkers 표지판() {
+        return new DynamoDbUniqueMarkers(client, properties);
     }
 
     // ---------- 공통 ----------

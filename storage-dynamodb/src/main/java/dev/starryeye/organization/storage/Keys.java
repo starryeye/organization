@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.UniqueKind;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -100,6 +101,20 @@ public final class Keys {
      */
     public static final String CYCLE_CUT_PK = "CYCLE_CUT";
     public static final String CUT_EDGE_PREFIX = "EDGE#";
+
+    /**
+     * 유일 값 표지판 파티션(설계 2026-10-14 §3.1) — 종류마다 하나, 정렬키가 값의 키다. GSI 키가 없어 직원·조직 열거와 어느 인덱스에도 섞이지 않는다.
+     * SCIM 쓰기만 만든다.
+     */
+    public static final String UNIQUE_USERNAME_PK = "UNIQUE#USERNAME";
+    public static final String UNIQUE_GROUP_EXTERNAL_ID_PK = "UNIQUE#GROUP_EXTERNAL_ID";
+
+    public static String uniquePk(UniqueKind kind) {
+        return switch (kind) {
+            case USER_NAME -> UNIQUE_USERNAME_PK;
+            case GROUP_EXTERNAL_ID -> UNIQUE_GROUP_EXTERNAL_ID_PK;
+        };
+    }
 
     private static final String TUPLE_SEPARATOR = "|";
 

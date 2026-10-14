@@ -8,9 +8,12 @@ import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -144,6 +147,22 @@ public interface DirectoryStateRepository {
 
     /** 보류 목록을 {@code edges} 로 통째로 바꾼다 — SCIM 재적재·wipe 가 쓴다(설계 2026-10-03 §4.6). */
     Mono<Void> replaceCutEdges(Set<GroupEdge> edges);
+
+    /**
+     * 유일 값의 표지판을 차지한다(설계 2026-10-14 §3.2). 없으면 {@code ownerId} 가 {@code at} 에 차지하고 빈 값이다. 이미 있으면 — 주인이
+     * {@code ownerId} 여도 — 아무것도 쓰지 않고 그 표지판을 돌려준다. 조건부 쓰기 하나다. {@code key} 는 {@link UniqueKind#key} 로 만든 값이고
+     * {@link UniqueKind#MAX_KEY_BYTES} 를 넘지 않는다.
+     */
+    Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at);
+
+    /** 표지판의 주인이 아직 {@code previousOwnerId} 일 때만 {@code ownerId} 로 바꾼다. 바꿨으면 참이다. */
+    Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at);
+
+    /** 표지판의 주인이 {@code ownerId} 일 때만 지운다. 남의 것이거나 없으면 아무것도 하지 않는다. */
+    Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId);
+
+    /** 표지판을 모두 지운다 — SCIM wipe 가 조직도를 비운 뒤 부른다. 직원·조직·보류 목록 같은 다른 줄은 건드리지 않는다. */
+    Mono<Void> clearUniqueMarkers();
 
     /**
      * LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. 저장본과 비교해 바뀐 것만 쓰고, <b>실제로 쓴 것</b>을 돌려준다(설계 2026-10-10 §4.3).
