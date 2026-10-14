@@ -204,6 +204,24 @@ class IncrementalSyncUniqueMarkerTest {
     }
 
     @Test
+    @DisplayName("개명이 일부 실패해도 META 가 새 이름이면 옛 표지판만 놓고 새 표지판은 남긴다 — 커밋이 건너뛰어지지 않는다")
+    void 개명이_일부_실패해도_META_가_새_이름이면_옛_표지판을_놓는다() {
+        // given — u-1 은 DEV001 의 멤버다. 이름을 바꾸며 비활성화하면 튜플을 지우는데 그 쓰기가 모두 실패한다
+        u1이_든_조직을_심는다();
+        useCase.createUser(직원("u-1", "old")).block();
+        checker.allowed.add(RelationTuple.directMember("u-1", "DEV001")); // 방금 쓴 튜플이 OpenFGA 에 있다 — 지우는 델타가 생긴다
+        writer.failFor(tuple -> true);
+
+        // when
+        var 결과 = useCase.changeUser("u-1", u -> u.withUserName("new").withActive(false)).block();
+
+        // then — 일부 반영이지만 변경 커밋은 새 이름으로 저장했다. 새 표지판은 주인이 쥐고 있어 남고 옛 표지판만 놓는다
+        assertThat(결과.fullyApplied()).isFalse();
+        assertThat(state.users.get("u-1").userName()).isEqualTo("new");
+        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("new");
+    }
+
+    @Test
     @DisplayName("커밋 뒤 옛 표지판을 놓다가 실패해도 요청은 성공이다")
     void 놓기가_실패해도_요청은_성공이다() {
         // given
