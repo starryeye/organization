@@ -227,6 +227,7 @@ class LdapInterruptedSyncScaleTest {
             return 실제.releaseUnique(kind, key, ownerId);
         }
         @Override public Mono<Void> clearUniqueMarkers() { return 실제.clearUniqueMarkers(); }
+        @Override public Flux<String> findUniqueOwners(UniqueKind kind) { return 실제.findUniqueOwners(kind); }
         @Override public Mono<DirectorySnapshot> loadAll() { return 실제.loadAll(); }
     }
 }

@@ -90,6 +90,19 @@ final class DynamoDbUniqueMarkers {
                 .then();
     }
 
+    /** 그 종류 파티션의 주인 아이디를 강한 일관성으로 모두 읽는다 — SCIM wipe 가 GSI 열거에서 빠진 직원·조직을 찾는다. 같은 주인이 여러 번 나올 수 있다. */
+    Flux<String> owners(UniqueKind kind) {
+        QueryRequest request = QueryRequest.builder()
+                .tableName(properties.getTableName())
+                .keyConditionExpression("#pk = :pk")
+                .expressionAttributeNames(Map.of("#pk", Keys.PK, "#owner", OWNER_ID))
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.uniquePk(kind))))
+                .projectionExpression("#owner")
+                .consistentRead(true)
+                .build();
+        return Paginator.queryAll(client, request).map(item -> Attrs.str(item, OWNER_ID));
+    }
+
     private Flux<String> 정렬키들(String pk) {
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())

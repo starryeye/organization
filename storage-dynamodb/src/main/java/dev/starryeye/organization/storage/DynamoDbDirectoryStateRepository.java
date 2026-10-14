@@ -872,6 +872,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         return 표지판().clear();
     }
 
+    @Override
+    public Flux<String> findUniqueOwners(UniqueKind kind) {
+        return 표지판().owners(kind);
+    }
+
     private DynamoDbUniqueMarkers 표지판() {
         return new DynamoDbUniqueMarkers(client, properties);
     }

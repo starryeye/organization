@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,6 +135,27 @@ class DynamoDbUniqueMarkersTest extends DynamoDbTestSupport {
         assertThat(repository.claimUnique(UniqueKind.GROUP_EXTERNAL_ID, "ext-1", "g-9", T2).block()).isNull();
         assertThat(repository.findUser("u-1").block()).isNotNull();
         assertThat(repository.findCutEdges().collectList().block()).containsExactly(new GroupEdge("g-1", "g-2"));
+    }
+
+    @Test
+    @DisplayName("주인 읽기는 그 종류 파티션의 주인만 모두 읽는다 — 다른 종류와 직원 META 는 섞이지 않고, 비운 뒤에는 없다")
+    void 주인은_종류별로_모두_읽는다() {
+        // given
+        repository.claimUnique(UniqueKind.USER_NAME, "kim", "u-1", T1).block();
+        repository.claimUnique(UniqueKind.USER_NAME, "lee", "u-2", T1).block();
+        repository.claimUnique(UniqueKind.GROUP_EXTERNAL_ID, "ext-1", "g-1", T1).block();
+        repository.saveUser(new DirectoryUser("u-3", null, "park", "박", null, true)).block();
+
+        // when
+        List<String> 직원 = repository.findUniqueOwners(UniqueKind.USER_NAME).collectList().block();
+        List<String> 조직 = repository.findUniqueOwners(UniqueKind.GROUP_EXTERNAL_ID).collectList().block();
+        repository.clearUniqueMarkers().block();
+        List<String> 비운_뒤 = repository.findUniqueOwners(UniqueKind.USER_NAME).collectList().block();
+
+        // then
+        assertThat(직원).containsExactlyInAnyOrder("u-1", "u-2");
+        assertThat(조직).containsExactly("g-1");
+        assertThat(비운_뒤).isEmpty();
     }
 
     @Test

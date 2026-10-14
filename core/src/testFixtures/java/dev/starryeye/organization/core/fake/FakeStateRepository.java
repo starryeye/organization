@@ -310,6 +310,27 @@ public class FakeStateRepository implements DirectoryStateRepository {
         return Mono.fromRunnable(uniqueMarkers::clear);
     }
 
+    /**
+     * 적은 표지판의 주인에 더해, 직원·조직 지도에 심은 것 중 그 값이 있는 것을 오래된 표지판의 주인으로 본다({@link #표지판}). 직원·조직을 읽지 않는다 —
+     * 읽기 계측({@link #findUsersCalls}·{@link #findGroupCalls})을 더럽히지 않는다.
+     */
+    @Override
+    public Flux<String> findUniqueOwners(UniqueKind kind) {
+        return Flux.defer(() -> {
+            List<String> owners = new ArrayList<>();
+            uniqueMarkers.getOrDefault(kind, Map.of()).values().forEach(claim -> owners.add(claim.ownerId()));
+            switch (kind) {
+                case USER_NAME -> users.values().stream()
+                        .filter(user -> user.userName() != null && !user.userName().isBlank())
+                        .forEach(user -> owners.add(user.id()));
+                case GROUP_EXTERNAL_ID -> groups.values().stream()
+                        .filter(group -> group.externalId() != null && !group.externalId().isBlank())
+                        .forEach(group -> owners.add(group.id()));
+            }
+            return Flux.fromIterable(owners);
+        });
+    }
+
     /** 키의 표지판 — 적은 것이 먼저고, 없으면 지금 그 값을 쥔 직원·조직을 오래된 표지판으로 본다. 없으면 null. */
     private UniqueClaim 표지판(UniqueKind kind, String key) {
         UniqueClaim 적은것 = 적은_표지판(kind).get(key);

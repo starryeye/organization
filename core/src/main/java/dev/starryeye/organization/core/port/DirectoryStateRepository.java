@@ -153,6 +153,12 @@ public interface DirectoryStateRepository {
     Mono<Void> clearUniqueMarkers();
 
     /**
+     * 그 종류 표지판의 주인 아이디를 강한 일관성으로 모두 읽는다(설계 2026-10-14 §5) — SCIM wipe 가 GSI 열거에서 빠진 직원·조직을 찾는 데 쓴다.
+     * 표지판은 SCIM 으로 만든 직원(userName 은 필수)과 externalId 가 있는 조직마다 하나다. 같은 주인이 여러 번 나올 수 있다.
+     */
+    Flux<String> findUniqueOwners(UniqueKind kind);
+
+    /**
      * LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. 저장본과 비교해 바뀐 것만 쓰고, <b>실제로 쓴 것</b>을 돌려준다(설계 2026-10-10 §4.3).
      * 돌려주는 것은 직원의 생성·이전·이후·삭제와, 조직의 이름표 이전·이후·생성·삭제, 들어오고 나간 멤버다. 같은 조직도면 빈 결과다. 이력이 이것으로
      * 조직도 변경을 남긴다.
