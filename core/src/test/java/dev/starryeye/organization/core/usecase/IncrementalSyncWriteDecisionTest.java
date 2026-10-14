@@ -158,6 +158,7 @@ class IncrementalSyncWriteDecisionTest {
         // then
         assertThat(result.fullyApplied()).isTrue();
         assertThat(state.groups.get("NEW").externalId()).isEqualTo("cn=NEW");
+        assertThat(state.uniqueMarkers.get(UniqueKind.GROUP_EXTERNAL_ID).get("cn=NEW").ownerId()).isEqualTo("NEW");
     }
 
     @Test
@@ -173,6 +174,7 @@ class IncrementalSyncWriteDecisionTest {
 
         // then
         assertThat(state.groups.get("DEV002").externalId()).isEqualTo("cn=MOVED");
+        assertThat(state.uniqueMarkers.get(UniqueKind.GROUP_EXTERNAL_ID).get("cn=MOVED").ownerId()).isEqualTo("DEV002");
     }
 
     @Test

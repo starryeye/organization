@@ -82,6 +82,7 @@ class WriteDecisionLockInvariantTest {
         @Override public Flux<GroupEdge> findCutEdges() { return 본다Flux("findCutEdges", super::findCutEdges); }
         @Override public Mono<UniqueClaim> claimUnique(UniqueKind k, String key, String owner, Instant at) { return 본다("claimUnique " + key, () -> super.claimUnique(k, key, owner, at)); }
         @Override public Mono<Boolean> takeOverUnique(UniqueKind k, String key, String owner, String prev, Instant at) { return 본다("takeOverUnique " + key, () -> super.takeOverUnique(k, key, owner, prev, at)); }
+        @Override public Mono<Void> releaseUnique(UniqueKind k, String key, String owner) { return 본다("releaseUnique " + key, () -> super.releaseUnique(k, key, owner)); }
     }
 
     @BeforeEach
@@ -125,6 +126,7 @@ class WriteDecisionLockInvariantTest {
         // then
         assertThat(모든읽기).as("읽기가 하나도 없으면 이 테스트는 아무것도 증명하지 못한다").isNotEmpty();
         assertThat(모든읽기).as("중복 판단은 표지판이다 — GSI 를 보지 않는다").anyMatch(읽기 -> 읽기.startsWith("claimUnique "));
+        assertThat(모든읽기).as("표지판을 놓는 쓰기도 락 안이다 — 아래 락밖읽기가 비어야 한다").anyMatch(읽기 -> 읽기.startsWith("releaseUnique "));
         assertThat(락밖읽기).isEmpty();
     }
 
@@ -144,6 +146,7 @@ class WriteDecisionLockInvariantTest {
         // then
         assertThat(모든읽기).isNotEmpty();
         assertThat(모든읽기).as("중복 판단은 표지판이다 — GSI 를 보지 않는다").anyMatch(읽기 -> 읽기.startsWith("claimUnique "));
+        assertThat(모든읽기).as("표지판을 놓는 쓰기도 락 안이다 — 아래 락밖읽기가 비어야 한다").anyMatch(읽기 -> 읽기.startsWith("releaseUnique "));
         assertThat(모든읽기).noneMatch(읽기 -> 읽기.startsWith("findGroupIdsByExternalId "));
         assertThat(락밖읽기).isEmpty();
     }

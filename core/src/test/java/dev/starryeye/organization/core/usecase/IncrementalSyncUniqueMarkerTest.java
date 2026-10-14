@@ -268,6 +268,21 @@ class IncrementalSyncUniqueMarkerTest {
         assertThat(적은것(UniqueKind.USER_NAME).get("kim").ownerId()).as("락 TTL 뒤 넘겨받는다").isEqualTo("u-1");
     }
 
+    @Test
+    @DisplayName("커밋 직전 리스 확인이 실패해 끝나도 표지판을 놓지 않는다 — 남이 락을 쥐었을 수 있다")
+    void 커밋_직전_리스_확인이_실패하면_표지판을_놓지_않는다() {
+        // given — 소속 조직이 없어 튜플 변화는 없고, 커밋 직전 확인에서 리스를 잃은 것이 드러난다
+        lock.failRenew = true;
+
+        // when
+        assertThatThrownBy(() -> useCase.createUser(직원("u-1", "kim")).block(Duration.ofSeconds(5)))
+                .isInstanceOf(LockUnavailableException.class);
+
+        // then
+        assertThat(state.users).doesNotContainKey("u-1");
+        assertThat(적은것(UniqueKind.USER_NAME).get("kim").ownerId()).as("놓으면 다른 서버의 재시도가 차지한 표지판을 지울 수 있다").isEqualTo("u-1");
+    }
+
     // ---------- 조직 ----------
 
     @Test
@@ -307,6 +322,24 @@ class IncrementalSyncUniqueMarkerTest {
 
         // then
         assertThat(적은것(UniqueKind.GROUP_EXTERNAL_ID)).containsOnlyKeys("EXT-2");
+    }
+
+    @Test
+    @DisplayName("조직 externalId 변경이 오류로 끝나면 새 표지판만 놓고 옛 표지판은 남긴다 — META 는 옛 값이다")
+    void 조직_externalId_변경이_오류로_끝나면_새_표지판만_놓는다() {
+        // given — g-1 은 u-1 을 멤버로 둔다. 멤버를 빼며 externalId 를 바꾸면 지우는 튜플이 생긴다
+        state.users.put("u-1", 직원("u-1", "kim"));
+        useCase.createGroup(new DirectoryGroup("g-1", "EXT-1", "개발", Set.of(MemberRef.user("u-1")))).block();
+        checker.allowed.add(RelationTuple.directMember("u-1", "g-1"));
+        writer.abortWhen(delta -> true);
+
+        // when
+        assertThatThrownBy(() -> useCase.changeGroup("g-1", GroupChange.replacement("EXT-2", "개발", Set.of())).block())
+                .isInstanceOf(TupleWriteAbortedException.class);
+
+        // then
+        assertThat(state.groups.get("g-1").externalId()).isEqualTo("EXT-1");
+        assertThat(적은것(UniqueKind.GROUP_EXTERNAL_ID)).containsOnlyKeys("EXT-1");
     }
 
     @Test

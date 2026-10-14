@@ -644,11 +644,18 @@ public class IncrementalSyncUseCase {
     /**
      * 표지판을 차지한(또는 놓을) 일이 끝나면 정리한다(설계 2026-10-14 §4.4·§4.5). 값을 내고 전부 반영됐으면(깨끗이) 결과를 알므로
      * {@code 깨끗하면_놓을것} 을 다시 읽지 않고 놓는다. 그 밖(오류·일부 반영·빈 끝)이면 주인을 한 번 읽어 {@code 건드린것} 중 주인이 쥐지 않은 것만
-     * 놓는다. 정리는 결과를 바꾸지 않는다. 리스를 잃어 일이 취소되면 여기까지 오지 않는다 — 락 없이 더 쓰지 않는다. 남은 표지판은 락 TTL 뒤 넘겨받는다.
+     * 놓는다. 정리는 결과를 바꾸지 않는다.
+     *
+     * <p>리스를 잃어 일이 취소되거나 리스 확인이 실패해({@link LockUnavailableException}) 끝나면 정리하지 않는다 — 남이 락을 쥐었을 수 있어 락 없이 더
+     * 쓰지 않는다. 같은 요청의 재시도가 다른 서버에서 "주인이 나" 로 차지한 표지판을 우리가 지울 수 있다. 취소는 여기까지 오지 않고, 리스 확인 실패는
+     * 신호를 그대로 내보낸다. 남은 표지판은 락 TTL 뒤 넘겨받고, 같은 직원·조직의 재시도는 "주인이 나" 로 곧바로 통과한다(설계 2026-10-14 §4.4).
      */
     private Mono<IncrementalSyncResult> 표지판을_정리한다(Mono<IncrementalSyncResult> 일, UniqueKind 종류, String 주인,
                                                      List<String> 깨끗하면_놓을것, List<String> 건드린것) {
         return 일.materialize().flatMap(끝 -> {
+            if (끝.isOnError() && 끝.getThrowable() instanceof LockUnavailableException) {
+                return Mono.just(끝);
+            }
             UniqueMarkers 표지판 = 표지판();
             Mono<Void> 정리 = 끝.isOnNext() && 끝.get().fullyApplied()
                     ? Flux.fromIterable(깨끗하면_놓을것).concatMap(값 -> 표지판.놓는다(종류, 값, 주인)).then()
