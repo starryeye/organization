@@ -39,8 +39,8 @@ final class UniqueMarkers {
 
     /**
      * {@code 주인} 이 {@code 값} 을 쓰도록 표지판을 차지한다(§4.1). 값이 없거나 비면 아무것도 하지 않는다. 남은 표지판의 주인이 그 값을 쥐고 있으면
-     * {@link DirectoryConflictException}(409)이고 — 주인이 나여도 그렇다(생성에는 자기 자신이 없다) — 주인이 나면 차지한 것으로 본다. 락 TTL 이
-     * 지난 표지판은 넘겨받고, 그 밖이면 {@link TemporaryFailureException}(503)이다. 키가 한도를 넘으면 {@link UniqueValueTooLongException}(400)이다.
+     * {@link DirectoryConflictException}(409)이고 — 주인이 나여도 그렇다(생성에는 자기 자신이 없다) — 주인이 나면 차지한 것으로 본다(락 TTL 이 지난
+     * 내 표지판은 시각을 새로 쓴다). 락 TTL 이 지난 남의 표지판은 넘겨받고, 그 밖이면 {@link TemporaryFailureException}(503)이다. 키가 한도를 넘으면 {@link UniqueValueTooLongException}(400)이다.
      */
     Mono<Void> 차지한다(UniqueKind 종류, String 값, String 주인) {
         if (값 == null || 값.isBlank()) {
@@ -63,15 +63,19 @@ final class UniqueMarkers {
             if (쥐었다) {
                 return Mono.<Void>error(new DirectoryConflictException(충돌_문구(종류, 값, 있던것.ownerId())));
             }
+            boolean 오래됐다 = !있던것.claimedAt().plus(넘겨받기_기준).isAfter(지금);
             if (있던것.ownerId().equals(주인)) {
-                return Mono.<Void>empty();
+                // 내가 전에 차지한 표지판이 락 TTL 만큼 지났으면 시각을 새로 쓴다 — 그대로 두면 META 를 저장하기 전에 남이 넘겨받을 수 있다
+                return 오래됐다 ? 넘겨받는다(종류, 키, 주인, 있던것, 지금) : Mono.<Void>empty();
             }
-            if (!있던것.claimedAt().plus(넘겨받기_기준).isAfter(지금)) {
-                return state.takeOverUnique(종류, 키, 주인, 있던것.ownerId(), 지금)
-                        .flatMap(넘겨받았다 -> 넘겨받았다 ? Mono.<Void>empty() : Mono.<Void>error(쓰는_중(종류)));
-            }
-            return Mono.<Void>error(쓰는_중(종류));
+            return 오래됐다 ? 넘겨받는다(종류, 키, 주인, 있던것, 지금) : Mono.<Void>error(쓰는_중(종류));
         });
+    }
+
+    /** 주인이 아직 {@code 있던것} 의 주인일 때만 {@code 주인} 으로 바꾸고 시각을 새로 쓴다. 조건에서 막히면(그 사이 남이 바꿨다) 503 이다. */
+    private Mono<Void> 넘겨받는다(UniqueKind 종류, String 키, String 주인, UniqueClaim 있던것, Instant 지금) {
+        return state.takeOverUnique(종류, 키, 주인, 있던것.ownerId(), 지금)
+                .flatMap(넘겨받았다 -> 넘겨받았다 ? Mono.<Void>empty() : Mono.<Void>error(쓰는_중(종류)));
     }
 
     /** 주인을 다시 읽지 않고 놓는다 — 깨끗이 끝나 결과를 아는 경우(§4.5). 놓기는 조건부라 남의 것을 지우지 않는다. 실패해도 경고만 남긴다. */

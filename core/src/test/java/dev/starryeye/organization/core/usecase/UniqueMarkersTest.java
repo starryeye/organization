@@ -104,6 +104,42 @@ class UniqueMarkersTest {
     }
 
     @Test
+    @DisplayName("주인이 나여도 락 TTL 이 지난 표지판은 시각을 새로 쓴다 — 아니면 META 를 저장하기 전에 남이 넘겨받는다")
+    void 내_오래된_표지판은_시각을_새로_쓴다() {
+        // given — u-1 은 아직 old 이고, kim 표지판은 u-1 의 것이지만 락 TTL 만큼 지났다
+        VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
+        state.users.put("u-1", 직원("u-1", "old"));
+        적는다(UniqueKind.USER_NAME, "kim", "u-1", Instant.EPOCH);
+        시간.advanceTimeBy(TTL);
+
+        // when
+        표지판.차지한다(UniqueKind.USER_NAME, "kim", "u-1").block();
+
+        // then
+        assertThat(적은것(UniqueKind.USER_NAME).get("kim")).isEqualTo(new UniqueClaim("u-1", Instant.EPOCH.plus(TTL)));
+    }
+
+    @Test
+    @DisplayName("주인이 나인 오래된 표지판의 시각을 새로 쓰다가 조건에서 막히면(그 사이 남이 넘겨받았다) 503 이다")
+    void 내_오래된_표지판의_새로_쓰기가_막히면_503이다() {
+        // given
+        VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
+        state = new FakeStateRepository() {
+            @Override
+            public Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at) {
+                return Mono.just(false);
+            }
+        };
+        표지판 = new UniqueMarkers(state, TTL);
+        적는다(UniqueKind.USER_NAME, "kim", "u-1", Instant.EPOCH);
+        시간.advanceTimeBy(TTL);
+
+        // when, then
+        assertThatThrownBy(() -> 표지판.차지한다(UniqueKind.USER_NAME, "kim", "u-1").block())
+                .isInstanceOf(TemporaryFailureException.class);
+    }
+
+    @Test
     @DisplayName("주인이 그 값을 쥐지 않고 락 TTL 이 지난 표지판은 넘겨받는다")
     void 오래된_표지판은_넘겨받는다() {
         // given
