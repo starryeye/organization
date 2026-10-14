@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>단위 테스트는 각 조각을 따로 본다 — 적용기의 갈래, 핸들러의 관찰자 호출, 라우터의 헤더. 여기서 확인하는 것은 다음이다.
  * <ul>
  *   <li>받아서 버린 속성의 이름이 관찰자를 거쳐 실제 앱의 {@code scim.patch.ignored} 메트릭에 잡힌다(관찰자 빈이 {@code ScimConfig} 에 실제로 이어졌다).</li>
- *   <li>조직 PATCH 가 externalId 를 바꾸고, 다른 조직이 쥔 값이면 실제 DynamoDB(GSI3)에서 락 안에 409 {@code uniqueness} 를 낸다.</li>
+ *   <li>조직 PATCH 가 externalId 를 바꾸고, 다른 조직이 쥔 값이면 실제 DynamoDB 의 표지판 차지(설계 2026-10-14)로 락 안에서 409 {@code uniqueness} 를 낸다.</li>
  *   <li>POST 201 의 {@code Location} 이 본문 {@code meta.location} 과 같다.</li>
  * </ul>
  */

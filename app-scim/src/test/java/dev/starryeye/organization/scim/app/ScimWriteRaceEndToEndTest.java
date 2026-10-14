@@ -264,7 +264,7 @@ class ScimWriteRaceEndToEndTest {
      * 이 시나리오는 <b>락이 두 POST 를 한 줄로 세우는 것</b>과, <b>두 번째 POST 가 표지판으로 막히는 것</b>을 함께 보인다.
      *
      * <p>중복 판정은 GSI 를 읽지 않으므로(설계 2026-10-14) 실제 DynamoDB 의 GSI 지연과 상관없다 — 로컬은 GSI 지연을 재현하지 못해, 그 독립성은
-     * 판정 경로의 구조(core 의 판단 읽기 테스트)로 보인다.
+     * 판정 경로의 구조({@code WriteDecisionLockInvariantTest})로 보인다.
      */
     @Test
     @DisplayName("대소문자만 다른 userName 으로 동시에 만들면 하나만 201 이고 하나는 409 다")
