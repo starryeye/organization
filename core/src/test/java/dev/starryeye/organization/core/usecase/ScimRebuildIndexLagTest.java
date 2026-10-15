@@ -24,6 +24,8 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -376,6 +378,50 @@ class ScimRebuildIndexLagTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(state.users).isEmpty();
+        assertThat(state.findUsersCalls).isEmpty();
+        assertThat(state.findGroupCalls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("wipe — 어느 조직에도 없고 장부에 줄이 없는 GSI 밖 새 직원도 표지판의 주인으로 찾아 지운다")
+    void wipe_는_표지판의_주인_중_남은_직원도_지운다() {
+        // given — 방금 POST 한 new.kim 은 GSI 에 아직 없고 어느 조직에도 없어 장부에 줄이 없다. 표지판만 강한 일관성으로 남아 있다
+        DirectoryUser 신입 = new DirectoryUser("u-new", "ext-new", "new.kim", "신입", null, true);
+        state.saveUser(신입).block();
+        state.uniqueMarkers.computeIfAbsent(UniqueKind.USER_NAME, kind -> new LinkedHashMap<>())
+                .put("new.kim", new UniqueClaim("u-new", NOW));
+        state.숨긴_직원.add("u-new");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then — 표지판을 비우기 전에 직원부터 지워, IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
+        assertThat(state.uniqueMarkers).isEmpty();
+        assertThat(auditLog.lastOf(MemberRef.user("u-new")).deleted()).isTrue();
+    }
+
+    @Test
+    @DisplayName("wipe — 표지판의 주인이 이미 replaceWith 가 지운 것이면 다시 읽지 않는다")
+    void wipe_는_replaceWith_가_지운_표지판_주인은_읽지_않는다() {
+        // given — 평소처럼 보이는 직원·조직이 표지판을 쥐고 있다. replaceWith 가 모두 지운다
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("DEV002", 김);
+        writer.stored.add(김_백엔드);
+        state.uniqueMarkers.computeIfAbsent(UniqueKind.USER_NAME, kind -> new LinkedHashMap<>())
+                .put("kim", new UniqueClaim("kim", NOW));
+        state.uniqueMarkers.computeIfAbsent(UniqueKind.GROUP_EXTERNAL_ID, kind -> new LinkedHashMap<>())
+                .put("DEV002", new UniqueClaim("DEV002", NOW));
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then — 표지판 Query 둘 뿐이고 직원·조직 읽기는 없다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.users).isEmpty();
+        assertThat(state.groups).isEmpty();
+        assertThat(state.uniqueMarkers).isEmpty();
         assertThat(state.findUsersCalls).isEmpty();
         assertThat(state.findGroupCalls).isEmpty();
     }

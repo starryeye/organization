@@ -18,6 +18,7 @@ import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
@@ -58,7 +59,7 @@ import java.util.stream.Collectors;
  *
  * <p><b>GSI 열거를 장부로 보강한다(설계 2026-10-13 §4).</b> 직원·조직 아이디는 GSI 로 훑는다(최종 일관성). 락 직전에 커밋된 쓰기가 아직 GSI 에 없으면
  * 그 대상의 권한이 "있어야 할 줄에 없는 줄" 로 지워진다. 그래서 지우기 전에, 지울 후보가 가리키는 대상 중 열거에서 빠진 것을 본 테이블에서 강한 일관성으로
- * 다시 읽어 조직도에 넣는다. {@code WIPE} 는 지운 튜플의 대상 중 남은 것을 같은 방법으로 찾아 지운다. 빠진 것이 없으면 읽기가 없다.
+ * 다시 읽어 조직도에 넣는다. {@code WIPE} 는 지운 튜플의 대상과 유일 값 표지판의 주인(강한 일관성 열거, 설계 2026-10-14 §5) 중 남은 것을 같은 방법으로 찾아 지운다. 빠진 것이 없으면 읽기가 없다.
  *
  * <p><b>{@code WIPE} 는 장부를 비운 뒤에만 조직도를 지운다.</b> 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고 FAILED 다 —
  * 조직도가 남아 있어야 다시 실행할 수 있다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만 살아남는다.
@@ -237,8 +238,10 @@ public class ScimRebuildUseCase {
             }
             // 조직도와 함께 보류 목록도 비운다 — 연결의 멤버 줄이 사라졌으니 보류할 것도 없다
             return state.replaceWith(DirectorySnapshot.empty())
-                    // GSI 열거에서 빠져 남은 대상을 장부로 찾아 지운다(설계 2026-10-13 §4.4)
+                    // GSI 열거에서 빠져 남은 대상을 장부와 표지판의 주인으로 찾아 지운다(설계 2026-10-13 §4.4, 2026-10-14 §5)
                     .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted()))
+                    // 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)
+                    .flatMap(changes -> state.clearUniqueMarkers().thenReturn(changes))
                     .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
                     .doOnSuccess(changes -> log.warn(
                             "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
@@ -253,9 +256,11 @@ public class ScimRebuildUseCase {
     }
 
     /**
-     * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상 중 방금 지운 직원·조직에 없는 것을 본 테이블에서 강한 일관성으로
-     * 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다. 지운 것을 비교 결과에
-     * 더해 이력에 삭제로 남긴다. 확인할 것이 없으면 받은 결과를 그대로 준다 — 평소에는 읽기가 없다.
+     * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상과 <b>표지판의 주인</b> 중 방금 지운 직원·조직에 없는 것을 본 테이블에서
+     * 강한 일관성으로 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다.
+     * 표지판은 강한 일관성 열거라(설계 2026-10-14 §5) 어느 조직에도 없어 장부에 줄이 없는, 방금 만든 직원까지 잡는다 — 표지판을 비우기 전에 지워야
+     * IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다. 지운 것을 비교 결과에 더해 이력에 삭제로 남긴다. 확인할 것이 없으면 받은 결과를 그대로 준다 —
+     * 평소에는 표지판 Query 둘뿐이고 다시 읽기는 없다(주인이 모두 방금 지운 것이다).
      *
      * <p><b>"방금 지운" 은 비교 결과에서 이후가 없는 것(삭제)만이다.</b> 보이는 직원을 지우며 멤버 줄이 빠진 조직은 이름표가 그대로인 "멤버만 빠짐"
      * 비교 결과로 오는데, 그 조직이 열거에서 빠진 것이면 남아 있다 — 지워진 것으로 세면 다시 읽지 않아 조직이 남는다. 지우는 조직의 "멤버만 빠짐" 은
@@ -263,6 +268,14 @@ public class ScimRebuildUseCase {
      * 비교하므로 "멤버만 빠짐" 이 앞에 남으면 이름표가 비어 보인다.
      */
     private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted) {
+        // 표지판의 주인은 강한 일관성으로 읽는다 — 읽기가 실패하면 표지판을 비우지 않고 FAILED 다(조직도가 남아 다시 실행할 수 있다)
+        return Mono.zip(state.findUniqueOwners(UniqueKind.USER_NAME).collect(Collectors.toCollection(LinkedHashSet::new)),
+                        state.findUniqueOwners(UniqueKind.GROUP_EXTERNAL_ID).collect(Collectors.toCollection(LinkedHashSet::new)))
+                .flatMap(owners -> 남은_대상을_지운다(changes, deleted, owners.getT1(), owners.getT2()));
+    }
+
+    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
+                                                Set<String> 표지판_직원, Set<String> 표지판_조직) {
         Set<String> 지운_직원 = changes.users().stream()
                 .filter(diff -> diff.after() == null)
                 .map(DirectoryChanges.UserDiff::id)
@@ -280,6 +293,9 @@ public class ScimRebuildUseCase {
                 볼_조직.add(subject.id());
             }
         }
+        // 표지판의 주인 중 replaceWith 가 지우지 않은 것 — 같은 주인이 여러 번 나올 수 있다
+        표지판_직원.stream().filter(id -> !지운_직원.contains(id)).forEach(볼_직원::add);
+        표지판_조직.stream().filter(id -> !지운_조직.contains(id)).forEach(볼_조직::add);
         if (볼_직원.isEmpty() && 볼_조직.isEmpty()) {
             return Mono.just(changes);
         }

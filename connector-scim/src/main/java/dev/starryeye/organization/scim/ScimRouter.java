@@ -2,6 +2,7 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.GroupGraphTooLargeException;
+import dev.starryeye.organization.core.usecase.UniqueValueTooLongException;
 import dev.starryeye.organization.scim.dto.ScimError;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.codec.DecodingException;
@@ -150,6 +151,10 @@ public final class ScimRouter {
         // 조직 계층이 순환 검사 한도를 넘었다 — 같은 요청은 다시 보내도 늘 넘으므로 영구 거절(설계 2026-10-03 §4.2, 점검 P2). 500 이면 IdP 가 같은 실패를 되풀이한다.
         if (error instanceof GroupGraphTooLargeException tooLarge) {
             return write(HttpStatus.BAD_REQUEST, "invalidValue", tooLarge.getMessage(), null);
+        }
+        // 유일 값이 표지판 키 한도를 넘는다 — 같은 요청은 다시 보내도 늘 넘으므로 영구 거절(설계 2026-10-14 §3.1)
+        if (error instanceof UniqueValueTooLongException tooLong) {
+            return write(HttpStatus.BAD_REQUEST, "invalidValue", tooLong.getMessage(), null);
         }
         // 본문이 코덱의 버퍼 한도를 넘었다. DecodingException 이 감싸 오므로 그 분기보다 먼저 본다 — 400 이면 IdP 가 같은 본문을 되풀이한다(점검 M3)
         if (원인에_있다(error, DataBufferLimitException.class)) {

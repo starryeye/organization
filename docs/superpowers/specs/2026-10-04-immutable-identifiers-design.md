@@ -221,7 +221,7 @@ README "인가 모델"·"조회 API — 식별자 셋".
 - **튜플이 UUID 라 OpenFGA 를 직접 보는 운영자는 읽기 어렵다** — 관리 API 로 본다.
 - **옮길 때 한 번의 조치가 필요하다** — SCIM 은 재프로비저닝, LDAP 은 force 동기화(또는 테이블·store 새로).
 - **조직 `externalId` 중복 판정은 RFC 밖의 우리 규칙이다** — `externalId` 를 일부러 겹치게 보내는 IdP 설정이면 409 다.
-- **`userName`·조직 `externalId` 중복 판정은 GSI 후보를 본 테이블로 다시 확인한다** — 막 저장돼 GSI 에 아직 없는 리소스와는 겹칠 수 있다(직원 `userName` 의 기존 틈과 같다).
+- **`userName`·조직 `externalId` 중복 판정은 GSI 후보를 본 테이블로 다시 확인한다** — 막 저장돼 GSI 에 아직 없는 리소스와는 겹칠 수 있다(직원 `userName` 의 기존 틈과 같다). **→ 해결(2026-10-14, 표지판 줄 — `2026-10-14-unique-markers-design.md`)**
 - **SCIM 에서 "아직 없는 리소스를 먼저 참조"하는 경로는 이제 생기지 않는다** — IdP 는 받은 `id` 로만 가리킨다. 상위 조직이 새 조직을 먼저 적어 두는 처리(`상위_조직들`)는 SCIM 에서 비게 된다(코드는 남는다).
 - **`entryUUID` 규모 테스트는 groupOfNames 만 본다** — DIT 의 `entryUUID` 는 e2e(`LdapDitImmutableIdEndToEndTest`)까지만 있다.
 - **기존 app-ldap e2e(삭제 가드, 멈춘 뒤 OpenFGA Read 복구, 보관, 어긋남)는 이름 기반 id 로 돈다** — `entryUUID` 로 끝에서 끝까지 확인한 것은 동기화와 개명뿐이다. 나머지 경로는

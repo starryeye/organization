@@ -9,12 +9,15 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Flux;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 
@@ -122,54 +125,48 @@ class IncrementalSyncWriteDecisionTest {
         assertThat(state.users.get("lee").active()).isFalse();
     }
 
+    /** 낡은 표지판 — 오래전(EPOCH)에 남아 있다. 실제 시계로 보면 락 TTL 이 지났다. */
+    private void 낡은_표지판을_적는다(UniqueKind 종류, String 키, String 주인) {
+        state.uniqueMarkers.computeIfAbsent(종류, ignored -> new LinkedHashMap<>()).put(키, new UniqueClaim(주인, Instant.EPOCH));
+    }
+
     @Test
-    @DisplayName("GSI 에만 남은 옛 후보(지워졌거나 이름이 바뀐 직원)는 중복으로 보지 않는다")
-    void GSI에만_남은_후보는_무시한다() {
-        // given — GSI 가 "park" 로 찾으면 지워진 ghost 와 이름을 바꾼 lee 를 돌려준다
-        준비한다(new FakeStateRepository() {
-            @Override
-            public Flux<String> findUserIdsByUserName(String userName) {
-                return "park".equalsIgnoreCase(userName) ? Flux.just("ghost", "lee") : super.findUserIdsByUserName(userName);
-            }
-        });
+    @DisplayName("주인이 지워진 낡은 표지판은 넘겨받는다 — 그 이름으로 바꿀 수 있다(설계 2026-10-14 §4.1)")
+    void 낡은_표지판은_넘겨받는다() {
+        // given
+        준비한다(new FakeStateRepository());
+        낡은_표지판을_적는다(UniqueKind.USER_NAME, "park", "ghost");
 
         // when
         useCase.changeUser("kim", u -> u.withUserName("park")).block();
 
-        // then — 본 테이블로 다시 읽으면 ghost 는 없고 lee 의 userName 은 lee 다
+        // then
         assertThat(state.users.get("kim").userName()).isEqualTo("park");
-    }
-
-    /** GSI3 가 "cn=NEW"·"cn=MOVED" 로 찾으면 지워진 ghost 와 externalId 를 바꾼 DEV001(지금은 cn=DEV001)을 돌려주게 한다. */
-    private void GSI3에_옛_조직이_남게_준비한다() {
-        준비한다(new FakeStateRepository() {
-            @Override
-            public Flux<String> findGroupIdsByExternalId(String externalId) {
-                return Set.of("cn=NEW", "cn=MOVED").contains(externalId)
-                        ? Flux.just("ghost", "DEV001") : super.findGroupIdsByExternalId(externalId);
-            }
-        });
+        assertThat(state.uniqueMarkers.get(UniqueKind.USER_NAME).get("park").ownerId()).isEqualTo("kim");
     }
 
     @Test
-    @DisplayName("조직 생성 — GSI3 에만 남은 옛 후보(지워졌거나 externalId 를 바꾼 조직)는 중복으로 보지 않는다")
-    void GSI3에만_남은_후보는_조직_생성에서_무시한다() {
+    @DisplayName("조직 생성 — 주인이 지워진 낡은 externalId 표지판은 넘겨받는다")
+    void 낡은_조직_표지판은_생성에서_넘겨받는다() {
         // given
-        GSI3에_옛_조직이_남게_준비한다();
+        준비한다(new FakeStateRepository());
+        낡은_표지판을_적는다(UniqueKind.GROUP_EXTERNAL_ID, "cn=NEW", "ghost");
 
         // when
         var result = useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block();
 
-        // then — 본 테이블로 다시 읽으면 ghost 는 없고 DEV001 의 externalId 는 cn=DEV001 이다
+        // then
         assertThat(result.fullyApplied()).isTrue();
         assertThat(state.groups.get("NEW").externalId()).isEqualTo("cn=NEW");
+        assertThat(state.uniqueMarkers.get(UniqueKind.GROUP_EXTERNAL_ID).get("cn=NEW").ownerId()).isEqualTo("NEW");
     }
 
     @Test
-    @DisplayName("조직 변경 — GSI3 에만 남은 옛 후보는 externalId 를 바꿀 때 중복으로 보지 않는다")
-    void GSI3에만_남은_후보는_조직_변경에서_무시한다() {
-        // given
-        GSI3에_옛_조직이_남게_준비한다();
+    @DisplayName("조직 변경 — externalId 를 바꿔 그 값을 쥐지 않는 주인의 낡은 표지판은 넘겨받는다")
+    void 낡은_조직_표지판은_변경에서_넘겨받는다() {
+        // given — DEV001 은 지금 cn=DEV001 이다. 옛 값 cn=MOVED 의 표지판이 남아 있다
+        준비한다(new FakeStateRepository());
+        낡은_표지판을_적는다(UniqueKind.GROUP_EXTERNAL_ID, "cn=MOVED", "DEV001");
         state.groups.put("DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀", Set.of()));
 
         // when
@@ -177,6 +174,7 @@ class IncrementalSyncWriteDecisionTest {
 
         // then
         assertThat(state.groups.get("DEV002").externalId()).isEqualTo("cn=MOVED");
+        assertThat(state.uniqueMarkers.get(UniqueKind.GROUP_EXTERNAL_ID).get("cn=MOVED").ownerId()).isEqualTo("DEV002");
     }
 
     @Test

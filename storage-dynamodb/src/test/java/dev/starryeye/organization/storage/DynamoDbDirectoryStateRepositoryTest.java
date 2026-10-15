@@ -318,20 +318,6 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("userName 은 대소문자를 가리지 않고 찾는다 — 저장된 값은 보낸 그대로다")
-    void userName_은_대소문자를_가리지_않는다() {
-        // given
-        repository.saveUser(new DirectoryUser("Kim", "e1", "Kim", "김철수", null, true)).block();
-
-        // when
-        List<String> ids = repository.findUserIdsByUserName("KIM").collectList().block();
-
-        // then
-        assertThat(ids).containsExactly("Kim");
-        assertThat(repository.findUser("Kim").block().userName()).isEqualTo("Kim");
-    }
-
-    @Test
     @DisplayName("externalId 로 직원·조직 아이디를 찾는다 — 종류를 섞지 않는다")
     void externalId_로_찾는다() {
         // given

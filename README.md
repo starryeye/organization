@@ -141,6 +141,10 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 실리지 않는다(`2026-10-08-audit-finish-design.md`). 기존 테이블은 다시 만들어야 한다. `create-table-on-startup` 이 켜져 있으면 GSI2 가
 옛 모양(정렬키 `displayName`)이거나 없는 테이블에서 서버가 "테이블을 다시 만들어야 한다" 며 기동을 멈춘다.
 
+**②-a(유일 값 표지판)는 SCIM 테이블에 줄을 더한다** — 직원 `userName`·조직 `externalId` 의 유일성을 `UNIQUE#USERNAME`·`UNIQUE#GROUP_EXTERNAL_ID`
+표지판 줄로 지킨다(`2026-10-14-unique-markers-design.md`). 테이블·GSI 정의는 바뀌지 않는다. 표지판 없이 저장된 직원·조직은 중복을 막지 못하므로,
+기존 SCIM 테이블은 비우고(테이블을 다시 만들거나 `mode=wipe`) IdP 에서 전체 재프로비저닝한다. LDAP 테이블은 그대로다.
+
 직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
 GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` — `userName`·`displayName`·`active`), GSI3(파티션키
 `externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
@@ -252,7 +256,7 @@ app-scim `mode=tuples`는 조직도가 비었는데 장부에 줄이 있으면 �
 **막 만든 직원·조직의 권한을 지우지 않는다.** 재적재는 직원·조직을 GSI(최종 일관성)로 훑는다. 락 직전에 만든 대상이 아직 GSI 에 없어도
 장부(OpenFGA)에 그 대상의 줄이 있으므로, 지우기 전에 본 테이블에서 강한 일관성으로 다시 읽어 조직도에 넣는다. `mode=wipe` 도 같은 방법으로
 남은 대상을 찾아 지운다. 장부에 줄이 없는 새 대상(비활성이거나 어느 조직에도 없는 직원, 멤버 없는 조직)은 권한이 없어 빠져도 권한은 바뀌지
-않는다 — `wipe` 뒤에 남을 수 있지만, IdP 가 다시 보낼 때 같은 `userName`·`externalId` 로 찾아 이어 붙인다.
+않는다 — `wipe` 는 유일 값 표지판의 주인도 다시 읽어 지우므로, 남을 수 있는 것은 `externalId` 없는 빈 조직뿐이다.
 
 ### ⚠️ `mode=wipe`는 되돌릴 수 없다
 
@@ -603,6 +607,11 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | `sortBy`·`sortOrder` | 직원 `userName`, 조직 `displayName` 만 |
 | `attributes`·`excludedAttributes` | 리소스를 돌려주는 모든 응답. 조직에서 `members` 를 빼면 멤버를 읽지 않는다 |
 
+**`userName`·조직 `externalId` 의 유일성은 표지판 줄로 지킨다.** 쓰기 락 안에서, OpenFGA 쓰기 전에 그 값의 표지판을 조건부로 차지한다. 그래서 응답을
+잃은 POST 를 IdP 가 곧바로 다시 보내도 409 다 — 최종 일관성 GSI 를 보지 않는다.
+다른 쓰기가 차지하고 아직 저장하지 않은 값은 503(Retry-After 2초)이다 — 락을 일찍 반납했거나(리스 확인 실패 등) 표지판 놓기가 실패해 새 표지판이 남은 경우에, 그 표지판이 30초(`dynamodb.lock-ttl`)가 될 때까지다. 같은 직원·조직의 PUT·PATCH·DELETE 재시도는 곧바로 통과하고, POST 재시도는 새 아이디라 기다린다. 다른 서버가 멈췄다가 리스 만료 뒤 늦게 커밋하는 좁은 틈은 막지 못한다(쓰기 락의 커밋 틈과 같다).
+값이 1024바이트를 넘으면 400 `invalidValue` 다.
+
 필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
 동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센
 값이다. 서버 루트 조회(`GET /scim/v2?filter=`)는 501 이다. 설계: `docs/superpowers/specs/2026-09-25-scim-list-filter-design.md`.
@@ -686,9 +695,9 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 
 409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
 PUT 도 같다(PATCH 도 같다 — path `externalId` 와 경로 없는 값의 `externalId` 키 모두. remove 는 비운다). RFC 핵심 스키마에서 `id` 말고는 유일한 속성이 없으므로 이것은 우리 규칙이다. `externalId` 가 있는 조직이면 응답을 잃은 POST 를 IdP 가 재시도해 같은 조직이
 둘 생기고 멤버가 갈리는 것을 막는다. `externalId` 는 대소문자를 가리고(`caseExact: true`), 비어 있으면 판정하지 않으며, `externalId` 를 일부러 겹치게
-보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 GSI 로 후보를 찾고 본
-테이블에서 다시 읽는다 — 방금(GSI 반영 전, 보통 1초 미만) 저장된 직원과 대소문자만 다른 이름, 방금 저장된 조직과 같은 `externalId` 는 드물게 통과할 수 있다.
-설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`, `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`.
+보내는 IdP 설정이면 409 가 난다. 직원의 `externalId` 는 중복을 확인하지 않는다. 두 확인 모두 전역 쓰기 락 안에서 표지판 줄을 조건부로 차지해
+판정한다 — GSI 를 보지 않으므로 방금 저장된 직원·조직과도 겹치지 않는다(위 "`userName`·조직 `externalId` 의 유일성은 표지판 줄로 지킨다" 문단).
+설계: `docs/superpowers/specs/2026-09-28-scim-write-lock-design.md`, `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`, `docs/superpowers/specs/2026-10-14-unique-markers-design.md`.
 
 **`externalId` 없는 조직 POST 는 재시도를 막지 못한다.** Okta 식으로 `externalId` 없이 조직을 만들고(서버가 새 `id` 를 발급한다) IdP 가 응답을 잃어
 같은 POST 를 재시도하면 같은 이름의 조직이 둘 생길 수 있다. 조직 `displayName` 은 겹쳐도 되는 속성(RFC 7643 §8.7.1 Group 스키마, `uniqueness: none`)이고 POST 는

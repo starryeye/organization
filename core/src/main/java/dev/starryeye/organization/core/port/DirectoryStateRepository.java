@@ -8,9 +8,12 @@ import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -35,24 +38,12 @@ public interface DirectoryStateRepository {
     Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids);
 
     /**
-     * {@code userName} 으로 직원 아이디를 찾는다. <b>대소문자를 가리지 않는다</b> — RFC 7643 은
-     * {@code userName} 을 {@code caseExact=false} 로 정한다. SCIM 생성의 409 중복 판정이 이 성질에
-     * 기댄다: 대소문자만 다른 {@code userName} 으로 다시 만들려 하면 여기서 걸려야 한다.
-     *
-     * <p>{@link DirectoryUser#id()} 는 서버가 발급한 값(SCIM 은 UUID)이거나 LDAP 의 불변 식별자이고,
-     * {@code userName} 은 속성일 뿐이라 id 는 {@code userName} 변경을 따라가지 않는다(SCIM 의 정체성은
-     * {@code id} 다). 그래서 이름이 바뀐 뒤 같은 사람이 새 {@code userName} 으로 다시 생성 요청되면
-     * {@link #findUser} 로는 못 찾고 같은 사람의 레코드가 둘 생긴다. 생성 시 중복 판정에 쓴다.
-     */
-    Flux<String> findUserIdsByUserName(String userName);
-
-    /**
      * {@code externalId} 가 같은 직원 아이디. GSI3(최종 일관성)라 막 저장된 직원이 늦게 보일 수 있다 — 부르는 쪽이 본 테이블로 다시 확인한다.
      * 빈 값이면 비어 있다. {@code externalId} 는 대소문자를 가린다(RFC 7643 caseExact).
      */
     Flux<String> findUserIdsByExternalId(String externalId);
 
-    /** 같은 것을 조직으로. SCIM 조직 생성·변경의 중복 판정(설계 2026-10-04 §3.2)과 관리 API 가 쓴다. */
+    /** 같은 것을 조직으로. 관리 API 가 쓴다 — SCIM 의 중복 판정은 표지판이다(설계 2026-10-14). */
     Flux<String> findGroupIdsByExternalId(String externalId);
 
     Mono<DirectoryGroup> findGroup(String groupId);
@@ -144,6 +135,28 @@ public interface DirectoryStateRepository {
 
     /** 보류 목록을 {@code edges} 로 통째로 바꾼다 — SCIM 재적재·wipe 가 쓴다(설계 2026-10-03 §4.6). */
     Mono<Void> replaceCutEdges(Set<GroupEdge> edges);
+
+    /**
+     * 유일 값의 표지판을 차지한다(설계 2026-10-14 §3.2). 없으면 {@code ownerId} 가 {@code at} 에 차지하고 빈 값이다. 이미 있으면 — 주인이
+     * {@code ownerId} 여도 — 아무것도 쓰지 않고 그 표지판을 돌려준다. 조건부 쓰기 하나다. {@code key} 는 {@link UniqueKind#key} 로 만든 값이고
+     * {@link UniqueKind#MAX_KEY_BYTES} 를 넘지 않는다.
+     */
+    Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at);
+
+    /** 표지판의 주인이 아직 {@code previousOwnerId} 일 때만 {@code ownerId} 로 바꾼다. 바꿨으면 참이다. */
+    Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at);
+
+    /** 표지판의 주인이 {@code ownerId} 일 때만 지운다. 남의 것이거나 없으면 아무것도 하지 않는다. */
+    Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId);
+
+    /** 표지판을 모두 지운다 — SCIM wipe 가 조직도를 비운 뒤 부른다. 직원·조직·보류 목록 같은 다른 줄은 건드리지 않는다. */
+    Mono<Void> clearUniqueMarkers();
+
+    /**
+     * 그 종류 표지판의 주인 아이디를 강한 일관성으로 모두 읽는다(설계 2026-10-14 §5) — SCIM wipe 가 GSI 열거에서 빠진 직원·조직을 찾는 데 쓴다.
+     * 표지판은 SCIM 으로 만든 직원(userName 은 필수)과 externalId 가 있는 조직마다 하나다. 같은 주인이 여러 번 나올 수 있다.
+     */
+    Flux<String> findUniqueOwners(UniqueKind kind);
 
     /**
      * LDAP 전체 동기화용. 스냅샷에 없는 기존 엔트리는 삭제된다. 저장본과 비교해 바뀐 것만 쓰고, <b>실제로 쓴 것</b>을 돌려준다(설계 2026-10-10 §4.3).

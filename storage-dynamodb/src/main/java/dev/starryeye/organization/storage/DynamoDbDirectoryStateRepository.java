@@ -10,6 +10,8 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.ResourceTimes;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -258,28 +260,6 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                         .build()))
                 .filter(response -> !response.attributes().isEmpty())
                 .map(response -> value);
-    }
-
-    /**
-     * {@link #saveUser} 가 GSI1 의 정렬키에 {@code userName} 을 넣어 두므로 Scan 없이
-     * 정확 일치 Query 로 찾을 수 있다. 정렬키는 소문자다({@link Keys#indexKey}) — {@code Kim}
-     * 이 있으면 {@code kim} 으로도 찾힌다.
-     */
-    @Override
-    public Flux<String> findUserIdsByUserName(String userName) {
-        if (userName == null || userName.isBlank()) {
-            return Flux.empty();
-        }
-        QueryRequest request = QueryRequest.builder()
-                .tableName(properties.getTableName())
-                .indexName(Keys.GSI1)
-                .keyConditionExpression("#pk = :pk AND #sk = :sk")
-                .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK, "#sk", Keys.GSI1SK))
-                .expressionAttributeValues(Map.of(
-                        ":pk", Attrs.s(Keys.USER_INDEX), ":sk", Attrs.s(Keys.indexKey(userName))))
-                .build();
-
-        return Paginator.queryAll(client, request).map(item -> Keys.parseUserPk(Attrs.str(item, Keys.PK)));
     }
 
     @Override
@@ -868,6 +848,37 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(CUT_PARENT, Attrs.s(edge.parent()));
         item.put(CUT_CHILD, Attrs.s(edge.child()));
         return item;
+    }
+
+    // ---------- 유일 값 표지판 ----------
+
+    @Override
+    public Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at) {
+        return 표지판().claim(kind, key, ownerId, at);
+    }
+
+    @Override
+    public Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at) {
+        return 표지판().takeOver(kind, key, ownerId, previousOwnerId, at);
+    }
+
+    @Override
+    public Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId) {
+        return 표지판().release(kind, key, ownerId);
+    }
+
+    @Override
+    public Mono<Void> clearUniqueMarkers() {
+        return 표지판().clear();
+    }
+
+    @Override
+    public Flux<String> findUniqueOwners(UniqueKind kind) {
+        return 표지판().owners(kind);
+    }
+
+    private DynamoDbUniqueMarkers 표지판() {
+        return new DynamoDbUniqueMarkers(client, properties);
     }
 
     // ---------- 공통 ----------

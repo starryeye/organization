@@ -242,12 +242,29 @@ class ScimWriteRaceEndToEndTest {
         }
     }
 
+    @Test
+    @DisplayName("같은 본문의 POST 를 잇달아 두 번 보내면(응답을 잃은 재시도) 두 번째는 409 이고 직원은 하나다")
+    void 같은_POST_를_두_번_보내면_두_번째는_409다() {
+        // given
+        String 본문 = 직원본문("retry.kim");
+
+        // when
+        int 처음 = 보낸다(HttpMethod.POST, "/scim/v2/Users", 본문);
+        int 다시 = 보낸다(HttpMethod.POST, "/scim/v2/Users", 본문);
+
+        // then
+        assertThat(처음).isEqualTo(201);
+        assertThat(다시).isEqualTo(409);
+        client.get().uri("/scim/v2/Users?filter={f}", "userName eq \"retry.kim\"")
+                .exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.totalResults").isEqualTo(1);
+    }
+
     /**
-     * 이 시나리오는 <b>락이 두 POST 를 한 줄로 세운다</b>는 것만 증명한다.
+     * 이 시나리오는 <b>락이 두 POST 를 한 줄로 세우는 것</b>과, <b>두 번째 POST 가 표지판으로 막히는 것</b>을 함께 보인다.
      *
-     * <p>DynamoDB Local 의 GSI 는 즉시 반영되므로 두 번째 POST 가 첫 번째를 GSI 로 찾는다. 실제 DynamoDB 의
-     * GSI 는 결과적 일관성이라, 첫 POST 직후(반영 전)에 온 두 번째 POST 는 통과할 수 있다 — 설계 §10
-     * "userName 의 GSI 지연 틈" 이 수용한 한계다({@code docs/superpowers/specs/2026-09-28-scim-write-lock-design.md}).
+     * <p>중복 판정은 GSI 를 읽지 않으므로(설계 2026-10-14) 실제 DynamoDB 의 GSI 지연과 상관없다 — 로컬은 GSI 지연을 재현하지 못해, 그 독립성은
+     * 판정 경로의 구조({@code WriteDecisionLockInvariantTest})로 보인다.
      */
     @Test
     @DisplayName("대소문자만 다른 userName 으로 동시에 만들면 하나만 201 이고 하나는 409 다")
@@ -273,10 +290,8 @@ class ScimWriteRaceEndToEndTest {
 
     /**
      * 서버가 id 를 정하므로 두 POST 는 서로 다른 id 를 받는다 — 겹침을 판정하는 것은 <b>같은 {@code externalId}</b> 다(설계 2026-10-04 §3.2).
-     * 생성은 쓰기 락(전역 하나)을 잡은 안에서 {@code externalId} 로 GSI3 를 읽고 본 테이블로 다시 확인하므로, 락이 두 POST 를 한 줄로 세우고
-     * 뒤의 것이 앞의 것을 본다. 위 userName 시나리오와 같이 DynamoDB Local 의 GSI 가 즉시 반영된다는 점에 기댄다 — 실제 DynamoDB 의 GSI 는
-     * 결과적 일관성이라 첫 POST 직후의 두 번째는 통과할 수 있다(설계 §3.2 가 받아들인 한계). 본 테이블 재확인은 낡은 후보를 걸러낼 뿐 없는 후보를
-     * 찾아 주지 못한다.
+     * 생성은 쓰기 락(전역 하나)을 잡은 안에서 {@code externalId} 의 표지판을 조건부로 차지하므로, 락이 두 POST 를 한 줄로 세우고 뒤의 것이 앞의
+     * 것의 표지판을 본다. {@code externalId} 유일성도 표지판 줄을 조건부로 차지해 지킨다(설계 2026-10-14) — GSI 지연과 상관없다.
      */
     @Test
     @DisplayName("같은 조직을 동시에 만들면 하나만 201 이고 하나는 409 다")

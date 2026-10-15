@@ -8,15 +8,18 @@ import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -65,6 +68,15 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** 보류 목록(설계 2026-10-03 §4.1). {@link #replaceWith} 는 건드리지 않는다 — 실제 저장소도 그렇다. */
     public final Set<GroupEdge> cutEdges = new LinkedHashSet<>();
 
+    /**
+     * 유일 값 표지판(설계 2026-10-14 §3) — 차지·넘겨받기로 적은 것. 직원·조직 지도에 바로 심은 것은 여기 적지 않아도 지금 값의 표지판을
+     * 오래전({@link Instant#EPOCH})에 쥔 것으로 본다({@link #표지판}). 실제 저장소에서 SCIM 으로 만든 직원·조직은 늘 자기 값의 표지판을 쥐고 있다.
+     */
+    public final Map<UniqueKind, Map<String, UniqueClaim>> uniqueMarkers = new EnumMap<>(UniqueKind.class);
+
+    /** 설정하면 {@link #releaseUnique} 가 이 예외로 끝난다 — 놓기 실패를 흉내 낸다. */
+    public volatile RuntimeException failReleaseUnique;
+
     /** {@link #findCutEdges} 가 불린 수 — 보류 목록을 언제 읽는지 단언한다. */
     public int findCutEdgesCalls;
 
@@ -103,18 +115,6 @@ public class FakeStateRepository implements DirectoryStateRepository {
             }
             return found;
         });
-    }
-
-    @Override
-    public Flux<String> findUserIdsByUserName(String userName) {
-        if (userName == null) {
-            return Flux.empty();
-        }
-        // 실제 저장소처럼 대소문자를 가리지 않는다(RFC 7643 userName caseExact=false)
-        String key = userName.toLowerCase(Locale.ROOT);
-        return Flux.fromIterable(users.values())
-                .filter(user -> user.userName() != null && key.equals(user.userName().toLowerCase(Locale.ROOT)))
-                .map(DirectoryUser::id);
     }
 
     @Override
@@ -265,6 +265,96 @@ public class FakeStateRepository implements DirectoryStateRepository {
             cutEdges.clear();
             cutEdges.addAll(edges);
         });
+    }
+
+    @Override
+    public Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at) {
+        return Mono.fromCallable(() -> {
+            UniqueClaim 있던것 = 표지판(kind, key);
+            if (있던것 != null) {
+                return 있던것;
+            }
+            적은_표지판(kind).put(key, new UniqueClaim(ownerId, at));
+            return null;
+        });
+    }
+
+    @Override
+    public Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at) {
+        return Mono.fromCallable(() -> {
+            UniqueClaim 있던것 = 표지판(kind, key);
+            if (있던것 == null || !있던것.ownerId().equals(previousOwnerId)) {
+                return false;
+            }
+            적은_표지판(kind).put(key, new UniqueClaim(ownerId, at));
+            return true;
+        });
+    }
+
+    @Override
+    public Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId) {
+        return Mono.defer(() -> {
+            if (failReleaseUnique != null) {
+                return Mono.error(failReleaseUnique);
+            }
+            UniqueClaim 있던것 = 적은_표지판(kind).get(key);
+            if (있던것 != null && 있던것.ownerId().equals(ownerId)) {
+                적은_표지판(kind).remove(key);
+            }
+            return Mono.empty();
+        });
+    }
+
+    @Override
+    public Mono<Void> clearUniqueMarkers() {
+        return Mono.fromRunnable(uniqueMarkers::clear);
+    }
+
+    /**
+     * 적은 표지판의 주인에 더해, 직원·조직 지도에 심은 것 중 그 값이 있는 것을 오래된 표지판의 주인으로 본다({@link #표지판}). 직원·조직을 읽지 않는다 —
+     * 읽기 계측({@link #findUsersCalls}·{@link #findGroupCalls})을 더럽히지 않는다.
+     */
+    @Override
+    public Flux<String> findUniqueOwners(UniqueKind kind) {
+        return Flux.defer(() -> {
+            List<String> owners = new ArrayList<>();
+            uniqueMarkers.getOrDefault(kind, Map.of()).values().forEach(claim -> owners.add(claim.ownerId()));
+            switch (kind) {
+                case USER_NAME -> users.values().stream()
+                        .filter(user -> user.userName() != null && !user.userName().isBlank())
+                        .forEach(user -> owners.add(user.id()));
+                case GROUP_EXTERNAL_ID -> groups.values().stream()
+                        .filter(group -> group.externalId() != null && !group.externalId().isBlank())
+                        .forEach(group -> owners.add(group.id()));
+            }
+            return Flux.fromIterable(owners);
+        });
+    }
+
+    /** 키의 표지판 — 적은 것이 먼저고, 없으면 지금 그 값을 쥔 직원·조직을 오래된 표지판으로 본다. 없으면 null. */
+    private UniqueClaim 표지판(UniqueKind kind, String key) {
+        UniqueClaim 적은것 = 적은_표지판(kind).get(key);
+        if (적은것 != null) {
+            return 적은것;
+        }
+        return switch (kind) {
+            case USER_NAME -> users.values().stream()
+                    .filter(user -> user.userName() != null && !user.userName().isBlank()
+                            && kind.key(user.userName()).equals(key))
+                    .findFirst()
+                    .map(user -> new UniqueClaim(user.id(), Instant.EPOCH))
+                    .orElse(null);
+            case GROUP_EXTERNAL_ID -> groups.values().stream()
+                    .filter(group -> group.externalId() != null && !group.externalId().isBlank()
+                            && kind.key(group.externalId()).equals(key))
+                    .findFirst()
+                    .map(group -> new UniqueClaim(group.id(), Instant.EPOCH))
+                    .orElse(null);
+        };
+    }
+
+    private Map<String, UniqueClaim> 적은_표지판(UniqueKind kind) {
+        return uniqueMarkers.computeIfAbsent(kind, ignored -> new LinkedHashMap<>());
     }
 
     /**

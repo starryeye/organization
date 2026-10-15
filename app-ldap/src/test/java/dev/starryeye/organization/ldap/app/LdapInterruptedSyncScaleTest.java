@@ -19,6 +19,8 @@ import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.UniqueClaim;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
@@ -46,6 +48,7 @@ import reactor.core.publisher.Mono;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -187,9 +190,6 @@ class LdapInterruptedSyncScaleTest {
         @Override public Mono<DirectoryUser> findUser(String userId) { return 실제.findUser(userId); }
         @Override public Flux<DirectoryUser> findUsers(Set<String> userIds) { return 실제.findUsers(userIds); }
         @Override public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) { return 실제.findMemberTypes(ids); }
-        @Override public Flux<String> findUserIdsByUserName(String userName) {
-            return 실제.findUserIdsByUserName(userName);
-        }
         @Override public Flux<String> findUserIdsByExternalId(String externalId) {
             return 실제.findUserIdsByExternalId(externalId);
         }
@@ -217,6 +217,17 @@ class LdapInterruptedSyncScaleTest {
             return 실제.changeCutEdges(added, removed);
         }
         @Override public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) { return 실제.replaceCutEdges(edges); }
+        @Override public Mono<UniqueClaim> claimUnique(UniqueKind kind, String key, String ownerId, Instant at) {
+            return 실제.claimUnique(kind, key, ownerId, at);
+        }
+        @Override public Mono<Boolean> takeOverUnique(UniqueKind kind, String key, String ownerId, String previousOwnerId, Instant at) {
+            return 실제.takeOverUnique(kind, key, ownerId, previousOwnerId, at);
+        }
+        @Override public Mono<Void> releaseUnique(UniqueKind kind, String key, String ownerId) {
+            return 실제.releaseUnique(kind, key, ownerId);
+        }
+        @Override public Mono<Void> clearUniqueMarkers() { return 실제.clearUniqueMarkers(); }
+        @Override public Flux<String> findUniqueOwners(UniqueKind kind) { return 실제.findUniqueOwners(kind); }
         @Override public Mono<DirectorySnapshot> loadAll() { return 실제.loadAll(); }
     }
 }

@@ -258,18 +258,19 @@ class ScimRebuildEndToEndTest {
 
     @Test
     @Order(9)
-    @DisplayName("wipe 뒤에도 SCIM 쓰기는 열려 있다 — IdP 재푸시를 받아야 하기 때문이다")
+    @DisplayName("wipe 뒤에도 SCIM 쓰기는 열려 있고, wipe 전에 있던 userName 으로 다시 만들어도 201 이다 — 표지판도 비워졌다")
     void wipe_뒤에_쓰기가_열려있다() {
-        // given, when — IdP 가 재프로비저닝으로 다시 밀어넣는 상황이다
-        String 김철수 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+        // given, when — IdP 가 재프로비저닝으로 wipe 전과 같은 userName 을 다시 밀어넣는 상황이다. 표지판이 남아 있다면 여기서 409 가 났을 것이다
+        String 다시_만든_홍길동 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
-                         "userName":"cs.kim","displayName":"김철수","active":true}""")
+                         "userName":"gd.hong","displayName":"홍길동","active":true}""")
                 .exchange());
 
         // then — 락이 반납되지 않았다면 여기서 503 이 났을 것이다
-        client.get().uri("/admin/employees/" + 김철수)
+        assertThat(다시_만든_홍길동).isNotEqualTo(홍길동);
+        client.get().uri("/admin/employees/" + 다시_만든_홍길동)
                 .exchange().expectStatus().isOk()
-                .expectBody().jsonPath("$.displayName").isEqualTo("김철수");
+                .expectBody().jsonPath("$.displayName").isEqualTo("홍길동");
     }
 }

@@ -4,6 +4,8 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
+import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockObserver;
@@ -12,7 +14,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -103,6 +107,31 @@ class TwoInstanceWriteTest extends DynamoDbTestSupport {
         for (int i = 0; i < 40; i++) {
             assertThat(저장소.findUser("u" + i).block().displayName()).isEqualTo("바뀐 " + i);
         }
+    }
+
+    @Test
+    @DisplayName("두 인스턴스가 대소문자만 다른 같은 userName 을 다른 아이디로 동시에 만들면 하나만 성공하고 하나는 409 다 — 표지판이 락 안에서 가린다(설계 2026-10-14)")
+    void 두_인스턴스가_같은_userName_을_동시에_만들면_하나만_성공한다() {
+        // given
+        List<IncrementalSyncUseCase> 인스턴스들 = List.of(인스턴스1, 인스턴스2);
+        List<String> 이름들 = List.of("Kim.Lee", "kim.lee");
+
+        // when — 락의 일시 실패(TemporaryFailureException)는 IdP 처럼 다시 보내고, 409 는 그대로 받는다
+        List<Object> 결과 = Flux.range(0, 2)
+                .flatMap(i -> 인스턴스들.get(i).createUser(new DirectoryUser("u-" + i, null, 이름들.get(i), "김", null, true))
+                        .retryWhen(Retry.fixedDelay(10, Duration.ofMillis(200))
+                                .filter(e -> e instanceof TemporaryFailureException))
+                        .<Object>map(r -> r)
+                        .onErrorResume(e -> Mono.just(e))
+                        .subscribeOn(Schedulers.boundedElastic()))
+                .collectList()
+                .block(Duration.ofMinutes(1));
+
+        // then
+        assertThat(결과).filteredOn(r -> r instanceof IncrementalSyncResult).hasSize(1);
+        assertThat(결과).filteredOn(r -> r instanceof DirectoryConflictException).hasSize(1);
+        long 저장된_직원 = Flux.just("u-0", "u-1").flatMap(저장소::findUser).count().block();
+        assertThat(저장된_직원).isEqualTo(1);
     }
 
     @Test

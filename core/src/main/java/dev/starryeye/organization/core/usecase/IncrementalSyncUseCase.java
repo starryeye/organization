@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleDelta;
 import dev.starryeye.organization.core.model.TupleWriteResult;
+import dev.starryeye.organization.core.model.UniqueKind;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
@@ -31,8 +32,10 @@ import reactor.core.publisher.Sinks;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -125,6 +128,9 @@ public class IncrementalSyncUseCase {
     /** 갱신 주기를 넘기지 않는 생성자가 쓰는 값 — 운영 결선은 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofSeconds(10);
 
+    /** 표지판 넘겨받기 기준을 넘기지 않는 생성자가 쓰는 값 — 운영 결선은 {@code dynamodb.lock-ttl} 을 넘긴다(설계 2026-10-14 §4.1). */
+    static final Duration DEFAULT_LOCK_TTL = Duration.ofSeconds(30);
+
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
     private final RelationTupleChecker checker;
@@ -142,24 +148,37 @@ public class IncrementalSyncUseCase {
     private final AuditRecorder audit;
     /** 요청의 traceId — 이력의 원인 id 다(설계 2026-10-10 §4.2). */
     private final TraceIds traceIds;
+    /**
+     * 유일 값 표지판을 넘겨받는 기준 — 락 TTL 이다(설계 2026-10-14 §4.1). 이보다 오래된 표지판은 주인이 그 값을 쥐지 않으면 넘겨받는다.
+     */
+    private final Duration lockTtl;
     /** 서버 안의 SCIM 쓰기 줄(설계 2026-10-07 §3.1) — 이 유스케이스 하나, 곧 서버 하나에 하나다. */
     private final LocalWriteQueue 줄 = new LocalWriteQueue();
     /** 다른 서버가 쥔 락을 다시 시도하는 간격(§3.2). */
     private final AcquireBackoff 백오프 = AcquireBackoff.무작위로();
 
-    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 10인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
                                   LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
     }
 
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 10인자 생성자로 이력과 traceId 를 넘긴다. */
+    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 11인자 생성자로 이력과 traceId 를 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver,
                 AuditRecorder.NONE, TraceIds.NONE);
+    }
+
+    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, Duration renewInterval,
+                                  DriftObserver driftObserver, LockObserver lockObserver,
+                                  AuditRecorder audit, TraceIds traceIds) {
+        this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
+                DEFAULT_LOCK_TTL);
     }
 
     /**
@@ -242,15 +261,17 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 직원 생성(POST). {@code userName} 중복을 <b>락 안에서</b> 확인한다(SCIM 쓰기 락 설계 §4). 아이디는 서버가 발급한 UUID 라 겹칠 일이 없어 보지 않는다
-     * (설계 2026-10-04 §3.2) — 지운 직원의 아이디가 다시 쓰이지 않아 남은 권한을 물려받지 않는다(점검 M7).
+     * 직원 생성(POST). {@code userName} 의 표지판을 <b>락 안에서, OpenFGA 쓰기 전에</b> 차지한다(설계 2026-10-14 §4.2) — 겹치면 409, 다른 쓰기가
+     * 아직 저장하지 않은 값이면 503 이다. 아이디는 서버가 발급한 UUID 라 겹칠 일이 없어 보지 않는다(설계 2026-10-04 §3.2) — 지운 직원의 아이디가
+     * 다시 쓰이지 않아 남은 권한을 물려받지 않는다(점검 M7).
      *
-     * <p>생성에는 "자기 자신"이 없다 — 이미 있는 직원은 모두 남이므로 중복 확인에서 아무도 빼지 않는다(자기 아이디를 넘기면 같은 아이디로 다시 온 POST 가 기존
-     * 직원을 덮어쓴다).
+     * <p>생성에는 "자기 자신"이 없다 — 표지판의 주인이 이 아이디여도 그 직원이 그 이름을 쥐고 있으면 409 다(같은 아이디로 다시 온 POST 가 기존 직원을
+     * 덮어쓰지 않는다). 끝나면 표지판을 정리한다({@link #표지판을_정리한다}).
      */
     public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
-        return withLock((lease, 기록) -> userName을_확인한다(user.userName(), null)
-                .then(Mono.defer(() -> upsertUserInternal(user, Optional.empty(), lease, 기록))));
+        return withLock((lease, 기록) -> 표지판().차지한다(UniqueKind.USER_NAME, user.userName(), user.id())
+                .then(Mono.defer(() -> 표지판을_정리한다(upsertUserInternal(user, Optional.empty(), lease, 기록),
+                        UniqueKind.USER_NAME, user.id(), List.of(), 값들(user.userName())))));
     }
 
     /**
@@ -259,35 +280,20 @@ public class IncrementalSyncUseCase {
      * <p>전에는 핸들러가 락 밖에서 읽은 직원으로 계산해, 동시에 온 비활성화와 이름 변경 중 늦게 저장된 쪽이 비활성화를
      * 되돌렸고(퇴사자 권한 부활), 그 사이 DELETE 가 끝났으면 지운 직원을 다시 만들었다(설계 §1.1·§1.2). 계산이 던지는
      * 예외는 그대로 나오고 아무것도 쓰지 않는다. 계산 결과의 아이디는 무시하고 {@code userId} 로 저장한다 — 경로가 정본이다.
-     * {@code userName} 이 바뀌었으면 중복을 확인한다(§4).
+     * {@code userName} 의 키(소문자)가 바뀌면 새 이름의 표지판을 차지하고, 커밋 뒤 옛 것을 놓는다(설계 2026-10-14 §4.2).
      */
     public Mono<IncrementalSyncResult> changeUser(String userId, UnaryOperator<DirectoryUser> 계산) {
         return withLock((lease, 기록) -> state.findUser(userId)
                 .flatMap(before -> {
                     DirectoryUser after = 계산.apply(before).withId(userId);
-                    Mono<Void> 확인 = Objects.equals(before.userName(), after.userName())
-                            ? Mono.empty()
-                            : userName을_확인한다(after.userName(), userId);
-                    return 확인.then(Mono.defer(() -> upsertUserInternal(after, Optional.of(before), lease, 기록)));
+                    Mono<IncrementalSyncResult> 일 = Mono.defer(() -> upsertUserInternal(after, Optional.of(before), lease, 기록));
+                    if (!키가_다르다(UniqueKind.USER_NAME, before.userName(), after.userName())) {
+                        return 일;
+                    }
+                    return 표지판().차지한다(UniqueKind.USER_NAME, after.userName(), userId)
+                            .then(Mono.defer(() -> 표지판을_정리한다(일, UniqueKind.USER_NAME, userId,
+                                    값들(before.userName()), 값들(before.userName(), after.userName()))));
                 }));
-    }
-
-    /**
-     * {@code userName} 이 다른 직원과 겹치는지 확인한다(SCIM 쓰기 락 설계 §4). GSI 로 후보를 찾고(대소문자 무시), 자기 자신({@code selfId}, 생성이면 null)을
-     * 뺀 뒤, 후보마다 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 {@code userName} 일 때만 충돌이다 — GSI 에 잠깐 남은
-     * 옛 값(방금 지웠거나 이름을 바꾼 직원) 때문에 잘못 거절하지 않는다. 남는 틈은 방금 저장돼 아직 GSI 에 없는 직원뿐이다(설계 §10).
-     */
-    private Mono<Void> userName을_확인한다(String userName, String selfId) {
-        if (userName == null) {
-            return Mono.empty();
-        }
-        return state.findUserIdsByUserName(userName)
-                .filter(id -> !id.equals(selfId))
-                .concatMap(state::findUser)
-                .filter(other -> userName.equalsIgnoreCase(other.userName()))
-                .next()
-                .flatMap(other -> Mono.error(new DirectoryConflictException(
-                        "이미 같은 userName 을 쓰는 직원이 있습니다: userName=%s, id=%s".formatted(userName, other.id()))));
     }
 
     /**
@@ -355,30 +361,14 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 생성(POST). {@code externalId} 가 있으면 다른 조직과 겹치는지 <b>락 안에서</b> 확인한다(설계 2026-10-04 §3.2). 겹치면 {@link DirectoryConflictException}.
+     * 조직 생성(POST). {@code externalId} 가 있으면 그 표지판을 <b>락 안에서</b> 차지한다(설계 2026-10-14 §4.3). 겹치면 {@link DirectoryConflictException}.
      * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다 — 같은 아이디·같은 {@code externalId} 로 다시 온 POST 도 409 이고 기존 조직을 덮어쓰지 않는다.
+     * RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 2026-10-04 §3.2).
      */
     public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
-        return withLock((lease, 기록) -> externalId를_확인한다(group.externalId(), null)
-                .then(Mono.defer(() -> upsertGroupInternal(group, lease, 기록))));
-    }
-
-    /**
-     * 조직 {@code externalId} 가 다른 조직과 겹치는지 — {@link #userName을_확인한다} 와 같은 방식이다. GSI3 로 후보를 찾고 자기 자신({@code selfId}, 생성이면 null)을
-     * 뺀 뒤 본 테이블을 강한 일관성으로 다시 읽어 여전히 같은 값일 때만 충돌이다. 빈 값은 보지 않는다. RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의
-     * 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 §3.2).
-     */
-    private Mono<Void> externalId를_확인한다(String externalId, String selfId) {
-        if (externalId == null || externalId.isBlank()) {
-            return Mono.empty();
-        }
-        return state.findGroupIdsByExternalId(externalId)
-                .filter(id -> !id.equals(selfId))
-                .concatMap(state::findGroupHeader)
-                .filter(other -> externalId.equals(other.externalId()))
-                .next()
-                .flatMap(other -> Mono.error(new DirectoryConflictException(
-                        "이미 같은 externalId 를 쓰는 조직이 있습니다: externalId=%s, id=%s".formatted(externalId, other.id()))));
+        return withLock((lease, 기록) -> 표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, group.externalId(), group.id())
+                .then(Mono.defer(() -> 표지판을_정리한다(upsertGroupInternal(group, lease, 기록),
+                        UniqueKind.GROUP_EXTERNAL_ID, group.id(), List.of(), 값들(group.externalId())))));
     }
 
     /**
@@ -400,7 +390,7 @@ public class IncrementalSyncUseCase {
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      *
-     * <p>{@code externalId} 가 바뀌면 다른 조직과 겹치는지 먼저 확인하고, 겹치면 아무것도 쓰지 않고 {@link DirectoryConflictException} 이다(설계 2026-10-04 §3.2).
+     * <p>{@code externalId} 가 바뀌면 새 값의 표지판을 먼저 차지하고(겹치면 아무것도 쓰지 않고 409), 커밋 뒤 옛 것을 놓는다(설계 2026-10-14 §4.3).
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock((lease, 기록) -> changeGroupInternal(groupId, change, lease, 기록));
@@ -411,10 +401,7 @@ public class IncrementalSyncUseCase {
         return state.findGroupHeader(groupId)
                 .flatMap(header -> {
                     GroupHeader 바뀐헤더 = change.applyTo(header);
-                    Mono<Void> 확인 = Objects.equals(header.externalId(), 바뀐헤더.externalId())
-                            ? Mono.empty()
-                            : externalId를_확인한다(바뀐헤더.externalId(), groupId);
-                    return 확인.then(Mono.defer(() -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
+                    Mono<IncrementalSyncResult> 일 = Mono.defer(() -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
                         Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
                         DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
                         // 그림에는 빠지는 멤버를 싣지 않는다 — 그 멤버의 직원을 읽지도, 그 줄을 Check 하지도 않는다(설계 2026-10-02 §4.2)
@@ -439,7 +426,13 @@ public class IncrementalSyncUseCase {
                                 .flatMap(result -> 하위_조직을_뺀다
                                         ? 보류를_다시_본다(lease, 기록).thenReturn(result)
                                         : Mono.just(result));
-                    })));
+                    }));
+                    if (!키가_다르다(UniqueKind.GROUP_EXTERNAL_ID, header.externalId(), 바뀐헤더.externalId())) {
+                        return 일;
+                    }
+                    return 표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, 바뀐헤더.externalId(), groupId)
+                            .then(Mono.defer(() -> 표지판을_정리한다(일, UniqueKind.GROUP_EXTERNAL_ID, groupId,
+                                    값들(header.externalId()), 값들(header.externalId(), 바뀐헤더.externalId()))));
                 });
     }
 
@@ -525,7 +518,9 @@ public class IncrementalSyncUseCase {
                                 .then(남긴다(() -> 기록.user(user, null)));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit);
+                    return 표지판을_정리한다(
+                            diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit),
+                            UniqueKind.USER_NAME, userId, 값들(user.userName()), 값들(user.userName()));
                 }));
     }
 
@@ -554,11 +549,13 @@ public class IncrementalSyncUseCase {
                         .flatMap(parentIds -> {
                             boolean 연결을_지운다 = !parentIds.isEmpty()
                                     || group.members().stream().anyMatch(member -> member.type() == MemberType.GROUP);
-                            return 반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease, 기록,
-                                    result -> 조직_삭제를_커밋한다(group, parentIds, result, 기록))
-                                    .flatMap(result -> 연결을_지운다
-                                            ? 보류를_다시_본다(lease, 기록).thenReturn(result)
-                                            : Mono.just(result));
+                            return 표지판을_정리한다(
+                                    반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease, 기록,
+                                            result -> 조직_삭제를_커밋한다(group, parentIds, result, 기록))
+                                            .flatMap(result -> 연결을_지운다
+                                                    ? 보류를_다시_본다(lease, 기록).thenReturn(result)
+                                                    : Mono.just(result)),
+                                    UniqueKind.GROUP_EXTERNAL_ID, groupId, 값들(group.externalId()), 값들(group.externalId()));
                         }));
     }
 
@@ -639,6 +636,45 @@ public class IncrementalSyncUseCase {
     }
 
     // ---------- 공통 ----------
+
+    private UniqueMarkers 표지판() {
+        return new UniqueMarkers(state, lockTtl);
+    }
+
+    /**
+     * 표지판을 차지한(또는 놓을) 일이 끝나면 정리한다(설계 2026-10-14 §4.4·§4.5). 값을 내고 전부 반영됐으면(깨끗이) 결과를 알므로
+     * {@code 깨끗하면_놓을것} 을 다시 읽지 않고 놓는다. 그 밖(오류·일부 반영·빈 끝)이면 주인을 한 번 읽어 {@code 건드린것} 중 주인이 쥐지 않은 것만
+     * 놓는다. 정리는 결과를 바꾸지 않는다.
+     *
+     * <p>리스를 잃어 일이 취소되거나 리스 확인이 실패해({@link LockUnavailableException}) 끝나면 정리하지 않는다 — 남이 락을 쥐었을 수 있어 락 없이 더
+     * 쓰지 않는다. 같은 요청의 재시도가 다른 서버에서 "주인이 나" 로 차지한 표지판을 우리가 지울 수 있다. 취소는 여기까지 오지 않고, 리스 확인 실패는
+     * 신호를 그대로 내보낸다. 남은 표지판은 락 TTL 뒤 넘겨받고, 같은 직원·조직의 재시도는 "주인이 나" 로 곧바로 통과한다(설계 2026-10-14 §4.4).
+     */
+    private Mono<IncrementalSyncResult> 표지판을_정리한다(Mono<IncrementalSyncResult> 일, UniqueKind 종류, String 주인,
+                                                     List<String> 깨끗하면_놓을것, List<String> 건드린것) {
+        return 일.materialize().flatMap(끝 -> {
+            if (끝.isOnError() && 끝.getThrowable() instanceof LockUnavailableException) {
+                return Mono.just(끝);
+            }
+            UniqueMarkers 표지판 = 표지판();
+            Mono<Void> 정리 = 끝.isOnNext() && 끝.get().fullyApplied()
+                    ? Flux.fromIterable(깨끗하면_놓을것).concatMap(값 -> 표지판.놓는다(종류, 값, 주인)).then()
+                    : 표지판.쥐지_않은_것을_놓는다(종류, 주인, 건드린것);
+            return 정리.thenReturn(끝);
+        }).<IncrementalSyncResult>dematerialize();
+    }
+
+    /** null 을 뺀 값 목록 — 표지판 정리에 넘긴다. */
+    private static List<String> 값들(String... 값) {
+        return Arrays.stream(값).filter(Objects::nonNull).toList();
+    }
+
+    /** 두 값이 다른 표지판 키인가 — 빈 값은 표지판이 없다. */
+    private static boolean 키가_다르다(UniqueKind 종류, String 전, String 후) {
+        String 전키 = 전 == null || 전.isBlank() ? null : 종류.key(전);
+        String 후키 = 후 == null || 후.isBlank() ? null : 종류.key(후);
+        return !Objects.equals(전키, 후키);
+    }
 
     /** {@code before}/{@code after} 튜플 집합과 반영 결과를 받아 실제 커밋을 수행한다. */
     @FunctionalInterface
