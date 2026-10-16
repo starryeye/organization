@@ -26,6 +26,7 @@ import java.util.TreeSet;
  *   <li>조직의 멤버가 바뀌면 조직 줄에는 멤버 들어옴·나감을, 멤버 줄에는 소속 들어옴·나감을 함께 적는다.</li>
  *   <li>튜플은 user 쪽이 대상이다 — {@code user:kim direct_member group:DEV} 는 kim 의 줄, {@code group:TEAM child group:HQ} 는 TEAM 의 줄이다.</li>
  *   <li>한 대상의 이전·이후가 여러 번 오면 처음의 이전과 마지막의 이후를 비교한다.</li>
+ *   <li>이름표가 그대로인 조직 결과는 멤버 변화만 적는다 — 상태(생성·삭제·속성)는 이름표가 바뀐 결과로만 본다(설계 2026-10-15 §5).</li>
  *   <li>빈 문자열은 없는 값으로 본다 — 저장소가 빈 값을 저장하지 않아, 그렇지 않으면 저장 전후 값이 늘 달라 보인다.</li>
  * </ul>
  *
@@ -54,11 +55,20 @@ public final class AuditChanges {
         return this;
     }
 
-    /** 조직 하나의 이름표 이전·이후와 들어오고 나간 멤버. 이름표가 null 인 쪽이 생성·삭제를 뜻한다. */
+    /**
+     * 조직 하나의 이름표 이전·이후와 들어오고 나간 멤버. 이름표가 null 인 쪽이 생성·삭제를 뜻한다.
+     *
+     * <p><b>이전과 이후의 이름표가 같으면 멤버 변화만 적고 상태는 보지 않는다(설계 2026-10-15 §5).</b> 변경을 끝나는 즉시 더하면 전체 교체가 GSI 밖
+     * 조직에서 멤버를 뺄 때 내는 "멤버만 빠짐"(이름표를 모를 수 있다)이 그 조직의 삭제보다 먼저 온다. 상태를 보면 처음 본 이전을 붙들어 삭제 줄의 이름표가
+     * 사라진다. 이름표가 같으면 속성 변화가 없으므로 한 번만 오는 경우의 결과는 전과 같다.
+     */
     public synchronized AuditChanges group(GroupHeader before, GroupHeader after,
                                            Set<MemberRef> added, Set<MemberRef> removed) {
         String id = after != null ? after.id() : before.id();
-        대상(MemberRef.group(id)).상태를_본다(속성(before), before == null, 속성(after), after == null);
+        boolean 이름표가_그대로다 = before != null && after != null && 속성(before).equals(속성(after));
+        if (!이름표가_그대로다) {
+            대상(MemberRef.group(id)).상태를_본다(속성(before), before == null, 속성(after), after == null);
+        }
         멤버를_적는다(id, added, removed);
         return this;
     }
@@ -74,6 +84,21 @@ public final class AuditChanges {
         changes.users().forEach(diff -> user(diff.before(), diff.after()));
         changes.groups().forEach(diff -> group(diff.before(), diff.after(), diff.added(), diff.removed()));
         return this;
+    }
+
+    /** 전체 교체가 변경마다 알리는 것을 이 모음에 더한다(설계 2026-10-15 §4). 회차가 도중에 실패해도 끝난 변경은 이미 들어 있다. */
+    public DirectoryChanges.Listener directoryListener() {
+        return new DirectoryChanges.Listener() {
+            @Override
+            public void user(DirectoryChanges.UserDiff diff) {
+                AuditChanges.this.user(diff.before(), diff.after());
+            }
+
+            @Override
+            public void group(DirectoryChanges.GroupDiff diff) {
+                AuditChanges.this.group(diff.before(), diff.after(), diff.added(), diff.removed());
+            }
+        };
     }
 
     /** 사건이 OpenFGA 에 실제로 쓰고 지운 튜플. */

@@ -53,4 +53,26 @@ public record DirectoryChanges(List<UserDiff> users, List<GroupDiff> groups) {
             return after != null ? after.id() : before.id();
         }
     }
+
+    /**
+     * 전체 교체가 직원·조직 하나의 저장·삭제를 마칠 때마다 듣는다(설계 2026-10-15 §4). 여러 스레드에서 불릴 수 있다.
+     * 같은 조직이 두 번 올 수 있다 — 이름표가 그대로인 "멤버만 빠짐" 뒤에 그 조직의 삭제가 오는 식이다.
+     */
+    public interface Listener {
+
+        /** 아무것도 듣지 않는다. */
+        Listener NONE = new Listener() {
+            @Override
+            public void user(UserDiff diff) {
+            }
+
+            @Override
+            public void group(GroupDiff diff) {
+            }
+        };
+
+        void user(UserDiff diff);
+
+        void group(GroupDiff diff);
+    }
 }

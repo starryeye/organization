@@ -218,4 +218,82 @@ class AuditChangesTest {
         assertThat(줄(entries, 개발).created()).isTrue();
         assertThat(줄(entries, 개발).membersAdded()).containsExactly(김);
     }
+
+    @Test
+    @DisplayName("이름표가 그대로인 결과 뒤에 그 조직의 삭제가 오면 삭제 줄에 지우기 전 이름표가 남는다")
+    void 멤버만_빠짐_뒤의_삭제는_이름표를_남긴다() {
+        // given — 전체 교체가 GSI 밖 조직의 "멤버만 빠짐"(이름표를 모름)을 먼저 알리고, 그 조직의 삭제가 뒤에 온다
+        GroupHeader 모르는_이름표 = new GroupHeader("TEAM", null, null);
+
+        // when
+        List<AuditEntry> entries = new AuditChanges()
+                .group(모르는_이름표, 모르는_이름표, Set.of(), Set.of(김))
+                .group(이름표("TEAM", "옛팀"), null, Set.of(), Set.of(이))
+                .entries();
+
+        // then
+        AuditEntry 팀의_줄 = 줄(entries, 팀);
+        assertThat(팀의_줄.deleted()).isTrue();
+        assertThat(팀의_줄.attributes()).containsExactly(
+                new AttributeChange("externalId", "cn=TEAM", null),
+                new AttributeChange("displayName", "옛팀", null));
+        assertThat(팀의_줄.membersRemoved()).containsExactly(김, 이);
+    }
+
+    @Test
+    @DisplayName("삭제가 먼저 오고 이름표가 그대로인 결과가 뒤에 와도 삭제 줄이다")
+    void 삭제_뒤의_멤버만_빠짐도_삭제_줄이다() {
+        // given
+        GroupHeader 옛팀 = 이름표("TEAM", "옛팀");
+
+        // when
+        List<AuditEntry> entries = new AuditChanges()
+                .group(옛팀, null, Set.of(), Set.of(이))
+                .group(옛팀, 옛팀, Set.of(), Set.of(김))
+                .entries();
+
+        // then
+        AuditEntry 팀의_줄 = 줄(entries, 팀);
+        assertThat(팀의_줄.deleted()).isTrue();
+        assertThat(팀의_줄.attributes()).containsExactly(
+                new AttributeChange("externalId", "cn=TEAM", null),
+                new AttributeChange("displayName", "옛팀", null));
+        assertThat(팀의_줄.membersRemoved()).containsExactly(김, 이);
+    }
+
+    @Test
+    @DisplayName("이름표가 그대로인 결과 하나만 오면 지금과 같다 — 생성·삭제·속성 없이 멤버 변화만 적는다")
+    void 이름표가_그대로인_결과_하나는_멤버만_적는다() {
+        // when
+        List<AuditEntry> entries = new AuditChanges()
+                .group(이름표("DEV", "개발"), 이름표("DEV", "개발"), Set.of(김), Set.of())
+                .entries();
+
+        // then
+        AuditEntry 개발의_줄 = 줄(entries, 개발);
+        assertThat(개발의_줄.created()).isFalse();
+        assertThat(개발의_줄.deleted()).isFalse();
+        assertThat(개발의_줄.attributes()).isEmpty();
+        assertThat(개발의_줄.membersAdded()).containsExactly(김);
+        assertThat(줄(entries, 김).joined()).containsExactly("DEV");
+    }
+
+    @Test
+    @DisplayName("전체 교체가 변경마다 알리는 것을 받아 같은 규칙으로 적는다")
+    void 전체_교체의_알림을_받는다() {
+        // given
+        AuditChanges 모음 = new AuditChanges();
+        DirectoryChanges.Listener 듣는다 = 모음.directoryListener();
+
+        // when
+        듣는다.user(new DirectoryChanges.UserDiff(null, 직원("kim")));
+        듣는다.group(new DirectoryChanges.GroupDiff(null, 이름표("DEV", "개발본부"), Set.of(김), Set.of()));
+
+        // then
+        List<AuditEntry> entries = 모음.entries();
+        assertThat(줄(entries, 김).created()).isTrue();
+        assertThat(줄(entries, 김).joined()).containsExactly("DEV");
+        assertThat(줄(entries, 개발).created()).isTrue();
+        assertThat(줄(entries, 개발).membersAdded()).containsExactly(김);
+    }
 }
