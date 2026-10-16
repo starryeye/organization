@@ -17,6 +17,7 @@ import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncSource;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -42,6 +43,7 @@ class IncrementalSyncAuditTest {
     private static final MemberRef 팀 = MemberRef.group("TEAM");
 
     private FakeStateRepository state;
+    private FakeTupleWriter writer;
     private FakeTupleChecker checker;
     private FakeMutationLock lock;
     private FakeAuditLog auditLog;
@@ -50,7 +52,7 @@ class IncrementalSyncAuditTest {
     @BeforeEach
     void setUp() {
         state = new FakeStateRepository();
-        FakeTupleWriter writer = new FakeTupleWriter();
+        writer = new FakeTupleWriter();
         checker = new FakeTupleChecker();
         lock = new FakeMutationLock();
         auditLog = new FakeAuditLog();
@@ -233,9 +235,9 @@ class IncrementalSyncAuditTest {
     }
 
     @Test
-    @DisplayName("커밋 자리가 기록한 뒤 오류로 끝난 요청은 남기지 않는다")
-    void 오류로_끝난_요청은_남기지_않는다() {
-        // given — 소속 조직 빼기가 변경 모음에 들어간 뒤, 직원 삭제 커밋이 실패한다
+    @DisplayName("커밋 자리가 기록한 뒤 오류로 끝난 요청도 그때까지 모은 것을 남긴다")
+    void 오류로_끝난_요청도_모은_것을_남긴다() {
+        // given — 소속 조직 빼기와 튜플 지우기가 끝난 뒤, 직원 삭제 커밋이 실패한다
         FakeStateRepository 실패하는_저장소 = new 삭제가_실패하는_저장소();
         실패하는_저장소.saveUser(직원("kim", true)).block();
         실패하는_저장소.saveGroup(new DirectoryGroup("DEV", "DEV", "개발", Set.of(김))).block();
@@ -245,10 +247,94 @@ class IncrementalSyncAuditTest {
                 lock, Duration.ZERO, Duration.ofSeconds(10), IncrementalSyncUseCase.DriftObserver.NOOP,
                 LockObserver.NOOP, audit, context -> "trace-1");
 
-        // when, then
+        // when
         assertThatThrownBy(() -> 실패하는_유스케이스.removeUser("kim").block())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("삭제 실패");
+
+        // then — 삭제는 없고, 나간 조직·잃은 권한·멤버 나감이 남는다
+        assertThat(auditLog.events).singleElement().satisfies(event ->
+                assertThat(event.cause()).isEqualTo(AuditCause.scimRequest("trace-1")));
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.deleted()).isFalse();
+        assertThat(김의_줄.left()).containsExactly("DEV");
+        assertThat(김의_줄.revoked()).containsExactly(RelationTuple.directMember("kim", "DEV"));
+        assertThat(auditLog.lastOf(개발).membersRemoved()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("오류로 끝난 요청의 시각도 반납 뒤가 아니라 락 안에서 끝난 때다")
+    void 오류로_끝난_요청의_시각도_락_안의_시각이다() {
+        // given — 직원 삭제 커밋이 실패한다. 반납하는 순간 시계가 1분 간다
+        ClockAdvancingLock 시계가_가는_락 = new ClockAdvancingLock(고정시각);
+        FakeStateRepository 실패하는_저장소 = new 삭제가_실패하는_저장소();
+        실패하는_저장소.saveUser(직원("kim", true)).block();
+        실패하는_저장소.saveGroup(new DirectoryGroup("DEV", "DEV", "개발", Set.of(김))).block();
+        checker.allowed.addAll(TupleMapper.toTuples(실패하는_저장소.loadAll().block()).tuples());
+        IncrementalSyncUseCase 유스케이스 = new IncrementalSyncUseCase(실패하는_저장소, new FakeTupleWriter(), checker,
+                시계가_가는_락, Duration.ZERO, Duration.ofSeconds(10), IncrementalSyncUseCase.DriftObserver.NOOP,
+                LockObserver.NOOP, new AuditRecorder(auditLog, AuditObserver.NOOP, 시계가_가는_락.clock()), context -> "trace-1");
+
+        // when
+        assertThatThrownBy(() -> 유스케이스.removeUser("kim").block()).hasMessage("삭제 실패");
+
+        // then
+        assertThat(시계가_가는_락.clock().instant()).isEqualTo(고정시각.plus(ClockAdvancingLock.STEP));
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(고정시각));
+    }
+
+    @Test
+    @DisplayName("OpenFGA 에 쓴 뒤 커밋 직전 리스 확인이 실패해도(503) 쓴 튜플을 남긴다 — 커밋하지 못한 소속은 없다")
+    void 커밋_직전_리스_확인이_실패해도_쓴_튜플을_남긴다() {
+        // given — OpenFGA 쓰기가 끝나면 리스를 잃는다
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(new DirectoryGroup("DEV", "DEV", "개발", Set.of())).block();
+        openFga를_상태와_맞춘다();
+        writer.onApply(() -> lock.failRenew = true);
+
+        // when
+        assertThatThrownBy(() -> useCase.changeGroup("DEV", GroupChange.delta().adding(Set.of(김))).block())
+                .isInstanceOf(LockUnavailableException.class);
+
+        // then
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.granted()).containsExactly(RelationTuple.directMember("kim", "DEV"));
+        assertThat(김의_줄.joined()).isEmpty();
+        assertThat(state.groups.get("DEV").members()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("쓰기가 차단기로 멈춘 요청은 끝난 묶음에서 실제로 쓴 튜플만 남긴다")
+    void 차단기로_멈추면_실제로_쓴_튜플만_남긴다() {
+        // given — kim 의 줄은 쓰이고 lee 의 줄은 실패한 뒤 차단기가 선다
+        state.saveUser(직원("kim", true)).block();
+        state.saveUser(직원("lee", true)).block();
+        state.saveGroup(new DirectoryGroup("DEV", "DEV", "개발", Set.of())).block();
+        openFga를_상태와_맞춘다();
+        writer.failFor(tuple -> tuple.equals(RelationTuple.directMember("lee", "DEV")));
+        writer.abortWhen(delta -> true);
+
+        // when
+        assertThatThrownBy(() -> useCase.changeGroup("DEV",
+                GroupChange.delta().adding(Set.of(김, MemberRef.user("lee")))).block())
+                .isInstanceOf(TemporaryFailureException.class);
+
+        // then
+        assertThat(auditLog.lastOf(김).granted()).containsExactly(RelationTuple.directMember("kim", "DEV"));
+        assertThat(auditLog.entriesOf(MemberRef.user("lee"))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("락을 잡지 못한 요청(503)은 모은 것이 없어 남기지 않는다")
+    void 락을_잡지_못하면_남기지_않는다() {
+        // given
+        lock.failAcquire = true;
+
+        // when
+        assertThatThrownBy(() -> useCase.createUser(직원("kim", true)).block())
+                .isInstanceOf(LockUnavailableException.class);
+
+        // then
         assertThat(auditLog.events).isEmpty();
     }
 

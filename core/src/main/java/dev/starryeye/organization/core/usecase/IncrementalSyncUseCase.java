@@ -621,13 +621,12 @@ public class IncrementalSyncUseCase {
             return 그래프.순환인가(edge).flatMap(순환 -> 순환
                     ? Mono.<Void>empty()
                     : 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
-                            .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(edge.tuple()), Set.of()))))
+                            // OpenFGA 에 실제로 쓴 줄은 묶음이 끝나는 즉시 이 요청의 권한 변경으로 더한다(설계 2026-10-15 §6)
+                            .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(edge.tuple()), Set.of()), 기록::tuples)))
                             .flatMap(result -> {
                                 if (!result.written().contains(edge.tuple())) {
                                     return Mono.empty(); // 쓰기 실패 — 목록에 남겨 다음에 다시 본다
                                 }
-                                // OpenFGA 에 실제로 썼다 — 이 요청의 권한 변경이다(설계 2026-10-10 §3.3)
-                                기록.tuples(result);
                                 그래프.보류에서_뺀다(edge);
                                 log.info("순환이 풀려 보류했던 연결을 썼다: 조직 '{}' → '{}'", edge.parent(), edge.child());
                                 return state.changeCutEdges(Set.of(), Set.of(edge));
@@ -704,21 +703,28 @@ public class IncrementalSyncUseCase {
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> core 는 SDK 예외를 가르지 못하고, 락을 못 잡은 요청은 어차피
      * 커밋도 못 하므로 획득 구간의 오류는 모두 {@link LockUnavailableException}(503)으로 감싼다. 500 은 버그, 503 은 재시도 신호다(설계 2026-10-05 §3.5).
      *
-     * <p><b>이력(설계 2026-10-10 §4.4).</b> 요청마다 원인(traceId)과 변경 모음 하나를 만들어 커밋 자리들에 넘긴다. 락을 반납하고 다음 요청에 차례를
-     * 넘긴 뒤, 응답하기 전에 모은 것을 한 번에 남긴다. 값을 낸 요청만 남긴다 — 오류로 끝난 요청은 커밋을 마치지 못했을 수 있다. 이력 쓰기는
-     * 실패해도 요청을 실패시키지 않는다({@link AuditRecorder}). 시각은 일이 락 안에서 값을 낸 때(커밋 직후) 잡는다 — 반납 뒤에 잡으면 그 사이 락을
-     * 잡고 커밋한 다른 요청·회차보다 늦은 시각이 되어 최신순이 뒤집힌다.
+     * <p><b>이력(설계 2026-10-10 §4.4, 2026-10-15 §6).</b> 요청마다 원인(traceId)과 변경 모음 하나를 만들어 커밋 자리들에 넘긴다. OpenFGA 에 쓴 줄은
+     * 묶음이 끝날 때마다, 조직도 변경은 각 커밋이 끝난 직후 더한다. 락을 반납하고 다음 요청에 차례를 넘긴 뒤, 응답하기 전에 모은 것을 한 번에 남긴다 —
+     * 요청이 값·오류(리스 상실·차단기·커밋 실패) 무엇으로 끝나든 그때까지 실제로 한 변경이다. 응답은 바뀌지 않는다. 이력 쓰기는 실패해도 요청을
+     * 실패시키지 않는다({@link AuditRecorder}). 시각은 일이 락 안에서 끝난 때 잡는다 — 반납 뒤에 잡으면 그 사이 락을 잡고 커밋한 다른 요청·회차보다 늦은
+     * 시각이 되어 최신순이 뒤집힌다.
      */
     private Mono<IncrementalSyncResult> withLock(BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
             AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context));
             AuditChanges 기록 = new AuditChanges();
-            AtomicReference<Instant> 커밋_시각 = new AtomicReference<>();
+            // 락 안의 일이 끝난 때 — 값·오류·취소(리스 상실) 무엇이든 반납 전이다. 이력의 시각이다(설계 2026-10-15 §6)
+            AtomicReference<Instant> 끝난_시각 = new AtomicReference<>();
+            Runnable 끝난_때를_잡는다 = () -> 끝난_시각.compareAndSet(null, audit.now());
             Sinks.One<IncrementalSyncResult> 결과 = Sinks.one();
             AtomicBoolean 요청이_떠났다 = new AtomicBoolean();
             // 알리기 전에 본다 — 값을 받은 뒤에 오는 취소는 떠난 것이 아니다.
-            잡고_돌린다(lease -> work.apply(lease, 기록).doOnNext(ignored -> 커밋_시각.set(audit.now())),
-                    () -> audit.record(원인, 커밋_시각.get(), 기록.entries()))
+            잡고_돌린다(lease -> work.apply(lease, 기록)
+                                    .doOnSuccess(ignored -> 끝난_때를_잡는다.run())
+                                    .doOnError(ignored -> 끝난_때를_잡는다.run())
+                                    .doOnCancel(끝난_때를_잡는다),
+                            // 락을 잡지 못한 요청은 모은 것이 없어 쓰지 않는다 — 시각도 없으니 지금으로 둔다
+                            () -> audit.record(원인, Optional.ofNullable(끝난_시각.get()).orElseGet(audit::now), 기록.entries()))
                     .contextWrite(context)
                     .subscribe(value -> {
                         if (요청이_떠났다.get() && !value.fullyApplied()) {
@@ -737,8 +743,7 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * {@code 반납_뒤} 는 반납하고 차례를 넘긴 뒤, 값을 낸 요청에서만 부른다 — 이력이다. 그것이 오류로 끝나도 요청은 그대로 값을 낸다 — 변경은 이미
-     * 커밋됐다(설계 2026-10-10 §4.5).
+     * {@code 반납_뒤} 는 반납하고 차례를 넘긴 뒤, 요청이 어떻게 끝나든 부른다 — 이력이다(설계 2026-10-15 §6). 그것이 오류로 끝나도 요청의 결과는 그대로다(설계 2026-10-10 §4.5).
      */
     private Mono<IncrementalSyncResult> 잡고_돌린다(Function<LockLease, Mono<IncrementalSyncResult>> work,
                                              Supplier<Mono<Integer>> 반납_뒤) {
@@ -766,15 +771,13 @@ public class IncrementalSyncUseCase {
                                 .doOnNext(끝 -> 차례.넘긴다())
                                 // 끝이 오지 않고 취소돼도 차례를 쥔 채 사라지지 않는다 — 넘긴다는 한 번만 넘긴다
                                 .doFinally(signal -> 차례.넘긴다())
-                                // 반납하고 차례를 넘긴 뒤, 응답하기 전에 이력을 남긴다(설계 2026-10-10 §4.4)
-                                .flatMap(끝 -> 끝.isOnNext()
-                                        ? Mono.defer(반납_뒤)
-                                                .onErrorResume(error -> {
-                                                    log.error("이력을 남기지 못했다 — 요청은 이미 커밋됐다", error);
-                                                    return Mono.empty();
-                                                })
-                                                .thenReturn(끝)
-                                        : Mono.just(끝))
+                                // 반납하고 차례를 넘긴 뒤, 응답하기 전에 이력을 남긴다 — 값·오류·빈 끝 무엇이든 그때까지 모은 것이다(설계 2026-10-15 §6)
+                                .flatMap(끝 -> Mono.defer(반납_뒤)
+                                        .onErrorResume(error -> {
+                                            log.error("이력을 남기지 못했다 — 요청의 결과는 그대로다", error);
+                                            return Mono.empty();
+                                        })
+                                        .thenReturn(끝))
                                 .<IncrementalSyncResult>dematerialize();
                     });
         });
@@ -933,7 +936,8 @@ public class IncrementalSyncUseCase {
      *
      * <p>{@code writer.apply}·{@code 커밋} 을 {@code Mono.defer} 로 감싼다 — 감싸지 않으면 확인이 실패해도 그 표현식이 이미 평가된 뒤다.
      *
-     * <p>커밋까지 마치면 OpenFGA 에 실제로 쓰고 지운 줄을 {@code 기록} 에 더한다(설계 2026-10-10 §3.3).
+     * <p>OpenFGA 묶음이 끝날 때마다 실제로 쓰고 지운 줄을 {@code 기록} 에 더한다(설계 2026-10-15 §6) — 뒤의 리스 확인·커밋이 실패해도 OpenFGA 에 쓴 줄은
+     * 이력에 남는다.
      */
     private Mono<IncrementalSyncResult> 반영하고_커밋한다(TupleDelta delta, LockLease lease, AuditChanges 기록,
                                                    Function<TupleWriteResult, Mono<Void>> 커밋) {
@@ -943,10 +947,9 @@ public class IncrementalSyncUseCase {
                     .thenReturn(IncrementalSyncResult.noChange());
         }
         return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
-                .then(Mono.defer(() -> writer.apply(delta)))
+                .then(Mono.defer(() -> writer.apply(delta, 기록::tuples)))
                 .flatMap(result -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
                         .then(Mono.defer(() -> 커밋.apply(result)))
-                        .then(남긴다(() -> 기록.tuples(result)))
                         .thenReturn(IncrementalSyncResult.of(result)));
     }
 
