@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p><b>한도는 시각을 빼서 재지 않고 타이머로 잰다.</b> 갱신을 보낼 때마다 "주기 두 번 뒤에 닿는 마감"({@link 마감}) 을 걸고, 그 갱신이 성공하면 그
  * 마감이 새 한도가 된다. 스케줄러의 지연은 단조 시계라 NTP 가 벽시계를 옮겨도 한도가 늘거나(TTL 을 넘겨서도 일한다) 줄지(잃지 않았는데 멈춘다)
  * 않는다. 벽시계({@code now})는 로그에 남은 시간을 보여 주는 데만 쓴다. 타이머는 Reactor 스케줄러에 걸므로 가상 시간 테스트가 그대로 된다.
+ * 이 내성은 이 멈춤 한도에만 해당한다 — 락의 만료 시각은 저장소가 각 서버의 벽시계로 쓰고 판단한다(점검 S15, 서버 시계를 NTP 로 맞춘다는 운영 전제).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -79,7 +80,11 @@ final class LeaseKeeper {
 
     /**
      * 한 tick 의 갱신. 조건 실패면 곧바로 오류다. 그 밖의 실패는 지금 한도(마지막으로 성공한 갱신을 보낸 때 + 2×주기)까지 쉬며 다시 시도한다.
-     * 시도마다(다시 시도도 새 시도다) 보낸 때부터 새 마감을 걸고, 성공하면 그 마감이 한도가 된다 — 실패하거나 끊긴 시도의 마감은 푼다.
+     * 시도마다(다시 시도도 새 시도다) 보내기 직전에 새 마감을 걸고, 성공하면 그 마감이 한도가 된다.
+     *
+     * <p><b>한도는 두 timeout 을 모두 지난 성공만 옮긴다.</b> 시도가 주기의 절반에서 끊기는 순간 답이 오면, 끊긴 시도의 늦은 답이 아직 흘러올 수 있다.
+     * 그 답이 한도를 옮기면 이 tick 이 지켜보는 한도({@code 한도}) 가 풀려, 일시 오류가 이어질 때 다시 시도가 끝없이 돈다. 받아들이지 않은 마감(실패·끊김·빈 답,
+     * timeout 이 버린 늦은 답)은 그 시도가 끝날 때 푼다.
      */
     private Mono<LockLease> 갱신한다(LockLease lease, AtomicReference<마감> 지금_마감, String 상실_사유) {
         return Mono.defer(() -> {
@@ -88,11 +93,14 @@ final class LeaseKeeper {
                 return Mono.error(new TimeoutException(한도_초과_사유));
             }
             return Mono.defer(() -> {
+                        Mono<LockLease> 갱신 = lock.renew(lease);
                         마감 보낸_때부터 = new 마감();
-                        return lock.renew(lease)
-                                .doOnNext(renewed -> 지금_마감.getAndSet(보낸_때부터).푼다())
-                                .doOnError(error -> 보낸_때부터.푼다())
-                                .doOnCancel(보낸_때부터::푼다);
+                        return 갱신.map(renewed -> 보낸_때부터)
+                                .doFinally(signal -> {
+                                    if (지금_마감.get() != 보낸_때부터) {
+                                        보낸_때부터.푼다();
+                                    }
+                                });
                     })
                     .timeout(renewInterval.dividedBy(2))
                     .retryWhen(Retry.backoff(Long.MAX_VALUE, renewInterval.dividedBy(50))
@@ -103,7 +111,9 @@ final class LeaseKeeper {
                             .doBeforeRetry(signal -> log.warn("{} — 락 리스 갱신이 실패해 다시 시도한다({}번째 실패, 한도까지 {}ms): {}",
                                     상실_사유, signal.totalRetries() + 1, 한도.남은_밀리초(),
                                     signal.failure().toString())))
-                    .timeout(한도.닿음(), Mono.error(new TimeoutException(한도_초과_사유)));
+                    .timeout(한도.닿음(), Mono.error(new TimeoutException(한도_초과_사유)))
+                    .doOnNext(새_한도 -> 지금_마감.getAndSet(새_한도).푼다())
+                    .map(새_한도 -> lease);
         });
     }
 
@@ -139,9 +149,14 @@ final class LeaseKeeper {
             return 표시용_마감_밀리초 - 벽시계();
         }
 
-        /** 더 쓰지 않는 마감의 타이머를 거둔다 — 성공한 갱신이 새 마감을 걸었거나, 시도가 실패했거나, 일이 끝났다. */
+        /**
+         * 더 쓰지 않는 마감의 타이머를 거둔다 — 성공한 갱신이 새 마감을 걸었거나, 시도가 받아들여지지 않았거나, 일이 끝났다. 이미 닿았으면 거둘 것이
+         * 없다 — 다른 스레드에서 도는 중인 타이머를 거두면 그 스레드를 인터럽트한다.
+         */
         void 푼다() {
-            타이머.dispose();
+            if (!지났다.get()) {
+                타이머.dispose();
+            }
         }
     }
 

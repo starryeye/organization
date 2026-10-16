@@ -6,7 +6,9 @@ import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.reactivestreams.Subscription;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 import reactor.test.scheduler.VirtualTimeScheduler;
 
@@ -193,6 +195,53 @@ class LeaseKeeperTest {
                 .expectSubscription()
                 .expectNoEvent(Duration.ofMillis(29_900))
                 .thenAwait(Duration.ofMillis(100))
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(LockUnavailableException.class)
+                        .hasCauseInstanceOf(TimeoutException.class)
+                        .cause().hasMessage("마지막 갱신 성공에서 갱신 주기 두 번이 지났다"))
+                .verify(Duration.ofSeconds(5));
+        assertThat(취소됨).isTrue();
+        assertThat(상실).containsExactly("테스트 도중 리스 상실");
+    }
+
+    @Test
+    @DisplayName("끊긴 시도의 늦은 성공은 한도를 옮기지 않는다 — 시도가 끊기는 순간 답이 와도 한도는 남아 주기 두 번에 멈춘다")
+    void 끊긴_시도의_늦은_성공은_한도를_옮기지_않는다() {
+        // given — 10초에 보낸 갱신이 취소를 듣지 않고 정확히 15초(주기의 절반, 시도가 끊기는 순간)에 성공으로 답한다. 그 뒤의 시도는 모두 일시 오류다
+        AtomicInteger 시도 = new AtomicInteger();
+        FakeMutationLock 끊긴_뒤에_답하는_락 = new FakeMutationLock() {
+            @Override
+            public Mono<LockLease> renew(LockLease lease) {
+                if (시도.incrementAndGet() == 1) {
+                    return Mono.fromDirect(subscriber -> {
+                        subscriber.onSubscribe(new Subscription() {
+                            @Override
+                            public void request(long n) {
+                            }
+
+                            @Override
+                            public void cancel() {
+                            }
+                        });
+                        Schedulers.parallel().schedule(() -> {
+                            subscriber.onNext(lease);
+                            subscriber.onComplete();
+                        }, 5, TimeUnit.SECONDS);
+                    });
+                }
+                return Mono.error(new IllegalStateException("갱신 일시 오류(테스트) — 스로틀 흉내"));
+            }
+        };
+        LockLease lease = 끊긴_뒤에_답하는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        AtomicBoolean 취소됨 = new AtomicBoolean();
+        LeaseKeeper keeper = new LeaseKeeper(끊긴_뒤에_답하는_락, Duration.ofSeconds(10), observer);
+
+        // when, then — 끊긴 시도의 답이 한도를 옮기면 이 tick 의 한도가 풀려 다시 시도가 끝없이 돈다. 처음 한도(20초)에 멈춰야 한다
+        StepVerifier.withVirtualTime(() -> keeper.keep(lease, Mono.<String>never().doOnCancel(() -> 취소됨.set(true)),
+                        "테스트 도중 리스 상실"))
+                .expectSubscription()
+                .expectNoEvent(Duration.ofSeconds(19))
+                .thenAwait(Duration.ofSeconds(1))
                 .expectErrorSatisfies(error -> assertThat(error)
                         .isInstanceOf(LockUnavailableException.class)
                         .hasCauseInstanceOf(TimeoutException.class)
