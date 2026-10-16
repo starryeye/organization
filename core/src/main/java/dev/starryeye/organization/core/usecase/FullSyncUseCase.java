@@ -1,12 +1,10 @@
 package dev.starryeye.organization.core.usecase;
 
-import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditKind;
-import dev.starryeye.organization.core.audit.AuditRecorder;
+import dev.starryeye.organization.core.audit.RunAudit;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.GuardDecision;
-import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncOutcome;
@@ -46,8 +44,9 @@ import java.util.function.Consumer;
  * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
  * 그 사이 되돌려진 사람의 권한이 영원히 남거나 빠지는 일(점검 M2)이 이것으로 막힌다.
  *
- * <p><b>이력(설계 2026-10-10 §4).</b> 회차가 커밋한 조직도 변경(전체 교체의 비교 결과)과 쓰고 지운 튜플을 회차 id 로 남긴다. 락을 반납한 뒤에 쓴다 —
- * {@link SyncJobs#startLockedThen} 의 "반납 뒤 할 일" 이다. 장부를 훑어 맞춘 회차는 지운 줄만 남긴다.
+ * <p><b>이력(설계 2026-10-10 §4, 2026-10-15).</b> 회차가 OpenFGA 에 쓰고 지운 튜플은 묶음마다, 현재상태가 바뀐 것은 직원·조직 하나마다 끝나는 즉시
+ * 회차의 변경 모음에 더한다. 회차가 어떻게 끝나든 {@link SyncJobs} 가 락을 반납한 뒤 남긴다 — 스냅샷 저장·현재상태 교체가 실패하거나 리스를 잃어도
+ * 이미 한 변경이 남는다. 장부를 훑어 맞춘 회차는 종류를 장부 맞추기로 바꾸고 지운 줄만 남긴다.
  */
 @Slf4j
 public class FullSyncUseCase {
@@ -61,19 +60,11 @@ public class FullSyncUseCase {
     private final DeletionGuard guard;
     private final SyncJobs jobs;
     private final Clock clock;
-    private final AuditRecorder audit;
     private final LedgerAlignment alignment;
 
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 이력을 받는 생성자다. */
     public FullSyncUseCase(DirectorySnapshotSource source, TupleSnapshotRepository snapshots,
                            DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
                            DeletionGuard guard, SyncJobs jobs, Clock clock) {
-        this(source, snapshots, state, writer, scanner, guard, jobs, clock, AuditRecorder.NONE);
-    }
-
-    public FullSyncUseCase(DirectorySnapshotSource source, TupleSnapshotRepository snapshots,
-                           DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
-                           DeletionGuard guard, SyncJobs jobs, Clock clock, AuditRecorder audit) {
         this.source = source;
         this.snapshots = snapshots;
         this.state = state;
@@ -81,8 +72,7 @@ public class FullSyncUseCase {
         this.guard = guard;
         this.jobs = jobs;
         this.clock = clock;
-        this.audit = audit;
-        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock, audit);
+        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock);
     }
 
     /**
@@ -90,19 +80,19 @@ public class FullSyncUseCase {
      * {@link LockUnavailableException} — 다른 인스턴스가 동기화·재적재 중이다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
      */
     public Mono<SyncRun> start(SyncTrigger trigger, Consumer<SyncRun> onFinished) {
-        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC,
-                run -> Mono.defer(() -> synchronize(trigger, run.runId())), onFinished);
+        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC, AuditKind.SYNC,
+                (run, 기록) -> Mono.defer(() -> synchronize(trigger, 기록)), onFinished);
     }
 
-    /** 락 안에서 맞추고 "반납 뒤 할 일"(이력)을 내놓는다. */
-    private Mono<Mono<SyncOutcome>> synchronize(SyncTrigger trigger, String runId) {
+    /** 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다. */
+    private Mono<Mono<SyncOutcome>> synchronize(SyncTrigger trigger, RunAudit 기록) {
         return source.fetchAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
             return snapshots.isWriting().flatMap(writing -> writing
-                    ? 훑어_맞춘다(directory, mapping.tuples(), trigger, runId)
-                    : 비교해_맞춘다(directory, mapping.tuples(), trigger, runId));
+                    ? 훑어_맞춘다(directory, mapping.tuples(), trigger, 기록)
+                    : 비교해_맞춘다(directory, mapping.tuples(), trigger, 기록.changes()));
         });
     }
 
@@ -114,10 +104,10 @@ public class FullSyncUseCase {
      * 보지 못하므로 여기서 감싸지 않는다.
      */
     private Mono<Mono<SyncOutcome>> 훑어_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                               SyncTrigger trigger, String runId) {
+                                               SyncTrigger trigger, RunAudit 기록) {
         log.warn(기준선_의심);
-        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED,
-                        AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, runId))
+        기록.kind(AuditKind.LEDGER_ALIGNMENT);
+        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED, 기록.changes())
                 .map(반납_뒤 -> 반납_뒤.map(outcome -> outcome.withNote(기준선_의심)))
                 .onErrorMap(error -> new IllegalStateException(
                         기준선_의심 + " / " + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()),
@@ -125,14 +115,13 @@ public class FullSyncUseCase {
     }
 
     private Mono<Mono<SyncOutcome>> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                                SyncTrigger trigger, String runId) {
-        AuditCause cause = AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, runId);
+                                                SyncTrigger trigger, AuditChanges 기록) {
         return baseline().flatMap(baseline -> {
             TupleDelta delta = TupleDiff.between(baseline, desired);
             if (delta.isEmpty()) {
                 log.info("변경 없음. OpenFGA 를 호출하지 않는다");
-                return state.replaceWith(directory)
-                        .map(changes -> 남긴다(cause, audit.now(), changes, TupleWriteResult.empty(), SyncOutcome.noChange()));
+                return state.replaceWith(directory, 기록.directoryListener())
+                        .thenReturn(Mono.just(SyncOutcome.noChange()));
             }
             if (trigger != SyncTrigger.FORCED) {
                 GuardDecision decision = guard.evaluate(delta, baseline);
@@ -141,14 +130,14 @@ public class FullSyncUseCase {
                     return Mono.just(Mono.just(SyncOutcome.aborted(decision.message())));
                 }
             }
-            // 표시가 쓰기보다 먼저다 — 표시를 남기지 못하면 쓰지 않는다(설계 2026-09-30 §11)
+            // 표시가 쓰기보다 먼저다 — 표시를 남기지 못하면 쓰지 않는다(설계 2026-09-30 §11). 쓴·지운 줄은 묶음마다 기록에 더한다
             return snapshots.markWriting()
-                    .then(Mono.defer(() -> writer.apply(delta)))
-                    .flatMap(result -> commit(directory, baseline, result, cause))
+                    .then(Mono.defer(() -> writer.apply(delta, 기록::tuples)))
+                    .flatMap(result -> commit(directory, baseline, result, 기록))
                     .onErrorResume(TupleWriteAbortedException.class, stopped ->
-                            saveSnapshotAndState(directory, baseline, stopped.partial())
-                                    .map(saved -> 남긴다(cause, saved.at(), saved.changes(), stopped.partial(),
-                                            SyncOutcome.stopped(stopped.partial(), saved.snapshotId(), stopped.getMessage()))));
+                            saveSnapshotAndState(directory, baseline, stopped.partial(), 기록)
+                                    .map(snapshotId -> Mono.just(
+                                            SyncOutcome.stopped(stopped.partial(), snapshotId, stopped.getMessage()))));
         });
     }
 
@@ -159,25 +148,11 @@ public class FullSyncUseCase {
     }
 
     private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, Set<RelationTuple> baseline,
-                                           TupleWriteResult result, AuditCause cause) {
-        return saveSnapshotAndState(directory, baseline, result)
-                .map(saved -> 남긴다(cause, saved.at(), saved.changes(), result, result.hasFailure()
-                        ? SyncOutcome.partial(result, saved.snapshotId())
-                        : SyncOutcome.succeeded(result, saved.snapshotId())));
-    }
-
-    /**
-     * 반납 뒤 할 일 — 회차가 커밋한 조직도 변경과 쓰고 지운 튜플을 회차 id 로 남긴다(설계 2026-10-10 §4.4). 시각 {@code at} 은 락 안에서 커밋한 직후에
-     * 잡은 것이고, 줄은 락을 반납한 뒤에 만든다. 이력을 쓰지 못해도 회차는 그대로이고, 메시지 앞에 빠진 줄이 붙는다(§4.5).
-     */
-    private Mono<SyncOutcome> 남긴다(AuditCause cause, Instant at, DirectoryChanges changes, TupleWriteResult result,
-                                  SyncOutcome outcome) {
-        return Mono.defer(() -> audit.recordRun(cause, at,
-                new AuditChanges().directory(changes).tuples(result).entries(), outcome));
-    }
-
-    /** 저장한 스냅샷 아이디와, 현재상태가 실제로 바뀐 것과, 그 커밋을 마친 시각(이력의 시각, §4.4). */
-    private record 저장함(String snapshotId, DirectoryChanges changes, Instant at) {
+                                           TupleWriteResult result, AuditChanges 기록) {
+        return saveSnapshotAndState(directory, baseline, result, 기록)
+                .map(snapshotId -> Mono.just(result.hasFailure()
+                        ? SyncOutcome.partial(result, snapshotId)
+                        : SyncOutcome.succeeded(result, snapshotId)));
     }
 
     /**
@@ -185,11 +160,11 @@ public class FullSyncUseCase {
      * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
      *
      * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
-     * 스냅샷 저장이 "기록 중" 표시를 지운다. 저장한 스냅샷 아이디와 현재상태가 바뀐 것, 현재상태 교체를 마친 시각을 준다.
+     * 스냅샷 저장이 "기록 중" 표시를 지운다. 현재상태가 바뀐 것은 직원·조직 하나마다 {@code 기록} 에 더한다. 저장한
+     * 스냅샷 아이디를 준다.
      */
-    private Mono<저장함> saveSnapshotAndState(DirectorySnapshot directory,
-                                            Set<RelationTuple> baseline,
-                                            TupleWriteResult result) {
+    private Mono<String> saveSnapshotAndState(DirectorySnapshot directory, Set<RelationTuple> baseline,
+                                              TupleWriteResult result, AuditChanges 기록) {
         Set<RelationTuple> committed = new HashSet<>(baseline);
         committed.removeAll(result.deleted());
         committed.addAll(result.written());
@@ -202,7 +177,7 @@ public class FullSyncUseCase {
                 committed);
 
         return snapshots.save(snapshot)
-                .then(Mono.defer(() -> state.replaceWith(directory)))
-                .map(changes -> new 저장함(snapshot.id(), changes, audit.now()));
+                .then(Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())))
+                .thenReturn(snapshot.id());
     }
 }

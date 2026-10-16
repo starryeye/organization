@@ -69,9 +69,8 @@ public class UseCaseConfig {
                                            RelationTupleScanner scanner,
                                            DeletionGuard guard,
                                            SyncJobs jobs,
-                                           Clock clock,
-                                           AuditRecorder auditRecorder) {
-        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock, auditRecorder);
+                                           Clock clock) {
+        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
     }
 
     @Bean
@@ -82,8 +81,7 @@ public class UseCaseConfig {
                                          RelationTupleScanner scanner,
                                          DeletionGuard guard,
                                          SyncJobs jobs,
-                                         Clock clock,
-                                         AuditRecorder auditRecorder) {
-        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock, auditRecorder);
+                                         Clock clock) {
+        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
     }
 }
