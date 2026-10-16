@@ -15,6 +15,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 public class FakeTupleWriter implements RelationTupleWriter {
@@ -56,8 +57,12 @@ public class FakeTupleWriter implements RelationTupleWriter {
         this.abortWhen = abortWhen;
     }
 
+    /**
+     * 델타 전체를 묶음 하나로 보고, 반영하자마자 알린 뒤 결과를 낸다(설계 2026-10-15 §4). {@link #delay} 는 알린 뒤에 늦춘다 — 묶음은 끝났는데 전체 응답이
+     * 늦는 사이 취소돼도 반영한 것은 이미 알린 뒤다. {@link #abortWhen} 에 걸리면 반영한 것을 알린 뒤 멈춘다.
+     */
     @Override
-    public Mono<TupleWriteResult> apply(TupleDelta delta) {
+    public Mono<TupleWriteResult> apply(TupleDelta delta, Consumer<TupleWriteResult> 묶음마다) {
         if (applyHook != null) {
             applyHook.run();
         }
@@ -86,6 +91,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
             }
         }
         TupleWriteResult applied = new TupleWriteResult(written, deleted, failures);
+        묶음마다.accept(applied);
         Mono<TupleWriteResult> result = abortWhen.test(delta)
                 ? Mono.error(new TupleWriteAbortedException("테스트용 차단 — 연속 실패로 멈췄다", applied))
                 : Mono.just(applied);

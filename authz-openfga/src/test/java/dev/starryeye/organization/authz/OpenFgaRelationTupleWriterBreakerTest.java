@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
@@ -491,5 +492,44 @@ class OpenFgaRelationTupleWriterBreakerTest {
                     assertThat(멈춤.partial().failures()).hasSize(6);
                 });
         assertThat(보낸것).hasSize(5).extracting(Batch::단계).doesNotContain(Phase.조직_쓰기);
+    }
+
+    @Test
+    @DisplayName("차단기로 멈추면 실제로 보낸 묶음의 결과만 알린다 — 보내지 않은 묶음은 알리지 않는다")
+    void 차단기로_멈추면_보낸_묶음만_알린다() {
+        // given — 첫 배치는 나가고, 그 뒤로 OpenFGA 가 죽는다
+        AtomicInteger 보낸_수 = new AtomicInteger();
+        Function<Batch, Mono<TupleWriteResult>> 첫_배치만_성공 = batch ->
+                Mono.just(보낸_수.incrementAndGet() == 1 ? batch.succeeded() : batch.failed("연결 거부"));
+        List<TupleWriteResult> 알린것 = new CopyOnWriteArrayList<>();
+
+        // when
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(
+                배치들(10), 첫_배치만_성공, 1, 알린것::add).block())
+                .isInstanceOf(TupleWriteAbortedException.class);
+
+        // then — 보낸 넷(성공 하나, 실패 셋)만 알렸다
+        assertThat(알린것).hasSize(4);
+        assertThat(알린것.stream().mapToInt(result -> result.written().size()).sum()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("동시에 보낸 묶음 중 뒤 묶음이 먼저 끝나면 곧바로 알린다 — 앞 묶음을 기다리다 취소돼도 끝난 묶음은 알린 뒤다")
+    void 먼저_끝난_묶음은_순서를_기다리지_않고_알린다() {
+        // given — 동시 2개. 첫 묶음은 응답이 오지 않고, 둘째 묶음은 곧바로 성공한다
+        List<Batch> batches = 배치들(2);
+        Sinks.One<TupleWriteResult> 오지_않는_응답 = Sinks.one();
+        Function<Batch, Mono<TupleWriteResult>> send = batch -> batch == batches.get(0)
+                ? 오지_않는_응답.asMono()
+                : Mono.just(batch.succeeded());
+        List<TupleWriteResult> 알린것 = new CopyOnWriteArrayList<>();
+
+        // when — 첫 묶음을 기다리는 동안 취소한다(기한·리스 상실)
+        Disposable 쓰기 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(batches, send, 2, 알린것::add).subscribe();
+        쓰기.dispose();
+
+        // then — 결과를 보낸 순서대로 모으는 자리는 둘째 묶음을 붙들고 있었지만, 알림은 이미 나갔다
+        assertThat(알린것).singleElement().satisfies(result ->
+                assertThat(result.written()).containsExactlyInAnyOrderElementsOf(batches.get(1).writes()));
     }
 }
