@@ -80,6 +80,9 @@ class ScimRebuildIndexLagTest {
         /** 조직을 읽고 지운 순서 — {@code find:<id>}, {@code delete:<id>}. 읽기가 지우기와 섞이는지 가린다. 읽는 때(구독)에 적는다. */
         final List<String> 조직_호출순서 = new ArrayList<>();
 
+        /** 설정하면 {@link #deleteUser} 가 이 예외로 끝난다 — wipe 의 남은 대상 지우기 실패를 흉내 낸다. 전체 교체의 직원 삭제에는 걸리지 않는다. */
+        volatile RuntimeException 직원_지우기_실패;
+
         @Override
         public Mono<DirectoryGroup> findGroup(String groupId) {
             return Mono.defer(() -> {
@@ -146,6 +149,9 @@ class ScimRebuildIndexLagTest {
         /** 실제 저장소처럼 직원을 지우면 그 직원이 멤버인 조직의 멤버 줄도 지운다 — 조직을 먼저 지우는지 순서를 가린다. */
         @Override
         public Mono<Void> deleteUser(String userId) {
+            if (직원_지우기_실패 != null) {
+                return Mono.error(직원_지우기_실패);
+            }
             return super.deleteUser(userId).then(Mono.fromRunnable(() -> {
                 MemberRef 지운_직원 = MemberRef.user(userId);
                 groups.replaceAll((id, group) -> {
@@ -186,8 +192,9 @@ class ScimRebuildIndexLagTest {
         auditLog = new FakeAuditLog();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), new FakeSnapshotRepository(),
-                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
-                clock, new AuditRecorder(auditLog, AuditObserver.NOOP, clock));
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
+                        new AuditRecorder(auditLog, AuditObserver.NOOP, clock)),
+                clock);
     }
 
     @AfterEach
@@ -484,5 +491,34 @@ class ScimRebuildIndexLagTest {
         assertThat(state.조직_호출순서).hasSize(4);
         assertThat(state.조직_호출순서.subList(0, 2)).allMatch(call -> call.startsWith("find:"));
         assertThat(state.조직_호출순서.subList(2, 4)).allMatch(call -> call.startsWith("delete:"));
+    }
+
+    @Test
+    @DisplayName("wipe — 남은 대상을 지우다 실패해도 그때까지 지운 조직은 지우기 전 이름표와 함께 이력에 남는다")
+    void wipe_는_남은_대상_지우기가_실패해도_지운_것을_남긴다() {
+        // given — lee 와 TEAM 은 GSI 에 없다. 남은 대상 중 조직 TEAM 을 지운 뒤 직원 lee 를 지우다 실패한다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("DEV002", 김);
+        조직을_심는다("TEAM", 이);
+        writer.stored.addAll(Set.of(김_백엔드, 이_팀));
+        state.숨긴_직원.add("lee");
+        state.숨긴_조직.add("TEAM");
+        state.직원_지우기_실패 = new IllegalStateException("직원 지우기 실패");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        AuditEntry 팀_줄 = auditLog.lastOf(팀);
+        assertThat(팀_줄.deleted()).isTrue();
+        assertThat(팀_줄.attributes())
+                .extracting(AttributeChange::name, AttributeChange::before, AttributeChange::after)
+                .containsExactly(tuple("externalId", "TEAM", null), tuple("displayName", "TEAM-조직", null));
+        assertThat(auditLog.lastOf(김).deleted()).isTrue();
+        AuditEntry 이의_줄 = auditLog.lastOf(이);
+        assertThat(이의_줄.deleted()).isFalse();
+        assertThat(이의_줄.revoked()).containsExactly(이_팀);
     }
 }

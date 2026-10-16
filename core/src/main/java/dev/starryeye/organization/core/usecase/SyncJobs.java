@@ -119,16 +119,6 @@ public class SyncJobs {
     }
 
     /**
-     * {@link #startLockedThen(SyncSource, SyncTrigger, MutationLock.LockPurpose, Mono, Consumer)} 와 같되, 일이 연 실행 기록을 받는다. 회차 id 를 이력의
-     * 원인으로 적는 작업(동기화·재적재)이 쓴다(설계 2026-10-10 §4.2). {@code work} 는 기록을 연 뒤, 락을 쥔 채로 한 번 불린다. 이력의 모음은 열지 않는다 —
-     * 이 오버로드의 작업이 이력을 스스로 남긴다.
-     */
-    public Mono<SyncRun> startLockedThen(SyncSource source, SyncTrigger trigger, MutationLock.LockPurpose purpose,
-                                         Function<SyncRun, Mono<Mono<SyncOutcome>>> work, Consumer<SyncRun> onFinished) {
-        return 락을_잡고_띄운다(source, trigger, purpose, null, (run, 기록) -> work.apply(run), onFinished);
-    }
-
-    /**
      * 변경 이력을 남기는 회차(동기화·재적재)를 띄운다(설계 2026-10-15 §3). {@link #startLockedThen(SyncSource, SyncTrigger, MutationLock.LockPurpose, Mono, Consumer)}
      * 와 같되, 회차의 변경 모음({@link RunAudit})을 함께 연다. {@code work} 는 기록을 연 뒤 락을 쥔 채로 한 번 불리고, 연 실행 기록(회차 id 가 이력의
      * 원인이다)과 모음을 받는다. 일은 쓰기가 끝나는 즉시 모음에 더한다.

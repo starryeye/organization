@@ -46,6 +46,7 @@ class ScimRebuildAuditTest {
     private FakeSyncRunRepository runs;
     private FakeMutationLock lock;
     private FakeAuditLog auditLog;
+    private FakeSnapshotRepository snapshots;
     private ScimRebuildUseCase useCase;
 
     @BeforeEach
@@ -55,10 +56,12 @@ class ScimRebuildAuditTest {
         runs = new FakeSyncRunRepository(NOW);
         lock = new FakeMutationLock();
         auditLog = new FakeAuditLog();
+        snapshots = new FakeSnapshotRepository();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), new FakeSnapshotRepository(),
-                new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
-                clock, new AuditRecorder(auditLog, AuditObserver.NOOP, clock));
+        useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), snapshots,
+                new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
+                        new AuditRecorder(auditLog, AuditObserver.NOOP, clock)),
+                clock);
     }
 
     private void 조직도를_심는다() {
@@ -139,8 +142,9 @@ class ScimRebuildAuditTest {
         Clock 시계 = 시계가_가는_락.clock();
         ScimRebuildUseCase 시계를_보는_재적재 = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer),
                 new FakeSnapshotRepository(),
-                new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
-                시계, new AuditRecorder(auditLog, AuditObserver.NOOP, 시계));
+                new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
+                        new AuditRecorder(auditLog, AuditObserver.NOOP, 시계)),
+                시계);
         SyncRun started = 시계를_보는_재적재.start(mode).block();
         return runs.awaitFinished(started.runId());
     }
@@ -177,5 +181,119 @@ class ScimRebuildAuditTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(시계가_가는_락.clock().instant()).isEqualTo(NOW.plus(ClockAdvancingLock.STEP));
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.at()).isEqualTo(NOW));
+    }
+
+    @Test
+    @DisplayName("tuples — 보류 목록 저장이 실패해도 지운 찌꺼기 줄을 남긴다")
+    void tuples_는_보류_목록이_실패해도_지운_줄을_남긴다() {
+        // given
+        조직도를_심는다();
+        writer.stored.add(찌꺼기);
+        state.failReplaceCutEdges = new IllegalStateException("보류 목록 저장 실패");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(auditLog.lastOf(MemberRef.user("ghost")).revoked()).containsExactly(찌꺼기);
+    }
+
+    @Test
+    @DisplayName("tuples — 스냅샷 저장이 실패해도 지운 찌꺼기 줄을 남긴다")
+    void tuples_는_스냅샷_저장이_실패해도_지운_줄을_남긴다() {
+        // given
+        조직도를_심는다();
+        writer.stored.add(찌꺼기);
+        snapshots.failSave(new IllegalStateException("스냅샷 저장 실패"));
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).startsWith("장부는 맞췄다 — 스냅샷 저장 실패");
+        assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
+                .isEqualTo(AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId())));
+        assertThat(auditLog.lastOf(MemberRef.user("ghost")).revoked()).containsExactly(찌꺼기);
+    }
+
+    @Test
+    @DisplayName("wipe — 장부 지우기가 일부 실패해 조직도를 지우지 않아도 지운 줄을 남긴다")
+    void wipe_는_장부_지우기가_일부_실패해도_지운_줄을_남긴다() {
+        // given
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+        writer.failFor(tuple -> tuple.equals(백엔드_개발본부));
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.revoked()).containsExactly(김_백엔드);
+        assertThat(김의_줄.deleted()).isFalse();
+        assertThat(auditLog.entriesOf(MemberRef.group("DEV002"))).isEmpty();
+        assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("wipe — 조직도 지우기가 도중에 실패해도 그때까지 지운 조직과 줄을 남긴다")
+    void wipe_는_조직도_지우기가_도중에_실패해도_지운_것을_남긴다() {
+        // given — 빈 조직도로 바꾸며 조직 DEV002 를 지운 뒤 끊긴다
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+        state.failReplaceWithAfter = 1;
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        AuditEntry 백엔드의_줄 = auditLog.lastOf(MemberRef.group("DEV002"));
+        assertThat(백엔드의_줄.deleted()).isTrue();
+        assertThat(백엔드의_줄.membersRemoved()).containsExactly(김);
+        assertThat(백엔드의_줄.revoked()).containsExactly(백엔드_개발본부);
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.deleted()).isFalse();
+        assertThat(김의_줄.revoked()).containsExactly(김_백엔드);
+        assertThat(state.users).containsKey("kim");
+    }
+
+    @Test
+    @DisplayName("wipe — 표지판 비우기가 실패해도 지운 직원·조직과 줄을 남긴다")
+    void wipe_는_표지판_비우기가_실패해도_지운_것을_남긴다() {
+        // given
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+        state.failClearUniqueMarkers = new IllegalStateException("표지판 비우기 실패");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(auditLog.lastOf(김).deleted()).isTrue();
+        assertThat(auditLog.lastOf(김).revoked()).containsExactly(김_백엔드);
+        assertThat(auditLog.lastOf(MemberRef.group("DEV002")).deleted()).isTrue();
+        assertThat(auditLog.lastOf(MemberRef.group("DEV001")).deleted()).isTrue();
+    }
+
+    @Test
+    @DisplayName("wipe — 보류 목록 비우기가 실패해도 지운 직원·조직과 줄을 남긴다")
+    void wipe_는_보류_목록이_실패해도_지운_것을_남긴다() {
+        // given
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+        state.failReplaceCutEdges = new IllegalStateException("보류 목록 비우기 실패");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(auditLog.lastOf(김).deleted()).isTrue();
+        assertThat(auditLog.lastOf(MemberRef.group("DEV002")).revoked()).containsExactly(백엔드_개발본부);
     }
 }

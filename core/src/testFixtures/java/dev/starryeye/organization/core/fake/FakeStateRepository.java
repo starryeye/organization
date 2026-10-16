@@ -77,6 +77,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** 설정하면 {@link #releaseUnique} 가 이 예외로 끝난다 — 놓기 실패를 흉내 낸다. */
     public volatile RuntimeException failReleaseUnique;
 
+    /** 설정하면 {@link #replaceCutEdges} 가 이 예외로 끝난다 — 보류 목록 저장 실패를 흉내 낸다. */
+    public volatile RuntimeException failReplaceCutEdges;
+
+    /** 설정하면 {@link #clearUniqueMarkers} 가 이 예외로 끝난다 — 표지판 비우기 실패를 흉내 낸다. */
+    public volatile RuntimeException failClearUniqueMarkers;
+
     /**
      * 설정하면 {@link #replaceWith(DirectorySnapshot, DirectoryChanges.Listener)} 가 변경을 이만큼 마친 뒤, 남은 변경이 있으면
      * {@code IllegalStateException} 으로 끝난다 — 도중에 끊긴 전체 교체를 흉내 낸다. 0 이면 아무것도 바꾸지 않고 실패한다. 음수면 실패하지 않는다.
@@ -267,10 +273,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
-        return Mono.fromRunnable(() -> {
-            cutEdges.clear();
-            cutEdges.addAll(edges);
-        });
+        return Mono.defer(() -> failReplaceCutEdges != null
+                ? Mono.error(failReplaceCutEdges)
+                : Mono.fromRunnable(() -> {
+                    cutEdges.clear();
+                    cutEdges.addAll(edges);
+                }));
     }
 
     @Override
@@ -313,7 +321,9 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> clearUniqueMarkers() {
-        return Mono.fromRunnable(uniqueMarkers::clear);
+        return Mono.defer(() -> failClearUniqueMarkers != null
+                ? Mono.error(failClearUniqueMarkers)
+                : Mono.fromRunnable(uniqueMarkers::clear));
     }
 
     /**

@@ -1,9 +1,7 @@
 package dev.starryeye.organization.core.usecase;
 
-import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditKind;
-import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
@@ -69,7 +67,8 @@ import java.util.stream.Collectors;
  * 스냅샷 저장과 이력은 락을 반납한 뒤에 해 그동안 SCIM 쓰기를 막지 않는다(설계 2026-10-02 §5, 점검 P8, 설계 2026-10-10 §4.4).
  *
  * <p><b>이력(설계 2026-10-10 §4.2).</b> 회차 id 로 남긴다. {@code TUPLES} 는 지운 줄만 — 쓴 줄은 중복 무시로 써 이미 있던 줄과 가를 수 없다.
- * {@code WIPE} 는 지운 직원·조직과 지운 줄 전부다.
+ * {@code WIPE} 는 지운 직원·조직과 지운 줄 전부다. 지운 줄과 지운 직원·조직은 끝나는 즉시 회차의 변경 모음에 더하고, 회차가 어떻게 끝나든 {@link SyncJobs} 가
+ * 락을 반납한 뒤 남긴다 — 도중에 실패한 재적재도 그때까지 지운 것이 남는다(설계 2026-10-15).
  *
  * <p><b>감사 이력은 지우지 않는다.</b> {@code WIPE} 도 스냅샷, 실행 이력, 변경 이력은 남긴다. 사고 뒤에 "무슨 일이 있었나"를 볼 유일한 기록인데
  * 그것까지 지우면 조사할 수단이 사라진다.
@@ -84,13 +83,6 @@ public class ScimRebuildUseCase {
     private final TupleSnapshotRepository snapshots;
     private final SyncJobs jobs;
     private final Clock clock;
-    private final AuditRecorder audit;
-
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 이력을 받는 생성자다. */
-    public ScimRebuildUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
-                              TupleSnapshotRepository snapshots, SyncJobs jobs, Clock clock) {
-        this(state, writer, scanner, snapshots, jobs, clock, AuditRecorder.NONE);
-    }
 
     /**
      * 작업 락(REBUILD)을 잡고 실행 기록(RUNNING)을 연 뒤 돌려준다. 재적재는 요청과 떼어 돈다 — 결과는 실행 기록으로 본다. 락 잡기·갱신·리스를
@@ -101,8 +93,8 @@ public class ScimRebuildUseCase {
      */
     public Mono<SyncRun> start(ScimRebuildMode mode) {
         log.warn("SCIM 재적재 요청: mode={}", mode);
-        return jobs.startLockedThen(SyncSource.SCIM, triggerFor(mode), MutationLock.LockPurpose.REBUILD,
-                run -> Mono.defer(() -> rebuild(mode, AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId()))),
+        return jobs.startLockedThen(SyncSource.SCIM, triggerFor(mode), MutationLock.LockPurpose.REBUILD, AuditKind.REBUILD,
+                (run, 기록) -> Mono.defer(() -> rebuild(mode, 기록.changes())),
                 run -> {
                 });
     }
@@ -111,9 +103,9 @@ public class ScimRebuildUseCase {
         return mode == ScimRebuildMode.WIPE ? SyncTrigger.RESET : SyncTrigger.REBUILD;
     }
 
-    /** 락 안에서 할 일을 하고 "반납 뒤 할 일"을 내놓는다 — 튜플 스냅샷 저장과 이력은 락을 반납한 뒤에 한다. */
-    private Mono<Mono<SyncOutcome>> rebuild(ScimRebuildMode mode, AuditCause cause) {
-        return mode == ScimRebuildMode.WIPE ? wipe(cause) : reloadTuples(cause);
+    /** 락 안에서 할 일을 하고 "반납 뒤 할 일"을 내놓는다 — 튜플 스냅샷 저장은 락을 반납한 뒤에 한다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다. */
+    private Mono<Mono<SyncOutcome>> rebuild(ScimRebuildMode mode, AuditChanges 기록) {
+        return mode == ScimRebuildMode.WIPE ? wipe(기록) : reloadTuples(기록);
     }
 
     // ---------- TUPLES ----------
@@ -131,7 +123,7 @@ public class ScimRebuildUseCase {
      * 장부를 맞춘 뒤 보류 목록을 버린 연결로 바꾼다 — 락 안이다. 멈춘 경우(빈 조직도)는 목록을 두고 간다. 지우기 전에 GSI 열거를 장부로 보강하고
      * (설계 2026-10-13 §4.3), 있어야 할 줄(D')과 보류 목록이 함께 보강한 조직도를 따른다 — 보강한 조직도가 순환이라 버린 연결은 장부에서도 지운다.
      */
-    private Mono<Mono<SyncOutcome>> reloadTuples(AuditCause cause) {
+    private Mono<Mono<SyncOutcome>> reloadTuples(AuditChanges 기록) {
         return state.loadAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
@@ -148,13 +140,12 @@ public class ScimRebuildUseCase {
                 return 다시.tuples();
             });
 
-            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 보강, 빈_조직도면_멈춘다)
+            return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 보강, 빈_조직도면_멈춘다, 기록::revoked)
                     .flatMap(reconciliation -> reconciliation.held()
                             ? Mono.just(Mono.just(SyncOutcome.failed(reconciliation.heldReason())))
-                            // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6).
-                            // 이력의 시각은 락 안의 일이 끝난 이때 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
+                            // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6)
                             : state.replaceCutEdges(최종.get().cutEdges())
-                                    .then(Mono.fromSupplier(() -> commitTuples(reconciliation, cause, audit.now()))));
+                                    .then(Mono.fromSupplier(() -> commitTuples(reconciliation))));
         });
     }
 
@@ -206,9 +197,9 @@ public class ScimRebuildUseCase {
     /**
      * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다.
      * <b>락을 반납한 뒤에 돈다</b>(설계 2026-10-02 §5) — SCIM 쓰기 경로는 이 스냅샷을 읽지 않는다. 저장이 실패하면 FAILED 다 — 장부는 이미 맞췄다.
-     * 저장한 뒤 지운 줄을 이력에 남긴다(설계 2026-10-10 §4.2). 이력의 시각 {@code at} 은 락 안의 일이 끝났을 때 잡은 것이다(§4.4).
+     * 지운 줄은 지우기 묶음이 끝날 때마다 이미 회차의 변경 모음에 들어 있어, 저장이 실패해도 이력에 남는다(설계 2026-10-15 §5).
      */
-    private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation, AuditCause cause, Instant at) {
+    private Mono<SyncOutcome> commitTuples(TupleReconciler.Reconciliation reconciliation) {
         return Mono.defer(() -> {
                     Instant now = clock.instant();
                     TupleSnapshot snapshot = new TupleSnapshot(
@@ -216,66 +207,64 @@ public class ScimRebuildUseCase {
                     return snapshots.save(snapshot).thenReturn(reconciliation.outcome(snapshot.id()));
                 })
                 .onErrorMap(error -> new IllegalStateException("장부는 맞췄다 — 스냅샷 저장 실패: "
-                        + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()), error))
-                .flatMap(outcome -> audit.recordRun(cause, at,
-                        new AuditChanges().revoked(reconciliation.result().deleted()).entries(), outcome));
+                        + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()), error));
     }
 
     // ---------- WIPE ----------
 
     /**
      * 있어야 할 줄이 없다(D = ∅)고 보고 장부를 비운 <b>뒤</b> 조직도를 지운다. 빈 스냅샷으로 교체하면 현재상태의 직원·조직이 전부 지워진다.
-     * 이력(지운 직원·조직과 지운 줄)은 락을 반납한 뒤에 남긴다.
+     * 지운 줄은 지우기 묶음마다, 지운 직원·조직은 하나마다 끝나는 즉시 {@code 기록} 에 더한다 — 어디서 실패해도 그때까지 지운 것이 이력에 남는다(설계 2026-10-15 §5).
      */
-    private Mono<Mono<SyncOutcome>> wipe(AuditCause cause) {
-        return TupleReconciler.reconcile(writer, scanner, Set.of()).flatMap(reconciliation -> {
-            TupleWriteResult result = reconciliation.result();
-            if (result.hasFailure()) {
-                String 멈춘_이유 = reconciliation.stopReason() == null ? "" : " — 멈춘 이유: " + reconciliation.stopReason();
-                return Mono.error(new IllegalStateException(
-                        "장부에서 %d줄을 지우지 못해 조직도를 지우지 않았다. 다시 실행하면 남은 줄부터 지운다%s"
-                                .formatted(result.failures().size(), 멈춘_이유)));
-            }
-            // 조직도와 함께 보류 목록도 비운다 — 연결의 멤버 줄이 사라졌으니 보류할 것도 없다
-            return state.replaceWith(DirectorySnapshot.empty())
-                    // GSI 열거에서 빠져 남은 대상을 장부와 표지판의 주인으로 찾아 지운다(설계 2026-10-13 §4.4, 2026-10-14 §5)
-                    .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted()))
-                    // 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)
-                    .flatMap(changes -> state.clearUniqueMarkers().thenReturn(changes))
-                    .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
-                    .doOnSuccess(changes -> log.warn(
-                            "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
-                    .map(changes -> {
-                        // 시각은 락 안에서 조직도를 지운 직후에 잡는다 — 쓰는 것은 반납한 뒤다(설계 2026-10-10 §4.4)
-                        Instant at = audit.now();
-                        return Mono.defer(() -> audit.recordRun(cause, at,
-                                new AuditChanges().directory(changes).revoked(result.deleted()).entries(),
-                                SyncOutcome.succeeded(result, null)));
-                    });
-        });
+    private Mono<Mono<SyncOutcome>> wipe(AuditChanges 기록) {
+        DirectoryChanges.Listener 변경마다 = 기록.directoryListener();
+        return TupleReconciler.reconcile(writer, scanner, Set.of(), TupleReconciler.DesiredRevision.NONE,
+                        TupleReconciler.DeleteCheck.NONE, 기록::revoked)
+                .flatMap(reconciliation -> {
+                    TupleWriteResult result = reconciliation.result();
+                    if (result.hasFailure()) {
+                        String 멈춘_이유 = reconciliation.stopReason() == null ? "" : " — 멈춘 이유: " + reconciliation.stopReason();
+                        return Mono.error(new IllegalStateException(
+                                "장부에서 %d줄을 지우지 못해 조직도를 지우지 않았다. 다시 실행하면 남은 줄부터 지운다%s"
+                                        .formatted(result.failures().size(), 멈춘_이유)));
+                    }
+                    // 조직도와 함께 보류 목록도 비운다 — 연결의 멤버 줄이 사라졌으니 보류할 것도 없다
+                    return state.replaceWith(DirectorySnapshot.empty(), 변경마다)
+                            // GSI 열거에서 빠져 남은 대상을 장부와 표지판의 주인으로 찾아 지운다(설계 2026-10-13 §4.4, 2026-10-14 §5)
+                            .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted(), 변경마다))
+                            // 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)
+                            .flatMap(changes -> state.clearUniqueMarkers().thenReturn(changes))
+                            .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
+                            .doOnSuccess(changes -> log.warn(
+                                    "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
+                            .thenReturn(Mono.just(SyncOutcome.succeeded(result, null)));
+                });
     }
 
     /**
      * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상과 <b>표지판의 주인</b> 중 방금 지운 직원·조직에 없는 것을 본 테이블에서
      * 강한 일관성으로 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다.
      * 표지판은 강한 일관성 열거라(설계 2026-10-14 §5) 어느 조직에도 없어 장부에 줄이 없는, 방금 만든 직원까지 잡는다 — 표지판을 비우기 전에 지워야
-     * IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다. 지운 것을 비교 결과에 더해 이력에 삭제로 남긴다. 확인할 것이 없으면 받은 결과를 그대로 준다 —
+     * IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다. 지운 것은 하나 지울 때마다 {@code 변경마다} 로 알려 이력에 삭제로 남기고(설계 2026-10-15 §4),
+     * 비교 결과에도 더해 돌려준다. 확인할 것이 없으면 받은 결과를 그대로 준다 —
      * 평소에는 표지판 Query 둘뿐이고 다시 읽기는 없다(주인이 모두 방금 지운 것이다).
      *
      * <p><b>"방금 지운" 은 비교 결과에서 이후가 없는 것(삭제)만이다.</b> 보이는 직원을 지우며 멤버 줄이 빠진 조직은 이름표가 그대로인 "멤버만 빠짐"
      * 비교 결과로 오는데, 그 조직이 열거에서 빠진 것이면 남아 있다 — 지워진 것으로 세면 다시 읽지 않아 조직이 남는다. 지우는 조직의 "멤버만 빠짐" 은
-     * 비교 결과에서 빼고, 나간 멤버를 삭제에 합친다. 이력이 이름표(이전 값)와 모든 멤버를 담은 삭제 한 줄로 읽는다 — 이력은 처음 이전과 마지막 이후를
-     * 비교하므로 "멤버만 빠짐" 이 앞에 남으면 이름표가 비어 보인다.
+     * 비교 결과에서 빼고, 나간 멤버를 삭제에 합친다. 이력은 이 접기에 기대지 않는다 — 변경 모음은 이름표가 그대로인 결과의 상태를 보지 않아 뒤에 온 삭제가
+     * 이름표를 남긴다(설계 2026-10-15 §5). 접기는 돌려주는 값을 정확하게 두려고 남긴다.
      */
-    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted) {
+    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
+                                                DirectoryChanges.Listener 변경마다) {
         // 표지판의 주인은 강한 일관성으로 읽는다 — 읽기가 실패하면 표지판을 비우지 않고 FAILED 다(조직도가 남아 다시 실행할 수 있다)
         return Mono.zip(state.findUniqueOwners(UniqueKind.USER_NAME).collect(Collectors.toCollection(LinkedHashSet::new)),
                         state.findUniqueOwners(UniqueKind.GROUP_EXTERNAL_ID).collect(Collectors.toCollection(LinkedHashSet::new)))
-                .flatMap(owners -> 남은_대상을_지운다(changes, deleted, owners.getT1(), owners.getT2()));
+                .flatMap(owners -> 남은_대상을_지운다(changes, deleted, owners.getT1(), owners.getT2(), 변경마다));
     }
 
     private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
-                                                Set<String> 표지판_직원, Set<String> 표지판_조직) {
+                                                Set<String> 표지판_직원, Set<String> 표지판_조직,
+                                                DirectoryChanges.Listener 변경마다) {
         Set<String> 지운_직원 = changes.users().stream()
                 .filter(diff -> diff.after() == null)
                 .map(DirectoryChanges.UserDiff::id)
@@ -316,17 +305,22 @@ public class ScimRebuildUseCase {
                 .concatMap(group -> {
                     Set<MemberRef> 나간_멤버 = new LinkedHashSet<>(먼저_나간_멤버.getOrDefault(group.id(), Set.of()));
                     나간_멤버.addAll(group.members());
+                    DirectoryChanges.GroupDiff 삭제 = new DirectoryChanges.GroupDiff(
+                            new GroupHeader(group.id(), group.externalId(), group.displayName()), null, Set.of(), 나간_멤버);
                     return state.deleteGroup(group.id(), group.members())
-                            .thenReturn(new DirectoryChanges.GroupDiff(
-                                    new GroupHeader(group.id(), group.externalId(), group.displayName()),
-                                    null, Set.of(), 나간_멤버));
+                            .then(Mono.fromRunnable(() -> 변경마다.group(삭제)))
+                            .thenReturn(삭제);
                 })
                 .collectList();
         Mono<List<DirectoryChanges.UserDiff>> 직원 = Mono.defer(() -> 볼_직원.isEmpty()
                 ? Mono.just(List.<DirectoryChanges.UserDiff>of())
                 : state.findUsers(볼_직원)
-                        .concatMap(user -> state.deleteUser(user.id())
-                                .thenReturn(new DirectoryChanges.UserDiff(user, null)))
+                        .concatMap(user -> {
+                            DirectoryChanges.UserDiff 삭제 = new DirectoryChanges.UserDiff(user, null);
+                            return state.deleteUser(user.id())
+                                    .then(Mono.fromRunnable(() -> 변경마다.user(삭제)))
+                                    .thenReturn(삭제);
+                        })
                         .collectList());
         return 조직.flatMap(groups -> 직원.map(users -> {
             if (groups.isEmpty() && users.isEmpty()) {

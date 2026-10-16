@@ -99,9 +99,8 @@ public class ScimUseCaseConfig {
                                                  RelationTupleScanner scanner,
                                                  TupleSnapshotRepository snapshots,
                                                  SyncJobs jobs,
-                                                 Clock clock,
-                                                 AuditRecorder auditRecorder) {
-        return new ScimRebuildUseCase(state, writer, scanner, snapshots, jobs, clock, auditRecorder);
+                                                 Clock clock) {
+        return new ScimRebuildUseCase(state, writer, scanner, snapshots, jobs, clock);
     }
 
     @Bean
