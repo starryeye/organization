@@ -163,7 +163,16 @@ public interface DirectoryStateRepository {
      * 돌려주는 것은 직원의 생성·이전·이후·삭제와, 조직의 이름표 이전·이후·생성·삭제, 들어오고 나간 멤버다. 같은 조직도면 빈 결과다. 이력이 이것으로
      * 조직도 변경을 남긴다.
      */
-    Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot);
+    default Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        return replaceWith(snapshot, DirectoryChanges.Listener.NONE);
+    }
+
+    /**
+     * {@link #replaceWith(DirectorySnapshot)} 와 같되, 직원·조직 하나의 저장·삭제가 끝날 때마다 그 변경으로 {@code 변경마다} 를 부른다(설계 2026-10-15
+     * §4). 도중에 실패해도 끝난 변경은 이미 알린 뒤다 — 실패한 회차의 조직도 변경도 이력에 남는다. 직원·조직 하나의 저장이 도중에 실패하면 이미 쓴 그 일부는
+     * 알리지 않는다(§8). 다 끝나면 알린 것 전부를 돌려준다. 여러 스레드에서 부를 수 있다.
+     */
+    Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다);
 
     Mono<DirectorySnapshot> loadAll();
 }

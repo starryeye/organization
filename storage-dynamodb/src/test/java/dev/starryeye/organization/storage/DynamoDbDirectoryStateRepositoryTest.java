@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
@@ -1665,5 +1666,68 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
         assertThat(meta(Keys.userPk("Kim")).get(Keys.GSI1SK).s()).isEqualTo("kim");
         assertThat(meta(Keys.groupPk("DEV")).get(Keys.GSI1SK).s()).isEqualTo("devteam");
         assertThat(changes.isEmpty()).isTrue();
+    }
+
+    /** 받은 알림을 모은다. 저장소가 단계 안에서 동시에 알리므로 스레드 안전한 목록이다. */
+    private static final class 받은_알림 implements DirectoryChanges.Listener {
+
+        final List<DirectoryChanges.UserDiff> 직원 = new CopyOnWriteArrayList<>();
+        final List<DirectoryChanges.GroupDiff> 조직 = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void user(DirectoryChanges.UserDiff diff) {
+            직원.add(diff);
+        }
+
+        @Override
+        public void group(DirectoryChanges.GroupDiff diff) {
+            조직.add(diff);
+        }
+    }
+
+    @Test
+    @DisplayName("전체 교체는 바뀐 직원·조직마다 알리고, 알린 것 전부가 돌려준 결과다")
+    void 전체_교체는_변경마다_알린다() {
+        // given
+        repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim"), "lee", 직원("lee")),
+                Map.of("DEV", 조직("DEV", "개발", MemberRef.user("kim")), "OLD", 조직("OLD", "옛 조직")))).block();
+        받은_알림 알림 = new 받은_알림();
+
+        // when — kim 은 바뀌고 lee 는 사라진다. DEV 는 바뀌고 OLD 는 사라진다
+        DirectoryChanges changes = repository.replaceWith(new DirectorySnapshot(
+                Map.of("kim", 직원("kim").withDisplayName("김철수")),
+                Map.of("DEV", 조직("DEV", "개발본부", MemberRef.user("kim")))), 알림).block();
+
+        // then
+        assertThat(알림.직원).hasSize(2).containsExactlyInAnyOrderElementsOf(changes.users());
+        assertThat(알림.조직).hasSize(2).containsExactlyInAnyOrderElementsOf(changes.groups());
+    }
+
+    @Test
+    @DisplayName("전체 교체가 도중에 실패하면 그때까지 알린 변경과 테이블이 같다 — 알리지 않은 변경은 쓰이지 않았다")
+    void 전체_교체가_도중에_실패하면_알린_것과_테이블이_같다() {
+        // given — 사라질 조직 OLD 가 있다. 직원을 쓰는 단계가 끝난 뒤, 조직을 지우는 단계에서 DynamoDB 가 실패한다
+        repository.saveGroup(조직("OLD", "옛 조직")).block();
+        DynamoDbAsyncClient 지우기에_실패하는_클라이언트 = (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("deleteItem") || method.getName().equals("batchWriteItem")) {
+                        return CompletableFuture.failedFuture(new IllegalStateException(method.getName() + " 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+        var 끊기는_저장소 = new DynamoDbDirectoryStateRepository(지우기에_실패하는_클라이언트, properties, clock);
+        받은_알림 알림 = new 받은_알림();
+
+        // when
+        assertThatThrownBy(() -> 끊기는_저장소.replaceWith(
+                new DirectorySnapshot(Map.of("kim", 직원("kim")), Map.of()), 알림).block());
+
+        // then — kim 은 쓰였고 알렸다. OLD 는 지우지 못했고 알리지 않았다
+        assertThat(알림.직원).containsExactly(new DirectoryChanges.UserDiff(null, 직원("kim")));
+        assertThat(알림.조직).isEmpty();
+        assertThat(repository.findUser("kim").block()).isNotNull();
+        assertThat(repository.findGroup("OLD").block()).isNotNull();
     }
 }

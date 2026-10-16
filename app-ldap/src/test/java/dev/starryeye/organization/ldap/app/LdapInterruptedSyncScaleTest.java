@@ -180,11 +180,11 @@ class LdapInterruptedSyncScaleTest {
             implements DirectoryStateRepository {
 
         @Override
-        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
             if (상태저장을_끊는다.get()) {
                 return Mono.error(new IllegalStateException("상태 저장 직전에 프로세스가 죽었다"));
             }
-            return 실제.replaceWith(snapshot);
+            return 실제.replaceWith(snapshot, 변경마다);
         }
 
         @Override public Mono<DirectoryUser> findUser(String userId) { return 실제.findUser(userId); }

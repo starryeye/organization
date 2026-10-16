@@ -106,16 +106,17 @@ class ScimRebuildIndexLagTest {
         /**
          * 실제 저장소처럼 숨긴 대상은 열거되지 않아 비교·삭제에서 빠지고, 끝난 뒤에도 남는다. 보이는 직원을 지우면 실제 저장소(직원을_지운다)처럼 그 직원의
          * 멤버 줄이 있던 조직의 멤버 줄도 지우고, 그 조직마다 이름표가 그대로인 "멤버만 빠짐" 비교 결과를 더한다 — 숨은 조직은 저장본에 없어 이름표가 비어 있다.
+         * "멤버만 빠짐" 도 실제 저장소처럼 그 직원을 지운 뒤에 알린다 — 그 조직의 삭제는 나중에(wipe 의 남은 대상 지우기) 온다.
          */
         @Override
-        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
             Map<String, DirectoryUser> 숨은_직원 = new LinkedHashMap<>(users);
             숨은_직원.keySet().retainAll(숨긴_직원);
             Map<String, DirectoryGroup> 숨은_조직 = new LinkedHashMap<>(groups);
             숨은_조직.keySet().retainAll(숨긴_조직);
             users.keySet().removeAll(숨긴_직원);
             groups.keySet().removeAll(숨긴_조직);
-            DirectoryChanges changes = super.replaceWith(snapshot).block();
+            DirectoryChanges changes = super.replaceWith(snapshot, 변경마다).block();
             List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>(changes.groups());
             for (DirectoryChanges.UserDiff diff : changes.users()) {
                 if (diff.after() != null) {
@@ -131,7 +132,10 @@ class ScimRebuildIndexLagTest {
                     남은_멤버.remove(지운_직원);
                     hidden.setValue(new DirectoryGroup(group.id(), group.externalId(), group.displayName(), 남은_멤버));
                     GroupHeader 이름표 = new GroupHeader(group.id(), null, null);
-                    조직변경.add(new DirectoryChanges.GroupDiff(이름표, 이름표, Set.of(), Set.of(지운_직원)));
+                    DirectoryChanges.GroupDiff 멤버만_빠짐 =
+                            new DirectoryChanges.GroupDiff(이름표, 이름표, Set.of(), Set.of(지운_직원));
+                    조직변경.add(멤버만_빠짐);
+                    변경마다.group(멤버만_빠짐);
                 }
             }
             users.putAll(숨은_직원);
