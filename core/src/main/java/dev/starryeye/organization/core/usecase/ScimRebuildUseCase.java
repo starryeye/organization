@@ -33,10 +33,8 @@ import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -233,9 +231,9 @@ public class ScimRebuildUseCase {
                             // GSI 열거에서 빠져 남은 대상을 장부와 표지판의 주인으로 찾아 지운다(설계 2026-10-13 §4.4, 2026-10-14 §5)
                             .flatMap(changes -> 남은_대상을_지운다(changes, result.deleted(), 변경마다))
                             // 표지판도 비운다 — 조직도가 비었으니 쥘 값도 없다(설계 2026-10-14 §5)
-                            .flatMap(changes -> state.clearUniqueMarkers().thenReturn(changes))
-                            .flatMap(changes -> state.replaceCutEdges(Set.of()).thenReturn(changes))
-                            .doOnSuccess(changes -> log.warn(
+                            .then(Mono.defer(state::clearUniqueMarkers))
+                            .then(Mono.defer(() -> state.replaceCutEdges(Set.of())))
+                            .doOnSuccess(ignored -> log.warn(
                                     "SCIM 조직도를 전부 비웠다. IdP 콘솔에서 전체 재프로비저닝을 실행해야 복구된다"))
                             .thenReturn(Mono.just(SyncOutcome.succeeded(result, null)));
                 });
@@ -245,16 +243,15 @@ public class ScimRebuildUseCase {
      * 조직도를 비운 뒤 남은 것을 지운다(설계 2026-10-13 §4.4). 지운 튜플의 대상과 <b>표지판의 주인</b> 중 방금 지운 직원·조직에 없는 것을 본 테이블에서
      * 강한 일관성으로 다시 확인해, 아직 있으면 조직 먼저(조직 전부를 읽은 뒤 읽은 멤버로), 그다음 직원 순으로 지운다 — GSI 열거에서 빠진, 락 직전에 만든 대상이다.
      * 표지판은 강한 일관성 열거라(설계 2026-10-14 §5) 어느 조직에도 없어 장부에 줄이 없는, 방금 만든 직원까지 잡는다 — 표지판을 비우기 전에 지워야
-     * IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다. 지운 것은 하나 지울 때마다 {@code 변경마다} 로 알려 이력에 삭제로 남기고(설계 2026-10-15 §4),
-     * 비교 결과에도 더해 돌려준다. 확인할 것이 없으면 받은 결과를 그대로 준다 —
-     * 평소에는 표지판 Query 둘뿐이고 다시 읽기는 없다(주인이 모두 방금 지운 것이다).
+     * IdP 가 같은 userName 으로 다시 POST 해도 중복이 생기지 않는다. 지운 것은 하나 지울 때마다 {@code 변경마다} 로 알려 이력에 삭제로 남긴다(설계 2026-10-15 §4).
+     * 확인할 것이 없으면 아무것도 하지 않는다 — 평소에는 표지판 Query 둘뿐이고 다시 읽기는 없다(주인이 모두 방금 지운 것이다).
      *
      * <p><b>"방금 지운" 은 비교 결과에서 이후가 없는 것(삭제)만이다.</b> 보이는 직원을 지우며 멤버 줄이 빠진 조직은 이름표가 그대로인 "멤버만 빠짐"
-     * 비교 결과로 오는데, 그 조직이 열거에서 빠진 것이면 남아 있다 — 지워진 것으로 세면 다시 읽지 않아 조직이 남는다. 지우는 조직의 "멤버만 빠짐" 은
-     * 비교 결과에서 빼고, 나간 멤버를 삭제에 합친다. 이력은 이 접기에 기대지 않는다 — 변경 모음은 이름표가 그대로인 결과의 상태를 보지 않아 뒤에 온 삭제가
-     * 이름표를 남긴다(설계 2026-10-15 §5). 접기는 돌려주는 값을 정확하게 두려고 남긴다.
+     * 비교 결과로 오는데, 그 조직이 열거에서 빠진 것이면 남아 있다 — 지워진 것으로 세면 다시 읽지 않아 조직이 남는다. 그 조직의 삭제는 지울 때 읽은 멤버만
+     * 나간 멤버로 알린다. 먼저 빠진 멤버는 "멤버만 빠짐" 으로 이미 알렸고, 변경 모음이 둘을 합친다 — 이름표가 그대로인 결과는 상태를 보지 않으므로
+     * 삭제 줄의 이름표도 남는다(설계 2026-10-15 §5).
      */
-    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
+    private Mono<Void> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
                                                 DirectoryChanges.Listener 변경마다) {
         // 표지판의 주인은 강한 일관성으로 읽는다 — 읽기가 실패하면 표지판을 비우지 않고 FAILED 다(조직도가 남아 다시 실행할 수 있다)
         return Mono.zip(state.findUniqueOwners(UniqueKind.USER_NAME).collect(Collectors.toCollection(LinkedHashSet::new)),
@@ -262,7 +259,7 @@ public class ScimRebuildUseCase {
                 .flatMap(owners -> 남은_대상을_지운다(changes, deleted, owners.getT1(), owners.getT2(), 변경마다));
     }
 
-    private Mono<DirectoryChanges> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
+    private Mono<Void> 남은_대상을_지운다(DirectoryChanges changes, Set<RelationTuple> deleted,
                                                 Set<String> 표지판_직원, Set<String> 표지판_조직,
                                                 DirectoryChanges.Listener 변경마다) {
         Set<String> 지운_직원 = changes.users().stream()
@@ -286,59 +283,32 @@ public class ScimRebuildUseCase {
         표지판_직원.stream().filter(id -> !지운_직원.contains(id)).forEach(볼_직원::add);
         표지판_조직.stream().filter(id -> !지운_조직.contains(id)).forEach(볼_조직::add);
         if (볼_직원.isEmpty() && 볼_조직.isEmpty()) {
-            return Mono.just(changes);
-        }
-        // 직원을 지우며 이미 멤버 줄이 빠진 조직의 나간 멤버 — 조직을 지울 때 삭제의 나간 멤버에 합친다
-        Map<String, Set<MemberRef>> 먼저_나간_멤버 = new LinkedHashMap<>();
-        for (DirectoryChanges.GroupDiff diff : changes.groups()) {
-            if (diff.after() != null && 볼_조직.contains(diff.id())) {
-                먼저_나간_멤버.computeIfAbsent(diff.id(), id -> new LinkedHashSet<>()).addAll(diff.removed());
-            }
+            return Mono.empty();
         }
         // 두 단계다 — 지울 조직 전부의 멤버를 먼저 읽고, 그다음 읽은 멤버로 지운다(replaceWith 와 같다). 하위 조직을 먼저 지우면 실제 저장소는 상위 조직의
         // 멤버 줄에서도 그 하위 조직을 지워, 뒤에 읽는 상위 조직은 하위 조직을 멤버로 모른다 — 이력의 나간 멤버에서 빠진다. 이미 지워진 하위 조직이 멤버로 적힌
         // 채 지워도 된다 — DeleteItem 은 없는 키에도 성공한다
-        Mono<List<DirectoryChanges.GroupDiff>> 조직 = Flux.fromIterable(볼_조직)
+        Mono<Long> 지운_조직_수 = Flux.fromIterable(볼_조직)
                 .flatMap(state::findGroup, 보강_동시성)
                 .collectList()
                 .flatMapMany(Flux::fromIterable)
-                .concatMap(group -> {
-                    Set<MemberRef> 나간_멤버 = new LinkedHashSet<>(먼저_나간_멤버.getOrDefault(group.id(), Set.of()));
-                    나간_멤버.addAll(group.members());
-                    DirectoryChanges.GroupDiff 삭제 = new DirectoryChanges.GroupDiff(
-                            new GroupHeader(group.id(), group.externalId(), group.displayName()), null, Set.of(), 나간_멤버);
-                    return state.deleteGroup(group.id(), group.members())
-                            .then(Mono.fromRunnable(() -> 변경마다.group(삭제)))
-                            .thenReturn(삭제);
-                })
-                .collectList();
-        Mono<List<DirectoryChanges.UserDiff>> 직원 = Mono.defer(() -> 볼_직원.isEmpty()
-                ? Mono.just(List.<DirectoryChanges.UserDiff>of())
+                .concatMap(group -> state.deleteGroup(group.id(), group.members())
+                        .then(Mono.fromRunnable(() -> 변경마다.group(new DirectoryChanges.GroupDiff(
+                                new GroupHeader(group.id(), group.externalId(), group.displayName()), null, Set.of(),
+                                group.members()))))
+                        .thenReturn(group.id()))
+                .count();
+        Mono<Long> 지운_직원_수 = Mono.defer(() -> 볼_직원.isEmpty()
+                ? Mono.just(0L)
                 : state.findUsers(볼_직원)
-                        .concatMap(user -> {
-                            DirectoryChanges.UserDiff 삭제 = new DirectoryChanges.UserDiff(user, null);
-                            return state.deleteUser(user.id())
-                                    .then(Mono.fromRunnable(() -> 변경마다.user(삭제)))
-                                    .thenReturn(삭제);
-                        })
-                        .collectList());
-        return 조직.flatMap(groups -> 직원.map(users -> {
-            if (groups.isEmpty() && users.isEmpty()) {
-                return changes;
+                        .concatMap(user -> state.deleteUser(user.id())
+                                .then(Mono.fromRunnable(() -> 변경마다.user(new DirectoryChanges.UserDiff(user, null))))
+                                .thenReturn(user.id()))
+                        .count());
+        return 지운_조직_수.flatMap(groups -> 지운_직원_수.doOnNext(users -> {
+            if (groups > 0 || users > 0) {
+                log.warn("GSI 열거에서 빠져 남아 있던 대상을 지웠다 — 직원 {}명, 조직 {}개. 락 직전에 만든 대상이다", users, groups);
             }
-            log.warn("GSI 열거에서 빠져 남아 있던 대상을 지웠다 — 직원 {}명, 조직 {}개. 락 직전에 만든 대상이다",
-                    users.size(), groups.size());
-            List<DirectoryChanges.UserDiff> 모든_직원 = new ArrayList<>(changes.users());
-            모든_직원.addAll(users);
-            Set<String> 지운_남은_조직 = groups.stream()
-                    .map(DirectoryChanges.GroupDiff::id)
-                    .collect(Collectors.toSet());
-            // 지운 조직의 "멤버만 빠짐" 은 삭제에 합쳤으니 뺀다
-            List<DirectoryChanges.GroupDiff> 모든_조직 = new ArrayList<>(changes.groups().stream()
-                    .filter(diff -> diff.after() == null || !지운_남은_조직.contains(diff.id()))
-                    .toList());
-            모든_조직.addAll(groups);
-            return new DirectoryChanges(모든_직원, 모든_조직);
-        }));
+        })).then();
     }
 }
