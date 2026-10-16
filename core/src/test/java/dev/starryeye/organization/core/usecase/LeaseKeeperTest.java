@@ -8,10 +8,12 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
+import reactor.test.scheduler.VirtualTimeScheduler;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -198,6 +200,74 @@ class LeaseKeeperTest {
                 .verify(Duration.ofSeconds(5));
         assertThat(취소됨).isTrue();
         assertThat(상실).containsExactly("테스트 도중 리스 상실");
+    }
+
+    /** 벽시계({@code now})만 옮길 수 있는 가상 시간 — 타이머는 가상 시간 그대로 간다. NTP 가 서버 시계를 옮기는 것을 흉내 낸다. */
+    private static final class 벽시계가_뛰는_가상시간 extends VirtualTimeScheduler {
+
+        private volatile long 옮긴_나노;
+
+        벽시계가_뛰는_가상시간() {
+            super(false);
+        }
+
+        void 벽시계를_옮긴다(Duration 만큼) {
+            옮긴_나노 += 만큼.toNanos();
+        }
+
+        @Override
+        public long now(TimeUnit unit) {
+            return super.now(unit) + unit.convert(옮긴_나노, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    @Test
+    @DisplayName("벽시계가 뒤로 가도 한도는 늘지 않는다 — 일시 오류가 이어지면 그대로 주기 두 번에 멈춘다")
+    void 벽시계가_뒤로_가도_한도는_늘지_않는다() {
+        // given — 갱신이 늘 일시 오류다. 5초에 NTP 가 시계를 한 시간 뒤로 옮긴다
+        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        lock.transientRenewFailures.set(Integer.MAX_VALUE);
+        AtomicBoolean 취소됨 = new AtomicBoolean();
+        LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
+        벽시계가_뛰는_가상시간 시간 = new 벽시계가_뛰는_가상시간();
+
+        // when, then — 벽시계로 재면 한도가 한 시간 늘어 TTL(30초)을 넘겨서도 일한다. 20초(시작 + 2×주기)에 멈춰야 한다
+        StepVerifier.withVirtualTime(() -> keeper.keep(lease, Mono.<String>never().doOnCancel(() -> 취소됨.set(true)),
+                        "테스트 도중 리스 상실"), () -> 시간, Long.MAX_VALUE)
+                .expectSubscription()
+                .thenAwait(Duration.ofSeconds(5))
+                .then(() -> 시간.벽시계를_옮긴다(Duration.ofHours(-1)))
+                .expectNoEvent(Duration.ofSeconds(14))
+                .thenAwait(Duration.ofSeconds(1))
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(LockUnavailableException.class)
+                        .hasCauseInstanceOf(TimeoutException.class)
+                        .cause().hasMessage("마지막 갱신 성공에서 갱신 주기 두 번이 지났다"))
+                .verify(Duration.ofSeconds(5));
+        assertThat(취소됨).isTrue();
+        assertThat(상실).containsExactly("테스트 도중 리스 상실");
+    }
+
+    @Test
+    @DisplayName("벽시계가 앞으로 가도 리스를 잃었다고 보지 않는다 — 갱신이 성공하면 일은 계속된다")
+    void 벽시계가_앞으로_가도_잃지_않는다() {
+        // given — 갱신은 늘 성공한다. 5초에 NTP 가 시계를 한 시간 앞으로 옮긴다
+        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
+        벽시계가_뛰는_가상시간 시간 = new 벽시계가_뛰는_가상시간();
+
+        // when, then — 벽시계로 재면 10초 갱신 때 한도가 이미 지나 거짓으로 멈춘다. 25초 걸리는 일이 끝까지 가야 한다
+        StepVerifier.withVirtualTime(() -> keeper.keep(lease, Mono.delay(Duration.ofSeconds(25)).thenReturn("끝"), "테스트"),
+                        () -> 시간, Long.MAX_VALUE)
+                .expectSubscription()
+                .thenAwait(Duration.ofSeconds(5))
+                .then(() -> 시간.벽시계를_옮긴다(Duration.ofHours(1)))
+                .thenAwait(Duration.ofSeconds(20))
+                .expectNext("끝")
+                .expectComplete()
+                .verify(Duration.ofSeconds(5));
+        assertThat(상실).isEmpty();
+        assertThat(lock.renewed.get()).isEqualTo(2);
     }
 
     @Test
