@@ -42,6 +42,7 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -701,9 +702,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * 맞춰져 있다. SCIM 재적재(ScimRebuildUseCase)는 이 메서드를 빈 스냅샷으로만 불러 비교할 것이 없다.
      *
      * <p><b>실제로 쓴 것을 돌려준다(설계 2026-10-10 §4.3).</b> 비교는 이미 손에 든 저장본({@link Stored})과 하므로 새로 읽는 것이 없다.
+     *
+     * <p><b>변경마다 알린다(설계 2026-10-15 §4).</b> 직원·조직 하나의 저장·삭제가 끝날 때마다 그 비교 결과로 {@code 변경마다} 를 부른다 — 도중에 실패해도
+     * 끝난 변경은 알린 뒤다. 단계 안에서는 동시에 쓰므로 여러 스레드에서 부른다. 직원·조직 하나의 저장이 도중에 실패하면 이미 쓴 그 일부는 알리지 않는다.
+     * 한 변경이 실패해 같은 단계의 다른 쓰기가 취소되면, 이미 반영된 그 쓰기도 알리지 않을 수 있다(설계 2026-10-15 §8).
      */
     @Override
-    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
         return Mono.zip(
                         storedIndex(Keys.USER_INDEX, this::storedUser, DirectoryUser::id),
                         storedIndex(Keys.GROUP_INDEX, this::storedGroup, GroupHeader::id))
@@ -712,14 +717,22 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                     Map<String, Stored<GroupHeader>> groups = stored.getT2();
                     Queue<DirectoryChanges.UserDiff> 직원변경 = new ConcurrentLinkedQueue<>();
                     Queue<DirectoryChanges.GroupDiff> 조직변경 = new ConcurrentLinkedQueue<>();
+                    // 끝난 변경은 곧바로 알리고, 돌려줄 결과에도 담는다
+                    Consumer<DirectoryChanges.UserDiff> 직원이_끝났다 = diff -> {
+                        직원변경.add(diff);
+                        변경마다.user(diff);
+                    };
+                    Consumer<DirectoryChanges.GroupDiff> 조직이_끝났다 = diff -> {
+                        조직변경.add(diff);
+                        변경마다.group(diff);
+                    };
 
+                    // 알림은 안쪽에서 — 바깥 flatMap 은 끝난 값을 큐에 담았다가 형제가 실패하면 버린다. 쓰기가 끝나는 즉시 알린다(설계 2026-10-15 §4)
                     Mono<Void> upsertUsers = Flux.fromIterable(snapshot.users().values())
-                            .flatMap(user -> writeUser(user, users.get(user.id())), QUERY_CONCURRENCY)
-                            .doOnNext(직원변경::add)
+                            .flatMap(user -> writeUser(user, users.get(user.id())).doOnNext(직원이_끝났다), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> upsertGroups = Flux.fromIterable(snapshot.groups().values())
-                            .flatMap(group -> writeGroup(group, groups.get(group.id())), QUERY_CONCURRENCY)
-                            .doOnNext(조직변경::add)
+                            .flatMap(group -> writeGroup(group, groups.get(group.id())).doOnNext(조직이_끝났다), QUERY_CONCURRENCY)
                             .then();
                     // 두 단계다 — 사라지는 조직 전부의 멤버를 먼저 읽고, 그다음 지운다. 하위 조직을 지우면 상위 조직의 멤버 줄(그 하위 조직)도
                     // 지우므로, 읽기와 지우기가 섞이면 상위 조직의 나간 멤버에서 하위 조직이 빠진다(비교 결과 = 실제로 쓴 것, 설계 2026-10-10 §9)
@@ -731,14 +744,14 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                             .collectList()
                             .flatMapMany(Flux::fromIterable)
                             .flatMap(diff -> deleteGroup(diff.id(), diff.removed())
-                                    .doOnSuccess(ignored -> 조직변경.add(diff)), QUERY_CONCURRENCY)
+                                    .doOnSuccess(ignored -> 조직이_끝났다.accept(diff)), QUERY_CONCURRENCY)
                             .then();
                     Mono<Void> removeStaleUsers = Flux.fromIterable(users.values())
                             .filter(user -> !snapshot.users().containsKey(user.value().id()))
                             .flatMap(user -> 직원을_지운다(user.value().id())
                                     .doOnNext(멤버였던_조직 -> {
-                                        직원변경.add(new DirectoryChanges.UserDiff(user.value(), null));
-                                        멤버였던_조직.forEach(groupId -> 조직변경.add(
+                                        직원이_끝났다.accept(new DirectoryChanges.UserDiff(user.value(), null));
+                                        멤버였던_조직.forEach(groupId -> 조직이_끝났다.accept(
                                                 멤버만_빠짐(groupId, user.value().id(), snapshot, groups)));
                                     }), QUERY_CONCURRENCY)
                             .then();

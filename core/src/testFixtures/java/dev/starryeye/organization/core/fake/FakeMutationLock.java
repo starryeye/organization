@@ -31,7 +31,7 @@ public class FakeMutationLock implements MutationLock {
     public boolean failAcquire = false;
 
     /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
-    public boolean failRenew = false;
+    public volatile boolean failRenew = false;
 
     /**
      * 남은 일시 오류 수 — 0 보다 크면 {@link #renew} 가 스로틀·네트워크 오류를 흉내 낸 {@link IllegalStateException} 으로 끝나고 하나 준다.

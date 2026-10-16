@@ -127,7 +127,7 @@ class LdapInterruptedSyncScaleTest {
 
     @Test
     @Order(1)
-    @DisplayName("L15-a. 상태 저장 직전에 끊기면 OpenFGA 만 반영되고 상태는 낡는다")
+    @DisplayName("L15-a. 상태 저장 직전에 끊기면 OpenFGA 만 반영되고 상태는 낡는다 — 쓴 권한은 이력에 남는다")
     void L15a_상태저장_직전에_끊긴다() {
         // when
         동기화한다().jsonPath("$.status").isEqualTo("FAILED");
@@ -141,6 +141,16 @@ class LdapInterruptedSyncScaleTest {
         var 상태 = state.loadAll().block(Duration.ofMinutes(1));
         assertThat(상태).isNotNull();
         assertThat(상태.users()).isEmpty();
+
+        // 상태 저장은 실패했지만 OpenFGA 에 쓴 권한은 이 회차의 이력에 남는다(설계 2026-10-15). 다음 회차(L15-b)는 "변경 없음" 이라 다시 만들지 못한다
+        client.get().uri("/admin/employees/{id}/history?limit=5", 기대.landmarks().L6직속직원()).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].cause.source").isEqualTo("LDAP")
+                .jsonPath("$.items[0].cause.kind").isEqualTo("SYNC")
+                .jsonPath("$.items[0].created").isEqualTo(false)
+                .jsonPath("$.items[0].granted").isNotEmpty()
+                .jsonPath("$.items[1]").doesNotExist();
     }
 
     @Test
@@ -180,11 +190,11 @@ class LdapInterruptedSyncScaleTest {
             implements DirectoryStateRepository {
 
         @Override
-        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
             if (상태저장을_끊는다.get()) {
                 return Mono.error(new IllegalStateException("상태 저장 직전에 프로세스가 죽었다"));
             }
-            return 실제.replaceWith(snapshot);
+            return 실제.replaceWith(snapshot, 변경마다);
         }
 
         @Override public Mono<DirectoryUser> findUser(String userId) { return 실제.findUser(userId); }

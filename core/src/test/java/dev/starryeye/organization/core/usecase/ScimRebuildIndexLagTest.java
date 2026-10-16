@@ -80,6 +80,9 @@ class ScimRebuildIndexLagTest {
         /** 조직을 읽고 지운 순서 — {@code find:<id>}, {@code delete:<id>}. 읽기가 지우기와 섞이는지 가린다. 읽는 때(구독)에 적는다. */
         final List<String> 조직_호출순서 = new ArrayList<>();
 
+        /** 설정하면 {@link #deleteUser} 가 이 예외로 끝난다 — wipe 의 남은 대상 지우기 실패를 흉내 낸다. 전체 교체의 직원 삭제에는 걸리지 않는다. */
+        volatile RuntimeException 직원_지우기_실패;
+
         @Override
         public Mono<DirectoryGroup> findGroup(String groupId) {
             return Mono.defer(() -> {
@@ -106,16 +109,17 @@ class ScimRebuildIndexLagTest {
         /**
          * 실제 저장소처럼 숨긴 대상은 열거되지 않아 비교·삭제에서 빠지고, 끝난 뒤에도 남는다. 보이는 직원을 지우면 실제 저장소(직원을_지운다)처럼 그 직원의
          * 멤버 줄이 있던 조직의 멤버 줄도 지우고, 그 조직마다 이름표가 그대로인 "멤버만 빠짐" 비교 결과를 더한다 — 숨은 조직은 저장본에 없어 이름표가 비어 있다.
+         * "멤버만 빠짐" 도 실제 저장소처럼 그 직원을 지운 뒤에 알린다 — 그 조직의 삭제는 나중에(wipe 의 남은 대상 지우기) 온다.
          */
         @Override
-        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
+        public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
             Map<String, DirectoryUser> 숨은_직원 = new LinkedHashMap<>(users);
             숨은_직원.keySet().retainAll(숨긴_직원);
             Map<String, DirectoryGroup> 숨은_조직 = new LinkedHashMap<>(groups);
             숨은_조직.keySet().retainAll(숨긴_조직);
             users.keySet().removeAll(숨긴_직원);
             groups.keySet().removeAll(숨긴_조직);
-            DirectoryChanges changes = super.replaceWith(snapshot).block();
+            DirectoryChanges changes = super.replaceWith(snapshot, 변경마다).block();
             List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>(changes.groups());
             for (DirectoryChanges.UserDiff diff : changes.users()) {
                 if (diff.after() != null) {
@@ -131,7 +135,10 @@ class ScimRebuildIndexLagTest {
                     남은_멤버.remove(지운_직원);
                     hidden.setValue(new DirectoryGroup(group.id(), group.externalId(), group.displayName(), 남은_멤버));
                     GroupHeader 이름표 = new GroupHeader(group.id(), null, null);
-                    조직변경.add(new DirectoryChanges.GroupDiff(이름표, 이름표, Set.of(), Set.of(지운_직원)));
+                    DirectoryChanges.GroupDiff 멤버만_빠짐 =
+                            new DirectoryChanges.GroupDiff(이름표, 이름표, Set.of(), Set.of(지운_직원));
+                    조직변경.add(멤버만_빠짐);
+                    변경마다.group(멤버만_빠짐);
                 }
             }
             users.putAll(숨은_직원);
@@ -142,6 +149,9 @@ class ScimRebuildIndexLagTest {
         /** 실제 저장소처럼 직원을 지우면 그 직원이 멤버인 조직의 멤버 줄도 지운다 — 조직을 먼저 지우는지 순서를 가린다. */
         @Override
         public Mono<Void> deleteUser(String userId) {
+            if (직원_지우기_실패 != null) {
+                return Mono.error(직원_지우기_실패);
+            }
             return super.deleteUser(userId).then(Mono.fromRunnable(() -> {
                 MemberRef 지운_직원 = MemberRef.user(userId);
                 groups.replaceAll((id, group) -> {
@@ -182,8 +192,9 @@ class ScimRebuildIndexLagTest {
         auditLog = new FakeAuditLog();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         useCase = new ScimRebuildUseCase(state, writer, new FakeTupleScanner(writer), new FakeSnapshotRepository(),
-                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
-                clock, new AuditRecorder(auditLog, AuditObserver.NOOP, clock));
+                new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
+                        new AuditRecorder(auditLog, AuditObserver.NOOP, clock)),
+                clock);
     }
 
     @AfterEach
@@ -480,5 +491,34 @@ class ScimRebuildIndexLagTest {
         assertThat(state.조직_호출순서).hasSize(4);
         assertThat(state.조직_호출순서.subList(0, 2)).allMatch(call -> call.startsWith("find:"));
         assertThat(state.조직_호출순서.subList(2, 4)).allMatch(call -> call.startsWith("delete:"));
+    }
+
+    @Test
+    @DisplayName("wipe — 남은 대상을 지우다 실패해도 그때까지 지운 조직은 지우기 전 이름표와 함께 이력에 남는다")
+    void wipe_는_남은_대상_지우기가_실패해도_지운_것을_남긴다() {
+        // given — lee 와 TEAM 은 GSI 에 없다. 남은 대상 중 조직 TEAM 을 지운 뒤 직원 lee 를 지우다 실패한다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("DEV002", 김);
+        조직을_심는다("TEAM", 이);
+        writer.stored.addAll(Set.of(김_백엔드, 이_팀));
+        state.숨긴_직원.add("lee");
+        state.숨긴_조직.add("TEAM");
+        state.직원_지우기_실패 = new IllegalStateException("직원 지우기 실패");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        AuditEntry 팀_줄 = auditLog.lastOf(팀);
+        assertThat(팀_줄.deleted()).isTrue();
+        assertThat(팀_줄.attributes())
+                .extracting(AttributeChange::name, AttributeChange::before, AttributeChange::after)
+                .containsExactly(tuple("externalId", "TEAM", null), tuple("displayName", "TEAM-조직", null));
+        assertThat(auditLog.lastOf(김).deleted()).isTrue();
+        AuditEntry 이의_줄 = auditLog.lastOf(이);
+        assertThat(이의_줄.deleted()).isFalse();
+        assertThat(이의_줄.revoked()).containsExactly(이_팀);
     }
 }

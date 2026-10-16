@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -60,9 +61,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      */
     static final int 연속_실패_한도 = 3;
 
-    /** 겹치는 델타의 거부({@link #batchesFor})도 던지지 않고 오류 신호로 돌려준다 — 구독할 때 배치를 짠다 */
+    /** 겹치는 델타의 거부({@link #batchesFor})도 던지지 않고 오류 신호로 돌려준다 — 구독할 때 배치를 짠다. 묶음마다 알린다(설계 2026-10-15 §4). */
     @Override
-    public Mono<TupleWriteResult> apply(TupleDelta delta) {
+    public Mono<TupleWriteResult> apply(TupleDelta delta, Consumer<TupleWriteResult> 묶음마다) {
         return Mono.defer(() -> {
             if (delta.isEmpty()) {
                 return Mono.just(TupleWriteResult.empty());
@@ -71,7 +72,18 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             List<Batch> batches = batchesFor(delta);
 
             return bootstrapper.resolveStore()
-                    .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch, properties.getRequestConcurrency()));
+                    .then(보내되_연속_실패면_멈춘다(batches, this::applyBatch, properties.getRequestConcurrency(), 묶음마다));
+        });
+    }
+
+    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
+                                                     Function<Batch, Mono<TupleWriteResult>> send) {
+        return 보내되_연속_실패면_멈춘다(batches, send, 1);
+    }
+
+    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
+                                                     Function<Batch, Mono<TupleWriteResult>> send, int 동시) {
+        return 보내되_연속_실패면_멈춘다(batches, send, 동시, 묶음 -> {
         });
     }
 
@@ -104,14 +116,14 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      *
      * <p><b>세는 것은 "한 줄도 못 살린 묶음"뿐이다(설계 2026-09-30 §6.3).</b> 거절된 묶음은 쪼개 보내므로 일부라도 반영됐으면 OpenFGA 가 죽은 것이
      * 아니다 — 셈을 처음부터 다시 한다. 인가 모델이 통째로 없어 모든 줄이 거절되면 세 묶음 뒤에 멈춘다.
+     *
+     * <p>{@code 묶음마다} 는 실제로 보낸 요청의 응답이 오는 즉시 그 결과로 불린다(설계 2026-10-15 §4) — 보내지 않은 묶음(차단기·앞 단계 실패)은 알리지 않는다.
+     * 결과를 모으는 자리({@link ResultAccumulator})가 아니라 응답 자리에서 알린다. 모으는 자리는 보낸 순서를 지키느라 먼저 끝난 묶음을 붙들어 둘 수 있어,
+     * 그 사이 취소되면 끝난 묶음을 놓친다.
      */
     static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
-                                                     Function<Batch, Mono<TupleWriteResult>> send) {
-        return 보내되_연속_실패면_멈춘다(batches, send, 1);
-    }
-
-    static Mono<TupleWriteResult> 보내되_연속_실패면_멈춘다(List<Batch> batches,
-                                                     Function<Batch, Mono<TupleWriteResult>> send, int 동시) {
+                                                     Function<Batch, Mono<TupleWriteResult>> send, int 동시,
+                                                     Consumer<TupleWriteResult> 묶음마다) {
         int 동시_수 = Math.max(1, 동시);
         return Mono.defer(() -> {
             AtomicInteger 연속_실패 = new AtomicInteger();
@@ -121,13 +133,15 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             Set<Phase> 실패한_단계 = ConcurrentHashMap.newKeySet();
             AtomicInteger 보류한_쓰기_수 = new AtomicInteger();
             // 실패는 단계별로 여기서 적는다 — 결과(TupleWriteResult)에는 단계가 없다. 거절을 쪼개다 한 줄만 남은 묶음도 실패다
+            // 알림도 여기서 한다 — 응답이 오는 즉시, 모으는 자리를 거치지 않고
             Function<Batch, Mono<TupleWriteResult>> 보내고_실패를_적는다 = batch -> send.apply(batch)
                     .doOnNext(result -> {
                         if (result.hasFailure()) {
                             실패한_단계.add(batch.단계());
                         }
-                    });
-            Function<Batch, Mono<묶음_결과>> 묶음마다 = batch -> Mono.defer(() -> {
+                    })
+                    .doOnNext(묶음마다);
+            Function<Batch, Mono<묶음_결과>> 묶음을_보낸다 = batch -> Mono.defer(() -> {
                 // 차단기가 이긴다
                 if (멈춤.get()) {
                     보내지_않은_수.incrementAndGet();
@@ -148,7 +162,7 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             return Flux.fromIterable(batches)
                     // 단계는 겹치지 않는다 — 한 단계의 묶음이 모두 끝난 뒤에야 다음 단계가 나간다. 단계 안에서만 동시에 보낸다
                     .windowUntilChanged(Batch::단계)
-                    .concatMap(같은_단계 -> 같은_단계.flatMapSequential(묶음마다, 동시_수))
+                    .concatMap(같은_단계 -> 같은_단계.flatMapSequential(묶음을_보낸다, 동시_수))
                     // 결과는 보낸 순서대로 센다. 앞 묶음을 센 뒤에야 다음 묶음이 나가므로, 멈춤 표시는 다음 묶음이 나가기 전에 선다.
                     // 실제로 보낸 것만 센다 — 보내지 않은 묶음은 셈을 올리지도 되돌리지도 않는다
                     .collect(ResultAccumulator::new, (누적기, 묶음) -> {

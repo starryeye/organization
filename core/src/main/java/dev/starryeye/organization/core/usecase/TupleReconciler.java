@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * 장부(OpenFGA store)를 있어야 할 줄 D 에 맞춘다 — 재적재의 2~3단계 (설계 2026-09-29 §3.1).
@@ -80,12 +81,20 @@ final class TupleReconciler {
         return reconcile(writer, scanner, desired, DesiredRevision.NONE, check);
     }
 
-    /**
-     * D 를 쓰고, 장부를 훑어 지울 후보를 가르고, 지우기 전에 {@code revision} 으로 D 를 다시 정한 D' 로 바꾼 뒤, {@code check} 를 거쳐 지운다.
-     * {@code check} 는 D' 와 남은 후보를 본다.
-     */
     static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
                                           Set<RelationTuple> desired, DesiredRevision revision, DeleteCheck check) {
+        return reconcile(writer, scanner, desired, revision, check, 지운_줄 -> {
+        });
+    }
+
+    /**
+     * D 를 쓰고, 장부를 훑어 지울 후보를 가르고, 지우기 전에 {@code revision} 으로 D 를 다시 정한 D' 로 바꾼 뒤, {@code check} 를 거쳐 지운다.
+     * {@code check} 는 D' 와 남은 후보를 본다. {@code 지운_줄마다} 는 지우기 묶음이 끝날 때마다 실제로 지운 줄로 불린다(설계 2026-10-15 §5) — 차단기로
+     * 멈추거나 취소돼도 끝난 묶음은 이미 알린 뒤다. 여러 스레드에서 불릴 수 있다. 쓴 줄은 알리지 않는다(이력은 재적재가 쓴 줄을 남기지 않는다).
+     */
+    static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
+                                          Set<RelationTuple> desired, DesiredRevision revision, DeleteCheck check,
+                                          Consumer<Set<RelationTuple>> 지운_줄마다) {
         return Mono.defer(() -> 쓴다(writer, desired)
                 .flatMap(written -> 훑는다(scanner, desired)
                         .flatMap(scan -> revision.revise(desired, scan.stale())
@@ -97,7 +106,7 @@ final class TupleReconciler {
                         log.warn("장부를 훑었지만 지우지 않는다: {}", hold.get());
                         return Mono.just(Reconciliation.held(revised.written(), hold.get()));
                     }
-                    return 지운다(writer, scan.stale())
+                    return 지운다(writer, scan.stale(), 지운_줄마다)
                             .map(deleted -> Reconciliation.of(revised.written(), deleted, scan.present()))
                             .onErrorResume(TupleWriteAbortedException.class,
                                     stopped -> Mono.just(Reconciliation.stopped(revised.written(), stopped, scan.present())));
@@ -164,10 +173,11 @@ final class TupleReconciler {
                 : writer.apply(TupleDelta.writeOnly(desired));
     }
 
-    private static Mono<TupleWriteResult> 지운다(RelationTupleWriter writer, Set<RelationTuple> stale) {
+    private static Mono<TupleWriteResult> 지운다(RelationTupleWriter writer, Set<RelationTuple> stale,
+                                              Consumer<Set<RelationTuple>> 지운_줄마다) {
         return stale.isEmpty()
                 ? Mono.just(TupleWriteResult.empty())
-                : writer.apply(TupleDelta.deleteOnly(stale));
+                : writer.apply(TupleDelta.deleteOnly(stale), 묶음 -> 지운_줄마다.accept(묶음.deleted()));
     }
 
     /**

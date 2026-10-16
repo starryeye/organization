@@ -77,6 +77,18 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** 설정하면 {@link #releaseUnique} 가 이 예외로 끝난다 — 놓기 실패를 흉내 낸다. */
     public volatile RuntimeException failReleaseUnique;
 
+    /** 설정하면 {@link #replaceCutEdges} 가 이 예외로 끝난다 — 보류 목록 저장 실패를 흉내 낸다. */
+    public volatile RuntimeException failReplaceCutEdges;
+
+    /** 설정하면 {@link #clearUniqueMarkers} 가 이 예외로 끝난다 — 표지판 비우기 실패를 흉내 낸다. */
+    public volatile RuntimeException failClearUniqueMarkers;
+
+    /**
+     * 설정하면 {@link #replaceWith(DirectorySnapshot, DirectoryChanges.Listener)} 가 변경을 이만큼 마친 뒤, 남은 변경이 있으면
+     * {@code IllegalStateException} 으로 끝난다 — 도중에 끊긴 전체 교체를 흉내 낸다. 0 이면 아무것도 바꾸지 않고 실패한다. 음수면 실패하지 않는다.
+     */
+    public volatile int failReplaceWithAfter = -1;
+
     /** {@link #findCutEdges} 가 불린 수 — 보류 목록을 언제 읽는지 단언한다. */
     public int findCutEdgesCalls;
 
@@ -261,10 +273,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> replaceCutEdges(Set<GroupEdge> edges) {
-        return Mono.fromRunnable(() -> {
-            cutEdges.clear();
-            cutEdges.addAll(edges);
-        });
+        return Mono.defer(() -> failReplaceCutEdges != null
+                ? Mono.error(failReplaceCutEdges)
+                : Mono.fromRunnable(() -> {
+                    cutEdges.clear();
+                    cutEdges.addAll(edges);
+                }));
     }
 
     @Override
@@ -307,7 +321,9 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> clearUniqueMarkers() {
-        return Mono.fromRunnable(uniqueMarkers::clear);
+        return Mono.defer(() -> failClearUniqueMarkers != null
+                ? Mono.error(failClearUniqueMarkers)
+                : Mono.fromRunnable(uniqueMarkers::clear));
     }
 
     /**
@@ -360,45 +376,82 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /**
      * 저장소와 같은 종류의 비교 결과를 돌려준다(설계 2026-10-10 §4.3) — 바뀐 직원·조직, 들어오고 나간 멤버, 사라진 것. 다만 사라진 직원을 지우며 그
      * 직원을 아직 멤버로 적은 조직의 멤버 줄까지 지우는 연쇄(실제 저장소의 "멤버만 빠짐")는 흉내 내지 않는다 — 그 결과는 저장소 테스트가 본다.
+     *
+     * <p>실제 저장소의 순서(직원 쓰기 → 조직 쓰기 → 사라진 조직 지우기 → 사라진 직원 지우기)로 하나씩 바꾸고, 바꿀 때마다 {@code 변경마다} 로 알린다
+     * (설계 2026-10-15 §4). {@link #failReplaceWithAfter} 로 도중에 끊을 수 있다 — 그러면 그때까지 바꾼 것만 남는다.
      */
     @Override
-    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot) {
-        List<DirectoryChanges.UserDiff> 직원변경 = new ArrayList<>();
-        snapshot.users().values().forEach(user -> {
-            DirectoryUser before = users.get(user.id());
-            if (!user.equals(before)) {
-                직원변경.add(new DirectoryChanges.UserDiff(before, user));
-            }
-        });
-        users.values().stream()
-                .filter(user -> !snapshot.users().containsKey(user.id()))
-                .forEach(user -> 직원변경.add(new DirectoryChanges.UserDiff(user, null)));
+    public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
+        return Mono.defer(() -> {
+            List<DirectoryChanges.UserDiff> 직원변경 = new ArrayList<>();
+            List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>();
+            List<Runnable> 차례 = new ArrayList<>();
+            snapshot.users().values().forEach(user -> {
+                DirectoryUser before = users.get(user.id());
+                if (!user.equals(before)) {
+                    DirectoryChanges.UserDiff diff = new DirectoryChanges.UserDiff(before, user);
+                    차례.add(() -> {
+                        users.put(user.id(), user);
+                        직원변경.add(diff);
+                        변경마다.user(diff);
+                    });
+                }
+            });
+            snapshot.groups().values().forEach(group -> {
+                DirectoryGroup before = groups.get(group.id());
+                Set<MemberRef> added = new LinkedHashSet<>(group.members());
+                Set<MemberRef> removed = new LinkedHashSet<>();
+                if (before != null) {
+                    added.removeAll(before.members());
+                    removed.addAll(before.members());
+                    removed.removeAll(group.members());
+                }
+                GroupHeader 이전 = before == null ? null : 이름표(before);
+                GroupHeader 이후 = 이름표(group);
+                if (before == null || !이후.equals(이전) || !added.isEmpty() || !removed.isEmpty()) {
+                    DirectoryChanges.GroupDiff diff = new DirectoryChanges.GroupDiff(이전, 이후, added, removed);
+                    차례.add(() -> {
+                        groups.put(group.id(), group);
+                        조직변경.add(diff);
+                        변경마다.group(diff);
+                    });
+                }
+            });
+            groups.values().stream()
+                    .filter(group -> !snapshot.groups().containsKey(group.id()))
+                    .forEach(group -> {
+                        DirectoryChanges.GroupDiff diff =
+                                new DirectoryChanges.GroupDiff(이름표(group), null, Set.of(), group.members());
+                        차례.add(() -> {
+                            groups.remove(group.id());
+                            조직변경.add(diff);
+                            변경마다.group(diff);
+                        });
+                    });
+            users.values().stream()
+                    .filter(user -> !snapshot.users().containsKey(user.id()))
+                    .forEach(user -> {
+                        DirectoryChanges.UserDiff diff = new DirectoryChanges.UserDiff(user, null);
+                        차례.add(() -> {
+                            users.remove(user.id());
+                            직원변경.add(diff);
+                            변경마다.user(diff);
+                        });
+                    });
 
-        List<DirectoryChanges.GroupDiff> 조직변경 = new ArrayList<>();
-        snapshot.groups().values().forEach(group -> {
-            DirectoryGroup before = groups.get(group.id());
-            Set<MemberRef> added = new LinkedHashSet<>(group.members());
-            Set<MemberRef> removed = new LinkedHashSet<>();
-            if (before != null) {
-                added.removeAll(before.members());
-                removed.addAll(before.members());
-                removed.removeAll(group.members());
+            for (int i = 0; i < 차례.size(); i++) {
+                if (i == failReplaceWithAfter) {
+                    return Mono.error(new IllegalStateException("replaceWith 도중 실패(테스트)"));
+                }
+                차례.get(i).run();
             }
-            GroupHeader 이전 = before == null ? null : 이름표(before);
-            GroupHeader 이후 = 이름표(group);
-            if (before == null || !이후.equals(이전) || !added.isEmpty() || !removed.isEmpty()) {
-                조직변경.add(new DirectoryChanges.GroupDiff(이전, 이후, added, removed));
-            }
+            // 다 마쳤으면 조직도를 통째로 맞춘다 — 바뀌지 않은 직원·조직의 순서까지 전과 같게 둔다
+            users.clear();
+            groups.clear();
+            users.putAll(snapshot.users());
+            groups.putAll(snapshot.groups());
+            return Mono.just(new DirectoryChanges(직원변경, 조직변경));
         });
-        groups.values().stream()
-                .filter(group -> !snapshot.groups().containsKey(group.id()))
-                .forEach(group -> 조직변경.add(new DirectoryChanges.GroupDiff(이름표(group), null, Set.of(), group.members())));
-
-        users.clear();
-        groups.clear();
-        users.putAll(snapshot.users());
-        groups.putAll(snapshot.groups());
-        return Mono.just(new DirectoryChanges(직원변경, 조직변경));
     }
 
     private static GroupHeader 이름표(DirectoryGroup group) {

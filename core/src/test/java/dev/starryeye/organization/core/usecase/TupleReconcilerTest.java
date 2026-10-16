@@ -8,8 +8,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -196,5 +198,25 @@ class TupleReconcilerTest {
         assertThat(reconciliation.held()).isTrue();
         assertThat(writer.deleted).isEmpty();
         assertThat(writer.stored).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("지우기 묶음이 끝날 때마다 지운 줄을 알린다 — 차단기로 멈춰도 끝난 것은 알린 뒤다")
+    void 지운_줄을_묶음마다_알린다() {
+        // given — 찌꺼기를 지우는 쓰기가 차단기로 멈춘다(그 전에 반영한 것은 반영됐다)
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 찌꺼기 = RelationTuple.directMember("ghost", "DEV002");
+        writer.stored.add(찌꺼기);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+        List<RelationTuple> 알린_줄 = new CopyOnWriteArrayList<>();
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(RelationTuple.directMember("kim", "DEV002")),
+                TupleReconciler.DesiredRevision.NONE, TupleReconciler.DeleteCheck.NONE, 알린_줄::addAll).block();
+
+        // then
+        assertThat(reconciliation.stopReason()).isNotNull();
+        assertThat(알린_줄).containsExactly(찌꺼기);
     }
 }
