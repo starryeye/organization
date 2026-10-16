@@ -705,6 +705,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      *
      * <p><b>변경마다 알린다(설계 2026-10-15 §4).</b> 직원·조직 하나의 저장·삭제가 끝날 때마다 그 비교 결과로 {@code 변경마다} 를 부른다 — 도중에 실패해도
      * 끝난 변경은 알린 뒤다. 단계 안에서는 동시에 쓰므로 여러 스레드에서 부른다. 직원·조직 하나의 저장이 도중에 실패하면 이미 쓴 그 일부는 알리지 않는다.
+     * 한 변경이 실패해 같은 단계의 다른 쓰기가 취소되면, 이미 반영된 그 쓰기도 알리지 않을 수 있다(§8).
      */
     @Override
     public Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다) {
