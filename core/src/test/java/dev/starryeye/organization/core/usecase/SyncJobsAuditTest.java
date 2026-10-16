@@ -172,7 +172,7 @@ class SyncJobsAuditTest {
     }
 
     @Test
-    @DisplayName("서버가 내려가 멈춘 회차도 그때까지 모은 것을 남긴다 — 종료는 이력과 기록을 마칠 때까지 기다린다")
+    @DisplayName("서버가 내려가 멈춘 회차도 그때까지 모은 것을 남긴다 — 종료는 종료 대기 한도 안에서 이력과 기록을 기다린다")
     void 서버가_내려가도_남긴다() {
         // given — 쓰기를 마치고 더 기다리는 중이다
         SyncJobs jobs = 잡스();

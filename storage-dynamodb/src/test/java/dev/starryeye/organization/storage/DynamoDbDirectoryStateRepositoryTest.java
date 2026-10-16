@@ -1705,7 +1705,7 @@ class DynamoDbDirectoryStateRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
-    @DisplayName("전체 교체가 도중에 실패하면 그때까지 알린 변경과 테이블이 같다 — 알리지 않은 변경은 쓰이지 않았다")
+    @DisplayName("전체 교체가 단계 사이에서 실패하면 그때까지 알린 변경은 모두 쓰였고, 다음 단계의 변경은 쓰지도 알리지도 않았다")
     void 전체_교체가_도중에_실패하면_알린_것과_테이블이_같다() {
         // given — 사라질 조직 OLD 가 있다. 직원을 쓰는 단계가 끝난 뒤, 조직을 지우는 단계에서 DynamoDB 가 실패한다
         repository.saveGroup(조직("OLD", "옛 조직")).block();

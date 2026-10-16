@@ -91,7 +91,7 @@ public class SyncJobs {
         this.keeper = new LeaseKeeper(lock, renewInterval, lockObserver);
         this.lockObserver = lockObserver;
         this.timeout = timeout;
-        this.audit = audit;
+        this.audit = Objects.requireNonNull(audit, "audit");
     }
 
     /**
@@ -125,7 +125,8 @@ public class SyncJobs {
      *
      * <p>회차가 값·오류·취소(기한·서버 종료·리스 상실) 무엇으로 끝나든: 락 안의 일이 끝난 때를 이력의 시각으로 잡고 → 반납하고 → 반납 뒤 할 일로 결론을
      * 정하고 → 모음을 그 결론과 함께 남기고 → 기록을 닫는다. 빈 모음은 쓰지 않는다. 이력 쓰기가 실패해도 결론은 그대로이고 메시지 앞에
-     * "감사 기록 N건 실패" 가 붙는다.
+     * "감사 기록 N건 실패" 가 붙는다. 서버 종료로 멈춘 회차도 같은 순서다 — 종료 대기({@code 종료_대기}) 안에 이력과 기록을 마치지 못하면
+     * 기록이 RUNNING 으로 남는다(설계 2026-10-15 §8).
      *
      * @param kind 남길 이력의 종류 — 일이 {@link RunAudit#kind(AuditKind)} 로 바꿀 수 있다
      */
@@ -219,6 +220,8 @@ public class SyncJobs {
      * 앱이 내려갈 때 부른다(설계 §4 "정상 종료"). 도는 작업을 멈춰 FAILED("서버 종료로 중단")로 기록하게 하고, 반납·기록을 마칠 때까지
      * 최대 {@link #종료_대기} 기다린다. 기다리지 않으면 이 뒤에 DynamoDB 클라이언트가 닫혀 기록이 RUNNING 으로 남고 락도 TTL 까지 묶인다.
      * 이 뒤에 걸린 작업은 일을 시작하지 않고 같은 사유로 끝난다.
+     * 이력을 남기는 회차는 이력을 쓴 뒤에 기록하므로, 모음이 크면 이 한도 안에 기록까지 마치지 못할 수 있다 — 그 기록은 다음 락 작업이
+     * "비정상 종료로 중단" 으로 닫는다(설계 2026-10-15 §8).
      */
     public void shutdown() {
         종료.tryEmitEmpty();

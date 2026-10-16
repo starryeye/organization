@@ -144,7 +144,7 @@ public class IncrementalSyncUseCase {
     private final Duration renewInterval;
     private final DriftObserver driftObserver;
     private final LockObserver lockObserver;
-    /** 변경 이력 — 요청이 커밋한 변경을 락을 반납한 뒤, 응답 전에 남긴다(설계 2026-10-10 §4.4). */
+    /** 변경 이력 — 요청이 실제로 한 변경을, 어떻게 끝나든 락을 반납한 뒤·응답 전에 남긴다(설계 2026-10-10 §4.4, 2026-10-15 §6). */
     private final AuditRecorder audit;
     /** 요청의 traceId — 이력의 원인 id 다(설계 2026-10-10 §4.2). */
     private final TraceIds traceIds;

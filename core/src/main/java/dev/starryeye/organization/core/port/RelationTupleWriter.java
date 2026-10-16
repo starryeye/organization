@@ -23,7 +23,8 @@ public interface RelationTupleWriter {
     /**
      * 델타를 반영하되, 쓰기 묶음 하나가 끝날 때마다 그 묶음의 결과(실제로 쓴 줄·지운 줄·실패)로 {@code 묶음마다} 를 부른다(설계 2026-10-15 §4). 차단기로
      * 멈추거나({@link TupleWriteAbortedException}) 도중에 취소돼도 끝난 묶음은 이미 알린 뒤다 — 실패한 회차·요청의 권한 변경도 이력에 남는다. 쓰고 응답을
-     * 잃은 묶음은 반영됐는지 모르므로 알리지 않는다(§8). 여러 스레드에서 부를 수 있다.
+     * 잃은 묶음은 반영됐는지 몰라 실패로 센다 — 실패만 담은 결과로 알리므로 쓴·지운 줄로는 남지 않는다(§8). 듣는 쪽은 던지지 않아야 한다.
+     * 여러 스레드에서 부를 수 있다.
      */
     Mono<TupleWriteResult> apply(TupleDelta delta, Consumer<TupleWriteResult> 묶음마다);
 }
