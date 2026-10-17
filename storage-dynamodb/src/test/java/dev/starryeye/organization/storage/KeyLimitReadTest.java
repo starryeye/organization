@@ -28,8 +28,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 한도를 넘는 키는 DynamoDB 를 부르지 않고 "없음" 이다(설계 2026-10-17 §4).
  *
- * <p>DynamoDB Local 은 키 길이를 거절하지 않아 "AWS 가 거절했다" 로는 시험할 수 없다. 대신 부르면 곧바로 실패하는 클라이언트로 저장소를 만들어, 요청을
- * 하나도 보내지 않는지를 본다.
+ * <p>DynamoDB Local 은 일부 호출만 키 길이를 거절해(GetItem·BatchGet·GSI 정렬키), 이 시험은 요청을 보내지 않는지를 본다. 부르면 곧바로 실패하는
+ * 클라이언트로 저장소를 만들어, 요청이 하나도 나가지 않음을 고정한다.
  */
 class KeyLimitReadTest extends DynamoDbTestSupport {
 

@@ -48,7 +48,7 @@ public final class ScimRouter {
     /** 본문 한도 기본값 — Spring Boot 의 {@code spring.codec.max-in-memory-size} 기본(256KB)과 같다 */
     private static final long 기본_본문_한도 = 256 * 1024;
 
-    /** 지원하지 않는 SCIM 엔드포인트 — RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
+    /** 지원하지 않는 SCIM 엔드포인트 — 지금은 Bulk 와 /Me 다. RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
     private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**");
 
     /** 있는 경로와 받는 메서드 — {@link #scimRoutes} 의 라우트와 같아야 한다. 틀린 메서드는 405 + Allow 로 알린다. */
