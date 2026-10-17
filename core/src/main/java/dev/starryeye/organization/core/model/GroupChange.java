@@ -100,6 +100,23 @@ public record GroupChange(boolean renames, String displayName,
     }
 
     /**
+     * 이 변경이 넣는 멤버 — 전체 교체면 시작 목록 전부, 그리고 넣기 연산의 멤버. 빼기 연산은 읽기라 싣지 않는다. 쓰기 한도를 보는 데 쓴다
+     * ({@link KeyValueLimits#overMembers}).
+     */
+    public Set<MemberRef> added() {
+        Set<MemberRef> refs = new LinkedHashSet<>();
+        if (replacesMembers()) {
+            refs.addAll(base);
+        }
+        for (MemberOp op : ops) {
+            if (op instanceof Add add) {
+                refs.add(add.ref());
+            }
+        }
+        return refs;
+    }
+
+    /**
      * {@code start} 에 연산을 적용하는 동안 직원·하위 조직이 같은 id 로 <b>둘 다 멤버일 수 있는</b> 채 id 빼기를 만나는 id 들 —
      * 이때만 현재상태로 종류를 물어야 한다. 넣기만 따라가므로 실제보다 넉넉하게 센다.
      */

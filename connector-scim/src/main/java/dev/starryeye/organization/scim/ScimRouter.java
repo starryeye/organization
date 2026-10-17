@@ -2,7 +2,7 @@ package dev.starryeye.organization.scim;
 
 import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.GroupGraphTooLargeException;
-import dev.starryeye.organization.core.usecase.UniqueValueTooLongException;
+import dev.starryeye.organization.core.usecase.ValueTooLongException;
 import dev.starryeye.organization.scim.dto.ScimError;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.codec.DecodingException;
@@ -48,9 +48,8 @@ public final class ScimRouter {
     /** 본문 한도 기본값 — Spring Boot 의 {@code spring.codec.max-in-memory-size} 기본(256KB)과 같다 */
     private static final long 기본_본문_한도 = 256 * 1024;
 
-    /** 지원하지 않는 SCIM 엔드포인트 — RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
-    private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**",
-            "/scim/v2/Schemas", "/scim/v2/Schemas/**", "/scim/v2/ResourceTypes", "/scim/v2/ResourceTypes/**");
+    /** 지원하지 않는 SCIM 엔드포인트 — 지금은 Bulk 와 /Me 다. RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
+    private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**");
 
     /** 있는 경로와 받는 메서드 — {@link #scimRoutes} 의 라우트와 같아야 한다. 틀린 메서드는 405 + Allow 로 알린다. */
     private static final Map<PathPattern, Set<HttpMethod>> 받는_메서드 = Map.ofEntries(
@@ -61,6 +60,10 @@ public final class ScimRouter {
             Map.entry(패턴하나("/scim/v2/Groups/.search"), Set.of(HttpMethod.POST)),
             Map.entry(패턴하나("/scim/v2/Groups/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE)),
             Map.entry(패턴하나("/scim/v2/ServiceProviderConfig"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/ResourceTypes"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/ResourceTypes/{name}"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/Schemas"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/Schemas/{id}"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2/"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2/.search"), Set.of(HttpMethod.POST)));
@@ -99,6 +102,11 @@ public final class ScimRouter {
                 .PATCH("/scim/v2/Groups/{id}", groups::patch)
                 .DELETE("/scim/v2/Groups/{id}", groups::delete)
                 .GET("/scim/v2/ServiceProviderConfig", request -> serviceProviderConfig())
+                // RFC 7644 §4 — 서버가 다루는 자원 종류와 스키마를 알린다. 단건의 이름·URN 은 대소문자를 가리지 않는다
+                .GET("/scim/v2/ResourceTypes", ScimDiscovery::resourceTypes)
+                .GET("/scim/v2/ResourceTypes/{name}", ScimDiscovery::resourceType)
+                .GET("/scim/v2/Schemas", ScimDiscovery::schemas)
+                .GET("/scim/v2/Schemas/{id}", ScimDiscovery::schema)
                 // 서버 루트 조회(여러 리소스 종류를 한꺼번에)는 지원하지 않는다 — S-1 설계 §4.6
                 .GET("/scim/v2", request -> rootQuery())
                 .GET("/scim/v2/", request -> rootQuery())
@@ -152,8 +160,8 @@ public final class ScimRouter {
         if (error instanceof GroupGraphTooLargeException tooLarge) {
             return write(HttpStatus.BAD_REQUEST, "invalidValue", tooLarge.getMessage(), null);
         }
-        // 유일 값이 표지판 키 한도를 넘는다 — 같은 요청은 다시 보내도 늘 넘으므로 영구 거절(설계 2026-10-14 §3.1)
-        if (error instanceof UniqueValueTooLongException tooLong) {
+        // 키에 들어갈 값이 한도를 넘는다(설계 2026-10-17 §3) — 같은 요청은 다시 보내도 늘 넘으므로 영구 거절(설계 2026-10-14 §3.1)
+        if (error instanceof ValueTooLongException tooLong) {
             return write(HttpStatus.BAD_REQUEST, "invalidValue", tooLong.getMessage(), null);
         }
         // 본문이 코덱의 버퍼 한도를 넘었다. DecodingException 이 감싸 오므로 그 분기보다 먼저 본다 — 400 이면 IdP 가 같은 본문을 되풀이한다(점검 M3)

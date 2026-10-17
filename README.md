@@ -600,6 +600,13 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | `/scim/v2/Users` | O | O | O | O | O | O |
 | `/scim/v2/Groups` | O | O | O | O | O | O |
 | `/scim/v2/ServiceProviderConfig` | - | O | - | - | - | - |
+| `/scim/v2/Schemas` | - | - | O (목록만, filter 403) | - | - | - |
+| `/scim/v2/Schemas/{URN}` | - | O | - | - | - | - |
+| `/scim/v2/ResourceTypes` | - | - | O (목록만, filter 403) | - | - | - |
+| `/scim/v2/ResourceTypes/{이름}` | - | O | - | - | - | - |
+
+`/Schemas`·`/ResourceTypes` 는 RFC 7644 §4 의 발견 엔드포인트다. 목록은 ListResponse 이고, 단건의 URN·이름은 대소문자를 가리지 않으며 모르면 404 다.
+`filter` 를 붙이면 403 이고 GET 외의 메서드는 405 다. 스키마에는 응답이 실제로 저장하고 돌려주는 속성만 싣는다.
 
 목록·필터 조회(RFC 7644 §3.4.2)와, 같은 조회를 본문으로 보내는 `POST /scim/v2/Users/.search`·`/Groups/.search` 를
 지원한다.
@@ -616,6 +623,12 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 잃은 POST 를 IdP 가 곧바로 다시 보내도 409 다 — 최종 일관성 GSI 를 보지 않는다.
 다른 쓰기가 차지하고 아직 저장하지 않은 값은 503(Retry-After 2초)이다 — 락을 일찍 반납했거나(리스 확인 실패 등) 표지판 놓기가 실패해 새 표지판이 남은 경우에, 그 표지판이 30초(`dynamodb.lock-ttl`)가 될 때까지다. 같은 직원·조직의 PUT·PATCH·DELETE 재시도는 곧바로 통과하고, POST 재시도는 새 아이디라 기다린다. 다른 서버가 멈췄다가 리스 만료 뒤 늦게 커밋하는 좁은 틈은 막지 못한다(쓰기 락의 커밋 틈과 같다).
 값이 1024바이트를 넘으면 400 `invalidValue` 다.
+
+**값의 한도.** 클라이언트가 보낸 값이 DynamoDB 키가 되는 자리는 길이를 본다(UTF-8 바이트). `userName`·`displayName`(직원·조직)은 소문자로 만든 뒤 1024바이트,
+`externalId` 는 값 그대로 1024바이트, 조직에 넣는 멤버 아이디는 500바이트(OpenFGA 튜플 `user` 칸이 512바이트다)이고, 넘으면 400 `invalidValue` 다. 표지판을 차지하기도 OpenFGA 를 쓰기도 전에
+거절하므로 요청은 아무것도 남기지 않는다. 빼는 멤버는 보지 않는다 — 없는 값을 빼는 PATCH 는 204 다. DynamoDB 키 한도(파티션키 2048·정렬키 1024바이트, 접두어 포함)를 넘는
+경로 아이디·필터 값으로 찾으면 DynamoDB 를 부르지 않고 없음이다 — 404 이거나 빈 목록(`totalResults` 0)이고, 관리 API 도 같다. LDAP 에서 온 긴 값은 막지 않는다. 설계:
+`docs/superpowers/specs/2026-10-17-scim-standard-rest-design.md`.
 
 필터 없는 목록은 IdP 가 페이지를 순서대로 부른다는 점을 이용해, 다음 페이지를 이어 읽을 위치를 DynamoDB 에 15분
 동안 책갈피로 둔다 — 직원이 10만 명이어도 페이지마다 100건만 읽는다. `totalResults` 는 가져오기 첫 페이지에서 센
@@ -763,7 +776,7 @@ remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. 멤버 �
 | 409 `uniqueness` | `userName`·조직 `externalId` 가 겹친다 | — |
 | 413 | 본문이 한도(기본 256KB, `spring.codec.max-in-memory-size`)를 넘었다 | 멤버를 PATCH 로 나눠 보낸다 |
 | 415 | Content-Type 이 `application/scim+json`·`application/json` 이 아니다 | — |
-| 501 | 지원하지 않는 기능 — Bulk, `/Me`, `/Schemas`, `/ResourceTypes`, 서버 루트 조회 | — |
+| 501 | 지원하지 않는 기능 — Bulk, `/Me`, 서버 루트 조회 | — |
 | 503 + `Retry-After` | 일시 장애 — 다른 SCIM 쓰기가 락을 쥐고 있다(2초), 재적재가 락을 쥐고 있다(60초), OpenFGA·DynamoDB 장애·리스 상실·쓰기 차단·부분 실패(10초) | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
 | 500 | 우리 버그 | 로그를 본다 |
 

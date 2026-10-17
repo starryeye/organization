@@ -28,6 +28,9 @@ public class StateMemberTypeResolver implements MemberTypeResolver {
 
     private static final int 로그에_남길_아이디 = 10;
 
+    /** 로그 한 줄이 본문 값 하나(수천 바이트일 수 있다)로 불어나지 않게 아이디마다 이만큼만 남긴다 */
+    private static final int 로그에_남길_글자 = 64;
+
     private final DirectoryStateRepository state;
 
     @Override
@@ -60,6 +63,10 @@ public class StateMemberTypeResolver implements MemberTypeResolver {
     }
 
     private static List<String> 앞부분(List<String> ids) {
-        return ids.subList(0, Math.min(로그에_남길_아이디, ids.size()));
+        return ids.subList(0, Math.min(로그에_남길_아이디, ids.size())).stream().map(StateMemberTypeResolver::줄인다).toList();
+    }
+
+    private static String 줄인다(String id) {
+        return id.length() > 로그에_남길_글자 ? id.substring(0, 로그에_남길_글자) + "…" : id;
     }
 }

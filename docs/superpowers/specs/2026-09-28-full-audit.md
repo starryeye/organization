@@ -161,7 +161,7 @@ IdP 는 아직 정하지 않았으므로 모든 IdP 를 같은 비중으로 본�
 | PATCH `Replace displayName` | ✅ 204(Entra 권고와 같다) | — |
 | `GET /Groups/{id}?excludedAttributes=members` | ✅ META 1건 | — |
 | `DELETE /Groups/{id}` | ✅ 204 · ⚠️ 큰 조직은 락 TTL 초과 | **C6** |
-| `GET /Schemas`, `/ResourceTypes` | ⚠️ 404 — 부재는 알려진 것, 본문이 SCIM Error 가 아님 | S7 |
+| `GET /Schemas`, `/ResourceTypes` | ⚠️ 404 — 부재는 알려진 것, 본문이 SCIM Error 가 아님 | S7 **→ 해결(2026-10-17 설계)** |
 | 503·500 에 대한 반응 | ⚠️ 문서 없음. 우리 500/503 의 뜻이 섞여 있다 | M4, S2 |
 
 **Okta**
@@ -1294,7 +1294,7 @@ AD 보안 그룹이 검색 범위에 섞여 튜플이 200만이 되면 삽입이
 | GSI1 `USER_INDEX` 쏠림(문서화된 한계) | SCIM `wipe` 도 락 안에서 같은 쏠림을 탄다(직원 10만 삭제 → 인덱스 삭제 각 10만). 10만 명 조직의 멤버 줄도 한 파티션으로 몰린다 | 코드로 셈 | — |
 | `updatedAt` 을 `meta.lastModified` 로 내보내지 않음 | Entra 문서의 **모든** 요청·응답 예시가 `meta.created`·`meta.lastModified` 를 담는다. 그 필드를 참조하는 매핑을 걸면 빈 값을 받는다 | 문서로 확인 | — |
 | 감사 로그 없음 | LDAP 개명이 삭제+생성이라 옛·새 조직을 잇는 기록이 전혀 없다(M9) | 코드로 확인 | M9 |
-| `/Schemas`·`/ResourceTypes` 없음 | 없는 경로의 404 본문이 SCIM Error 가 아니다(S7). Ping·OneLogin·JumpCloud 의 커스텀 흐름은 스키마 발견을 강제하지 않는다. Entra 는 커스텀 앱에서 스키마 발견을 지원하지 않는다 | 문서로 확인 | S7 |
+| `/Schemas`·`/ResourceTypes` 없음 | 없는 경로의 404 본문이 SCIM Error 가 아니다(S7). Ping·OneLogin·JumpCloud 의 커스텀 흐름은 스키마 발견을 강제하지 않는다. Entra 는 커스텀 앱에서 스키마 발견을 지원하지 않는다 | 문서로 확인 | S7 **→ 해결(2026-10-17 설계)** |
 | IdP 는 503 을 재시도 신호로 본다(README 전제) | **Okta 의 503 재시도 여부는 문서로 확인되지 않았다.** Okta 는 412/429/503/500 반응을 문서화하지 않고, 실패 작업의 Tasks 큐와 수동 "Retry Selected" 만 문서화한다. Entra 는 "개별 오류는 다음 주기(약 40분)에 재시도" | 미확인 | M4, S2 |
 | 잠김(lockout) 계정은 읽지 않는다(설계 `2026-09-25-ldap-disabled-account-design.md` §6 에서 의도적으로 뺌) | authentik(LOCKOUT 비트)·ConnId AD(`lockoutTime`)는 잠금을 읽는다. Keycloak 은 안 읽는다. Microsoft 문서는 `userAccountControl` 의 LOCKOUT 비트가 2003 이후 신뢰할 수 없고 `lockoutTime`/계산 속성으로 봐야 한다고 적는다. OpenLDAP 영구 잠금 특수값은 일시 잠금이 아니다(S24) | 코드·문서로 확인 | S24 |
 | `accountExpires` 를 읽는다 | 비교한 셋(Keycloak·authentik·ConnId) 어디에도 없는, 우리만의 추가 커버리지다 | 코드로 확인 | — |

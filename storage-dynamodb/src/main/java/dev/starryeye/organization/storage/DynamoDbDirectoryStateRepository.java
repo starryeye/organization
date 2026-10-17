@@ -45,10 +45,18 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * 조직·직원·멤버십의 현재 상태를 단일 테이블에 저장하는 {@link DirectoryStateRepository} 구현체.
  * 튜플이 아니라 도메인 상태만 다룬다 — 실제로 OpenFGA 에 반영된 튜플은 별도 저장소(Task 9)가 담당한다.
+ *
+ * <h2>한도를 넘는 키</h2>
+ *
+ * <p>클라이언트 값이 키가 되는 읽기는 접두어까지 붙인 최종 키를 재고({@link Keys#fitsPartitionKey}·{@link Keys#fitsSortKey}), 넘으면 DynamoDB 를
+ * 부르지 않고 없음으로 답한다. 한도를 넘는 키의 아이템은 있을 수 없고(설계 2026-10-17 §4), 실제 DynamoDB 는 그런 키를
+ * {@code ValidationException} 으로 거절해 요청이 500 이 된다. 묶음 읽기는 넘는 키만 빼고 나머지를 읽는다. 쓰기는 여기서 다시 보지 않는다 — SCIM 쓰기는
+ * core 가 먼저 막는다.
  *
  * <h2>강한 일관성</h2>
  *
@@ -131,9 +139,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      */
     @Override
     public Mono<DirectoryUser> findUser(String userId) {
+        String pk = Keys.userPk(userId);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
-                        .key(Map.of(Keys.PK, Attrs.s(Keys.userPk(userId)),
+                        .key(Map.of(Keys.PK, Attrs.s(pk),
                                 Keys.SK, Attrs.s(Keys.META)))
                         .consistentRead(true)
                         .build()))
@@ -275,7 +287,7 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
 
     /** GSI3 에서 {@code externalId} 가 같은 아이템 중 {@code prefix} 종류의 META 만 골라 PK 를 준다. */
     private Flux<String> pksByExternalId(String externalId, String prefix) {
-        if (externalId == null || externalId.isEmpty()) {
+        if (externalId == null || externalId.isEmpty() || !Keys.fitsPartitionKey(externalId)) {
             return Flux.empty();
         }
         QueryRequest request = QueryRequest.builder()
@@ -323,7 +335,11 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** <b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고. */
     @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
-        return queryPartition(Keys.groupPk(groupId))
+        String pk = Keys.groupPk(groupId);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
+        return queryPartition(pk)
                 .collectList()
                 .flatMap(items -> Mono.justOrEmpty(toGroup(groupId, items)));
     }
@@ -336,9 +352,13 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      */
     @Override
     public Mono<GroupHeader> findGroupHeader(String groupId) {
+        String pk = Keys.groupPk(groupId);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
-                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
+                        .key(Map.of(Keys.PK, Attrs.s(pk),
                                 Keys.SK, Attrs.s(Keys.META)))
                         .consistentRead(true)
                         .build()))
@@ -359,6 +379,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * {@code private} 로 좁히지 않는다.
      */
     Mono<Boolean> containsMember(String groupId, MemberRef ref) {
+        if (!fitsMemberRow(groupId, ref)) {
+            return Mono.just(false);
+        }
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(groupId)),
@@ -452,19 +475,24 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     @Override
     public Flux<DirectoryUser> findUsers(Set<String> userIds) {
         return Flux.fromIterable(userIds)
+                .filter(id -> Keys.fitsPartitionKey(Keys.userPk(id)))
                 .map(id -> Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META)))
                 .buffer(BatchRequests.GET_LIMIT)
                 .flatMap(this::batchGet, QUERY_CONCURRENCY)
                 .map(item -> toUser(Keys.parseUserPk(Attrs.str(item, Keys.PK)), item));
     }
 
-    /** 아이디마다 조직 META·직원 META 키를 함께 묻는다 — 키가 아이디의 두 배라 100개 묶음에 50명씩 든다(설계 2026-10-03 §3.1). */
+    /**
+     * 아이디마다 조직 META·직원 META 키를 함께 묻는다 — 키가 아이디의 두 배라 100개 묶음에 50명씩 든다(설계 2026-10-03 §3.1). 한도를 넘는 키는 묻지
+     * 않는다 — 접두어 길이가 달라 한 아이디의 두 키 중 하나만 넘을 수 있으니 키마다 잰다.
+     */
     @Override
     public Mono<Map<String, MemberType>> findMemberTypes(Set<String> ids) {
         return Flux.fromIterable(ids)
-                .flatMapIterable(id -> List.of(
-                        Map.of(Keys.PK, Attrs.s(Keys.groupPk(id)), Keys.SK, Attrs.s(Keys.META)),
-                        Map.of(Keys.PK, Attrs.s(Keys.userPk(id)), Keys.SK, Attrs.s(Keys.META))))
+                .flatMapIterable(id -> Stream.of(Keys.groupPk(id), Keys.userPk(id))
+                        .filter(Keys::fitsPartitionKey)
+                        .map(pk -> Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
+                        .toList())
                 .buffer(BatchRequests.GET_LIMIT)
                 .flatMap(this::batchGet, QUERY_CONCURRENCY)
                 .map(item -> Attrs.str(item, Keys.PK))
@@ -481,10 +509,12 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /**
      * 멤버 줄 키를 {@code BatchGetItem} 으로 <b>강한 일관성</b>으로 읽는다. 조직 파티션을 훑지 않으므로 읽는 양이 조직 크기가 아니라
      * 후보 수를 따른다(조직 멤버 PATCH 설계 §6). 미처리 키는 {@link BatchRequests} 규칙(5번까지, 백오프)으로 다시 읽는다.
+     * 정렬키가 한도를 넘는 후보는 멤버일 수 없어 묻지 않는다.
      */
     @Override
     public Mono<Set<MemberRef>> findMembers(String groupId, Set<MemberRef> candidates) {
         return Flux.fromIterable(candidates)
+                .filter(ref -> fitsMemberRow(groupId, ref))
                 .buffer(BatchRequests.GET_LIMIT)
                 .concatMap(chunk -> batchGet(chunk.stream()
                         .map(ref -> Map.of(
@@ -499,11 +529,20 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** 멤버 줄만, <b>정렬키만</b> 읽는다. META 와 이 조직 자신의 소속 줄({@code BELONGS_TO#})은 접두가 달라 섞이지 않는다. */
     @Override
     public Flux<MemberRef> findMemberRefs(String groupId) {
-        return querySortKeys(Keys.groupPk(groupId), Keys.MEMBER_PREFIX).map(Keys::parseMemberSk);
+        String pk = Keys.groupPk(groupId);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Flux.empty();
+        }
+        return querySortKeys(pk, Keys.MEMBER_PREFIX).map(Keys::parseMemberSk);
     }
 
     private Flux<Map<String, AttributeValue>> batchGet(List<Map<String, AttributeValue>> keys) {
         return new BatchRequests(client, properties.getTableName()).get(keys);
+    }
+
+    /** 조직 파티션키와 멤버 줄 정렬키가 모두 한도 안인가. 넘으면 그런 멤버 줄은 있을 수 없다. */
+    private static boolean fitsMemberRow(String groupId, MemberRef ref) {
+        return Keys.fitsPartitionKey(Keys.groupPk(groupId)) && Keys.fitsSortKey(Keys.memberSk(ref));
     }
 
     /** 파티션에서 정렬키가 {@code prefix} 로 시작하는 줄의 <b>정렬키만</b> 강한 일관성으로 읽는다. */
@@ -654,6 +693,9 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      */
     @Override
     public Flux<String> findGroupIdsContaining(MemberRef ref) {
+        if (!Keys.fitsPartitionKey(Keys.memberPk(ref))) {
+            return Flux.empty();
+        }
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")

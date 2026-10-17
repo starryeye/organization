@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
 import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
+import dev.starryeye.organization.core.model.KeyValueLimits;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -229,10 +230,11 @@ public class IncrementalSyncUseCase {
      * 엣지를 <b>영원히</b> 못 쓰게 되므로 더 심각하다.
      */
     public Mono<IncrementalSyncResult> upsertUser(DirectoryUser user) {
-        return withLock((lease, 기록) -> state.findUser(user.id())
-                .map(Optional::of)
-                .defaultIfEmpty(Optional.empty())
-                .flatMap(existing -> upsertUserInternal(user, existing, lease, 기록)));
+        return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(user))
+                .then(Mono.defer(() -> state.findUser(user.id())
+                        .map(Optional::of)
+                        .defaultIfEmpty(Optional.empty())
+                        .flatMap(existing -> upsertUserInternal(user, existing, lease, 기록)))));
     }
 
     /**
@@ -267,9 +269,12 @@ public class IncrementalSyncUseCase {
      *
      * <p>생성에는 "자기 자신"이 없다 — 표지판의 주인이 이 아이디여도 그 직원이 그 이름을 쥐고 있으면 409 다(같은 아이디로 다시 온 POST 가 기존 직원을
      * 덮어쓰지 않는다). 끝나면 표지판을 정리한다({@link #표지판을_정리한다}).
+     *
+     * <p>표지판보다 먼저 키에 들어갈 값(userName·displayName·externalId)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
      */
     public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
-        return withLock((lease, 기록) -> 표지판().차지한다(UniqueKind.USER_NAME, user.userName(), user.id())
+        return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(user))
+                .then(표지판().차지한다(UniqueKind.USER_NAME, user.userName(), user.id()))
                 .then(Mono.defer(() -> 표지판을_정리한다(upsertUserInternal(user, Optional.empty(), lease, 기록),
                         UniqueKind.USER_NAME, user.id(), List.of(), 값들(user.userName())))));
     }
@@ -281,16 +286,19 @@ public class IncrementalSyncUseCase {
      * 되돌렸고(퇴사자 권한 부활), 그 사이 DELETE 가 끝났으면 지운 직원을 다시 만들었다(설계 §1.1·§1.2). 계산이 던지는
      * 예외는 그대로 나오고 아무것도 쓰지 않는다. 계산 결과의 아이디는 무시하고 {@code userId} 로 저장한다 — 경로가 정본이다.
      * {@code userName} 의 키(소문자)가 바뀌면 새 이름의 표지판을 차지하고, 커밋 뒤 옛 것을 놓는다(설계 2026-10-14 §4.2).
+     *
+     * <p>표지판보다 먼저 <b>바꾼 결과</b>의 값이 키 한도를 넘는지 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
      */
     public Mono<IncrementalSyncResult> changeUser(String userId, UnaryOperator<DirectoryUser> 계산) {
         return withLock((lease, 기록) -> state.findUser(userId)
                 .flatMap(before -> {
                     DirectoryUser after = 계산.apply(before).withId(userId);
+                    Mono<Void> 한도 = 한도를_본다(KeyValueLimits.over(after));
                     Mono<IncrementalSyncResult> 일 = Mono.defer(() -> upsertUserInternal(after, Optional.of(before), lease, 기록));
                     if (!키가_다르다(UniqueKind.USER_NAME, before.userName(), after.userName())) {
-                        return 일;
+                        return 한도.then(일);
                     }
-                    return 표지판().차지한다(UniqueKind.USER_NAME, after.userName(), userId)
+                    return 한도.then(표지판().차지한다(UniqueKind.USER_NAME, after.userName(), userId))
                             .then(Mono.defer(() -> 표지판을_정리한다(일, UniqueKind.USER_NAME, userId,
                                     값들(before.userName()), 값들(before.userName(), after.userName()))));
                 }));
@@ -324,7 +332,8 @@ public class IncrementalSyncUseCase {
      * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
-        return withLock((lease, 기록) -> upsertGroupInternal(group, lease, 기록));
+        return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(이름표(group)).or(() -> KeyValueLimits.overMembers(group.members())))
+                .then(Mono.defer(() -> upsertGroupInternal(group, lease, 기록))));
     }
 
     private Mono<IncrementalSyncResult> upsertGroupInternal(DirectoryGroup group, LockLease lease, AuditChanges 기록) {
@@ -364,9 +373,12 @@ public class IncrementalSyncUseCase {
      * 조직 생성(POST). {@code externalId} 가 있으면 그 표지판을 <b>락 안에서</b> 차지한다(설계 2026-10-14 §4.3). 겹치면 {@link DirectoryConflictException}.
      * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다 — 같은 아이디·같은 {@code externalId} 로 다시 온 POST 도 409 이고 기존 조직을 덮어쓰지 않는다.
      * RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 2026-10-04 §3.2).
+     *
+     * <p>표지판보다 먼저 키에 들어갈 값(displayName·externalId·멤버 아이디)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
      */
     public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
-        return withLock((lease, 기록) -> 표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, group.externalId(), group.id())
+        return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(이름표(group)).or(() -> KeyValueLimits.overMembers(group.members())))
+                .then(표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, group.externalId(), group.id()))
                 .then(Mono.defer(() -> 표지판을_정리한다(upsertGroupInternal(group, lease, 기록),
                         UniqueKind.GROUP_EXTERNAL_ID, group.id(), List.of(), 값들(group.externalId())))));
     }
@@ -391,6 +403,9 @@ public class IncrementalSyncUseCase {
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      *
      * <p>{@code externalId} 가 바뀌면 새 값의 표지판을 먼저 차지하고(겹치면 아무것도 쓰지 않고 409), 커밋 뒤 옛 것을 놓는다(설계 2026-10-14 §4.3).
+     *
+     * <p>표지판보다 먼저 바뀐 이름표(displayName·externalId)와 <b>넣는 멤버</b>({@link GroupChange#added})의 아이디가 키 한도를 넘는지 본다 — 넘으면
+     * {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}). 빼는 멤버는 보지 않는다 — 읽기라 없는 멤버를 뺀 것과 같다.
      */
     public Mono<IncrementalSyncResult> changeGroup(String groupId, GroupChange change) {
         return withLock((lease, 기록) -> changeGroupInternal(groupId, change, lease, 기록));
@@ -401,6 +416,7 @@ public class IncrementalSyncUseCase {
         return state.findGroupHeader(groupId)
                 .flatMap(header -> {
                     GroupHeader 바뀐헤더 = change.applyTo(header);
+                    Mono<Void> 한도 = 한도를_본다(KeyValueLimits.over(바뀐헤더).or(() -> KeyValueLimits.overMembers(change.added())));
                     Mono<IncrementalSyncResult> 일 = Mono.defer(() -> 바뀌는_멤버(groupId, change).flatMap(전후 -> {
                         Set<MemberRef> 빠질것 = 차집합(전후.전(), 전후.후());
                         DirectoryGroup 전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(), 전후.전());
@@ -428,9 +444,9 @@ public class IncrementalSyncUseCase {
                                         : Mono.just(result));
                     }));
                     if (!키가_다르다(UniqueKind.GROUP_EXTERNAL_ID, header.externalId(), 바뀐헤더.externalId())) {
-                        return 일;
+                        return 한도.then(일);
                     }
-                    return 표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, 바뀐헤더.externalId(), groupId)
+                    return 한도.then(표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, 바뀐헤더.externalId(), groupId))
                             .then(Mono.defer(() -> 표지판을_정리한다(일, UniqueKind.GROUP_EXTERNAL_ID, groupId,
                                     값들(header.externalId()), 값들(header.externalId(), 바뀐헤더.externalId()))));
                 });
@@ -635,6 +651,15 @@ public class IncrementalSyncUseCase {
     }
 
     // ---------- 공통 ----------
+
+    /**
+     * 키에 들어갈 값이 쓰기 한도를 넘으면 {@link ValueTooLongException} 으로 끝난다(설계 2026-10-17 §3). <b>락 안에서, 표지판을 차지하기 전, OpenFGA 를 보기 전에</b>
+     * 부른다 — 그래서 넘는 요청은 표지판·OpenFGA·DynamoDB 어디에도 쓰지 않는다. 표지판의 길이 검사({@link UniqueMarkers#차지한다})는 저장소 포트 계약이라 남긴다.
+     */
+    private static Mono<Void> 한도를_본다(Optional<KeyValueLimits.Over> 넘음) {
+        return 넘음.<Mono<Void>>map(over -> Mono.error(new ValueTooLongException(over.attribute(), over.limitBytes())))
+                .orElseGet(Mono::empty);
+    }
 
     private UniqueMarkers 표지판() {
         return new UniqueMarkers(state, lockTtl);

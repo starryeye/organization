@@ -69,6 +69,11 @@ public class ScimException extends RuntimeException {
         return new ScimException(HttpStatus.BAD_REQUEST, "invalidValue", detail);
     }
 
+    /** RFC 7644 §3.12 — 허락되지 않은 작업이다. {@code /Schemas}·{@code /ResourceTypes} 의 {@code filter} 가 이 응답을 받는다(§4). SCIM 이 정한 scimType 은 없다. */
+    public static ScimException forbidden(String detail) {
+        return new ScimException(HttpStatus.FORBIDDEN, null, detail);
+    }
+
     /** RFC 7644 §3.12 — 서비스 제공자가 지원하지 않는 작업이다(서버 루트 조회 등). */
     public static ScimException notImplemented(String detail) {
         return new ScimException(HttpStatus.NOT_IMPLEMENTED, null, detail);

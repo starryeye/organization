@@ -48,6 +48,9 @@ import java.util.Set;
  *
  * <p><b>쓰기(§4.1).</b> 묶음 쓰기({@link BatchRequests} — 25개씩, 처리 못 한 것은 5번까지 다시 보낸다)다. 묶음 하나가 끝내 실패해도 나머지는 계속
  * 쓰고, 실패한 아이템 수를 돌려준다.
+ *
+ * <p><b>읽기.</b> 한도를 넘는 키의 아이템은 있을 수 없어 부르지 않고 없음이다(설계 2026-10-17 §4) — 실제 DynamoDB 는 그런 키를
+ * {@code ValidationException} 으로 거절한다. 대상의 파티션키({@code AUDIT#USER#<id>} 등)를 접두어까지 재서, 넘으면 빈 쪽을 답한다.
  */
 @Slf4j
 public class DynamoDbAuditLog implements AuditLog {
@@ -56,8 +59,6 @@ public class DynamoDbAuditLog implements AuditLog {
     static final int PART_BUDGET = 300_000;
 
     private static final int WRITE_CONCURRENCY = 8;
-    /** DynamoDB 정렬키 한도. 위조 커서의 시작 키가 넘으면 ValidationException(500)이 된다. */
-    private static final int MAX_SORT_KEY_BYTES = 1024;
     private static final String SCOPE_PREFIX = "AUDIT/";
     /** 한 줄의 0번 조각 정렬키 끝({@link Keys#auditSk}). 다음 쪽 커서는 늘 이 키를 가리킨다. */
     private static final String FIRST_PART_SUFFIX = "#0000";
@@ -174,6 +175,10 @@ public class DynamoDbAuditLog implements AuditLog {
     @Override
     public Mono<Page<AuditRecord>> history(MemberRef subject, String cursor, int limit) {
         String pk = Keys.auditPk(subject);
+        // 한도를 넘는 파티션키의 이력은 있을 수 없다 — 커서를 보기 전에 빈 쪽으로 답한다(설계 2026-10-17 §4)
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.just(Page.empty());
+        }
         String scope = SCOPE_PREFIX + pk;
         return Mono.defer(() -> {
             QueryRequest.Builder request = QueryRequest.builder()
@@ -248,7 +253,7 @@ public class DynamoDbAuditLog implements AuditLog {
         if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK))
                 || !pk.equals(start.get(Keys.PK).s())
                 || !start.get(Keys.SK).s().endsWith(FIRST_PART_SUFFIX)
-                || start.get(Keys.SK).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES) {
+                || !Keys.fitsSortKey(start.get(Keys.SK).s())) {
             throw new IllegalArgumentException("이 대상의 이력 커서가 아니다");
         }
         return start;
