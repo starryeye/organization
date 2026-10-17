@@ -51,21 +51,23 @@ final class ScimDiscovery {
         return 단건(request, SCHEMAS, request.pathVariable("id"), "스키마");
     }
 
-    /** 정렬 시험이 응답 DTO 와 맞대 본다 */
+    /** 정렬 시험이 응답 DTO 와 맞대 본다 — 공유 원본이 아니라 복사본이다 */
     static JsonNode userSchema() {
-        return USER_SCHEMA;
+        return USER_SCHEMA.deepCopy();
     }
 
-    /** 정렬 시험이 응답 DTO 와 맞대 본다 */
+    /** 정렬 시험이 응답 DTO 와 맞대 본다 — 공유 원본이 아니라 복사본이다 */
     static JsonNode groupSchema() {
-        return GROUP_SCHEMA;
+        return GROUP_SCHEMA.deepCopy();
     }
 
     private static Mono<ServerResponse> 목록(ServerRequest request, List<ObjectNode> 자원) {
         if (filter_있다(request)) {
             return Mono.error(filter_거절());
         }
-        var body = new ScimListResponse(List.of(ScimSchemas.LIST_RESPONSE), 자원.size(), 1, 자원.size(), List.copyOf(자원));
+        // 공유 원본이 아니라 복사본을 내보낸다 — 직렬화 쪽이 값을 바꿔도 다음 응답이 달라지지 않는다
+        var body = new ScimListResponse(List.of(ScimSchemas.LIST_RESPONSE), 자원.size(), 1, 자원.size(),
+                자원.stream().<JsonNode>map(ObjectNode::deepCopy).toList());
         return ServerResponse.ok().contentType(ScimRouter.SCIM_JSON).bodyValue(body);
     }
 
@@ -77,7 +79,7 @@ final class ScimDiscovery {
         return 자원.stream()
                 .filter(하나 -> 하나.get("id").asText().equalsIgnoreCase(아이디))
                 .findFirst()
-                .map(하나 -> ServerResponse.ok().contentType(ScimRouter.SCIM_JSON).bodyValue(하나))
+                .map(하나 -> ServerResponse.ok().contentType(ScimRouter.SCIM_JSON).bodyValue(하나.deepCopy()))
                 .orElseGet(() -> Mono.error(ScimException.notFound("없는 " + 종류 + "입니다: " + 아이디)));
     }
 
@@ -121,29 +123,38 @@ final class ScimDiscovery {
         meta.put("location", location);
     }
 
-    /** 지금 코드의 실제 동작대로다 — userName 의 유일성은 표지판이 지키고, 대소문자는 키를 소문자로 만들어 가리지 않는다 */
+    /**
+     * 지금 코드의 실제 동작대로다 — userName 의 유일성은 표지판이 지키고, 대소문자는 키를 소문자로 만들어 가리지 않는다.
+     * 속성마다 짧은 {@code description} 을 단다(RFC 7643 §7). 말은 RFC 의 예처럼 영어다.
+     */
     private static ArrayNode 직원_속성() {
         return 배열(
-                문자열("userName").put("required", true).put("uniqueness", "server"),
-                복합("name", false,
-                        문자열("formatted"), 문자열("familyName"), 문자열("givenName"),
-                        문자열("middleName"), 문자열("honorificPrefix"), 문자열("honorificSuffix")),
-                문자열("displayName"),
+                문자열("userName", "Unique name of the user, case-insensitive").put("required", true).put("uniqueness", "server"),
+                복합("name", "The components of the user's name", false,
+                        문자열("formatted", "Full name, formatted for display"),
+                        문자열("familyName", "Family name (last name)"),
+                        문자열("givenName", "Given name (first name)"),
+                        문자열("middleName", "Middle name"),
+                        문자열("honorificPrefix", "Honorific prefix, such as Ms."),
+                        문자열("honorificSuffix", "Honorific suffix, such as III")),
+                문자열("displayName", "Name of the user, suitable for display"),
                 // 한 개만 저장하고 type work·primary true 로 돌려준다
-                복합("emails", true,
-                        문자열("value"), 정규값(문자열("type"), "work"), 불리언("primary")),
-                불리언("active"));
+                복합("emails", "Email address of the user; only one is stored", true,
+                        문자열("value", "Email address"),
+                        정규값(문자열("type", "Label of the email address, always work"), "work"),
+                        불리언("primary", "Whether this is the primary email, always true")),
+                불리언("active", "Whether the user account is active"));
     }
 
     private static ArrayNode 조직_속성() {
         return 배열(
                 // POST 가 displayName 을 요구하지 않는다
-                문자열("displayName"),
+                문자열("displayName", "Name of the group, suitable for display"),
                 // display·$ref 는 돌려주지 않아 알리지 않는다. 멤버는 넣고 빼기만 하고 바꾸지 않는다.
                 // value 가 없는 멤버는 400 invalidSyntax 라 필수다(ScimMapper.memberId·ScimPatchApplier). type 은 없으면 현재 상태로 판정하므로 필수가 아니다
-                복합("members", true,
-                        문자열("value").put("required", true).put("mutability", "immutable"),
-                        정규값(문자열("type"), "User", "Group").put("mutability", "immutable")));
+                복합("members", "Members of the group, users or other groups", true,
+                        문자열("value", "Identifier of the member").put("required", true).put("mutability", "immutable"),
+                        정규값(문자열("type", "Type of the member, User or Group"), "User", "Group").put("mutability", "immutable")));
     }
 
     private static ArrayNode 배열(ObjectNode... 속성) {
@@ -155,11 +166,12 @@ final class ScimDiscovery {
     }
 
     /** 성질의 기본값 — 쓰고 읽을 수 있고(readWrite), 기본으로 돌려주고(default), 유일하지 않고(none), 필수가 아니다. */
-    private static ObjectNode 속성(String 이름, String type, boolean multiValued) {
+    private static ObjectNode 속성(String 이름, String 설명, String type, boolean multiValued) {
         ObjectNode attribute = JSON.objectNode();
         attribute.put("name", 이름);
         attribute.put("type", type);
         attribute.put("multiValued", multiValued);
+        attribute.put("description", 설명);
         attribute.put("required", false);
         if ("string".equals(type)) {
             // RFC 7643 §7 — caseExact 는 문자열 속성에만 있다
@@ -171,16 +183,16 @@ final class ScimDiscovery {
         return attribute;
     }
 
-    private static ObjectNode 문자열(String 이름) {
-        return 속성(이름, "string", false);
+    private static ObjectNode 문자열(String 이름, String 설명) {
+        return 속성(이름, 설명, "string", false);
     }
 
-    private static ObjectNode 불리언(String 이름) {
-        return 속성(이름, "boolean", false);
+    private static ObjectNode 불리언(String 이름, String 설명) {
+        return 속성(이름, 설명, "boolean", false);
     }
 
-    private static ObjectNode 복합(String 이름, boolean multiValued, ObjectNode... 하위) {
-        ObjectNode attribute = 속성(이름, "complex", multiValued);
+    private static ObjectNode 복합(String 이름, String 설명, boolean multiValued, ObjectNode... 하위) {
+        ObjectNode attribute = 속성(이름, 설명, "complex", multiValued);
         attribute.set("subAttributes", 배열(하위));
         return attribute;
     }

@@ -88,6 +88,22 @@ class StateMemberTypeResolverTest {
     }
 
     @Test
+    @DisplayName("경고에 남기는 아이디는 앞 64글자까지다 — 긴 본문 값이 로그를 불리지 않고, 짧은 아이디는 그대로다")
+    void 긴_아이디는_앞부분만_로그에_남긴다() {
+        // given
+        String 긴 = "x".repeat(2100);
+
+        // when
+        resolver.resolveAll(new LinkedHashSet<>(List.of(긴, "ghost"))).block();
+
+        // then
+        assertThat(로그.list).filteredOn(event -> event.getLevel() == Level.WARN).singleElement()
+                .extracting(ILoggingEvent::getFormattedMessage).asString()
+                .contains("x".repeat(64) + "…", "ghost")
+                .doesNotContain("x".repeat(65));
+    }
+
+    @Test
     @DisplayName("판정할 아이디가 없으면 저장소를 읽지 않는다")
     void 비면_읽지_않는다() {
         // when

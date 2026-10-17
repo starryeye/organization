@@ -29,7 +29,7 @@ class KeyValueLimitsTest {
         // when
         var 직원_결과 = KeyValueLimits.over(직원(한도값, 한도값, 한도값));
         var 조직_결과 = KeyValueLimits.over(조직(한도값, 한도값));
-        var 멤버_결과 = KeyValueLimits.overMembers(Set.of(MemberRef.user("u".repeat(1000))));
+        var 멤버_결과 = KeyValueLimits.overMembers(Set.of(MemberRef.user("u".repeat(500))));
 
         // then
         assertThat(직원_결과).isEmpty();
@@ -52,8 +52,8 @@ class KeyValueLimitsTest {
                 .contains(new KeyValueLimits.Over("displayName", 한도));
         assertThat(KeyValueLimits.over(조직("개발", 넘침)))
                 .contains(new KeyValueLimits.Over("externalId", 한도));
-        assertThat(KeyValueLimits.overMembers(Set.of(MemberRef.user("u".repeat(1001)))))
-                .contains(new KeyValueLimits.Over("members", 1000));
+        assertThat(KeyValueLimits.overMembers(Set.of(MemberRef.user("u".repeat(501)))))
+                .contains(new KeyValueLimits.Over("members", 500));
     }
 
     @Test
@@ -69,14 +69,14 @@ class KeyValueLimitsTest {
     }
 
     @Test
-    @DisplayName("멤버 가운데 하나라도 아이디가 1000바이트를 넘으면 members 를 준다")
+    @DisplayName("멤버 가운데 하나라도 아이디가 500바이트를 넘으면 members 를 준다")
     void 멤버_하나라도_넘으면_members_를_준다() {
         // when
         var 결과 = KeyValueLimits.overMembers(Set.of(
-                MemberRef.user("kim"), MemberRef.group("g".repeat(1001))));
+                MemberRef.user("kim"), MemberRef.group("g".repeat(501))));
 
         // then
-        assertThat(결과).contains(new KeyValueLimits.Over("members", 1000));
+        assertThat(결과).contains(new KeyValueLimits.Over("members", 500));
     }
 
     @Test

@@ -128,7 +128,7 @@ class IncrementalSyncKeyLimitTest {
     }
 
     @Test
-    @DisplayName("아이디가 1000바이트를 넘는 멤버를 넣는 조직 변경은 아무것도 쓰지 않는다")
+    @DisplayName("아이디가 500바이트를 넘는 멤버를 넣는 조직 변경은 아무것도 쓰지 않는다")
     void 긴_멤버를_넣는_조직_변경은_아무것도_쓰지_않는다() {
         // given
         state.saveUser(직원("kim")).block();
@@ -136,21 +136,21 @@ class IncrementalSyncKeyLimitTest {
         openFga를_상태와_맞춘다();
         저장상태 전 = 지금_상태();
         GroupChange 변경 = GroupChange.delta().reidentified("ext-NEW")
-                .adding(Set.of(MemberRef.user("u".repeat(1001))));
+                .adding(Set.of(MemberRef.user("u".repeat(501))));
 
         // when, then
         넘어서_아무것도_쓰지_않았다(() -> useCase.changeGroup("DEV", 변경).block(), "members", 전);
     }
 
     @Test
-    @DisplayName("아이디가 1000바이트를 넘는 멤버로 조직을 통째로 교체해도 아무것도 쓰지 않는다")
+    @DisplayName("아이디가 500바이트를 넘는 멤버로 조직을 통째로 교체해도 아무것도 쓰지 않는다")
     void 긴_멤버로_교체하는_조직_변경은_아무것도_쓰지_않는다() {
         // given
         state.saveUser(직원("kim")).block();
         state.saveGroup(new DirectoryGroup("DEV", "ext-DEV", "개발", Set.of(김))).block();
         openFga를_상태와_맞춘다();
         저장상태 전 = 지금_상태();
-        GroupChange 교체 = GroupChange.replacement("ext-NEW", "개발", Set.of(MemberRef.group("g".repeat(1001))));
+        GroupChange 교체 = GroupChange.replacement("ext-NEW", "개발", Set.of(MemberRef.group("g".repeat(501))));
 
         // when, then
         넘어서_아무것도_쓰지_않았다(() -> useCase.changeGroup("DEV", 교체).block(), "members", 전);
@@ -165,7 +165,7 @@ class IncrementalSyncKeyLimitTest {
         openFga를_상태와_맞춘다();
 
         // when
-        useCase.changeGroup("DEV", GroupChange.delta().removingId("u".repeat(1001))).block();
+        useCase.changeGroup("DEV", GroupChange.delta().removingId("u".repeat(501))).block();
 
         // then
         assertThat(state.groups.get("DEV").members()).containsExactly(김);
@@ -201,7 +201,7 @@ class IncrementalSyncKeyLimitTest {
         // given
         state.saveUser(직원("kim")).block();
         저장상태 전 = 지금_상태();
-        DirectoryGroup 긴 = new DirectoryGroup("DEV", "ext-DEV", "개발", Set.of(김, MemberRef.user("u".repeat(1001))));
+        DirectoryGroup 긴 = new DirectoryGroup("DEV", "ext-DEV", "개발", Set.of(김, MemberRef.user("u".repeat(501))));
 
         // when, then
         넘어서_아무것도_쓰지_않았다(() -> useCase.upsertGroup(긴).block(), "members", 전);

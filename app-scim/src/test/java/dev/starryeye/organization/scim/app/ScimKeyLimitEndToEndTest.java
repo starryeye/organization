@@ -131,7 +131,7 @@ class ScimKeyLimitEndToEndTest {
     @Test
     @DisplayName("1025바이트 표시명으로 직원을 만들면 400 invalidValue 이고 detail 에 displayName 이 있다")
     void 긴_표시명의_직원_생성은_400이다() {
-        // given, when, then
+        // given, when
         client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
@@ -142,6 +142,15 @@ class ScimKeyLimitEndToEndTest {
                 .expectBody()
                 .jsonPath("$.scimType").isEqualTo("invalidValue")
                 .jsonPath("$.detail").value(d -> assertThat((String) d).contains("displayName"));
+
+        // then — 같은 userName 으로 보통 표시명의 직원을 다시 만들면 201 이다: 400 이 userName 표지판을 남기지 않았다
+        client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "userName":"long-display-kim","displayName":"보통 표시명","active":true}
+                        """)
+                .exchange()
+                .expectStatus().isCreated();
     }
 
     @Test
@@ -169,9 +178,10 @@ class ScimKeyLimitEndToEndTest {
     }
 
     @Test
-    @DisplayName("1001바이트 멤버가 섞인 조직 PUT 은 400 invalidValue 이고 멤버는 그대로다")
+    @DisplayName("2100바이트 멤버가 섞인 조직 PUT 은 400 invalidValue 이고 detail 에 members 가 있으며 멤버는 그대로다")
     void 긴_멤버가_섞인_교체는_400이다() {
-        // given
+        // given — type 없는 긴 아이디는 본문 값이라 경로 한도에 걸리지 않고, 멤버 종류를 찾는 BatchGet 까지 닿는다.
+        // 읽기 가드가 없으면 DynamoDB Local 이 긴 BatchGet 키를 거절해 500 이 된다
         String 직원 = 직원을_만든다("member-put-kim");
         String 조직 = 조직을_만든다("member-put-org", 직원);
 
@@ -181,11 +191,12 @@ class ScimKeyLimitEndToEndTest {
                         {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
                          "displayName":"member-put-org",
                          "members":[{"value":"%s"},{"value":"%s"}]}
-                        """.formatted(직원, "u".repeat(1001)))
+                        """.formatted(직원, 긴_값))
                 .exchange()
                 .expectStatus().isBadRequest()
                 .expectBody()
-                .jsonPath("$.scimType").isEqualTo("invalidValue");
+                .jsonPath("$.scimType").isEqualTo("invalidValue")
+                .jsonPath("$.detail").value(d -> assertThat((String) d).contains("members"));
 
         // then
         assertThat(멤버들(조직)).containsExactly(직원);

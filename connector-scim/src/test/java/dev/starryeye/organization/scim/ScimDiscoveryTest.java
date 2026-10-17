@@ -1,5 +1,7 @@
 package dev.starryeye.organization.scim;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakePageBookmarkRepository;
 import dev.starryeye.organization.core.fake.FakeQueryRepository;
@@ -17,7 +19,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * {@code /Schemas}·{@code /ResourceTypes} 가 RFC 7644 §4 대로 답하는지 본다(설계 2026-10-17 §5).
@@ -169,6 +174,55 @@ class ScimDiscoveryTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.totalResults").isEqualTo(2)
+                // count=1 을 받았다면 한 건만 담긴다 — 둘 다 담겨야 페이지 파라미터를 무시한 것이다
+                .jsonPath("$.itemsPerPage").isEqualTo(2)
+                .jsonPath("$.Resources").value(자원 -> assertThat((List<?>) 자원).hasSize(2))
                 .jsonPath("$.Resources[0].attributes").exists();
+    }
+
+    @Test
+    @DisplayName("속성과 하위 속성마다 description 이 있다 — RFC 7643 §7, userName 도 그렇다")
+    void 속성마다_description_이_있다() {
+        // given
+        List<String> 설명_없는_속성 = new ArrayList<>();
+
+        // when
+        JsonNode 목록 = client.get().uri("/scim/v2/Schemas").exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class).returnResult().getResponseBody();
+        목록.get("Resources").forEach(schema -> 설명_없는_속성을_모은다(schema.get("attributes"), schema.get("name").asText(), 설명_없는_속성));
+
+        // then
+        assertThat(설명_없는_속성).isEmpty();
+        JsonNode userName = 목록.get("Resources").get(0).get("attributes").get(0);
+        assertThat(userName.get("name").asText()).isEqualTo("userName");
+        assertThat(userName.get("description").asText()).isNotBlank();
+    }
+
+    @Test
+    @DisplayName("스키마 접근자가 준 값을 바꿔도 다음 응답은 그대로다 — 공유 원본이 아니라 복사본을 준다")
+    void 접근자는_복사본을_준다() {
+        // given
+        ((ObjectNode) ScimDiscovery.userSchema()).put("name", "바뀜");
+        ((ObjectNode) ScimDiscovery.groupSchema()).put("name", "바뀜");
+
+        // when, then
+        assertThat(ScimDiscovery.userSchema().get("name").asText()).isEqualTo("User");
+        assertThat(ScimDiscovery.groupSchema().get("name").asText()).isEqualTo("Group");
+        client.get().uri("/scim/v2/Schemas/" + ScimSchemas.USER).exchange()
+                .expectStatus().isOk()
+                .expectBody().jsonPath("$.name").isEqualTo("User");
+    }
+
+    private static void 설명_없는_속성을_모은다(JsonNode attributes, String 경로, List<String> 모음) {
+        attributes.forEach(attribute -> {
+            String 이름 = 경로 + "." + attribute.get("name").asText();
+            if (!attribute.hasNonNull("description") || attribute.get("description").asText().isBlank()) {
+                모음.add(이름);
+            }
+            if (attribute.has("subAttributes")) {
+                설명_없는_속성을_모은다(attribute.get("subAttributes"), 이름, 모음);
+            }
+        });
     }
 }

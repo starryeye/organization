@@ -13,18 +13,23 @@ import java.util.Optional;
  *   <li>{@code userName}·{@code displayName} — 키에는 {@code Locale.ROOT} 소문자가 들어가므로 <b>소문자로 만든 뒤</b> 잰다. 소문자로 바꾸면
  *       바이트가 늘 수 있다(U+0130 은 2에서 3바이트).</li>
  *   <li>{@code externalId} — 값 그대로 키가 된다. 공백뿐인 값도 잰다(표지판은 건너뛰지만 직원 GSI3 파티션키에는 그대로 들어간다).</li>
- *   <li>넣는 멤버의 아이디 — 멤버 줄 정렬키 {@code MEMBER#GROUP#<id>} 가 1024바이트라 접두어를 빼고 {@value #MAX_MEMBER_ID_BYTES}바이트다.</li>
+ *   <li>넣는 멤버의 아이디 — 두 곳의 한도 가운데 작은 쪽이다. 멤버 줄 정렬키 {@code MEMBER#GROUP#<id>} 는 1024바이트라 아이디가 1011바이트까지, OpenFGA 튜플의
+ *       {@code user} 칸({@code user:<id>} / {@code group:<id>})은 512바이트라 506바이트까지다. 작은 쪽을 내림해 {@value #MAX_MEMBER_ID_BYTES}바이트다.</li>
  * </ul>
  *
  * <p>없는({@code null}) 값은 넘지 않는다. 읽기 쪽 한도는 저장소의 몫이다(설계 §4).
  */
 public final class KeyValueLimits {
 
-    /** 정렬키에 들어가는 값의 한도 — 표지판 키 한도와 같다. */
+    /** 키(정렬키·색인 파티션키)에 들어가는 값의 한도 — 표지판 키 한도와 같다. */
     public static final int MAX_INDEXED_BYTES = UniqueKind.MAX_KEY_BYTES;
 
-    /** 멤버 줄 정렬키 {@code MEMBER#GROUP#<id>}(1024)에서 접두어를 뺀 아이디의 한도. */
-    public static final int MAX_MEMBER_ID_BYTES = 1000;
+    /**
+     * 멤버 아이디의 한도 — 두 곳의 한도 가운데 작은 쪽을 내림한 값이다. DynamoDB 멤버 줄 정렬키 {@code MEMBER#GROUP#<id>} 는 1024바이트라
+     * 아이디가 1011바이트까지 들어간다. OpenFGA 튜플의 {@code user} 칸은 512바이트라(실제 OpenFGA 로 확인했다) {@code user:<id>} 면 507바이트,
+     * {@code group:<id>} 면 506바이트까지다. 작은 쪽인 506이 이기고, 500으로 내린다.
+     */
+    public static final int MAX_MEMBER_ID_BYTES = 500;
 
     /** 한도를 넘은 속성과 그 한도. */
     public record Over(String attribute, int limitBytes) {
