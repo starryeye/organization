@@ -40,7 +40,7 @@ final class UniqueMarkers {
     /**
      * {@code 주인} 이 {@code 값} 을 쓰도록 표지판을 차지한다(§4.1). 값이 없거나 비면 아무것도 하지 않는다. 남은 표지판의 주인이 그 값을 쥐고 있으면
      * {@link DirectoryConflictException}(409)이고 — 주인이 나여도 그렇다(생성에는 자기 자신이 없다) — 주인이 나면 차지한 것으로 본다(락 TTL 이 지난
-     * 내 표지판은 시각을 새로 쓴다). 락 TTL 이 지난 남의 표지판은 넘겨받고, 그 밖이면 {@link TemporaryFailureException}(503)이다. 키가 한도를 넘으면 {@link UniqueValueTooLongException}(400)이다.
+     * 내 표지판은 시각을 새로 쓴다). 락 TTL 이 지난 남의 표지판은 넘겨받고, 그 밖이면 {@link TemporaryFailureException}(503)이다. 키가 한도를 넘으면 {@link ValueTooLongException}(400)이다.
      */
     Mono<Void> 차지한다(UniqueKind 종류, String 값, String 주인) {
         if (값 == null || 값.isBlank()) {
@@ -48,8 +48,7 @@ final class UniqueMarkers {
         }
         String 키 = 종류.key(값);
         if (!UniqueKind.fits(키)) {
-            return Mono.error(new UniqueValueTooLongException(
-                    "%s 이(가) %d바이트를 넘습니다".formatted(이름(종류), UniqueKind.MAX_KEY_BYTES)));
+            return Mono.error(new ValueTooLongException(이름(종류), UniqueKind.MAX_KEY_BYTES));
         }
         return Mono.defer(() -> {
             Instant 지금 = 지금();

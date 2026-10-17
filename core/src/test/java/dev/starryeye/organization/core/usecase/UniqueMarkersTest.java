@@ -214,8 +214,8 @@ class UniqueMarkersTest {
         // then
         assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys(한도);
         assertThatThrownBy(() -> 표지판.차지한다(UniqueKind.USER_NAME, 넘침, "u-2").block())
-                .isInstanceOf(UniqueValueTooLongException.class)
-                .hasMessageContaining("1024");
+                .isInstanceOf(ValueTooLongException.class)
+                .hasMessage("userName 이(가) 1024바이트를 넘습니다");
     }
 
     @Test

@@ -135,4 +135,20 @@ class GroupChangeTest {
         // then
         assertThat(after.members()).containsExactly(MemberRef.user("park"));
     }
+
+    @Test
+    @DisplayName("넣는 멤버는 교체의 목록 전부와 넣기 연산의 멤버다 — 빼기 연산은 싣지 않는다")
+    void 넣는_멤버를_준다() {
+        // given
+        var 교체 = GroupChange.replacement("cn=DEV", "개발본부", Set.of(MemberRef.user("park")))
+                .adding(Set.of(MemberRef.group("TEAM")))
+                .removingId("kim");
+        var 증분 = GroupChange.delta().adding(Set.of(MemberRef.user("lee"))).removingId("kim");
+        var 빼기만 = GroupChange.delta().removingId("kim");
+
+        // when, then
+        assertThat(교체.added()).containsExactlyInAnyOrder(MemberRef.user("park"), MemberRef.group("TEAM"));
+        assertThat(증분.added()).containsExactly(MemberRef.user("lee"));
+        assertThat(빼기만.added()).isEmpty();
+    }
 }
