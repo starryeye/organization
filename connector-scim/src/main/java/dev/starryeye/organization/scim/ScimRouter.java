@@ -49,8 +49,7 @@ public final class ScimRouter {
     private static final long 기본_본문_한도 = 256 * 1024;
 
     /** 지원하지 않는 SCIM 엔드포인트 — RFC 7644 는 501 로 알린다(§3.12, /Me 는 §3.11). Bulk 는 ServiceProviderConfig 가 지원 안 함으로 선언했다. */
-    private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**",
-            "/scim/v2/Schemas", "/scim/v2/Schemas/**", "/scim/v2/ResourceTypes", "/scim/v2/ResourceTypes/**");
+    private static final List<PathPattern> 지원_안_함 = 패턴("/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Me/**");
 
     /** 있는 경로와 받는 메서드 — {@link #scimRoutes} 의 라우트와 같아야 한다. 틀린 메서드는 405 + Allow 로 알린다. */
     private static final Map<PathPattern, Set<HttpMethod>> 받는_메서드 = Map.ofEntries(
@@ -61,6 +60,10 @@ public final class ScimRouter {
             Map.entry(패턴하나("/scim/v2/Groups/.search"), Set.of(HttpMethod.POST)),
             Map.entry(패턴하나("/scim/v2/Groups/{id}"), Set.of(HttpMethod.GET, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE)),
             Map.entry(패턴하나("/scim/v2/ServiceProviderConfig"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/ResourceTypes"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/ResourceTypes/{name}"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/Schemas"), Set.of(HttpMethod.GET)),
+            Map.entry(패턴하나("/scim/v2/Schemas/{id}"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2/"), Set.of(HttpMethod.GET)),
             Map.entry(패턴하나("/scim/v2/.search"), Set.of(HttpMethod.POST)));
@@ -99,6 +102,11 @@ public final class ScimRouter {
                 .PATCH("/scim/v2/Groups/{id}", groups::patch)
                 .DELETE("/scim/v2/Groups/{id}", groups::delete)
                 .GET("/scim/v2/ServiceProviderConfig", request -> serviceProviderConfig())
+                // RFC 7644 §4 — 서버가 다루는 자원 종류와 스키마를 알린다. 단건의 이름·URN 은 대소문자를 가리지 않는다
+                .GET("/scim/v2/ResourceTypes", ScimDiscovery::resourceTypes)
+                .GET("/scim/v2/ResourceTypes/{name}", ScimDiscovery::resourceType)
+                .GET("/scim/v2/Schemas", ScimDiscovery::schemas)
+                .GET("/scim/v2/Schemas/{id}", ScimDiscovery::schema)
                 // 서버 루트 조회(여러 리소스 종류를 한꺼번에)는 지원하지 않는다 — S-1 설계 §4.6
                 .GET("/scim/v2", request -> rootQuery())
                 .GET("/scim/v2/", request -> rootQuery())

@@ -9,6 +9,10 @@ public final class ScimSchemas {
     public static final String PATCH_OP = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
     public static final String SERVICE_PROVIDER_CONFIG =
             "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig";
+    /** RFC 7643 §6 — {@code /ResourceTypes} 가 돌려주는 자원 종류. */
+    public static final String RESOURCE_TYPE = "urn:ietf:params:scim:schemas:core:2.0:ResourceType";
+    /** RFC 7643 §7 — {@code /Schemas} 가 돌려주는 스키마. */
+    public static final String SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Schema";
     /** RFC 7644 §3.4.2 — 조회 응답. */
     public static final String LIST_RESPONSE = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
     /** RFC 7644 §3.4.3 — {@code POST /.search} 본문. */

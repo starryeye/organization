@@ -85,6 +85,10 @@ class ScimRouteMissTest {
             "/scim/v2/Groups/.search           | DELETE,GET,PATCH,POST,PUT",
             "/scim/v2/Groups/DEV002            | DELETE,GET,PATCH,PUT",
             "/scim/v2/ServiceProviderConfig    | GET",
+            "/scim/v2/Schemas                  | GET",
+            "/scim/v2/Schemas/x                | GET",
+            "/scim/v2/ResourceTypes            | GET",
+            "/scim/v2/ResourceTypes/User       | GET",
             "/scim/v2                          | GET",
             "/scim/v2/                         | GET",
             "/scim/v2/.search                  | POST"})
@@ -97,8 +101,7 @@ class ScimRouteMissTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"/scim/v2/Bulk", "/scim/v2/Me", "/scim/v2/Schemas", "/scim/v2/ResourceTypes",
-            "/scim/v2/Schemas/urn:ietf:params:scim:schemas:core:2.0:User"})
+    @ValueSource(strings = {"/scim/v2/Bulk", "/scim/v2/Me"})
     @DisplayName("지원하지 않는 SCIM 엔드포인트는 501 이다 — RFC 7644 §3.12, /Me 는 §3.11")
     void 지원하지_않는_엔드포인트는_501이다(String path) {
         // when, then
