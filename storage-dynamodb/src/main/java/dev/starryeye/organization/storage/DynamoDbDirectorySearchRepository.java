@@ -15,7 +15,6 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,15 +25,12 @@ import java.util.function.Function;
  *
  * <p>DynamoDB 정렬키로 할 수 있는 것은 정확 일치와 {@code begins_with} 뿐이다.
  * 부분일치는 Scan 이거나 검색엔진이므로 이 계획의 범위 밖이다(설계 §12).
+ *
+ * <p>한도를 넘는 키의 아이템은 있을 수 없어 부르지 않고 없음이다(설계 2026-10-17 §4) — 실제 DynamoDB 는 그런 키를 {@code ValidationException} 으로
+ * 거절한다. 조직 코드는 파티션키로, 소문자로 바꾼 검색 접두사는 GSI 정렬키로 잰다. 한도를 넘으면 시작 위치(커서)를 볼 것도 없이 먼저 답한다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectorySearchRepository implements DirectorySearchRepository {
-
-    /** DynamoDB 정렬키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 DynamoDB 가 거절한다. */
-    private static final int MAX_SORT_KEY_BYTES = 1024;
-
-    /** DynamoDB 파티션키의 최대 길이(UTF-8 바이트). 이보다 긴 시작 키는 실제 DynamoDB 가 거절한다(DynamoDB Local 은 거절하지 않는다). */
-    private static final int MAX_PARTITION_KEY_BYTES = 2048;
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -67,9 +63,13 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
      */
     @Override
     public Mono<GroupSummary> findGroupSummary(String orgCode) {
+        String pk = Keys.groupPk(orgCode);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
         GetItemRequest request = GetItemRequest.builder()
                 .tableName(properties.getTableName())
-                .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(orgCode)), Keys.SK, Attrs.s(Keys.META)))
+                .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
                 .projectionExpression("#pk, #displayName")
                 .expressionAttributeNames(Map.of("#pk", Keys.PK, "#displayName", "displayName"))
                 .build();
@@ -87,6 +87,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     @Override
     public Mono<Page<String>> findGroupUserMemberIds(String orgCode, String cursor, int limit) {
         String pk = Keys.groupPk(orgCode);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.just(Page.empty());
+        }
         String prefix = Keys.memberSkPrefix(MemberType.USER);
         String scope = memberScope(orgCode);
         return Mono.defer(() -> {
@@ -121,7 +124,7 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
         if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK))
                 || !pk.equals(start.get(Keys.PK).s())
                 || !start.get(Keys.SK).s().startsWith(prefix)
-                || start.get(Keys.SK).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES) {
+                || !Keys.fitsSortKey(start.get(Keys.SK).s())) {
             throw new IllegalArgumentException("이 조직의 멤버 목록 커서가 아니다");
         }
         return start;
@@ -143,9 +146,9 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
         if (!start.keySet().equals(Set.of(Keys.PK, Keys.SK, pkName, skName))
                 || !partition.equals(start.get(pkName).s())
                 || !start.get(skName).s().startsWith(prefix)
-                || start.get(skName).s().getBytes(StandardCharsets.UTF_8).length > MAX_SORT_KEY_BYTES
+                || !Keys.fitsSortKey(start.get(skName).s())
                 || !start.get(Keys.PK).s().startsWith(종류_접두)
-                || start.get(Keys.PK).s().getBytes(StandardCharsets.UTF_8).length > MAX_PARTITION_KEY_BYTES
+                || !Keys.fitsPartitionKey(start.get(Keys.PK).s())
                 || !Keys.META.equals(start.get(Keys.SK).s())) {
             throw new IllegalArgumentException("이 검색의 커서가 아니다");
         }
@@ -154,11 +157,15 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
 
     @Override
     public Flux<String> findChildOrgCodes(String orgCode) {
+        String pk = Keys.groupPk(orgCode);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Flux.empty();
+        }
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .keyConditionExpression("#pk = :pk AND begins_with(#sk, :prefix)")
                 .expressionAttributeNames(Map.of("#pk", Keys.PK, "#sk", Keys.SK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.groupPk(orgCode)),
+                .expressionAttributeValues(Map.of(":pk", Attrs.s(pk),
                         ":prefix", Attrs.s(Keys.memberSkPrefix(MemberType.GROUP))))
                 .projectionExpression("#sk")
                 .consistentRead(true)
@@ -180,6 +187,10 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
     private <T> Mono<Page<T>> query(String indexName, String pkName, String skName, String partition,
                                     String prefix, String cursor, int limit,
                                     Function<Map<String, AttributeValue>, T> mapper) {
+        // 접두사는 이미 소문자다(Keys.indexKey) — 소문자로 늘어난 바이트까지 잰 정렬키 값이다
+        if (!Keys.fitsSortKey(prefix)) {
+            return Mono.just(Page.empty());
+        }
         // 인덱스만이 아니라 파티션까지 커서에 담는다 — GSI1 은 USER_INDEX 와 GROUP_INDEX 를
         // 함께 쓰므로 인덱스 이름만 담으면 두 검색의 커서가 서로 통과해 버린다.
         String scope = indexName + "/" + partition;

@@ -217,4 +217,20 @@ class KeysTest {
         assertThat(Keys.auditRecordKey("2026-10-10T03:00:00.000Z#run-1#0002"))
                 .isEqualTo("2026-10-10T03:00:00.000Z#run-1");
     }
+
+    @Test
+    @DisplayName("키 한도는 글자 수가 아니라 UTF-8 바이트로 잰다 — 한도와 같으면 들어가고 1바이트 넘으면 들어가지 않는다")
+    void 키_한도는_바이트로_잰다() {
+        // given, when, then — 정렬키 1024바이트
+        assertThat(Keys.fitsSortKey("x".repeat(1024))).isTrue();
+        assertThat(Keys.fitsSortKey("x".repeat(1025))).isFalse();
+        assertThat(Keys.fitsSortKey("가".repeat(341) + "x")).isTrue();
+        assertThat(Keys.fitsSortKey("가".repeat(342))).as("342자지만 1026바이트").isFalse();
+
+        // then — 파티션키 2048바이트
+        assertThat(Keys.fitsPartitionKey("x".repeat(2048))).isTrue();
+        assertThat(Keys.fitsPartitionKey("x".repeat(2049))).isFalse();
+        assertThat(Keys.fitsPartitionKey("가".repeat(682) + "xx")).isTrue();
+        assertThat(Keys.fitsPartitionKey("가".repeat(683))).as("683자지만 2049바이트").isFalse();
+    }
 }

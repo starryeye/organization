@@ -30,6 +30,9 @@ import java.util.function.Function;
  * <p>목록은 GSI1 파티션({@code USER_INDEX}/{@code GROUP_INDEX})을 정렬키 순서로 {@code limit} 건씩 읽는다.
  * 위치는 {@link Cursor} 로 감싼 LastEvaluatedKey 다. 파티션 전체를 읽는 것은 {@link #countUsers}·
  * {@link #skipUsers} 뿐이고, 그 둘은 책갈피가 없을 때만 불린다(설계 §4.4).
+ *
+ * <p>한도를 넘는 키의 아이템은 있을 수 없어 부르지 않고 없음이다(설계 2026-10-17 §4) — 실제 DynamoDB 는 그런 키를 {@code ValidationException} 으로
+ * 거절한다. 아이디는 파티션키로, 소문자로 바꾼 {@code userName}·조직명은 GSI1 정렬키로 잰다. {@code externalId} 는 상태 저장소가 잰다.
  */
 @RequiredArgsConstructor
 public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepository {
@@ -113,6 +116,9 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
 
     /** META 한 건을 <b>강한 일관성</b>으로 읽는다. 없으면 빈 Mono. */
     private Mono<Map<String, AttributeValue>> meta(String pk) {
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
         return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
                         .tableName(properties.getTableName())
                         .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.META)))
@@ -133,13 +139,17 @@ public class DynamoDbDirectoryQueryRepository implements DirectoryQueryRepositor
         if (value == null || value.isEmpty()) {
             return Flux.empty();
         }
+        String sortKey = Keys.indexKey(value);
+        if (!Keys.fitsSortKey(sortKey)) {
+            return Flux.empty();
+        }
         QueryRequest request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .indexName(Keys.GSI1)
                 .keyConditionExpression("#pk = :pk AND #sk = :sk")
                 .expressionAttributeNames(Map.of("#pk", Keys.GSI1PK, "#sk", Keys.GSI1SK))
                 .expressionAttributeValues(Map.of(
-                        ":pk", Attrs.s(partition), ":sk", Attrs.s(Keys.indexKey(value))))
+                        ":pk", Attrs.s(partition), ":sk", Attrs.s(sortKey)))
                 .build();
         return Paginator.queryAll(client, request);
     }

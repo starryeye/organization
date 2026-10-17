@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.UniqueKind;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -51,6 +52,14 @@ public final class Keys {
     public static final String GSI3PK = "externalId";
     /** @see #GSI3 — 본 테이블의 파티션키 속성 그 자체다. {@code USER#}/{@code GROUP#} 접두사로 종류를 가른다. */
     public static final String GSI3SK = PK;
+
+    /**
+     * DynamoDB 파티션키의 최대 길이(UTF-8 바이트). 이보다 긴 키는 실제 DynamoDB 가 {@code ValidationException} 으로 거절한다. DynamoDB Local 은 호출마다
+     * 다르다 — GetItem·BatchGetItem 의 키는 거절하지만 Query 의 파티션키 값은 거절하지 않는다. 그래서 시험은 Local 의 거절에 기대지 않고 요청을 보냈는지를 본다.
+     */
+    public static final int MAX_PARTITION_KEY_BYTES = 2048;
+    /** DynamoDB 정렬키의 최대 길이(UTF-8 바이트). GSI 의 키도 같다. */
+    public static final int MAX_SORT_KEY_BYTES = 1024;
 
     public static final String META = "META";
 
@@ -137,6 +146,26 @@ public final class Keys {
      */
     public static String indexKey(String raw) {
         return raw.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 파티션키로 쓸 수 있는가 — UTF-8 바이트가 {@link #MAX_PARTITION_KEY_BYTES} 이하인가. 접두어({@code USER#} 등)를 붙인 <b>최종 키 문자열</b>을
+     * 넘긴다. 넘는 키의 아이템은 있을 수 없으니, 읽기는 DynamoDB 를 부르지 않고 "없음" 으로 답한다(설계 2026-10-17 §4).
+     */
+    public static boolean fitsPartitionKey(String key) {
+        return utf8Bytes(key) <= MAX_PARTITION_KEY_BYTES;
+    }
+
+    /**
+     * 정렬키(GSI 정렬키 포함)로 쓸 수 있는가 — UTF-8 바이트가 {@link #MAX_SORT_KEY_BYTES} 이하인가. 소문자로 바꾸면 바이트가 늘 수 있으니(U+0130 은
+     * 2바이트에서 3바이트) {@link #indexKey} 를 거친 뒤의 문자열을 넘긴다.
+     */
+    public static boolean fitsSortKey(String key) {
+        return utf8Bytes(key) <= MAX_SORT_KEY_BYTES;
+    }
+
+    private static int utf8Bytes(String key) {
+        return key.getBytes(StandardCharsets.UTF_8).length;
     }
 
     /** 책갈피 파티션키 — 종류·방향별로 하나. 예: {@code PAGE#USER#ASC}. */
