@@ -137,6 +137,17 @@ class ScimDiscoveryTest {
                 .isEqualTo(List.of("User", "Group"));
     }
 
+    @Test
+    @DisplayName("조직 멤버의 value 는 필수다 — value 없는 멤버는 POST·PUT·PATCH 모두 400 invalidSyntax 로 거절한다")
+    void 멤버의_value_는_필수다() {
+        // when, then
+        client.get().uri("/scim/v2/Schemas/" + ScimSchemas.GROUP).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.attributes[?(@.name=='members')].subAttributes[?(@.name=='value')].required")
+                .isEqualTo(true);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"/scim/v2/Schemas", "/scim/v2/ResourceTypes"})
     @DisplayName("filter 가 오면 403 SCIM 오류다 — RFC 7644 §4")

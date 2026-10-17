@@ -139,9 +139,10 @@ final class ScimDiscovery {
         return 배열(
                 // POST 가 displayName 을 요구하지 않는다
                 문자열("displayName"),
-                // display·$ref 는 돌려주지 않아 알리지 않는다. 멤버는 넣고 빼기만 하고 바꾸지 않는다
+                // display·$ref 는 돌려주지 않아 알리지 않는다. 멤버는 넣고 빼기만 하고 바꾸지 않는다.
+                // value 가 없는 멤버는 400 invalidSyntax 라 필수다(ScimMapper.memberId·ScimPatchApplier). type 은 없으면 현재 상태로 판정하므로 필수가 아니다
                 복합("members", true,
-                        문자열("value").put("mutability", "immutable"),
+                        문자열("value").put("required", true).put("mutability", "immutable"),
                         정규값(문자열("type"), "User", "Group").put("mutability", "immutable")));
     }
 
