@@ -307,7 +307,7 @@ git commit -m "feat: /Schemas·/ResourceTypes 를 RFC 7644 §4 대로 연다 —
 - [ ] **Step 2: 돌린다**
 
 Run: `./gradlew :app-scim:test --tests '*ScimKeyLimitEndToEndTest*'`
-Expected: PASS(Task 1~3 위에서). DynamoDB Local 은 키 길이를 거절하지 않으므로 이 시험은 HTTP 응답을 고정한다. "부르지 않음" 은 Task 2 가 고정한다.
+Expected: PASS(Task 1~3 위에서). DynamoDB Local 은 일부 호출만 키 길이를 거절하므로(GetItem·BatchGet·GSI 정렬키) 이 시험은 HTTP 응답을 고정한다. "부르지 않음" 은 Task 2 가 고정한다.
 
 - [ ] **Step 3: 문서를 고친다**
 
