@@ -53,8 +53,12 @@
 | 직원 `displayName`(본문에 없으면 `name.formatted`, 그다음 `userName` 으로 정해진 값) | GSI2 정렬키(소문자) | 1024바이트. 소문자로 만든 뒤 잰다 |
 | 조직 `displayName` | GSI1 정렬키(소문자) | 1024바이트. 소문자로 만든 뒤 잰다 |
 | 직원·조직 `externalId` | GSI3 파티션키, 조직 표지판 | 1024바이트. 직원은 실제 한도가 2048이지만 조직 표지판과 같게 둔다. **공백뿐인 값도 잰다** |
-| 넣는 멤버의 아이디(조직 POST·PUT 의 `members`, PATCH add·replace) | 멤버 줄 정렬키 `MEMBER#GROUP#<id>`(1024) | 1000바이트 |
+| 넣는 멤버의 아이디(조직 POST·PUT 의 `members`, PATCH add·replace) | 멤버 줄 정렬키 `MEMBER#GROUP#<id>`(1024)와 OpenFGA 튜플 `user` 칸(512) | 500바이트 |
 
+- **멤버 아이디의 500은 두 한도 가운데 작은 쪽을 내린 값이다.**
+  - 멤버 줄 정렬키 `MEMBER#GROUP#<id>` 는 1024바이트라 아이디는 1011바이트까지다.
+  - 멤버 튜플의 `user` 칸은 `user:<id>`(직원) 또는 `group:<id>`(조직)이고 512바이트 이하여야 한다. 아이디는 507·506바이트까지다.
+  - 작은 쪽(506)을 500으로 내린다. 1000으로 두면 507~1000바이트 아이디가 쓰기 검사를 지나 멤버 줄로 저장되고, 나중에 조직 삭제가 그 튜플을 지우다 OpenFGA 400 을 받아 503 이 되풀이된다.
 - **어디서 보나.** 쓰기 락 안에서, 표지판을 차지하기 전, OpenFGA 를 보기 전이다(지금 `userName` 길이를 보는 자리).
   - 대상은 `createUser`·`changeUser`·`createGroup`·`changeGroup`, 그리고 테스트용 `upsertUser`·`upsertGroup` 이다.
   - PUT·PATCH 는 바꾼 결과 값을 본다. 바뀌지 않은 값도 결과에 있으면 본다 — 지금 저장된 값은 이미 한도 안이다.
@@ -145,7 +149,10 @@
 - **LDAP 에서 온 긴 값은 막지 않는다.** 1KB 넘는 표시명 같은 값이 오면 지금처럼 그 회차의 현재상태 교체가 실패한다(FAILED). 사내 디렉터리에서 현실적이지 않다.
 - **DynamoDB Local 은 키 길이를 호출마다 다르게 다룬다.** GetItem·BatchGetItem 키와 GSI 정렬키는 거절하고, Query 파티션키는 받는다. 그래서 실제 AWS 의 거절은 문서 근거(AWS 키 한도)이고, 시험은 "한도를 넘는 키로 DynamoDB 를 부르지 않는다" 를 고정한다.
 - **`begins_with` 피연산자가 1024바이트를 넘을 때 AWS 가 거절하는지 확인하지 못했다.** 넘는 접두어로 시작하는 정렬키는 있을 수 없으니 거절하든 안 하든 "없음" 이 맞다.
-- **우리 한도(1000·1024바이트)는 DynamoDB 한도에서 정한 값이다.** RFC 는 길이를 정하지 않는다. 직원 `externalId` 는 2048까지 들어가지만 1024로 막는다.
+- **우리 한도(500·1024바이트)는 DynamoDB 한도와 OpenFGA 한도에서 정한 값이다.** RFC 는 길이를 정하지 않는다. 직원 `externalId` 는 2048까지 들어가지만 1024로 막는다.
+  - 멤버 아이디의 500은 DynamoDB 정렬키(1024)뿐 아니라 OpenFGA 튜플 `user` 칸(512바이트)에서도 온다.
+  - 이 512는 실제 OpenFGA 로 확인했다(최종 리뷰 뒤 일회용 시험). `user` 가 정확히 512바이트인 튜플은 쓰이고, 513바이트는 쓰기가 400 `invalid TupleKey.User: value length must be at most 512 bytes`(`FgaApiValidationError`)로 거절된다. 지우기도 같고(`TupleKeyWithoutCondition.User`), `group:<id>` 도 같다.
+  - 시험은 남기지 않았다. 한도는 `KeyValueLimits.MAX_MEMBER_ID_BYTES` 한 곳이고, OpenFGA 서버를 올리면 이 값을 다시 확인해야 한다.
 - **`/Schemas` 는 자원 스키마(User·Group)만 싣는다.** `ServiceProviderConfig`·`ResourceType`·`Schema` 자신의 스키마(RFC 7643 §8.7.2)는 싣지 않는다.
 - **`/Schemas` 는 받는 것이 아니라 저장하는 것을 알린다.** RFC 가 정의한 다른 속성(`nickName`·enterprise 확장 등)을 PATCH 로 받아서 버리는 것(⑤-2)은 그대로이고 스키마에 나오지 않는다.
 - **IdP 의 실제 발견 요청으로 확인하지 못했다.** 지금 연동하는 IdP 는 부르지 않는다.
@@ -163,6 +170,7 @@
   - 마지막 그물은 된다.
   - 그러나 쓰기는 OpenFGA 다음이라 거기서 막으면 지금과 같은 어긋남이 남는다. SCIM 은 §3 이 먼저 막고, LDAP 까지 막으려면 회차의 실패 규칙을 새로 정해야 한다(§11).
 - **`/Schemas` 에 RFC 의 전체 User 스키마를 싣기.** 저장하지 않는 속성을 지원하는 것처럼 알린다.
+- **멤버 아이디 한도를 DynamoDB 정렬키 한도(아이디 1011바이트)로만 두기.** 처음 설계가 이렇게 1000으로 두었다. 최종 리뷰가 OpenFGA 튜플 `user` 칸(512바이트)이라는 두 번째 한도를 찾았다(§7). 그 한도를 모르면 507바이트 넘는 아이디가 쓰기 검사를 지나, 조직 삭제가 영영 503 이 되는 멤버 줄이 생긴다.
 
 ## 9. 검증
 

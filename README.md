@@ -600,9 +600,9 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 | `/scim/v2/Users` | O | O | O | O | O | O |
 | `/scim/v2/Groups` | O | O | O | O | O | O |
 | `/scim/v2/ServiceProviderConfig` | - | O | - | - | - | - |
-| `/scim/v2/Schemas` | - | - | O | - | - | - |
+| `/scim/v2/Schemas` | - | - | O (목록만, filter 403) | - | - | - |
 | `/scim/v2/Schemas/{URN}` | - | O | - | - | - | - |
-| `/scim/v2/ResourceTypes` | - | - | O | - | - | - |
+| `/scim/v2/ResourceTypes` | - | - | O (목록만, filter 403) | - | - | - |
 | `/scim/v2/ResourceTypes/{이름}` | - | O | - | - | - | - |
 
 `/Schemas`·`/ResourceTypes` 는 RFC 7644 §4 의 발견 엔드포인트다. 목록은 ListResponse 이고, 단건의 URN·이름은 대소문자를 가리지 않으며 모르면 404 다.
@@ -625,7 +625,7 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 값이 1024바이트를 넘으면 400 `invalidValue` 다.
 
 **값의 한도.** 클라이언트가 보낸 값이 DynamoDB 키가 되는 자리는 길이를 본다(UTF-8 바이트). `userName`·`displayName`(직원·조직)은 소문자로 만든 뒤 1024바이트,
-`externalId` 는 값 그대로 1024바이트, 조직에 넣는 멤버 아이디는 1000바이트이고, 넘으면 400 `invalidValue` 다. 표지판을 차지하기도 OpenFGA 를 쓰기도 전에
+`externalId` 는 값 그대로 1024바이트, 조직에 넣는 멤버 아이디는 500바이트(OpenFGA 튜플 `user` 칸이 512바이트다)이고, 넘으면 400 `invalidValue` 다. 표지판을 차지하기도 OpenFGA 를 쓰기도 전에
 거절하므로 요청은 아무것도 남기지 않는다. 빼는 멤버는 보지 않는다 — 없는 값을 빼는 PATCH 는 204 다. DynamoDB 키 한도(파티션키 2048·정렬키 1024바이트, 접두어 포함)를 넘는
 경로 아이디·필터 값으로 찾으면 DynamoDB 를 부르지 않고 없음이다 — 404 이거나 빈 목록(`totalResults` 0)이고, 관리 API 도 같다. LDAP 에서 온 긴 값은 막지 않는다. 설계:
 `docs/superpowers/specs/2026-10-17-scim-standard-rest-design.md`.
