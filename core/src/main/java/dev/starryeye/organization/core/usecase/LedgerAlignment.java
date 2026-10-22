@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
@@ -20,9 +21,10 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
- * LDAP 장부 맞추기 — 재적재와 "멈춘 뒤 첫 동기화"가 함께 쓴다(설계 2026-09-30 §4).
+ * LDAP 장부 맞추기 — 재적재와 "멈춘 뒤 첫 동기화", "기준선 없는 첫 회차"가 함께 쓴다(설계 2026-09-30 §4, 2026-10-20 §4).
  *
  * <ol>
  *   <li>쓰기 전에 "기록 중" 표시를 남긴다 — 이 청소가 중간에 멈춰도 다음 회차가 다시 맞춘다.</li>
@@ -30,7 +32,8 @@ import java.util.Set;
  *       표시가 남아 다음 회차도 다시 확인한다.</li>
  *   <li>끝나면 스냅샷(표시가 사라진다)과 현재상태를 남긴다.</li>
  *   <li>지운 줄과 현재상태가 바뀐 것은 끝나는 즉시 회차의 변경 모음에 더한다(설계 2026-10-15 §5) — 스냅샷 저장·현재상태 교체가 실패해도 남는다. 쓴 줄은
- *       중복 무시로 써 이미 있던 줄과 가를 수 없어 남기지 않는다(설계 2026-10-10 §3.5). 이력은 {@link SyncJobs} 가 남긴다.</li>
+ *       중복 무시로 써 이미 있던 줄과 가를 수 없어 보통 남기지 않는다(설계 2026-10-10 §3.5). 다만 기준선 없는 첫 회차는 첫 적재의 부여 이력을 잃으면 안
+ *       되므로({@code 쓴_줄도_남긴다}) 쓴 줄도 묶음마다 더한다(설계 2026-10-20 §4). 이력은 {@link SyncJobs} 가 남긴다.</li>
  * </ol>
  */
 @RequiredArgsConstructor
@@ -43,13 +46,26 @@ final class LedgerAlignment {
     private final DeletionGuard guard;
     private final Clock clock;
 
-    /** 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다. */
+    /** 쓴 줄은 남기지 않는 장부 맞추기 — 재적재와 "기록 중" 회차. */
     Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, boolean force,
                                   AuditChanges 기록) {
+        return align(directory, desired, force, 기록, false);
+    }
+
+    /**
+     * 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다.
+     *
+     * @param 쓴_줄도_남긴다 true 면 쓴 줄도 묶음마다 부여로 더한다 — 기준선 없는 첫 회차(설계 2026-10-20 §4). 그 회차는 종류가 동기화 그대로라 첫 적재의
+     *                       부여 이력이 사라지면 안 된다
+     */
+    Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, boolean force,
+                                  AuditChanges 기록, boolean 쓴_줄도_남긴다) {
         TupleReconciler.DeleteCheck check = force ? TupleReconciler.DeleteCheck.NONE : this::가드로_본다;
+        Consumer<TupleWriteResult> 쓴_묶음마다 = 쓴_줄도_남긴다 ? 기록::tuples : 묶음 -> {
+        };
         return snapshots.markWriting()
                 .then(TupleReconciler.reconcile(writer, scanner, desired, TupleReconciler.DesiredRevision.NONE, check,
-                        기록::revoked))
+                        기록::revoked, 쓴_묶음마다))
                 .flatMap(reconciliation -> reconciliation.held()
                         ? Mono.just(Mono.just(SyncOutcome.aborted(reconciliation.heldReason())))
                         : commit(directory, reconciliation, 기록));

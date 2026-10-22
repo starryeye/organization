@@ -262,7 +262,8 @@ class FullSyncUseCaseTest {
     @Test
     @DisplayName("기준선 스냅샷이 깨져 있으면 아무것도 쓰지 않고 FAILED 로 끝나며, 이유에 복구 방법이 남는다")
     void 기준선이_깨지면_쓰지_않고_FAILED() {
-        // given
+        // given — 포인터는 있는데 스냅샷이 깨졌다(포인터가 없으면 장부를 훑어 맞추므로 미리 저장해 포인터를 둔다)
+        빈_기준선을_둔다();
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
         snapshots.failFindLatest(new SnapshotIntegrityException(
                 "기준선 스냅샷 20260806T030000-LDAP 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요"));
@@ -274,7 +275,7 @@ class FullSyncUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(run.message()).contains("POST /admin/sync/rebuild");
         assertThat(writer.appliedDeltas).isEmpty();
-        assertThat(snapshots.saved).isEmpty();
+        assertThat(snapshots.saved).as("미리 저장한 것뿐이다").hasSize(1);
         assertThat(state.users).isEmpty();
     }
 
@@ -481,7 +482,99 @@ class FullSyncUseCaseTest {
         assertThat(snapshots.writing).isFalse();
     }
 
+    // ---------- 기준선 없음 (설계 2026-10-20 §4) ----------
+
+    @Test
+    @DisplayName("기준선이 없으면(포인터 없음) 장부를 훑어 목표 밖의 줄을 지운다 — 새 테이블과 기존 store 짝에서 찌꺼기가 영원히 남지 않는다")
+    void 기준선이_없으면_장부를_훑어_목표_밖의_줄을_지운다() {
+        // given — 저장한 스냅샷이 없는데 장부에는 목표 밖의 ghost 가 이미 있다(테이블을 다시 만든 경우)
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 유령 = RelationTuple.directMember("ghost", "DEV002");
+        writer.stored.add(유령);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 빈 기준선과 비교하면 지울 게 없지만, 장부를 훑어 ghost 를 찾아 지운다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.message()).contains("기준선 없음");
+        assertThat(run.deletedCount()).isEqualTo(1);
+        assertThat(writer.stored).containsExactly(김);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(김);
+        assertThat(snapshots.saved.get(0).uncertain()).isEmpty();
+        assertThat(snapshots.writing).as("스냅샷을 남겼으니 표시가 사라진다").isFalse();
+    }
+
+    @Test
+    @DisplayName("기준선이 없는 첫 설치(빈 장부)는 목표를 모두 쓰고 결과가 전과 같다")
+    void 기준선이_없는_첫_설치는_목표를_모두_쓰고_결과가_지금과_같다() {
+        // given — 빈 장부
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+        source.willReturn(조직도(Set.of("kim", "lee"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.writtenCount()).isEqualTo(2);
+        assertThat(run.deletedCount()).isZero();
+        assertThat(writer.stored).containsExactlyInAnyOrder(김, 이);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrder(김, 이);
+        assertThat(state.users).containsOnlyKeys("kim", "lee");
+    }
+
+    @Test
+    @DisplayName("기준선이 없어도 삭제 가드는 훑은 장부로 본다 — 장부의 대부분이 목표 밖이면 지우지 않고 ABORTED")
+    void 기준선이_없어도_삭제_가드는_훑은_장부로_본다() {
+        // given — 장부에 20줄, 목표는 그중 10명뿐이다(50% 를 지워야 한다). 저장한 스냅샷은 없다
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(IntStream.range(0, 10).mapToObj(i -> "user" + i).collect(Collectors.toSet()), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).contains("기준선 없음").contains("훑은 장부").contains("임계치");
+        assertThat(writer.stored).as("지우지 않았다").hasSize(20);
+        assertThat(writer.deleted).isEmpty();
+    }
+
+    @Test
+    @DisplayName("기준선이 없는 첫 회차가 가드에 통째로 걸리면 스냅샷이 없으므로 다음 회차도 장부를 다시 훑는다")
+    void 기준선이_없는_첫_회차가_가드에_통째로_걸리면_다음_회차도_장부를_훑는다() {
+        // given — 장부에 20줄, 목표는 그중 10명뿐이라 가드가 걸린다
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(IntStream.range(0, 10).mapToObj(i -> "user" + i).collect(Collectors.toSet()), "DEV002"));
+        동기화한다(SyncTrigger.SCHEDULED);
+        int 첫_회차까지_훑은_수 = scanner.scanCount.get();
+
+        // when — 2회차도 같은 상황이다
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 첫 회차가 스냅샷을 남기지 못했으니 기준선은 여전히 없다. 빈 기준선과 비교하지 않고 다시 훑는다
+        assertThat(첫_회차까지_훑은_수).isEqualTo(1);
+        assertThat(scanner.scanCount.get()).isEqualTo(첫_회차까지_훑은_수 + 1);
+        assertThat(run2.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(snapshots.writing).as("표시가 남아 다음 회차도 기준선을 믿지 않는다").isTrue();
+        assertThat(writer.stored).hasSize(20);
+    }
+
     // ---------- 결과를 모르는 줄 (설계 2026-10-20 §3) ----------
+
+    /**
+     * 비교 경로로 가려고 빈 기준선을 미리 저장한다. 저장한 스냅샷이 없으면 장부를 훑어 맞추고(설계 2026-10-20 §4), 훑기가 결과를 모르는 쓰기의
+     * 실제를 알려 줘서 불확실 줄이 생기지 않는다 — 이 절의 시험은 비교 경로의 식(설계 §3.3)을 본다.
+     */
+    private void 빈_기준선을_둔다() {
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of())).block();
+    }
 
     /** 저장한 스냅샷의 확실한 줄(B)과 불확실 줄(U)은 겹치지 않는다(설계 2026-10-20 §3.2). */
     private static void 겹치지_않는다(TupleSnapshot snapshot) {
@@ -492,6 +585,7 @@ class FullSyncUseCaseTest {
     @DisplayName("결과를 모르는 쓰기는 불확실 줄로 남고, 다음 회차에 목표에서 빠졌으면 지운다 — 응답만 잃은 권한이 영원히 남지 않는다")
     void 결과를_모르는_쓰기는_불확실_줄로_남고_목표에서_빠지면_다음_회차가_지운다() {
         // given — 서버는 kim 의 쓰기를 반영했는데 응답을 잃었다
+        빈_기준선을_둔다();
         RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
         writer.lostResponseFor(tuple -> tuple.equals(김));
@@ -501,7 +595,7 @@ class FullSyncUseCaseTest {
 
         // then — 반영됐는지 모르므로 확실한 줄(tuples)이 아니라 불확실 줄에 적힌다
         assertThat(run1.status()).isEqualTo(SyncStatus.PARTIAL);
-        TupleSnapshot 첫째 = snapshots.saved.get(0);
+        TupleSnapshot 첫째 = snapshots.saved.get(1);
         assertThat(첫째.uncertain()).containsExactly(김);
         assertThat(첫째.tuples()).isEmpty();
         겹치지_않는다(첫째);
@@ -518,7 +612,7 @@ class FullSyncUseCaseTest {
         assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(writer.appliedDeltas.get(writer.appliedDeltas.size() - 1).toDelete()).containsExactly(김);
         assertThat(writer.stored).isEmpty();
-        TupleSnapshot 둘째 = snapshots.saved.get(1);
+        TupleSnapshot 둘째 = snapshots.saved.get(2);
         assertThat(둘째.uncertain()).isEmpty();
         assertThat(둘째.tuples()).isEmpty();
     }
@@ -563,6 +657,7 @@ class FullSyncUseCaseTest {
     @DisplayName("쓰기가 연속 실패 차단기로 멈춘 회차도 결과를 모르는 줄을 불확실 줄로 남긴다")
     void 차단기로_멈춘_회차도_불확실_줄을_남긴다() {
         // given — kim 의 쓰기는 응답을 잃고, 같은 델타가 차단기로 멈춘다
+        빈_기준선을_둔다();
         RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
         writer.lostResponseFor(tuple -> tuple.equals(김));
@@ -573,10 +668,10 @@ class FullSyncUseCaseTest {
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(snapshots.saved).hasSize(1);
-        assertThat(snapshots.saved.get(0).uncertain()).containsExactly(김);
-        assertThat(snapshots.saved.get(0).tuples()).isEmpty();
-        겹치지_않는다(snapshots.saved.get(0));
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(snapshots.saved.get(1).uncertain()).containsExactly(김);
+        assertThat(snapshots.saved.get(1).tuples()).isEmpty();
+        겹치지_않는다(snapshots.saved.get(1));
         assertThat(snapshots.writing).as("스냅샷을 남겼으니 표시가 사라진다").isFalse();
     }
 
@@ -611,6 +706,7 @@ class FullSyncUseCaseTest {
     @DisplayName("불확실 줄을 다시 보냈는데 확정적으로 실패하면(거절·보내지 않음) 불확실 줄로 남는다 — 반영 여부를 아직 모른다")
     void 확정_실패한_불확실_줄은_불확실_줄로_남는다() {
         // given — 1회차: kim 의 쓰기가 응답을 잃어 불확실 줄이 됐다
+        빈_기준선을_둔다();
         RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
         source.willReturn(조직도(Set.of("kim"), "DEV002"));
         writer.lostResponseFor(tuple -> tuple.equals(김));
@@ -623,7 +719,7 @@ class FullSyncUseCaseTest {
 
         // then — 확실한 줄로 옮기지도, 불확실 줄에서 지우지도 않는다
         assertThat(run2.status()).isEqualTo(SyncStatus.PARTIAL);
-        TupleSnapshot 둘째 = snapshots.saved.get(1);
+        TupleSnapshot 둘째 = snapshots.saved.get(2);
         assertThat(둘째.uncertain()).containsExactly(김);
         assertThat(둘째.tuples()).isEmpty();
         겹치지_않는다(둘째);
@@ -635,7 +731,7 @@ class FullSyncUseCaseTest {
 
         // then — 불확실 줄로 남아 있었기에 이번에 지운다
         assertThat(writer.stored).isEmpty();
-        assertThat(snapshots.saved.get(2).uncertain()).isEmpty();
+        assertThat(snapshots.saved.get(3).uncertain()).isEmpty();
     }
 
     @Test

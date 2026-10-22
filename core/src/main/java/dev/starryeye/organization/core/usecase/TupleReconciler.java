@@ -91,18 +91,30 @@ final class TupleReconciler {
         });
     }
 
-    /**
-     * D 를 쓰고, 장부를 훑어 지울 후보를 가르고, 지우기 전에 {@code revision} 으로 D 를 다시 정한 D' 로 바꾼 뒤, {@code check} 를 거쳐 지운다.
-     * {@code check} 는 D' 와 남은 후보를 본다. {@code 지운_줄마다} 는 지우기 묶음이 끝날 때마다 실제로 지운 줄로 불린다(설계 2026-10-15 §5) — 차단기로
-     * 멈추거나 취소돼도 끝난 묶음은 이미 알린 뒤다. 여러 스레드에서 불릴 수 있다. 쓴 줄은 알리지 않는다(이력은 재적재가 쓴 줄을 남기지 않는다).
-     */
+    /** 쓴 줄은 알리지 않는다 — 재적재·"기록 중" 장부 맞추기의 이력은 쓴 줄을 남기지 않는다(설계 2026-10-10 §3.5). */
     static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
                                           Set<RelationTuple> desired, DesiredRevision revision, DeleteCheck check,
                                           Consumer<Set<RelationTuple>> 지운_줄마다) {
-        return Mono.defer(() -> 쓴다(writer, desired)
+        return reconcile(writer, scanner, desired, revision, check, 지운_줄마다, 쓴_묶음 -> {
+        });
+    }
+
+    /**
+     * D 를 쓰고, 장부를 훑어 지울 후보를 가르고, 지우기 전에 {@code revision} 으로 D 를 다시 정한 D' 로 바꾼 뒤, {@code check} 를 거쳐 지운다.
+     * {@code check} 는 D' 와 남은 후보를 본다. {@code 지운_줄마다} 는 지우기 묶음이 끝날 때마다 실제로 지운 줄로 불린다(설계 2026-10-15 §5) — 차단기로
+     * 멈추거나 취소돼도 끝난 묶음은 이미 알린 뒤다. 여러 스레드에서 불릴 수 있다.
+     *
+     * <p>{@code 쓴_묶음마다} 는 쓰기 묶음이 끝날 때마다 그 묶음의 결과(쓴 줄·실패)로 불린다 — 첫 쓰기와 훑은 뒤 더 쓰는 쓰기 모두다. 기준선이 없는 첫 회차의
+     * 부여 이력이 이것으로 남는다(설계 2026-10-20 §4). 쓴 줄은 중복 무시로 써 이미 있던 줄과 가를 수 없다는 한계는 그대로다.
+     */
+    static Mono<Reconciliation> reconcile(RelationTupleWriter writer, RelationTupleScanner scanner,
+                                          Set<RelationTuple> desired, DesiredRevision revision, DeleteCheck check,
+                                          Consumer<Set<RelationTuple>> 지운_줄마다,
+                                          Consumer<TupleWriteResult> 쓴_묶음마다) {
+        return Mono.defer(() -> 쓴다(writer, desired, 쓴_묶음마다)
                 .flatMap(written -> 훑는다(scanner, desired)
                         .flatMap(scan -> revision.revise(desired, scan.stale())
-                                .flatMap(다시_정한_D -> 다시_정한다(writer, desired, written, scan, 다시_정한_D))))
+                                .flatMap(다시_정한_D -> 다시_정한다(writer, desired, written, scan, 다시_정한_D, 쓴_묶음마다))))
                 .flatMap(revised -> {
                     Scan scan = revised.scan();
                     Optional<String> hold = check.holdReason(revised.desired(), scan.stale(), scan.scanned());
@@ -132,7 +144,7 @@ final class TupleReconciler {
      * <p>더 쓴 줄은 훑은 <b>뒤</b>에 보내므로 훑기가 결과를 알려 주지 못한다. 결과를 모르는 채 실패한 줄은 {@link Scan#uncertain()} 으로 넘긴다.
      */
     private static Mono<다시_정함> 다시_정한다(RelationTupleWriter writer, Set<RelationTuple> desired, TupleWriteResult written,
-                                        Scan scan, Set<RelationTuple> revised) {
+                                        Scan scan, Set<RelationTuple> revised, Consumer<TupleWriteResult> 쓴_묶음마다) {
         // 같은 객체면 바뀐 것이 없다 — 평소(LDAP 장부 맞춤·초기화·바뀐 것 없는 SCIM 재적재)에는 |D| 크기의 집합 둘을 만들지 않는다
         if (revised == desired) {
             return Mono.just(new 다시_정함(desired, written, scan));
@@ -155,7 +167,7 @@ final class TupleReconciler {
         남은_후보.addAll(장부에_있던_뺀);
         log.warn("지우기 전에 있어야 할 줄을 다시 정했다 — 더한 {}줄(장부에 있던 {}줄은 지우지 않고 {}줄은 새로 쓴다), 뺀 {}줄(장부에 있던 {}줄은 지울 후보로 넘긴다)",
                 더한.size(), 장부에_있던_더한.size(), 쓸것.size(), 뺀.size(), 장부에_있던_뺀.size());
-        return 쓴다(writer, 쓸것).map(더_쓴 -> {
+        return 쓴다(writer, 쓸것, 쓴_묶음마다).map(더_쓴 -> {
             Set<RelationTuple> present = new HashSet<>(scan.present());
             present.removeAll(뺀);
             present.addAll(장부에_있던_더한);
@@ -174,10 +186,11 @@ final class TupleReconciler {
         return new TupleWriteResult(written, first.deleted(), failures);
     }
 
-    private static Mono<TupleWriteResult> 쓴다(RelationTupleWriter writer, Set<RelationTuple> desired) {
+    private static Mono<TupleWriteResult> 쓴다(RelationTupleWriter writer, Set<RelationTuple> desired,
+                                            Consumer<TupleWriteResult> 쓴_묶음마다) {
         return desired.isEmpty()
                 ? Mono.just(TupleWriteResult.empty())
-                : writer.apply(TupleDelta.writeOnly(desired));
+                : writer.apply(TupleDelta.writeOnly(desired), 쓴_묶음마다);
     }
 
     private static Mono<TupleWriteResult> 지운다(RelationTupleWriter writer, Set<RelationTuple> stale,

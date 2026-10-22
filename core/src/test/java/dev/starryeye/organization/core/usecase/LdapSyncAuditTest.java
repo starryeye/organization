@@ -304,6 +304,27 @@ class LdapSyncAuditTest {
     }
 
     @Test
+    @DisplayName("기준선이 없는 첫 회차는 종류가 동기화 그대로이고 쓴 줄을 부여로, 지운 줄을 회수로 남긴다")
+    void 기준선이_없는_첫_회차는_쓴_줄을_부여로_남긴다() {
+        // given — 저장한 스냅샷이 없고 장부에는 찌꺼기가 있다. 가드는 이 테스트의 관심이 아니다(기준 10건 미만이라 걸리지 않는다)
+        writer.stored.add(유령_개발);
+        source.willReturn(조직도(직원("kim")));
+
+        // when
+        SyncRun run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 장부 맞추기와 달리 첫 적재의 부여 이력이 사라지지 않는다(설계 2026-10-10 §4.2)
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(auditLog.events).singleElement().satisfies(event ->
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.created()).isTrue();
+        assertThat(김의_줄.granted()).containsExactly(김_개발);
+        assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
+        assertThat(auditLog.lastOf(유령).granted()).isEmpty();
+    }
+
+    @Test
     @DisplayName("재적재는 재적재로 남기고, 지운 줄만 적는다")
     void 재적재는_지운_줄만() {
         // given

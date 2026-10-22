@@ -20,7 +20,6 @@ import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
-import dev.starryeye.organization.core.port.TupleSnapshotRepository.BaselineState;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
@@ -50,14 +49,20 @@ import java.util.function.Consumer;
  * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
  * 그 사이 되돌려진 사람의 권한이 영원히 남거나 빠지는 일(점검 M2)이 이것으로 막힌다.
  *
+ * <p><b>포인터가 없을 때도 기준선을 믿지 않는다(설계 2026-10-20 §4).</b> 첫 회차이거나 테이블을 새로 만들었다 — 후자는 이미 장부(store)에 줄이 있는데 빈 기준선과
+ * 비교해 지울 줄이 없다고 잘못 보게 된다. 그래서 비교 대신 같은 장부 맞추기로 간다. 빈 장부의 첫 설치는 D 를 다 쓰고 장부를 한 번 훑을 뿐이다. 포인터 상태는 셋이다
+ * — 없음(장부 맞추기, 이력은 동기화 그대로), 기록 중(장부 맞추기, 이력은 장부 맞추기), 있음(비교).
+ *
  * <p><b>이력(설계 2026-10-10 §4, 2026-10-15).</b> 회차가 OpenFGA 에 쓰고 지운 튜플은 묶음마다, 현재상태가 바뀐 것은 직원·조직 하나마다 끝나는 즉시
  * 회차의 변경 모음에 더한다. 회차가 어떻게 끝나든 {@link SyncJobs} 가 락을 반납한 뒤 남긴다 — 스냅샷 저장·현재상태 교체가 실패하거나 리스를 잃어도
- * 이미 한 변경이 남는다. 장부를 훑어 맞춘 회차는 종류를 장부 맞추기로 바꾸고 지운 줄만 남긴다.
+ * 이미 한 변경이 남는다. "기록 중" 때문에 장부를 훑어 맞춘 회차는 종류를 장부 맞추기로 바꾸고 지운 줄만 남긴다. 기준선이 없어 훑은 첫 회차는 종류가 동기화 그대로이고
+ * 쓴 줄(첫 적재의 부여 이력)도 남긴다.
  */
 @Slf4j
 public class FullSyncUseCase {
 
     static final String 기준선_의심 = "기준선 의심(지난 회차가 기록 전에 멈춤) — 장부를 훑어 맞춤";
+    static final String 기준선_없음 = "기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤";
 
     private final DirectorySnapshotSource source;
     private final TupleSnapshotRepository snapshots;
@@ -96,27 +101,51 @@ public class FullSyncUseCase {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
-            return snapshots.baselineState().map(상태 -> 상태 == BaselineState.WRITING).flatMap(writing -> writing
-                    ? 훑어_맞춘다(directory, mapping.tuples(), trigger, 기록)
-                    : 비교해_맞춘다(directory, mapping.tuples(), trigger, 기록.changes()));
+            return snapshots.baselineState().flatMap(상태 -> switch (상태) {
+                // 포인터가 없다 — 첫 회차이거나 테이블을 새로 만들었다. 빈 기준선과 비교하면 장부의 찌꺼기를 영원히 못 지운다(설계 2026-10-20 §4)
+                case NONE -> 기준선_없이_맞춘다(directory, mapping.tuples(), trigger, 기록);
+                case WRITING -> 훑어_맞춘다(directory, mapping.tuples(), trigger, 기록);
+                case PRESENT -> 비교해_맞춘다(directory, mapping.tuples(), trigger, 기록.changes());
+            });
         });
     }
 
     /**
      * 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. {@code FORCED} 면 삭제 가드를 건너뛴다.
-     *
-     * <p>청소 자체가 오류로 끝나도(쓰기 단계 차단기, 스냅샷 저장 실패, "기록 중" 표시를 남기지 못함) 기록 메시지에 "기준선 의심" 사정을
-     * 남긴다 — 그러지 않으면 FAILED 사유만 보고는 지난 회차가 기록 전에 멈췄다는 맥락이 사라진다. 취소는 {@code onErrorMap} 이
-     * 보지 못하므로 여기서 감싸지 않는다.
+     * 지난 회차가 쓴 뒤·기록 전에 멈춰 "기록 중" 표시가 남았다. 이력은 장부 맞추기로 바꾸고 지운 줄만 남긴다.
      */
     private Mono<Mono<SyncOutcome>> 훑어_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
                                                SyncTrigger trigger, RunAudit 기록) {
         log.warn(기준선_의심);
         기록.kind(AuditKind.LEDGER_ALIGNMENT);
-        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED, 기록.changes())
-                .map(반납_뒤 -> 반납_뒤.map(outcome -> outcome.withNote(기준선_의심)))
+        return 장부를_맞춘다(directory, desired, trigger, 기록, 기준선_의심, false);
+    }
+
+    /**
+     * 기준선이 없는 회차 — 스냅샷 포인터가 아예 없다. 빈 기준선과 비교하는 대신 "기록 중"과 같은 청소로 맞춘다(설계 2026-10-20 §4).
+     * 빈 장부의 첫 설치는 D 를 다 쓰고 장부를 한 번 훑을 뿐이라 결과가 같다.
+     *
+     * <p>이력은 동기화 그대로 두고 쓴 줄도 부여로 남긴다 — 첫 적재의 부여 이력(설계 2026-10-10 §4.2)을 잃지 않는다. 가드가 통째로 막으면 스냅샷이 없고
+     * 표시가 남아, 다음 회차는 "기록 중" 길로 다시 장부를 훑는다.
+     */
+    private Mono<Mono<SyncOutcome>> 기준선_없이_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
+                                                    SyncTrigger trigger, RunAudit 기록) {
+        log.warn(기준선_없음);
+        return 장부를_맞춘다(directory, desired, trigger, 기록, 기준선_없음, true);
+    }
+
+    /**
+     * 장부 맞추기로 한 번 맞추고 결론 앞에 사정을 붙인다.
+     *
+     * <p>청소 자체가 오류로 끝나도(쓰기 단계 차단기, 스냅샷 저장 실패, "기록 중" 표시를 남기지 못함) 기록 메시지에 사정을 남긴다 — 그러지 않으면 FAILED
+     * 사유만 보고는 기준선을 믿지 못해 훑었다는 맥락이 사라진다. 취소는 {@code onErrorMap} 이 보지 못하므로 여기서 감싸지 않는다.
+     */
+    private Mono<Mono<SyncOutcome>> 장부를_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
+                                               SyncTrigger trigger, RunAudit 기록, String 사정, boolean 쓴_줄도_남긴다) {
+        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED, 기록.changes(), 쓴_줄도_남긴다)
+                .map(반납_뒤 -> 반납_뒤.map(outcome -> outcome.withNote(사정)))
                 .onErrorMap(error -> new IllegalStateException(
-                        기준선_의심 + " / " + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()),
+                        사정 + " / " + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()),
                         error));
     }
 
