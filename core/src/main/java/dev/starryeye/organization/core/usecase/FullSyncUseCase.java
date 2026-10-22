@@ -19,6 +19,7 @@ import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
+import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
@@ -44,6 +45,11 @@ import java.util.function.Consumer;
  * 있다. 결과를 모르는 쓰기를 B 에서 빼 두면 그 줄이 목표에서 빠질 때 지울 기준이 없어 권한이 영원히 남고, 결과를 모르는 지우기를 B 에 두면 목표에 다시 들 때
  * 쓸 줄로 잡히지 않아 권한이 영원히 빠진다. 그래서 B 와 따로 U 에 적고, 다음 회차가 목표에 있으면 쓰고 없으면 지운다 — 쓸 줄 = D − B,
  * 지울 줄 = (B − D) ∪ (U − D). 삭제 가드의 기준 수는 |B| + |U| 다.
+ *
+ * <p><b>가드가 걸려도 디렉터리가 명시한 회수는 먼저 반영한다(설계 2026-10-20 §5).</b> 지울 줄 전체가 삭제 가드를 넘으면 그 가운데 디렉터리가 막았다고
+ * 명시한 직원의 소속 줄({@link TupleMapper#inactiveMemberTuples})만 떼어 같은 가드로 다시 본다. 통과하면 그 지우기만 반영하고 스냅샷을 남긴다 —
+ * 부여·나머지 지우기·현재상태 교체는 보류하고 ABORTED 다. 그것마저 넘으면 지금처럼 아무것도 반영하지 않는다. 큰 개편 하나가 퇴사자 회수를 매일 멈추던
+ * 것을 막는다. {@code FORCED} 는 가드를 건너뛴다.
  *
  * <p><b>기록 중 표시(설계 2026-09-30 §4).</b> OpenFGA 에 쓰기 직전 스냅샷 포인터에 "기록 중"을 남기고, 스냅샷 저장이 그것을 지운다. 표시가 남아
  * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
@@ -160,7 +166,11 @@ public class FullSyncUseCase {
                         .thenReturn(Mono.just(SyncOutcome.noChange()));
             }
             if (trigger != SyncTrigger.FORCED) {
-                GuardDecision decision = guard.evaluate(delta.toDelete().size(), baseline.크기(), "기준 스냅샷");
+                GuardDecision decision = guard.evaluate(delta.toDelete(), TupleMapper.inactiveMemberTuples(directory),
+                        baseline.크기(), "기준 스냅샷");
+                if (decision.partial()) {
+                    return 비활성_회수만_반영한다(baseline, delta, decision, 기록);
+                }
                 if (decision.aborted()) {
                     log.warn("삭제 가드 발동: {}", decision.message());
                     return Mono.just(Mono.just(SyncOutcome.aborted(decision.message())));
@@ -177,10 +187,33 @@ public class FullSyncUseCase {
         });
     }
 
-    /** 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄). 스냅샷이 없으면 둘 다 비었다. */
-    private record 기준선(Set<RelationTuple> tuples, Set<RelationTuple> uncertain) {
+    /**
+     * 가드가 걸렸지만 디렉터리가 막았다고 명시한 회수만으로는 가드 안이다(설계 2026-10-20 §5.3) — <b>그 지우기만</b> 반영한다.
+     * <ul>
+     *   <li>"기록 중" 표시를 남긴 뒤 지우고, §3 의 식으로 스냅샷을 저장해 표시를 지운다. 지운 줄은 묶음마다 이력에 더한다.</li>
+     *   <li><b>현재상태는 바꾸지 않는다.</b> 가드가 걸린 회차는 디렉터리 그림을 받아들이지 않은 회차다.</li>
+     *   <li><b>부여와 나머지 지우기는 보류한다.</b> 부여만 반영하면 이동자가 옛 소속(지우기 보류)과 새 소속(쓰기 반영)을 함께 갖는다.</li>
+     * </ul>
+     * 실행 기록은 ABORTED 다. 지우다 차단기로 멈추면 나간 지우기로 스냅샷을 남기고 FAILED 다 — 이때도 현재상태는 바꾸지 않는다.
+     */
+    private Mono<Mono<SyncOutcome>> 비활성_회수만_반영한다(기준선 baseline, TupleDelta delta, GuardDecision decision,
+                                                     AuditChanges 기록) {
+        Set<RelationTuple> 회수 = decision.revocationsOnly();
+        String 결론 = LedgerAlignment.비활성_회수만_반영했다(회수.size(), delta.toDelete().size() - 회수.size(),
+                delta.toWrite().size(), decision.message());
+        log.warn("{}", 결론);
+        return snapshots.markWriting()
+                .then(Mono.defer(() -> writer.apply(TupleDelta.deleteOnly(회수), 기록::tuples)))
+                .flatMap(result -> 스냅샷을_저장한다(baseline, result)
+                        .map(snapshotId -> Mono.just(SyncOutcome.revokedOnly(result, snapshotId, 결론))))
+                .onErrorResume(TupleWriteAbortedException.class, stopped ->
+                        스냅샷을_저장한다(baseline, stopped.partial())
+                                .map(snapshotId -> Mono.just(SyncOutcome.stopped(stopped.partial(), snapshotId,
+                                        결론 + " / " + stopped.getMessage()))));
+    }
 
-        static final 기준선 없음 = new 기준선(Set.of(), Set.of());
+    /** 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄). */
+    private record 기준선(Set<RelationTuple> tuples, Set<RelationTuple> uncertain) {
 
         /** 삭제 가드의 기준 수 — |B| + |U|. 불확실 줄도 장부에 있을 수 있는 줄이다 */
         int 크기() {
@@ -188,10 +221,15 @@ public class FullSyncUseCase {
         }
     }
 
+    /**
+     * 포인터가 "기준선 있음"인 회차의 기준선. 여기서 스냅샷이 비어 돌아오면 빈 기준선과 비교하지 않고 {@link SnapshotIntegrityException} 으로 멈춘다 —
+     * 빈 기준선은 지울 줄이 0 이라 장부의 줄을 영원히 못 지운다(설계 2026-10-20 §1.4 의 뒷문). 포인터가 없는 회차는 여기 오지 않고 장부를 훑는다.
+     */
     private Mono<기준선> baseline() {
         return snapshots.findLatest()
                 .map(snapshot -> new 기준선(snapshot.tuples(), snapshot.uncertain()))
-                .defaultIfEmpty(기준선.없음);
+                .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
+                        "스냅샷 포인터는 기준선이 있다고 하는데 최신 스냅샷을 읽지 못했습니다 — POST /admin/sync/rebuild 로 복구하세요")));
     }
 
     /**
@@ -237,6 +275,12 @@ public class FullSyncUseCase {
      */
     private Mono<String> saveSnapshotAndState(DirectorySnapshot directory, 기준선 baseline,
                                               TupleWriteResult result, AuditChanges 기록) {
+        return 스냅샷을_저장한다(baseline, result)
+                .flatMap(snapshotId -> state.replaceWith(directory, 기록.directoryListener()).thenReturn(snapshotId));
+    }
+
+    /** §3 의 식으로 새 스냅샷을 만들어 저장한다 — 저장이 "기록 중" 표시를 지운다. 현재상태는 건드리지 않는다. 저장한 스냅샷 아이디를 준다. */
+    private Mono<String> 스냅샷을_저장한다(기준선 baseline, TupleWriteResult result) {
         Set<RelationTuple> uncertain = new HashSet<>(baseline.uncertain());
         uncertain.removeAll(result.written());
         uncertain.removeAll(result.deleted());
@@ -255,8 +299,6 @@ public class FullSyncUseCase {
                 committed,
                 uncertain);
 
-        return snapshots.save(snapshot)
-                .then(Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())))
-                .thenReturn(snapshot.id());
+        return snapshots.save(snapshot).thenReturn(snapshot.id());
     }
 }

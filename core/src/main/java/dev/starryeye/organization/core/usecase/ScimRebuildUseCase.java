@@ -36,7 +36,6 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -112,7 +111,9 @@ public class ScimRebuildUseCase {
     static final String 빈_조직도 = "조직도가 비어 있다 — 장부를 비우려면 mode=wipe";
 
     private static final TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
-            desired.isEmpty() && !stale.isEmpty() ? Optional.of(빈_조직도) : Optional.empty();
+            desired.isEmpty() && !stale.isEmpty()
+                    ? TupleReconciler.DeleteVerdict.holdAll(빈_조직도)
+                    : TupleReconciler.DeleteVerdict.proceed(stale);
 
     /** 열거에서 빠진 조직을 다시 읽을 때의 동시성. 평소에는 0개다. */
     private static final int 보강_동시성 = 8;
@@ -139,7 +140,7 @@ public class ScimRebuildUseCase {
             });
 
             return TupleReconciler.reconcile(writer, scanner, mapping.tuples(), 보강, 빈_조직도면_멈춘다, 기록::revoked)
-                    .flatMap(reconciliation -> reconciliation.held()
+                    .flatMap(reconciliation -> reconciliation.heldEntirely()
                             ? Mono.just(Mono.just(SyncOutcome.failed(reconciliation.heldReason())))
                             // 재적재는 전체를 정하는 연산이라 보류 목록도 처음부터 다시 정한다(설계 2026-10-03 §4.6)
                             : state.replaceCutEdges(최종.get().cutEdges())

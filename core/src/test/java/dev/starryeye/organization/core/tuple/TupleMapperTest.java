@@ -112,6 +112,25 @@ class TupleMapperTest {
     }
 
     @Test
+    @DisplayName("비활성 직원의 소속 줄만 돌려준다 — 활성 직원, 그림에 없는 직원, 하위 조직 멤버는 빠진다(설계 2026-10-20 §5.1)")
+    void 비활성_직원의_소속_줄만_돌려준다() {
+        // given — lee 는 막혔지만 그림에도 두 조직의 소속에도 그대로 있다. ghost 는 멤버로만 남고 그림에 없다.
+        // park 은 막혔지만 어느 조직의 멤버도 아니다. DEV002 는 DEV001 의 하위 조직이다
+        var snapshot = 스냅샷(
+                Set.of(활성직원("kim"), 비활성직원("lee"), 비활성직원("park")),
+                Set.of(조직("DEV001", "개발본부", MemberRef.user("kim"), MemberRef.user("lee"), MemberRef.group("DEV002")),
+                        조직("DEV002", "백엔드팀", MemberRef.user("lee"), MemberRef.user("ghost"))));
+
+        // when
+        var tuples = TupleMapper.inactiveMemberTuples(snapshot);
+
+        // then
+        assertThat(tuples).containsExactlyInAnyOrder(
+                RelationTuple.directMember("lee", "DEV001"),
+                RelationTuple.directMember("lee", "DEV002"));
+    }
+
+    @Test
     @DisplayName("스냅샷에 존재하지 않는 멤버는 건너뛰고 경고로 남긴다")
     void 존재하지_않는_멤버는_경고로_남긴다() {
         // given
