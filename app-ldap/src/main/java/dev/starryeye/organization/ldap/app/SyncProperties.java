@@ -11,7 +11,8 @@ import java.time.Duration;
 @ConfigurationProperties("sync")
 public class SyncProperties {
 
-    private String cron = "0 0 3 * * *";
+    /** 매시 정각(설계 2026-10-20 §8). 하루 한 번이면 퇴사 회수가 최악 하루 늦는다. 변경 없는 회차는 쓰기가 0번이라 비용은 디렉터리 전체 읽기다. */
+    private String cron = "0 0 * * * *";
     private String purgeCron = "0 0 4 * * *";
     private DeletionGuardConfig deletionGuard = new DeletionGuardConfig();
 

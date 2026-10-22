@@ -71,6 +71,9 @@ class LdapReadTimeoutDuringPagingTest {
             // "페이징 도중"이 된다. read-timeout 만 줄인다.
             properties.setReadTimeout(Duration.ofSeconds(1));
             properties.setMaxRetries(1);
+            // 재시도 사이 대기는 밀리초로 줄인다 — 운영 기본값(10초~2분)이면 아래 20초 기한을 넘긴다
+            properties.setRetryMinBackoff(Duration.ofMillis(10));
+            properties.setRetryMaxBackoff(Duration.ofMillis(50));
 
             LdapConfig ldapConfig = new LdapConfig();
             LdapContextSource contextSource = ldapConfig.ldapContextSource(properties);
