@@ -401,6 +401,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
      * 설계 2026-09-30 §6.2). 요청 하나가 원자적이라 줄 하나가 걸리면 같은 배치 100줄이 함께 실패했고, 다시 돌려도 같은 99명이 빠졌다.
      * 일시 오류(재시도 뒤에도 실패)는 쪼개지 않는다 — 쪼개도 같이 실패한다.
      *
+     * <p>실패의 종류(설계 2026-10-20 §3.1): 거절은 <b>확정</b>이다 — 서버가 받지 않았다. 일시 오류는 <b>불확실</b>이다 — 보냈는데 결과를 모른다
+     * (서버가 받았는데 응답만 잃었을 수 있다). 보내지 않은 묶음(차단기·앞 단계 실패)도 확정이다({@link #보내되_연속_실패면_멈춘다}).
+     *
      * <p>패키지 전용 — 쪼개는 규칙을 OpenFGA 없이 단위 테스트로 고정한다.
      */
     static Mono<TupleWriteResult> 쪼개며_보낸다(Batch batch, Function<Batch, Mono<Void>> send,
@@ -422,8 +425,9 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
                                 batch.tuples().get(0), rootMessage(error));
                         return Mono.just(batch.failed(rootMessage(error)));
                     }
+                    // 보냈는데 일시 오류가 재시도 뒤에도 남았다 — 서버가 받았는지 모른다. 불확실로 남겨 호출자가 다음 회차에 다시 정한다
                     log.error("배치 {}건 적용 실패", batch.size(), error);
-                    return Mono.just(batch.failed(rootMessage(error)));
+                    return Mono.just(batch.uncertain(rootMessage(error)));
                 });
     }
 
@@ -530,9 +534,16 @@ public class OpenFgaRelationTupleWriter implements RelationTupleWriter {
             return new TupleWriteResult(Set.copyOf(writes), Set.copyOf(deletes), List.of());
         }
 
+        /** 확정 실패 — 반영되지 않았다는 것을 안다(거절됐거나 보내지 않았다) */
         TupleWriteResult failed(String reason) {
             return new TupleWriteResult(Set.of(), Set.of(),
                     tuples().stream().map(tuple -> new TupleFailure(tuple, reason)).toList());
+        }
+
+        /** 불확실 실패 — 보냈는데 일시 오류가 재시도 뒤에도 남아 반영됐는지 모른다(설계 2026-10-20 §3.1) */
+        TupleWriteResult uncertain(String reason) {
+            return new TupleWriteResult(Set.of(), Set.of(),
+                    tuples().stream().map(tuple -> TupleFailure.uncertain(tuple, reason)).toList());
         }
 
         /**
