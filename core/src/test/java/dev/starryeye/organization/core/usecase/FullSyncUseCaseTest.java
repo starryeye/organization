@@ -480,4 +480,217 @@ class FullSyncUseCaseTest {
         assertThat(writer.stored).hasSize(10);
         assertThat(snapshots.writing).isFalse();
     }
+
+    // ---------- 결과를 모르는 줄 (설계 2026-10-20 §3) ----------
+
+    /** 저장한 스냅샷의 확실한 줄(B)과 불확실 줄(U)은 겹치지 않는다(설계 2026-10-20 §3.2). */
+    private static void 겹치지_않는다(TupleSnapshot snapshot) {
+        assertThat(snapshot.tuples()).doesNotContainAnyElementsOf(snapshot.uncertain());
+    }
+
+    @Test
+    @DisplayName("결과를 모르는 쓰기는 불확실 줄로 남고, 다음 회차에 목표에서 빠졌으면 지운다 — 응답만 잃은 권한이 영원히 남지 않는다")
+    void 결과를_모르는_쓰기는_불확실_줄로_남고_목표에서_빠지면_다음_회차가_지운다() {
+        // given — 서버는 kim 의 쓰기를 반영했는데 응답을 잃었다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(김));
+
+        // when
+        var run1 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 반영됐는지 모르므로 확실한 줄(tuples)이 아니라 불확실 줄에 적힌다
+        assertThat(run1.status()).isEqualTo(SyncStatus.PARTIAL);
+        TupleSnapshot 첫째 = snapshots.saved.get(0);
+        assertThat(첫째.uncertain()).containsExactly(김);
+        assertThat(첫째.tuples()).isEmpty();
+        겹치지_않는다(첫째);
+        assertThat(writer.stored).as("실제로는 반영돼 있다").containsExactly(김);
+
+        // given — 그 사이 kim 이 조직에서 빠졌다
+        writer.lostResponseFor(tuple -> false);
+        source.willReturn(조직도(Set.of(), "DEV002"));
+
+        // when
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 불확실 줄이 목표에 없으니 지운다. 장부에서 사라지고 불확실 줄도 비워진다
+        assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.appliedDeltas.get(writer.appliedDeltas.size() - 1).toDelete()).containsExactly(김);
+        assertThat(writer.stored).isEmpty();
+        TupleSnapshot 둘째 = snapshots.saved.get(1);
+        assertThat(둘째.uncertain()).isEmpty();
+        assertThat(둘째.tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("결과를 모르는 지우기는 불확실 줄로 남고, 다음 회차에 목표에 다시 들었으면 쓴다 — 응답만 잃은 지우기가 권한을 영원히 빼지 않는다")
+    void 결과를_모르는_지우기는_불확실_줄로_남고_목표에_다시_들면_다음_회차가_쓴다() {
+        // given — 기준선에 kim, lee. 이번 목표는 kim 뿐이라 lee 를 지우는데, 서버가 반영하고 응답을 잃는다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(김, 이))).block();
+        writer.stored.addAll(Set.of(김, 이));
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(이));
+
+        // when
+        var run1 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — lee 는 확실한 줄에서 빠지고 불확실 줄로 옮겨 간다
+        assertThat(run1.status()).isEqualTo(SyncStatus.PARTIAL);
+        TupleSnapshot 첫째 = snapshots.saved.get(1);
+        assertThat(첫째.tuples()).containsExactly(김);
+        assertThat(첫째.uncertain()).containsExactly(이);
+        겹치지_않는다(첫째);
+
+        // given — lee 가 조직에 다시 들었다
+        writer.lostResponseFor(tuple -> false);
+        source.willReturn(조직도(Set.of("kim", "lee"), "DEV002"));
+
+        // when
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 장부에 lee 가 다시 생기고 기준선도 둘 다 담는다
+        assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactlyInAnyOrder(김, 이);
+        TupleSnapshot 둘째 = snapshots.saved.get(2);
+        assertThat(둘째.tuples()).containsExactlyInAnyOrder(김, 이);
+        assertThat(둘째.uncertain()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("쓰기가 연속 실패 차단기로 멈춘 회차도 결과를 모르는 줄을 불확실 줄로 남긴다")
+    void 차단기로_멈춘_회차도_불확실_줄을_남긴다() {
+        // given — kim 의 쓰기는 응답을 잃고, 같은 델타가 차단기로 멈춘다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(김));
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.saved.get(0).uncertain()).containsExactly(김);
+        assertThat(snapshots.saved.get(0).tuples()).isEmpty();
+        겹치지_않는다(snapshots.saved.get(0));
+        assertThat(snapshots.writing).as("스냅샷을 남겼으니 표시가 사라진다").isFalse();
+    }
+
+    @Test
+    @DisplayName("불확실 줄이 남아 있으면 목표가 지난 회차와 같아도 변경 없음이 아니다 — 목표에 없는 불확실 줄은 다시 지운다")
+    void 불확실_줄이_남아_있으면_목표가_같아도_변경_없음이_아니다() {
+        // given — 1회차: 기준선의 lee 를 지웠는데 응답을 잃었다. 목표는 kim 뿐이다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(김, 이))).block();
+        writer.stored.addAll(Set.of(김, 이));
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(이));
+        동기화한다(SyncTrigger.SCHEDULED);
+        int 첫_회차까지 = writer.appliedDeltas.size();
+
+        // when — 2회차의 목표는 1회차와 같다
+        writer.lostResponseFor(tuple -> false);
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 기준선(kim)과 목표(kim)는 같지만 lee 를 다시 보낸다. 겹치는 줄은 없다
+        assertThat(run2.message()).isNotEqualTo("변경 없음");
+        assertThat(writer.appliedDeltas).hasSize(첫_회차까지 + 1);
+        var 마지막 = writer.appliedDeltas.get(writer.appliedDeltas.size() - 1);
+        assertThat(마지막.toDelete()).containsExactly(이);
+        assertThat(마지막.toWrite()).isEmpty();
+        assertThat(snapshots.saved.get(2).uncertain()).isEmpty();
+        assertThat(snapshots.saved.get(2).tuples()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("불확실 줄을 다시 보냈는데 확정적으로 실패하면(거절·보내지 않음) 불확실 줄로 남는다 — 반영 여부를 아직 모른다")
+    void 확정_실패한_불확실_줄은_불확실_줄로_남는다() {
+        // given — 1회차: kim 의 쓰기가 응답을 잃어 불확실 줄이 됐다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(김));
+        동기화한다(SyncTrigger.SCHEDULED);
+
+        // when — 2회차: kim 을 다시 쓰는데 이번에는 거절된다. 반영 여부는 여전히 모른다
+        writer.lostResponseFor(tuple -> false);
+        writer.failFor(tuple -> tuple.equals(김));
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 확실한 줄로 옮기지도, 불확실 줄에서 지우지도 않는다
+        assertThat(run2.status()).isEqualTo(SyncStatus.PARTIAL);
+        TupleSnapshot 둘째 = snapshots.saved.get(1);
+        assertThat(둘째.uncertain()).containsExactly(김);
+        assertThat(둘째.tuples()).isEmpty();
+        겹치지_않는다(둘째);
+
+        // when — 3회차: kim 이 조직에서 빠졌다
+        writer.failFor(tuple -> false);
+        source.willReturn(조직도(Set.of(), "DEV002"));
+        동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 불확실 줄로 남아 있었기에 이번에 지운다
+        assertThat(writer.stored).isEmpty();
+        assertThat(snapshots.saved.get(2).uncertain()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("삭제 가드의 기준 수는 확실한 줄과 불확실 줄을 합친 수다 — 불확실 줄도 장부에 있을 수 있는 줄이다")
+    void 가드의_기준_수는_확실한_줄과_불확실_줄을_합친_수다() {
+        // given — 확실한 줄 7 + 불확실 줄 3 = 10(최소 기준). 확실한 줄만으로는 가드를 적용하지 않는 크기다. 목표는 0건
+        Set<RelationTuple> 확실 = IntStream.range(0, 7)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002")).collect(Collectors.toSet());
+        Set<RelationTuple> 불확실 = IntStream.range(7, 10)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002")).collect(Collectors.toSet());
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 확실, 불확실)).block();
+        source.willReturn(DirectorySnapshot.empty());
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 지울 10건이 기준 10건의 100% 라 가드가 걸린다
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).contains("삭제 대상 10건").contains("기준 스냅샷 10건");
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("훑어 맞추기에서 결과를 모르는 지우기도 불확실 줄로 남고, 다음 회차가 목표에 다시 들었으면 쓴다")
+    void 훑어_맞추기에서_결과를_모르는_지우기는_불확실_줄로_남는다() {
+        // given — 지난 회차가 기록 전에 멈췄다. 장부에 kim, park. 목표는 kim 뿐이라 park 을 지우는데 서버가 반영하고 응답을 잃는다
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.stored.addAll(Set.of(김, 박));
+        snapshots.writing.set(true);
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+        writer.lostResponseFor(tuple -> tuple.equals(박));
+
+        // when
+        var run1 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — park 은 확실한 줄이 아니라 불확실 줄이다. 표시는 스냅샷 저장으로 사라진다
+        assertThat(run1.status()).isEqualTo(SyncStatus.PARTIAL);
+        TupleSnapshot 첫째 = snapshots.saved.get(0);
+        assertThat(첫째.tuples()).containsExactly(김);
+        assertThat(첫째.uncertain()).containsExactly(박);
+        겹치지_않는다(첫째);
+        assertThat(snapshots.writing).isFalse();
+
+        // given — park 이 되돌아왔다
+        writer.lostResponseFor(tuple -> false);
+        source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
+
+        // when
+        var run2 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run2.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactlyInAnyOrder(김, 박);
+        assertThat(snapshots.saved.get(1).tuples()).containsExactlyInAnyOrder(김, 박);
+        assertThat(snapshots.saved.get(1).uncertain()).isEmpty();
+    }
 }

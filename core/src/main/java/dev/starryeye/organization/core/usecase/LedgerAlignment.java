@@ -60,12 +60,16 @@ final class LedgerAlignment {
         return decision.aborted() ? Optional.of(decision.message()) : Optional.empty();
     }
 
-    /** 스냅샷에는 장부에 실제로 있다고 볼 줄을 담는다(설계 2026-09-29 §3.1 4단계). 그다음 현재상태를 LDAP 대로 바꾼다. */
+    /**
+     * 스냅샷에는 장부에 있다고 확실히 아는 줄(B)과, 보냈는데 결과를 몰라 있는지 모르는 줄(U)을 따로 담는다(설계 2026-09-29 §3.1 4단계, 2026-10-20 §3.4).
+     * 그다음 현재상태를 LDAP 대로 바꾼다.
+     */
     private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, TupleReconciler.Reconciliation reconciliation,
                                            AuditChanges 기록) {
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
-                SnapshotIds.generate(now, SyncSource.LDAP), now, SyncSource.LDAP, reconciliation.ledger());
+                SnapshotIds.generate(now, SyncSource.LDAP), now, SyncSource.LDAP, reconciliation.ledger(),
+                reconciliation.uncertain());
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())))

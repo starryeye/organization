@@ -38,8 +38,13 @@ import java.util.function.Consumer;
 /**
  * LDAP 전체 동기화.
  *
- * <p>핵심은 <b>OpenFGA 에 먼저 쓰고, 실제 성공한 튜플만 새 스냅샷으로 커밋</b>하는 것이다.
- * 실패한 튜플은 새 스냅샷에 들어가지 않으므로 다음 동기화의 diff 가 자동으로 다시 잡는다.
+ * <p>핵심은 <b>OpenFGA 에 먼저 쓰고, 반영됐다고 확실한 튜플만 새 스냅샷의 기준선(B)으로 커밋</b>하는 것이다.
+ * 거절되거나 보내지 않은 쓰기는 B 에 들어가지 않으므로 다음 동기화의 diff 가 자동으로 다시 잡는다.
+ *
+ * <p><b>결과를 모르는 줄은 불확실 줄(U)로 남는다(설계 2026-10-20 §3).</b> 보냈는데 일시 오류로 결과를 모르는 쓰기·지우기는 서버가 반영하고 응답만 잃었을 수
+ * 있다. 결과를 모르는 쓰기를 B 에서 빼 두면 그 줄이 목표에서 빠질 때 지울 기준이 없어 권한이 영원히 남고, 결과를 모르는 지우기를 B 에 두면 목표에 다시 들 때
+ * 쓸 줄로 잡히지 않아 권한이 영원히 빠진다. 그래서 B 와 따로 U 에 적고, 다음 회차가 목표에 있으면 쓰고 없으면 지운다 — 쓸 줄 = D − B,
+ * 지울 줄 = (B − D) ∪ (U − D). 삭제 가드의 기준 수는 |B| + |U| 다.
  *
  * <p><b>기록 중 표시(설계 2026-09-30 §4).</b> OpenFGA 에 쓰기 직전 스냅샷 포인터에 "기록 중"을 남기고, 스냅샷 저장이 그것을 지운다. 표시가 남아
  * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
@@ -118,14 +123,15 @@ public class FullSyncUseCase {
     private Mono<Mono<SyncOutcome>> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
                                                 SyncTrigger trigger, AuditChanges 기록) {
         return baseline().flatMap(baseline -> {
-            TupleDelta delta = TupleDiff.between(baseline, desired);
+            TupleDelta delta = 델타를_정한다(baseline, desired);
             if (delta.isEmpty()) {
+                // 델타가 비면 U 도 비어 있다 — U 의 줄은 D 에 있으면 쓸 줄에, 없으면 지울 줄에 반드시 든다
                 log.info("변경 없음. OpenFGA 를 호출하지 않는다");
                 return state.replaceWith(directory, 기록.directoryListener())
                         .thenReturn(Mono.just(SyncOutcome.noChange()));
             }
             if (trigger != SyncTrigger.FORCED) {
-                GuardDecision decision = guard.evaluate(delta, baseline);
+                GuardDecision decision = guard.evaluate(delta.toDelete().size(), baseline.크기(), "기준 스냅샷");
                 if (decision.aborted()) {
                     log.warn("삭제 가드 발동: {}", decision.message());
                     return Mono.just(Mono.just(SyncOutcome.aborted(decision.message())));
@@ -142,13 +148,42 @@ public class FullSyncUseCase {
         });
     }
 
-    private Mono<Set<RelationTuple>> baseline() {
-        return snapshots.findLatest()
-                .map(TupleSnapshot::tuples)
-                .defaultIfEmpty(Set.of());
+    /** 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄). 스냅샷이 없으면 둘 다 비었다. */
+    private record 기준선(Set<RelationTuple> tuples, Set<RelationTuple> uncertain) {
+
+        static final 기준선 없음 = new 기준선(Set.of(), Set.of());
+
+        /** 삭제 가드의 기준 수 — |B| + |U|. 불확실 줄도 장부에 있을 수 있는 줄이다 */
+        int 크기() {
+            return tuples.size() + uncertain.size();
+        }
     }
 
-    private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, Set<RelationTuple> baseline,
+    private Mono<기준선> baseline() {
+        return snapshots.findLatest()
+                .map(snapshot -> new 기준선(snapshot.tuples(), snapshot.uncertain()))
+                .defaultIfEmpty(기준선.없음);
+    }
+
+    /**
+     * 쓸 줄 = D − B, 지울 줄 = (B − D) ∪ (U − D)(설계 2026-10-20 §3.3). U 는 B 에 없으므로 U ∩ D 는 쓸 줄에 저절로 든다. 멱등 옵션(없는 줄 지우기 무시,
+     * 있는 줄 쓰기 무시) 덕에 U 의 줄을 다시 보내도 안전하다. 쓸 줄은 D 안, 지울 줄은 D 밖이라 겹치지 않는다.
+     */
+    private static TupleDelta 델타를_정한다(기준선 baseline, Set<RelationTuple> desired) {
+        TupleDelta diff = TupleDiff.between(baseline.tuples(), desired);
+        if (baseline.uncertain().isEmpty()) {
+            return diff;
+        }
+        Set<RelationTuple> toDelete = new HashSet<>(diff.toDelete());
+        for (RelationTuple tuple : baseline.uncertain()) {
+            if (!desired.contains(tuple)) {
+                toDelete.add(tuple);
+            }
+        }
+        return new TupleDelta(diff.toWrite(), toDelete);
+    }
+
+    private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, 기준선 baseline,
                                            TupleWriteResult result, AuditChanges 기록) {
         return saveSnapshotAndState(directory, baseline, result, 기록)
                 .map(snapshotId -> Mono.just(result.hasFailure()
@@ -158,24 +193,38 @@ public class FullSyncUseCase {
 
     /**
      * 튜플 스냅샷과 현재상태는 <b>기준이 다르다</b>.
-     * 스냅샷은 OpenFGA 에 실제 반영된 것, 현재상태는 LDAP 에서 읽은 사실 그대로다.
+     * 스냅샷은 OpenFGA 에 반영됐다고 확실한 줄(B)과 결과를 모르는 줄(U), 현재상태는 LDAP 에서 읽은 사실 그대로다.
      *
-     * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다.
+     * <p>쓰기가 차단기로 멈췄을 때도 여기를 탄다(설계 2026-09-29 §5) — 이미 나간 쓰기를 스냅샷에 담지 않으면 기준선이 장부와 어긋난다. 나간 쓰기 가운데
+     * 결과를 모르는 줄은 확실하다고 할 수 없다(설계 2026-09-30 §4.1 의 "기준선이 정확하다"는 이 줄을 몰랐다) — <b>결과를 모르는 줄은 U 로 남는다</b>.
+     * R 을 이번 회차의 결과라 하면(설계 2026-10-20 §3.2):
+     * <ul>
+     *   <li>U_new = (U − (R.쓴 줄 ∪ R.지운 줄)) ∪ R.불확실 줄 — 이번에 결과가 확정된 줄만 U 에서 나간다. 다시 보냈는데 거절되거나 보내지 않은 줄은 여전히
+     *       모르므로 U 에 남는다.</li>
+     *   <li>B_new = ((B − R.지운 줄) ∪ R.쓴 줄) − U_new — B 와 U 는 겹치지 않는다.</li>
+     * </ul>
      * 스냅샷 저장이 "기록 중" 표시를 지운다. 현재상태가 바뀐 것은 직원·조직 하나마다 {@code 기록} 에 더한다. 저장한
      * 스냅샷 아이디를 준다.
      */
-    private Mono<String> saveSnapshotAndState(DirectorySnapshot directory, Set<RelationTuple> baseline,
+    private Mono<String> saveSnapshotAndState(DirectorySnapshot directory, 기준선 baseline,
                                               TupleWriteResult result, AuditChanges 기록) {
-        Set<RelationTuple> committed = new HashSet<>(baseline);
+        Set<RelationTuple> uncertain = new HashSet<>(baseline.uncertain());
+        uncertain.removeAll(result.written());
+        uncertain.removeAll(result.deleted());
+        uncertain.addAll(result.uncertain());
+
+        Set<RelationTuple> committed = new HashSet<>(baseline.tuples());
         committed.removeAll(result.deleted());
         committed.addAll(result.written());
+        committed.removeAll(uncertain);
 
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
                 SnapshotIds.generate(now, SyncSource.LDAP),
                 now,
                 SyncSource.LDAP,
-                committed);
+                committed,
+                uncertain);
 
         return snapshots.save(snapshot)
                 .then(Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())))

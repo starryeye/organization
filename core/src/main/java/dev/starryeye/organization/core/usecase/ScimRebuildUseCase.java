@@ -193,7 +193,7 @@ public class ScimRebuildUseCase {
     }
 
     /**
-     * 스냅샷에는 <b>장부에 실제로 있다고 볼 줄</b>만 담는다(설계 §3.1 4단계). 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다.
+     * 스냅샷에는 <b>장부에 있다고 확실히 아는 줄</b>(B)과 <b>결과를 몰라 있는지 모르는 줄</b>(U)을 따로 담는다(설계 §3.1 4단계, 2026-10-20 §3.4). 지우기가 차단기로 멈췄어도 같다 — 스냅샷을 남긴 뒤 FAILED 로 기록한다.
      * <b>락을 반납한 뒤에 돈다</b>(설계 2026-10-02 §5) — SCIM 쓰기 경로는 이 스냅샷을 읽지 않는다. 저장이 실패하면 FAILED 다 — 장부는 이미 맞췄다.
      * 지운 줄은 지우기 묶음이 끝날 때마다 이미 회차의 변경 모음에 들어 있어, 저장이 실패해도 이력에 남는다(설계 2026-10-15 §5).
      */
@@ -201,7 +201,8 @@ public class ScimRebuildUseCase {
         return Mono.defer(() -> {
                     Instant now = clock.instant();
                     TupleSnapshot snapshot = new TupleSnapshot(
-                            SnapshotIds.generate(now, SyncSource.SCIM), now, SyncSource.SCIM, reconciliation.ledger());
+                            SnapshotIds.generate(now, SyncSource.SCIM), now, SyncSource.SCIM, reconciliation.ledger(),
+                            reconciliation.uncertain());
                     return snapshots.save(snapshot).thenReturn(reconciliation.outcome(snapshot.id()));
                 })
                 .onErrorMap(error -> new IllegalStateException("장부는 맞췄다 — 스냅샷 저장 실패: "

@@ -33,6 +33,10 @@ import java.util.function.Consumer;
  * 대신한다. D' 에 새로 든 줄은 지우지 않고(장부에 없으면 쓴다), D 에 있었지만 D' 에 없는 줄은 장부에 있다면 지울 후보가 된다. SCIM 재적재가 GSI 열거에서
  * 빠진 대상을 본 테이블로 다시 읽어 D' 를 만든다. LDAP 장부 맞추기는 쓰지 않는다.
  *
+ * <p><b>결과를 모르는 지우기는 불확실 줄로 남는다(설계 2026-10-20 §3.4).</b> 쓰기는 훑기가 실제를 알려 주지만, 훑은 뒤의 지우기는 일시 오류로 결과를 모를 수
+ * 있다. 그 줄은 새 스냅샷의 기준선(B)이 아니라 불확실 줄(U)에 담는다 — 다음 회차가 목표에 따라 다시 정한다. 거절된 줄과 보내지 않은 줄은 장부에 그대로
+ * 있다는 것을 아니까 B 에 남긴다.
+ *
  * <p><b>훑기는 흘려 보내며 비교한다.</b> 장부 전체를 메모리에 모으지 않는다 — 드는 것은 D 와 지울 후보뿐이다.
  *
  * <p>호출자는 D 를 <b>다 읽은 뒤에만</b> 부른다. 읽기가 실패했는데 부르면 빈 D 로 장부를 비운다(점검 M13).
@@ -107,9 +111,9 @@ final class TupleReconciler {
                         return Mono.just(Reconciliation.held(revised.written(), hold.get()));
                     }
                     return 지운다(writer, scan.stale(), 지운_줄마다)
-                            .map(deleted -> Reconciliation.of(revised.written(), deleted, scan.present()))
+                            .map(deleted -> Reconciliation.of(revised.written(), deleted, scan))
                             .onErrorResume(TupleWriteAbortedException.class,
-                                    stopped -> Mono.just(Reconciliation.stopped(revised.written(), stopped, scan.present())));
+                                    stopped -> Mono.just(Reconciliation.stopped(revised.written(), stopped, scan)));
                 }));
     }
 
@@ -124,6 +128,8 @@ final class TupleReconciler {
      *   <li>뺀 줄(D∖D') 중 장부에 있던 것은 장부에 있는 줄에서 빼 지울 후보에 넣는다. 장부에 없던 것은 어느 쪽에도 넣지 않는다.</li>
      * </ul>
      * 바뀐 것이 없으면 받은 그대로다 — 쓰기가 없다.
+     *
+     * <p>더 쓴 줄은 훑은 <b>뒤</b>에 보내므로 훑기가 결과를 알려 주지 못한다. 결과를 모르는 채 실패한 줄은 {@link Scan#uncertain()} 으로 넘긴다.
      */
     private static Mono<다시_정함> 다시_정한다(RelationTupleWriter writer, Set<RelationTuple> desired, TupleWriteResult written,
                                         Scan scan, Set<RelationTuple> revised) {
@@ -154,7 +160,8 @@ final class TupleReconciler {
             present.removeAll(뺀);
             present.addAll(장부에_있던_더한);
             present.addAll(더_쓴.written());
-            return new 다시_정함(revised, 쓴_결과를_합친다(written, 더_쓴), new Scan(남은_후보, present, scan.scanned()));
+            return new 다시_정함(revised, 쓴_결과를_합친다(written, 더_쓴),
+                    new Scan(남은_후보, present, scan.scanned(), 더_쓴.uncertain()));
         });
     }
 
@@ -199,45 +206,56 @@ final class TupleReconciler {
                             stale.add(tuple);
                         }
                     })
-                    .then(Mono.fromSupplier(() -> new Scan(stale, present, 읽은_줄.get())))
+                    .then(Mono.fromSupplier(() -> new Scan(stale, present, 읽은_줄.get(), Set.of())))
                     .doOnNext(scan -> log.info("장부 훑기: {}줄을 읽어 있어야 할 줄에 없는 {}줄을 찾았다 ({}ms)",
                             scan.scanned(), scan.stale().size(), Duration.ofNanos(System.nanoTime() - 시작).toMillis()));
         });
     }
 
-    /** 훑은 결과 — 지울 후보(stale), 장부에 있다고 확인된 D 의 줄(present, 새 스냅샷의 재료), 읽은 줄 수(삭제 가드의 기준). */
-    private record Scan(Set<RelationTuple> stale, Set<RelationTuple> present, long scanned) {
+    /**
+     * 훑은 결과 — 지울 후보(stale), 장부에 있다고 확인된 D 의 줄(present, 새 스냅샷의 재료), 읽은 줄 수(삭제 가드의 기준), 훑은 뒤 더 쓰다가 결과를 모르게 된
+     * 줄(uncertain, 다시 정하지 않았으면 비어 있다).
+     */
+    private record Scan(Set<RelationTuple> stale, Set<RelationTuple> present, long scanned, Set<RelationTuple> uncertain) {
     }
 
     /**
      * 장부 청소의 결과.
      *
      * @param result     쓰기·지우기를 합친 결과 — 실행 기록의 건수가 된다
-     * @param ledger     장부에 실제로 있다고 볼 줄 — 새 스냅샷이 된다 (설계 §3.1 4단계)
+     * @param ledger     장부에 있다고 확실히 아는 줄 — 새 스냅샷의 B 가 된다 (설계 2026-10-20 §3.4)
+     * @param uncertain  보냈는데 결과를 몰라 장부에 있는지 모르는 줄 — 새 스냅샷의 U 가 된다. {@code ledger} 와 겹치지 않는다
      * @param stopReason 지우기가 연속 실패 차단기로 멈춘 사유. 멈추지 않았으면 {@code null}
      * @param heldReason 지우기 전 확인이 멈춘 사유. 멈추지 않았으면 {@code null} — 이때는 스냅샷을 남기지 않는다
      */
-    record Reconciliation(TupleWriteResult result, Set<RelationTuple> ledger, String stopReason, String heldReason) {
+    record Reconciliation(TupleWriteResult result, Set<RelationTuple> ledger, Set<RelationTuple> uncertain,
+                          String stopReason, String heldReason) {
 
         /**
-         * 스냅샷에 담을 줄 = 훑을 때 장부에 있던 있어야 할 줄(present) ∪ 지우기에 실패한 줄. 스캔은 쓰기 단계 뒤에 돌므로, 다시 쓰기가
-         * 실패한 줄이라도 전부터 장부에 있었다면(present 에 있다면) 여전히 담는다 — 빼면 그 사람이 나중에 조직도에서 빠져도 지울 기준이
-         * 없어 권한이 영원히 남는다(점검 M2). 애초에 장부에 없었는데 쓰기까지 실패한 줄은 present 에 없으니 자연히 빠진다 — 다음
-         * 동기화가 다시 쓴다.
+         * 스냅샷에 담을 줄을 가른다(설계 2026-10-20 §3.4).
+         * <ul>
+         *   <li><b>ledger(B)</b> = 훑을 때 장부에 있던 있어야 할 줄(present) ∪ 지울 후보 가운데 지워졌다고도, 결과를 모른다고도 할 수 없는 줄.
+         *       후보 가운데 지워지지 않은 것이 확실한 줄은 거절된 줄과 보내지 않은 줄(차단기로 멈춤)이다. 스캔은 쓰기 단계 뒤에 돌므로, 다시 쓰기가
+         *       실패한 줄이라도 전부터 장부에 있었다면(present 에 있다면) 여전히 담는다 — 빼면 그 사람이 나중에 조직도에서 빠져도 지울 기준이
+         *       없어 권한이 영원히 남는다(점검 M2). 애초에 장부에 없었는데 쓰기까지 실패한 줄은 present 에 없으니 자연히 빠진다 — 다음 동기화가
+         *       다시 쓴다.</li>
+         *   <li><b>uncertain(U)</b> = 지우기가 결과를 모른 채 실패한 줄 ∪ 훑은 뒤 더 쓰다가 결과를 모른 채 실패한 줄. 지운 줄도 쓴 줄도 아니고 B 에도
+         *       넣지 않는다 — 다음 회차가 목표에 따라 다시 쓰거나 지운다.</li>
+         * </ul>
+         * 처음 쓰기(훑기 앞)의 불확실 실패는 U 에 넣지 않는다 — 뒤이은 훑기가 실제를 알려 주었다.
          */
-        static Reconciliation of(TupleWriteResult written, TupleWriteResult deleted, Set<RelationTuple> present) {
-            return 합친다(written, deleted, present, null);
+        static Reconciliation of(TupleWriteResult written, TupleWriteResult deleted, Scan scan) {
+            return 합친다(written, deleted, scan, null);
         }
 
-        /** 지우기가 차단기로 멈췄다. 보내지 않은 지우기는 {@code partial} 에 실패로 들어 있어 {@code ledger} 에 남는다. */
-        static Reconciliation stopped(TupleWriteResult written, TupleWriteAbortedException stopped,
-                                      Set<RelationTuple> present) {
-            return 합친다(written, stopped.partial(), present, stopped.getMessage());
+        /** 지우기가 차단기로 멈췄다. 보내지 않은 지우기는 {@code partial} 에 확정 실패로 들어 있고, 후보 가운데 지워지지 않은 것이 확실한 줄로 {@code ledger} 에 남는다. */
+        static Reconciliation stopped(TupleWriteResult written, TupleWriteAbortedException stopped, Scan scan) {
+            return 합친다(written, stopped.partial(), scan, stopped.getMessage());
         }
 
         /** 지우기 전에 멈췄다 — 지운 것이 없다. 호출자는 스냅샷을 남기지 않고 사유로 끝낸다. */
         static Reconciliation held(TupleWriteResult written, String reason) {
-            return new Reconciliation(written, Set.copyOf(written.written()), null, reason);
+            return new Reconciliation(written, Set.copyOf(written.written()), Set.of(), null, reason);
         }
 
         boolean held() {
@@ -254,15 +272,22 @@ final class TupleReconciler {
                     : SyncOutcome.succeeded(result, snapshotId);
         }
 
-        private static Reconciliation 합친다(TupleWriteResult written, TupleWriteResult deleted,
-                                          Set<RelationTuple> present, String stopReason) {
-            Set<RelationTuple> ledger = new HashSet<>(present);
-            deleted.failures().forEach(failure -> ledger.add(failure.tuple()));
+        private static Reconciliation 합친다(TupleWriteResult written, TupleWriteResult deleted, Scan scan,
+                                          String stopReason) {
+            Set<RelationTuple> uncertain = new HashSet<>(scan.uncertain());
+            uncertain.addAll(deleted.uncertain());
+
+            Set<RelationTuple> ledger = new HashSet<>(scan.present());
+            for (RelationTuple candidate : scan.stale()) {
+                if (!deleted.deleted().contains(candidate) && !uncertain.contains(candidate)) {
+                    ledger.add(candidate);
+                }
+            }
 
             List<TupleFailure> failures = new ArrayList<>(written.failures());
             failures.addAll(deleted.failures());
             return new Reconciliation(
-                    new TupleWriteResult(written.written(), deleted.deleted(), failures), ledger, stopReason, null);
+                    new TupleWriteResult(written.written(), deleted.deleted(), failures), ledger, uncertain, stopReason, null);
         }
     }
 }
