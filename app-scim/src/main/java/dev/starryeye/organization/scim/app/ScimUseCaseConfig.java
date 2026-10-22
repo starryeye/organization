@@ -35,8 +35,8 @@ import java.time.Duration;
 public class ScimUseCaseConfig {
 
     @Bean
-    public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry) {
-        return new ScimSyncMetrics(registry);
+    public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry, Clock clock) {
+        return new ScimSyncMetrics(registry, clock);
     }
 
     /** 변경 이력을 남긴다(설계 2026-10-10 §4). 쓰지 못한 줄은 {@code audit.write.failures} 로 센다(§4.5). */

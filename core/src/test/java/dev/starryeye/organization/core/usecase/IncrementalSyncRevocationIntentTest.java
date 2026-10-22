@@ -23,6 +23,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -341,6 +343,36 @@ class IncrementalSyncRevocationIntentTest {
         assertThat(writer.appliedDeltas).isEmpty();
         assertThat(lock.acquired).hasValue(1);
         assertThat(lock.released).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("남은 회수 지우기는 쓰기 경로의 드리프트 관찰을 부르지 않는다 — 같은 줄은 아카이빙 게이지가 이미 센다(설계 §6.4)")
+    void 남은_회수_지우기는_쓰기_경로의_드리프트_관찰을_부르지_않는다() {
+        // given — 비활성 kim 의 줄이 남았다. 쓰기 경로의 관찰자를 기록하는 유스케이스다
+        List<String> 본_것 = new ArrayList<>();
+        AuditRecorder audit = new AuditRecorder(auditLog, AuditObserver.NOOP, Clock.fixed(고정시각, ZoneOffset.UTC));
+        IncrementalSyncUseCase useCase = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
+                Duration.ofSeconds(10), (extra, missing) -> 본_것.add(extra + "/" + missing), LockObserver.NOOP, audit,
+                context -> "trace-1");
+        두_조직에_속한_활성_김을_심는다(state);
+        state.saveUser(직원("kim", true), 직원("kim", false)).block();
+
+        // when
+        var result = useCase.revokeLeftovers("kim").block();
+
+        // then — 지웠지만 관찰은 부르지 않았다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.stored).isEmpty();
+        assertThat(본_것).isEmpty();
+
+        // given — 대조: 같은 어긋남을 쓰기 요청이 만나면 관찰자를 부른다 (기록기가 연결돼 있다는 증거)
+        writer.stored.addAll(Set.of(김_개발, 김_운영));
+
+        // when
+        useCase.changeUser("kim", user -> user.withDisplayName("김철수")).block();
+
+        // then
+        assertThat(본_것).containsExactly("2/0");
     }
 
     @Test

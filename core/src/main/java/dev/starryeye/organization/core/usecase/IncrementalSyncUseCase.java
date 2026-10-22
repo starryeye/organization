@@ -276,7 +276,7 @@ public class IncrementalSyncUseCase {
      * 직원이 없으면 빈 {@code Mono} 다 — 아카이빙이 비교한 뒤 그 직원이 지워졌을 수 있고, 존재 확인도 락 안이다.
      *
      * <p>목표는 {@link #upsertUserInternal} 이 저장본으로 정하는 것과 같다 — 같은 후보, 같은 Check 기준선, 같은 목표다. 다만 델타 가운데 <b>지우기만</b>
-     * 반영하고({@link #diffAndApply} 의 {@code 지우기만}) 쓰기는 버린다. 직원 레코드·소속·표지판은 바꾸지 않는다. 락·리스 확인·이력은 다른 쓰기와 같다.
+     * 반영하고({@link #diffAndApply} 의 {@code 지우기만}) 쓰기는 버린다. 직원 레코드·소속·표지판은 바꾸지 않는다. 락·리스 확인·이력은 다른 쓰기와 같다. 쓰기 경로의 드리프트 관찰({@link DriftObserver})은 부르지 않는다 — 같은 줄을 아카이빙의 게이지가 이미 센다.
      *
      * <p><b>왜 쓰지 않나.</b> 아카이빙은 락 밖에서 상태를 읽어 어긋남을 찾는다. 그 상태는 낡았을 수 있다 — 직원 삭제가 OpenFGA 에서는 끝났는데 레코드 삭제
      * 커밋이 실패하면, 레코드는 활성에 소속이 그대로인데 장부에는 줄이 없다. 낡은 상태대로 다시 쓰면 지운 직원의 권한이 되살아난다. 낡은 상태로 지우는 것은
@@ -973,7 +973,8 @@ public class IncrementalSyncUseCase {
      *
      * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      * @param 기록 이 요청의 변경 모음 — 반영한 튜플을 더한다
-     * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표·어긋남 관찰은 그대로다.
+     * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표는 그대로다. 어긋남은 로그에만 남기고
+     *                 {@link DriftObserver} 는 부르지 않는다(아카이빙 게이지가 같은 줄을 센다).
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
@@ -1009,7 +1010,10 @@ public class IncrementalSyncUseCase {
                 int missing = (int) 상태기준선.stream().filter(t -> !actual.contains(t)).count();
                 if (extra > 0 || missing > 0) {
                     log.warn("OpenFGA 어긋남 발견: 있어선 안 될 튜플 {}건, 빠진 튜플 {}건", extra, missing);
-                    driftObserver.observed(extra, missing);
+                    // 지우기만 하는 복구는 세지 않는다 — 같은 줄을 아카이빙 게이지가 이미 세고, 세면 복구가 도는 날마다 쓰기 경로의 카운터가 오른다
+                    if (!지우기만) {
+                        driftObserver.observed(extra, missing);
+                    }
                 }
 
                 return 그래프.거른다(actual, 원하는것, focus).flatMap(거름 -> {
