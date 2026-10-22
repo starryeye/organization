@@ -39,6 +39,22 @@ class ScimSyncMetricsTest {
     }
 
     @Test
+    @DisplayName("아카이빙 어긋남은 kind 태그를 단 게이지에 마지막 값으로 남는다 — 누적하지 않고, 0 으로도 내려온다(설계 2026-10-20 §6.4)")
+    void 아카이빙_어긋남을_게이지로_낸다() {
+        // given — 아직 아카이빙을 하지 않았다
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isZero();
+        assertThat(registry.get("scim.archive.drift").tag("kind", "missing").gauge().value()).isZero();
+
+        // when — 첫 아카이빙에서 3·1 을 보고, 다음 아카이빙에서 0·2 를 본다
+        metrics.observed(3L, 1L);
+        metrics.observed(0L, 2L);
+
+        // then — 합이 아니라 마지막 값이다
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isEqualTo(0);
+        assertThat(registry.get("scim.archive.drift").tag("kind", "missing").gauge().value()).isEqualTo(2);
+    }
+
+    @Test
     @DisplayName("락 대기 시간은 타이머로, 경합은 카운터로 남는다")
     void 대기와_경합을_센다() {
         // when — 경합 없이 한 번, 밀려서 한 번

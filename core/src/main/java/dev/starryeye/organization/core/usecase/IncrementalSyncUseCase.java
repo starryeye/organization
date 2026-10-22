@@ -122,7 +122,7 @@ import java.util.stream.Collectors;
  *
  * <p><b>직원의 {@code active} 는 예외다 — 요청값을 저장한다(설계 2026-10-20 §6.1·§6.2).</b> 기준선이 Check 라 저장된 {@code active} 가 재시도의 "이전"을
  * 오염시키지 않는다(델타는 Check 결과와 목표의 차이다). OpenFGA 단계가 오류로 끝나도 저장하고, 지우지 못한 직원은 비활성으로 남긴다 —
- * 회수 의도가 IdP 재시도에만 달려 있지 않게 한다({@link #upsertUser}, {@link #removeUser}).
+ * 회수 의도가 IdP 재시도에만 달려 있지 않게 한다({@link #upsertUser}, {@link #removeUser}). 재시도가 오지 않아도 하루 아카이빙이 남은 줄을 지운다({@link #revokeLeftovers}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -268,6 +268,33 @@ public class IncrementalSyncUseCase {
             Mono<IncrementalSyncResult> 반영 = diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, 기록, commit);
             return existing.map(저장본 -> 오류여도_의도를_저장한다(반영, 커밋에_닿았다, 저장본, user, lease, 기록))
                     .orElse(반영);
+        });
+    }
+
+    /**
+     * 저장된 직원의 <b>남은 회수만</b> 락 안에서 지운다 — 하루 아카이빙이 장부에 목표 밖 줄이 남은 직원을 찾으면 부른다(설계 2026-10-20 §6.4).
+     * 직원이 없으면 빈 {@code Mono} 다 — 아카이빙이 비교한 뒤 그 직원이 지워졌을 수 있고, 존재 확인도 락 안이다.
+     *
+     * <p>목표는 {@link #upsertUserInternal} 이 저장본으로 정하는 것과 같다 — 같은 후보, 같은 Check 기준선, 같은 목표다. 다만 델타 가운데 <b>지우기만</b>
+     * 반영하고({@link #diffAndApply} 의 {@code 지우기만}) 쓰기는 버린다. 직원 레코드·소속·표지판은 바꾸지 않는다. 락·리스 확인·이력은 다른 쓰기와 같다.
+     *
+     * <p><b>왜 쓰지 않나.</b> 아카이빙은 락 밖에서 상태를 읽어 어긋남을 찾는다. 그 상태는 낡았을 수 있다 — 직원 삭제가 OpenFGA 에서는 끝났는데 레코드 삭제
+     * 커밋이 실패하면, 레코드는 활성에 소속이 그대로인데 장부에는 줄이 없다. 낡은 상태대로 다시 쓰면 지운 직원의 권한이 되살아난다. 낡은 상태로 지우는 것은
+     * 거부 쪽으로만 틀리므로 안전하다. 빠진 줄은 IdP 재시도·다음 쓰기·재적재가 채운다.
+     *
+     * <p>결과는 부분 반영일 수 있다({@code fullyApplied == false}). 지우지 못한 줄은 다음 아카이빙에 다시 잡힌다.
+     */
+    public Mono<IncrementalSyncResult> revokeLeftovers(String userId) {
+        return withLock((lease, 기록) -> state.findUser(userId)
+                .flatMap(저장본 -> 남은_회수만_지운다(저장본, lease, 기록)));
+    }
+
+    private Mono<IncrementalSyncResult> 남은_회수만_지운다(DirectoryUser 저장본, LockLease lease, AuditChanges 기록) {
+        return affectedGroupHeadersOf(저장본.id()).flatMap(headers -> {
+            Mono<DirectorySnapshot> 그림 = 직원한명_그림(headers, 저장본.id(), Mono.just(저장본));
+            // 상태는 바꾸지 않는다 — 커밋할 것이 없다
+            Commit 커밋하지_않는다 = (result, beforeTuples, afterTuples) -> Mono.empty();
+            return diffAndApply(그림, 그림, RelationTuple.userRef(저장본.id()), Set.of(), lease, 기록, 커밋하지_않는다, true);
         });
     }
 
@@ -904,6 +931,17 @@ public class IncrementalSyncUseCase {
         return Duration.ofMillis(AcquireBackoff.지금() - 시작);
     }
 
+    /** 쓰기까지 반영하는 보통의 경우다 — 자세한 것은 아래 {@code 지우기만} 을 받는 쪽에 적는다. */
+    private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
+                                                      Mono<DirectorySnapshot> afterMono,
+                                                      String focus,
+                                                      Set<RelationTuple> 확인없이_지울것,
+                                                      LockLease lease,
+                                                      AuditChanges 기록,
+                                                      Commit commit) {
+        return diffAndApply(beforeMono, afterMono, focus, 확인없이_지울것, lease, 기록, commit, false);
+    }
+
     /**
      * 기준선을 <b>OpenFGA 에 물어서</b> 만든다 (설계 §5).
      *
@@ -935,6 +973,7 @@ public class IncrementalSyncUseCase {
      *
      * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      * @param 기록 이 요청의 변경 모음 — 반영한 튜플을 더한다
+     * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표·어긋남 관찰은 그대로다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
@@ -942,7 +981,8 @@ public class IncrementalSyncUseCase {
                                                       Set<RelationTuple> 확인없이_지울것,
                                                       LockLease lease,
                                                       AuditChanges 기록,
-                                                      Commit commit) {
+                                                      Commit commit,
+                                                      boolean 지우기만) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
             DirectorySnapshot afterSnapshot = both.getT2();
@@ -974,7 +1014,8 @@ public class IncrementalSyncUseCase {
 
                 return 그래프.거른다(actual, 원하는것, focus).flatMap(거름 -> {
                     Set<RelationTuple> after = 거름.남길것();
-                    TupleDelta 계산 = TupleDiff.between(actual, after);
+                    TupleDelta 전체 = TupleDiff.between(actual, after);
+                    TupleDelta 계산 = 지우기만 ? TupleDelta.deleteOnly(전체.toDelete()) : 전체;
                     if (확인없이_지울것.isEmpty()) {
                         return 반영하고_커밋한다(계산, lease, 기록, result -> 보류와_함께_커밋한다(거름, result, actual, after, commit));
                     }

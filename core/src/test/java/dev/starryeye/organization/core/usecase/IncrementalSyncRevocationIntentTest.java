@@ -284,6 +284,82 @@ class IncrementalSyncRevocationIntentTest {
         assertThat(저장이_실패하는_저장소.users.get("kim").active()).isTrue();
     }
 
+    @Test
+    @DisplayName("남은 회수 지우기는 저장된 비활성 직원의 남은 줄만 락 안에서 Check 기준선으로 지우고, 상태는 바꾸지 않는다(설계 §6.4)")
+    void 남은_회수_지우기는_저장된_비활성_직원의_남은_줄만_지운다() {
+        // given — 비활성으로 저장된 kim 의 줄이 두 소속 모두에 남았다. 동료 lee 의 줄은 상태와 맞다
+        두_조직에_속한_활성_김을_심는다(state);
+        state.saveUser(직원("lee", true)).block();
+        state.saveGroup(new DirectoryGroup("DEV001", "DEV001", "개발본부", Set.of(김, MemberRef.user("lee")))).block();
+        writer.stored.add(RelationTuple.directMember("lee", "DEV001"));
+        state.saveUser(직원("kim", true), 직원("kim", false)).block();
+        DirectoryUser 저장본 = state.users.get("kim");
+
+        // when
+        var result = 유스케이스().revokeLeftovers("kim").block();
+
+        // then — 남은 줄만 지웠다. 상태는 그대로(이름·활성·소속)이고 이력에 지운 줄이 남는다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.stored).containsExactly(RelationTuple.directMember("lee", "DEV001"));
+        assertThat(writer.appliedDeltas).hasSize(1);
+        assertThat(writer.appliedDeltas.get(0).toWrite()).isEmpty();
+        assertThat(writer.appliedDeltas.get(0).toDelete()).containsExactlyInAnyOrder(김_개발, 김_운영);
+        assertThat(state.users.get("kim")).isEqualTo(저장본);
+        assertThat(state.groups.get("DEV001").members()).contains(김);
+        assertThat(auditLog.lastOf(김).revoked()).containsExactlyInAnyOrder(김_개발, 김_운영);
+        assertThat(auditLog.lastOf(김).attributes()).as("직원 레코드를 다시 저장하지 않았다").isEmpty();
+        assertThat(lock.acquired).as("락 안에서 했다").hasValue(1);
+        assertThat(lock.released).hasValue(1);
+        assertThat(checker.checked).as("기준선은 Check 다").isNotEmpty();
+    }
+
+    @Test
+    @DisplayName("남은 회수 지우기는 빠진 줄을 쓰지 않는다 — 낡은 상태가 지운 직원의 권한을 되살리면 안 된다(설계 §6.4)")
+    void 남은_회수_지우기는_빠진_줄을_쓰지_않는다() {
+        // given — 상태는 활성 kim 이 두 소속이라 말하지만 장부에는 한 줄만 있다(직원 삭제가 OpenFGA 에서 끝나고 커밋이 실패한 모양)
+        두_조직에_속한_활성_김을_심는다(state);
+        writer.stored.remove(김_운영);
+
+        // when
+        var result = 유스케이스().revokeLeftovers("kim").block();
+
+        // then — 쓰지 않았다
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(writer.stored).containsExactly(김_개발);
+        assertThat(state.users.get("kim").active()).isTrue();
+    }
+
+    @Test
+    @DisplayName("남은 회수 지우기는 직원이 없으면 빈 결과다 — 락 안에서 읽는다(설계 §6.4)")
+    void 남은_회수_지우기는_직원이_없으면_빈_결과다() {
+        // given, when
+        var result = 유스케이스().revokeLeftovers("nobody").block();
+
+        // then
+        assertThat(result).isNull();
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(lock.acquired).hasValue(1);
+        assertThat(lock.released).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("남은 회수 지우기가 일부 실패하면 부분 반영을 알리고 상태는 그대로다(설계 §6.4)")
+    void 남은_회수_지우기가_일부_실패하면_부분_반영을_알린다() {
+        // given
+        두_조직에_속한_활성_김을_심는다(state);
+        state.saveUser(직원("kim", true), 직원("kim", false)).block();
+        writer.failFor(김_운영::equals);
+
+        // when
+        var result = 유스케이스().revokeLeftovers("kim").block();
+
+        // then
+        assertThat(result.fullyApplied()).isFalse();
+        assertThat(writer.stored).containsExactly(김_운영);
+        assertThat(state.users.get("kim").active()).isFalse();
+    }
+
     /** 시드({@code saveUser(user)})는 그대로 두고, 유스케이스가 쓰는 {@code saveUser(before, after)} 만 실패한다. */
     private static class 직원_저장이_실패하는_저장소 extends FakeStateRepository {
 
