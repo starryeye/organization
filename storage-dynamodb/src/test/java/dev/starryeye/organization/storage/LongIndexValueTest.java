@@ -25,7 +25,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 긴 색인 값(LDAP 의 자유 서술 {@code description} 이 조직 표시명이 된다)도 상태 교체가 성공한다(설계 2026-10-20 §7).
  *
  * <p>색인 정렬키(GSI1SK·GSI2SK)는 쓸 때 1024바이트로 자르고, 원래 값은 {@code displayName}·{@code userName} 속성에 그대로 둔다. 실제 DynamoDB 는
- * 1024바이트를 넘는 정렬키를 {@code ValidationException} 으로 거절한다. DynamoDB Local 이 거절하든 아니든, 시험은 <b>읽어 본 정렬키의 길이</b>를 본다.
+ * 1024바이트를 넘는 정렬키를 {@code ValidationException} 으로 거절한다. DynamoDB Local 2.5.3 도 1200바이트 GSI 정렬키를 거절한다(검토에서 확인:
+ * {@code ValidationException: Size limit exceeded}) — 자르지 않은 키는 상태 교체를 실패시킨다. 시험은 <b>읽어 본 정렬키의 길이</b>를 본다.
  */
 class LongIndexValueTest extends DynamoDbTestSupport {
 
