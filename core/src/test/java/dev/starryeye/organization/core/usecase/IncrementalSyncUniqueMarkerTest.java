@@ -186,8 +186,8 @@ class IncrementalSyncUniqueMarkerTest {
     }
 
     @Test
-    @DisplayName("개명이 오류로 끝나면 새 표지판만 놓고 옛 표지판은 남긴다 — META 는 옛 이름이다")
-    void 개명이_오류로_끝나면_새_표지판만_놓는다() {
+    @DisplayName("개명이 오류로 끝나도 요청값을 저장하므로 META 는 새 이름이고, 옛 표지판만 놓고 새 표지판은 남긴다(설계 2026-10-20 §6.1)")
+    void 개명이_오류로_끝나도_META_가_새_이름이면_옛_표지판을_놓는다() {
         // given — u-1 은 DEV001 의 멤버다. 이름을 바꾸며 비활성화하면 튜플을 지운다
         state.groups.put("DEV001", new DirectoryGroup("DEV001", null, "개발", Set.of(MemberRef.user("u-1"))));
         useCase.createUser(직원("u-1", "old")).block();
@@ -198,9 +198,11 @@ class IncrementalSyncUniqueMarkerTest {
         assertThatThrownBy(() -> useCase.changeUser("u-1", u -> u.withUserName("new").withActive(false)).block())
                 .isInstanceOf(TupleWriteAbortedException.class);
 
-        // then
-        assertThat(state.users.get("u-1").userName()).isEqualTo("old");
-        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("old");
+        // then — OpenFGA 단계가 오류로 끝나도 요청값을 저장한다(설계 2026-10-20 §6.1). 예전에는 META 가 옛 이름으로 남았다.
+        // 정리는 그대로 주인이 쥔 이름을 본다 — 새 표지판은 남고 옛 표지판만 놓는다
+        assertThat(state.users.get("u-1").userName()).isEqualTo("new");
+        assertThat(state.users.get("u-1").active()).isFalse();
+        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("new");
     }
 
     @Test

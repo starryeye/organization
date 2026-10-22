@@ -284,8 +284,8 @@ class IncrementalSyncUseCaseTest {
         // OpenFGA 에 남은 튜플을 영원히 다시 잡지 못한다.
         assertThat(result.fullyApplied()).isFalse();
         assertThat(state.users).containsKey("kim");
-        // 실패했으므로 active 는 이전 값(활성)으로 되돌아간다
-        assertThat(state.users.get("kim").active()).isTrue();
+        // 실패해도 요청한 active(비활성)를 저장한다 — 기준선이 Check 라 재시도의 델타가 지워지지 않는다(설계 2026-10-20 §6.1)
+        assertThat(state.users.get("kim").active()).isFalse();
     }
 
     @Test
@@ -565,7 +565,7 @@ class IncrementalSyncUseCaseTest {
     }
 
     @Test
-    @DisplayName("비활성화 반영이 전부 실패하면 활성 상태를 되돌려 재시도가 다시 삭제를 시도하게 한다")
+    @DisplayName("비활성화 반영이 전부 실패해도 비활성으로 저장하고, 재시도가 Check 기준선으로 다시 삭제를 시도한다(설계 2026-10-20 §6.1)")
     void 비활성화_전체_실패시_재시도가_다시_삭제를_시도한다() {
         // given
         state.saveUser(직원("kim", true)).block();
@@ -576,25 +576,25 @@ class IncrementalSyncUseCaseTest {
         // when
         var result = useCase.upsertUser(직원("kim", false)).block();
 
-        // then — 실패했으니 active 를 되돌려 저장한다. 그대로 false 를 저장하면 다음 diff 가 이미
-        // 같다고 판단해 영원히 재시도하지 못한다
+        // then — 실패해도 요청한 비활성을 저장한다(설계 2026-10-20 §6.1). 예전에는 active 를 되돌렸다 — 상태가 기준선이던 시절의
+        // 규칙이다. 기준선이 Check 라 저장된 false 가 재시도의 델타를 지우지 않는다
         assertThat(result.fullyApplied()).isFalse();
-        assertThat(state.users.get("kim").active()).isTrue();
+        assertThat(state.users.get("kim").active()).isFalse();
 
         // when — 재시도 (실패 조건 해제)
         writer.appliedDeltas.clear();
         writer.failFor(tuple -> false);
         var retry = useCase.upsertUser(직원("kim", false)).block();
 
-        // then
+        // then — 전후가 모두 비활성이어도 Check 가 남은 줄을 보고 지운다
         assertThat(retry.fullyApplied()).isTrue();
         assertThat(writer.appliedDeltas.get(0).toDelete())
                 .containsExactly(RelationTuple.directMember("kim", "DEV002"));
     }
 
     @Test
-    @DisplayName("반영이 실패해 active 를 되돌려도 요청의 이름은 남는다")
-    void 실패해_되돌려도_이름은_남는다() {
+    @DisplayName("반영이 실패해도 요청의 이름과 활성 여부를 그대로 저장한다(설계 2026-10-20 §6.1)")
+    void 실패해도_요청의_이름과_활성_여부를_저장한다() {
         // given — 조직에 속한 활성 직원을 비활성으로 바꾸되 튜플 반영이 전부 실패한다
         state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
         state.saveGroup(new DirectoryGroup("DEV", null, "개발팀", Set.of(MemberRef.user("kim")))).block();
@@ -605,9 +605,9 @@ class IncrementalSyncUseCaseTest {
         // when
         useCase.upsertUser(new DirectoryUser("kim", null, "kim", "김철수", null, false, 이름)).block();
 
-        // then
+        // then — active 를 되돌리지 않는다(설계 2026-10-20 §6.1)
         DirectoryUser 저장 = state.users.get("kim");
-        assertThat(저장.active()).isTrue();
+        assertThat(저장.active()).isFalse();
         assertThat(저장.name()).isEqualTo(이름);
     }
 }
