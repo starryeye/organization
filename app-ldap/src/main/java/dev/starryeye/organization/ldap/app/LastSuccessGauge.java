@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 디렉터리 그림을 받아들여 반영까지 마친 마지막 LDAP 회차의 끝난 시각을 게이지 {@code sync.last.success}(epoch 초, 태그 {@code source=LDAP})로 낸다
- * (설계 2026-10-20 §8). 회수가 얼마나 낡았는지 보는 경보의 재료다 — 예: "지금 − 값 &gt; 2시간".
+ * (설계 2026-10-20 §8). 회수가 얼마나 낡았는지 보는 경보의 재료다 — 예: "지금 − 값 &gt; 2.5시간"(README 의 경보 예).
  *
  * <p><b>SUCCEEDED 와 PARTIAL 만 센다.</b> 영구히 거절되는 줄 하나가 있으면 매 회차가 PARTIAL 이지만 회수는 계속 나간다. 그것을 "멈춤"으로 울리면 경보가
  * 늘 울린다. ABORTED(가드가 멈춘 회차, 일부 반영 포함)와 FAILED 는 세지 않는다 — 그 동안이 바로 경보가 울려야 하는 때다.

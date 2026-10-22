@@ -18,7 +18,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 마지막 성공 시각 게이지(설계 2026-10-20 §8). 회수가 얼마나 낡았는지 보는 경보의 재료다 — "지금 − 값 > 2시간".
+ * 마지막 성공 시각 게이지(설계 2026-10-20 §8). 회수가 얼마나 낡았는지 보는 경보의 재료다 — "지금 − 값 > 2.5시간".
  * SUCCEEDED 와 PARTIAL 만 센다: 영구히 거절되는 줄 하나가 있으면 매 회차가 PARTIAL 이지만 회수는 계속 나가므로, 그것을 멈춤으로 울리면 경보가 늘 울린다.
  * ABORTED(가드가 멈춘 회차)와 FAILED 는 세지 않는다 — 그 동안이 경보가 울려야 하는 때다.
  */

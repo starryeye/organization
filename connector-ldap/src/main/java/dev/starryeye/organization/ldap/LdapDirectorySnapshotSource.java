@@ -64,7 +64,7 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
 
     /**
      * 읽기 재시도 규칙. {@code ldap.max-retries} 번, 첫 대기 {@code ldap.retry-min-backoff} 에서 두 배씩 늘려 {@code ldap.retry-max-backoff} 에서
-     * 멈춘다(기본 5번·10초~2분 — 대기만 약 4~5분). {@link #다시_읽어도_같은가} 인 실패는 재시도하지 않고, 다 쓰면 마지막 실패를 그대로 던진다.
+     * 멈춘다(기본 5번·10초~2분 — 대기만 약 2~6분, 지터 때문에 달라진다). {@link #다시_읽어도_같은가} 인 실패는 재시도하지 않고, 다 쓰면 마지막 실패를 그대로 던진다.
      */
     static RetryBackoffSpec 재시도_규칙(LdapProperties properties) {
         return Retry.backoff(properties.getMaxRetries(), properties.getRetryMinBackoff())
