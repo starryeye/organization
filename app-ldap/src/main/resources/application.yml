@@ -17,7 +17,9 @@ spring:
     context-propagation: auto
 
 sync:
-  cron: "0 0 3 * * *"
+  # 매시 정각. 퇴사 회수는 다음 정각 + 회차 시간에 닿는다. 변경 없는 회차는 쓰기가 0번이지만 디렉터리 전체와 직전 스냅샷·현재상태 전체를 읽고,
+  # 변경 있는 회차는 스냅샷 한 벌(10만 명 약 6MB)을 통째로 새로 쓴다 — README "회수 목표" 의 회차별 비용
+  cron: "0 0 * * * *"
   purge-cron: "0 0 4 * * *"
   # 동기화·재적재 한 번의 전체 기한. 넘으면 남은 일을 멈추고 FAILED("기한 초과 — 30분")로 기록한 뒤 작업 락을 푼다
   job-timeout: 30m
@@ -34,6 +36,10 @@ ldap:
   page-size: 500
   connect-timeout: 10s
   read-timeout: 150s
+  # 읽기 실패 재시도: 5번, 첫 대기 10초에서 두 배씩 늘어 2분에서 멈춘다 — 대기만 약 2~6분(지터 때문에 달라진다)이라 도메인 컨트롤러 재부팅을 버틴다
+  max-retries: 5
+  retry-min-backoff: 10s
+  retry-max-backoff: 2m
   strategy: group-of-names
   # id 는 서버가 엔트리마다 만들어 이름이 바뀌어도 유지하는 불변 값이다(entryUUID — OpenLDAP·389DS 등). AD 는 objectGUID,
   # 로그인 속성은 sAMAccountName 을 권한다. uid/cn/ou 같은 이름 기반 id 도 쓸 수 있지만 개명이 삭제+생성이 된다

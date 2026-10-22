@@ -35,8 +35,8 @@ import java.time.Duration;
 public class ScimUseCaseConfig {
 
     @Bean
-    public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry) {
-        return new ScimSyncMetrics(registry);
+    public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry, Clock clock) {
+        return new ScimSyncMetrics(registry, clock);
     }
 
     /** 변경 이력을 남긴다(설계 2026-10-10 §4). 쓰지 못한 줄은 {@code audit.write.failures} 로 센다(§4.5). */
@@ -103,14 +103,21 @@ public class ScimUseCaseConfig {
         return new ScimRebuildUseCase(state, writer, scanner, snapshots, jobs, clock);
     }
 
+    /**
+     * 하루 아카이빙. 어긋남의 수는 게이지로 내고({@link ScimSyncMetrics}), 남은 회수는 SCIM 쓰기와 같은 길(락·리스·Check 기준선·이력)로 지운다
+     * ({@link IncrementalSyncUseCase#revokeLeftovers}, 설계 2026-10-20 §6.4).
+     */
     @Bean
     public SnapshotArchiveUseCase snapshotArchiveUseCase(DirectoryStateRepository state,
                                                           RelationTupleChecker checker,
                                                           TupleSnapshotRepository snapshots,
                                                           SyncRunRepository runs,
                                                           MutationLock lock,
-                                                          Clock clock) {
-        return new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock, clock);
+                                                          Clock clock,
+                                                          ScimSyncMetrics metrics,
+                                                          IncrementalSyncUseCase incrementalSyncUseCase) {
+        return new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock, clock,
+                metrics, incrementalSyncUseCase::revokeLeftovers);
     }
 
     /** 하루 1회 작업(아카이빙·만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). */

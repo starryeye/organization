@@ -1,5 +1,7 @@
 package dev.starryeye.organization.core.model;
 
+import java.util.Optional;
+
 public record RelationTuple(String user, String relation, String object) {
 
     public static final String DIRECT_MEMBER = "direct_member";
@@ -33,6 +35,15 @@ public record RelationTuple(String user, String relation, String object) {
      */
     public static RelationTuple member(String userId, String groupId) {
         return new RelationTuple(USER_TYPE + ":" + userId, MEMBER, GROUP_TYPE + ":" + groupId);
+    }
+
+    /** 직원이 조직에 직접 속하는 줄이면 그 직원의 아이디, 아니면 빈 값. {@link #directMember} 를 거꾸로 읽는다. */
+    public Optional<String> directMemberUserId() {
+        String prefix = USER_TYPE + ":";
+        if (!DIRECT_MEMBER.equals(relation) || !user.startsWith(prefix)) {
+            return Optional.empty();
+        }
+        return Optional.of(user.substring(prefix.length()));
     }
 
     /** 튜플의 한 자리에 들어가는 직원 참조: {@code user:U} */

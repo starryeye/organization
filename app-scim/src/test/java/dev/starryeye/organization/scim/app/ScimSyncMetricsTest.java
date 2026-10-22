@@ -5,7 +5,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,6 +40,76 @@ class ScimSyncMetricsTest {
         // then
         assertThat(registry.counter("scim.drift.detected", "kind", "extra").count()).isEqualTo(2);
         assertThat(registry.counter("scim.drift.detected", "kind", "missing").count()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("아카이빙 어긋남은 kind 태그를 단 게이지에 마지막 값으로 남는다 — 누적하지 않고, 0 으로도 내려온다(설계 2026-10-20 §6.4)")
+    void 아카이빙_어긋남을_게이지로_낸다() {
+        // given — 아직 아카이빙을 하지 않았다
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isZero();
+        assertThat(registry.get("scim.archive.drift").tag("kind", "missing").gauge().value()).isZero();
+
+        // when — 첫 아카이빙에서 3·1 을 보고, 다음 아카이빙에서 0·2 를 본다
+        metrics.observed(3L, 1L);
+        metrics.observed(0L, 2L);
+
+        // then — 합이 아니라 마지막 값이다
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isEqualTo(0);
+        assertThat(registry.get("scim.archive.drift").tag("kind", "missing").gauge().value()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("관찰 시각 게이지는 아카이빙이 관찰할 때마다 바뀌고, 관찰 전에는 값이 없다 — 다른 인스턴스의 낡은 값과 구별한다(설계 2026-10-20 §6.4)")
+    void 관찰_시각_게이지는_관찰할_때마다_바뀌고_관찰_전에는_값이_없다() {
+        // given — 이 인스턴스는 아직 아카이빙을 관찰하지 않았다
+        // 준비한다() 가 같은 이름의 게이지를 이미 등록한 registry 는 쓰지 않는다 — 처음 등록한 쪽의 값을 읽게 된다
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        움직이는_시계 시계 = new 움직이는_시계(Instant.parse("2026-10-22T03:00:00Z"));
+        ScimSyncMetrics 지표 = new ScimSyncMetrics(registry, 시계);
+        assertThat(registry.get("scim.archive.drift.observed").gauge().value())
+                .as("관찰한 적이 없으면 0 이 아니라 값이 없다 — '관찰했고 0건' 과 구별된다").isNaN();
+
+        // when — 어긋남이 없는 관찰(0, 0)
+        지표.observed(0L, 0L);
+
+        // then — 0건도 관찰이다
+        assertThat(registry.get("scim.archive.drift.observed").gauge().value())
+                .isEqualTo(Instant.parse("2026-10-22T03:00:00Z").getEpochSecond());
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isZero();
+
+        // when — 하루 뒤 다음 관찰
+        시계.now = Instant.parse("2026-10-23T03:00:05Z");
+        지표.observed(2L, 1L);
+
+        // then
+        assertThat(registry.get("scim.archive.drift.observed").gauge().value())
+                .isEqualTo(Instant.parse("2026-10-23T03:00:05Z").getEpochSecond());
+        assertThat(registry.get("scim.archive.drift").tag("kind", "extra").gauge().value()).isEqualTo(2);
+    }
+
+    /** 시각을 직접 옮기는 시계 — 관찰 시각 게이지가 관찰할 때마다 읽는지 본다. */
+    private static class 움직이는_시계 extends Clock {
+
+        Instant now;
+
+        움직이는_시계(Instant now) {
+            this.now = now;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 
     @Test

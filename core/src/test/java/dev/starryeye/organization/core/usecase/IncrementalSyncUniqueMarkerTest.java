@@ -25,6 +25,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /** SCIM 입구가 유일 값 표지판을 차지하고 정리한다(설계 2026-10-14 §4.2~§4.5). */
 class IncrementalSyncUniqueMarkerTest {
@@ -186,8 +187,8 @@ class IncrementalSyncUniqueMarkerTest {
     }
 
     @Test
-    @DisplayName("개명이 오류로 끝나면 새 표지판만 놓고 옛 표지판은 남긴다 — META 는 옛 이름이다")
-    void 개명이_오류로_끝나면_새_표지판만_놓는다() {
+    @DisplayName("개명이 오류로 끝나도 요청값을 저장하므로 META 는 새 이름이고, 옛 표지판만 놓고 새 표지판은 남긴다(설계 2026-10-20 §6.1)")
+    void 개명이_오류로_끝나도_META_가_새_이름이면_옛_표지판을_놓는다() {
         // given — u-1 은 DEV001 의 멤버다. 이름을 바꾸며 비활성화하면 튜플을 지운다
         state.groups.put("DEV001", new DirectoryGroup("DEV001", null, "개발", Set.of(MemberRef.user("u-1"))));
         useCase.createUser(직원("u-1", "old")).block();
@@ -198,9 +199,11 @@ class IncrementalSyncUniqueMarkerTest {
         assertThatThrownBy(() -> useCase.changeUser("u-1", u -> u.withUserName("new").withActive(false)).block())
                 .isInstanceOf(TupleWriteAbortedException.class);
 
-        // then
-        assertThat(state.users.get("u-1").userName()).isEqualTo("old");
-        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("old");
+        // then — OpenFGA 단계가 오류로 끝나도 요청값을 저장한다(설계 2026-10-20 §6.1). 예전에는 META 가 옛 이름으로 남았다.
+        // 정리는 그대로 주인이 쥔 이름을 본다 — 새 표지판은 남고 옛 표지판만 놓는다
+        assertThat(state.users.get("u-1").userName()).isEqualTo("new");
+        assertThat(state.users.get("u-1").active()).isFalse();
+        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("new");
     }
 
     @Test
@@ -299,6 +302,27 @@ class IncrementalSyncUniqueMarkerTest {
         // then
         assertThat(state.users).doesNotContainKey("u-1");
         assertThat(적은것(UniqueKind.USER_NAME).get("kim").ownerId()).as("놓으면 다른 서버의 재시도가 차지한 표지판을 지울 수 있다").isEqualTo("u-1");
+    }
+
+    @Test
+    @DisplayName("개명의 Check 가 실패하고 의도를 저장하기 전 리스 확인도 실패하면 표지판을 정리하지 않는다 — 리스 오류에 원래 오류가 붙는다")
+    void 의도_저장_전_리스_확인이_실패하면_표지판을_정리하지_않는다() {
+        // given — u-1 은 DEV001 의 멤버라 개명의 Check 가 튜플을 확인한다. Check 가 실패하고, 의도를 저장하기 직전 리스 확인도 실패한다
+        u1이_든_조직을_심는다();
+        useCase.createUser(직원("u-1", "old")).block();
+        checker.failFor(tuple -> true);
+        lock.failRenew = true;
+
+        // when
+        Throwable 던진_것 = catchThrowable(() -> useCase.changeUser("u-1", u -> u.withUserName("new")).block());
+
+        // then — 리스 없이 놓지 않는다. 의도는 저장되지 않아 META 는 옛 이름인데, 정리가 돌았다면 주인이 쥐지 않은 새 표지판이 놓였을 것이다
+        assertThat(던진_것).isInstanceOf(LockUnavailableException.class);
+        assertThat(던진_것.getSuppressed()).anySatisfy(붙은_것 -> assertThat(붙은_것)
+                .isInstanceOf(IllegalStateException.class).hasMessage("Check 실패(테스트)"));
+        assertThat(state.users.get("u-1").userName()).isEqualTo("old");
+        assertThat(적은것(UniqueKind.USER_NAME)).containsOnlyKeys("old", "new");
+        assertThat(적은것(UniqueKind.USER_NAME).get("new").ownerId()).as("락 TTL 뒤 넘겨받는다").isEqualTo("u-1");
     }
 
     // ---------- 조직 ----------

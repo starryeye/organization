@@ -117,8 +117,12 @@ import java.util.stream.Collectors;
  * 실패한 부분을 그대로 반영된 것처럼 저장하면 OpenFGA 에는 없는데 DynamoDB 에는 있는(또는
  * 그 반대인) 상태가 되고, 다음 동기화의 diff는 "이미 같다"고 판단해 이 불일치를 영원히
  * 다시 잡지 못한다 — 재시도가 diff 할 "이전" 자체가 이미 목표값으로 오염됐기 때문이다.
- * 그래서 모든 커밋은 반드시 {@code TupleWriteResult} 를 보고 실제로 반영된 만큼만 상태에
+ * 그래서 멤버십 커밋은 반드시 {@code TupleWriteResult} 를 보고 실제로 반영된 만큼만 상태에
  * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}).
+ *
+ * <p><b>직원의 {@code active} 는 예외다 — 요청값을 저장한다(설계 2026-10-20 §6.1·§6.2).</b> 기준선이 Check 라 저장된 {@code active} 가 재시도의 "이전"을
+ * 오염시키지 않는다(델타는 Check 결과와 목표의 차이다). OpenFGA 단계가 오류로 끝나도 저장하고, 지우지 못한 직원은 비활성으로 남긴다 —
+ * 회수 의도가 IdP 재시도에만 달려 있지 않게 한다({@link #upsertUser}, {@link #removeUser}). 재시도가 오지 않아도 하루 아카이빙이 남은 줄을 지운다({@link #revokeLeftovers}).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -201,9 +205,11 @@ public class IncrementalSyncUseCase {
      * <p><b>SCIM 입구가 아니다.</b> 생성·중복 판단 없이 그대로 덮어쓴다 — 테스트와 등가 비교용이다. SCIM 쓰기는
      * {@link #createUser}·{@link #changeUser} 를 쓴다(판단 읽기가 락 안).
      *
-     * <p>반영이 실패하면 {@code active} 를 요청값 그대로 저장하지 않고 이전 값으로 되돌린다.
-     * 그대로 저장하면 다음 동기화가 "이미 목표 상태"라고 오판해 실패한 튜플을 영원히
-     * 다시 시도하지 못한다.
+     * <p><b>반영이 실패해도 요청값({@code active} 포함)을 저장한다(설계 2026-10-20 §6.1).</b> 결과에 실패가 담겨 오든, Check·쓰기가 오류로 끝나든,
+     * 차단기로 멈추든 같다({@link #오류여도_의도를_저장한다}). 응답은 지금처럼 503 이다. 예전에는 실패하면 {@code active} 를 이전 값으로 되돌렸다 —
+     * 상태가 기준선이던 시절의 규칙이다(설계 2026-08-14 §7.2). 기준선이 Check 인 지금은 저장된 {@code active} 가 재시도의 델타를 지우지 않고,
+     * 되돌리면 IdP 가 다시 보내지 않을 때 회수 의도가 어디에도 남지 않는다. 남은 줄은 재시도·이 직원을 건드리는 다음 쓰기·하루 아카이빙·재적재가
+     * 저장된 의도대로 맞춘다. 락을 못 잡았거나 리스를 잃었으면 저장하지 않는다 — 다른 인스턴스의 저장을 덮을 수 있다.
      *
      * <p>아직 한 번도 저장된 적 없는 직원은 <b>비활성으로 취급</b>해 "이전"을 구성한다 —
      * 존재하지 않는 직원은 튜플을 만들지 않는다는 점에서 비활성 직원과 같다. 이 자리에
@@ -217,7 +223,7 @@ public class IncrementalSyncUseCase {
      * 않다: 멤버 0개인 조직은 <b>상위 조직의 child 엣지</b>를 성립시키지만 없는 조직은 그렇지
      * 않아, 같은 대역을 쓰면 델타가 사라진다.
      *
-     * <p><b>아직 없던 직원은 하나라도 실패하면 레코드를 만들지 않는다.</b> 만들어 두면 IdP 의
+     * <p><b>아직 없던 직원은 하나라도 실패하면 레코드를 만들지 않는다</b> — OpenFGA 단계가 오류로 끝나도 같다(설계 2026-10-20 §6.1). 만들어 두면 IdP 의
      * 재시도가 {@code POST} 로 오는데 이미 존재해서 {@code 409 uniqueness} 로 막힌다. IdP 는
      * 409 를 영구 충돌로 읽어 재시도를 멈추므로, 실패한 튜플을 다시 잡을 기회가 사라진다 —
      * 그 사람은 {@code active=false} 로 남는다. 권한이 없는 안전한 방향이지만
@@ -248,18 +254,87 @@ public class IncrementalSyncUseCase {
             DirectoryUser existingUser = existing.orElse(neverStored);
             Mono<DirectorySnapshot> before = 직원한명_그림(headers, user.id(), Mono.just(existingUser));
             Mono<DirectorySnapshot> after = 직원한명_그림(headers, user.id(), Mono.just(user));
+            AtomicBoolean 커밋에_닿았다 = new AtomicBoolean();
 
+            // 실패가 있어도 요청값을 저장한다(설계 2026-10-20 §6.1) — 기준선은 Check 라 저장된 active 가 재시도의 델타를 지우지 않는다
             Commit commit = (result, beforeTuples, afterTuples) -> {
+                커밋에_닿았다.set(true);
                 if (existing.isEmpty() && result.hasFailure()) {
                     return Mono.empty();
                 }
-                DirectoryUser 저장할것 = reconcileUser(existingUser, user, result);
-                return Mono.defer(() -> state.saveUser(existing.orElse(null), 저장할것))
-                        .then(남긴다(() -> 기록.user(existing.orElse(null), 저장할것)));
+                return 직원을_저장한다(existing.orElse(null), user, 기록);
             };
 
-            return diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, 기록, commit);
+            Mono<IncrementalSyncResult> 반영 = diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, 기록, commit);
+            return existing.map(저장본 -> 오류여도_의도를_저장한다(반영, 커밋에_닿았다, 저장본, user, lease, 기록))
+                    .orElse(반영);
         });
+    }
+
+    /**
+     * 저장된 직원의 <b>남은 회수만</b> 락 안에서 지운다 — 하루 아카이빙이 장부에 목표 밖 줄이 남은 직원을 찾으면 부른다(설계 2026-10-20 §6.4).
+     * 직원이 없으면 빈 {@code Mono} 다 — 아카이빙이 비교한 뒤 그 직원이 지워졌을 수 있고, 존재 확인도 락 안이다.
+     *
+     * <p>목표는 {@link #upsertUserInternal} 이 저장본으로 정하는 것과 같다 — 같은 후보, 같은 Check 기준선, 같은 목표다. 다만 델타 가운데 <b>지우기만</b>
+     * 반영하고({@link #diffAndApply} 의 {@code 지우기만}) 쓰기는 버린다. 직원 레코드·소속·표지판은 바꾸지 않는다. 락·리스 확인·이력은 다른 쓰기와 같다. 쓰기 경로의 드리프트 관찰({@link DriftObserver})은 부르지 않는다 — 같은 줄을 아카이빙의 게이지가 이미 센다.
+     *
+     * <p><b>왜 쓰지 않나.</b> 아카이빙은 락 밖에서 상태를 읽어 어긋남을 찾는다. 그 상태는 낡았을 수 있다 — 직원 삭제가 OpenFGA 에서는 끝났는데 레코드 삭제
+     * 커밋이 실패하면, 레코드는 활성에 소속이 그대로인데 장부에는 줄이 없다. 낡은 상태대로 다시 쓰면 지운 직원의 권한이 되살아난다. 낡은 상태로 지우는 것은
+     * 거부 쪽으로만 틀리므로 안전하다. 빠진 줄은 IdP 재시도·다음 쓰기·재적재가 채운다.
+     *
+     * <p>결과는 부분 반영일 수 있다({@code fullyApplied == false}). 지우지 못한 줄은 다음 아카이빙에 다시 잡힌다.
+     */
+    public Mono<IncrementalSyncResult> revokeLeftovers(String userId) {
+        return withLock((lease, 기록) -> state.findUser(userId)
+                .flatMap(저장본 -> 남은_회수만_지운다(저장본, lease, 기록)));
+    }
+
+    private Mono<IncrementalSyncResult> 남은_회수만_지운다(DirectoryUser 저장본, LockLease lease, AuditChanges 기록) {
+        return affectedGroupHeadersOf(저장본.id()).flatMap(headers -> {
+            Mono<DirectorySnapshot> 그림 = 직원한명_그림(headers, 저장본.id(), Mono.just(저장본));
+            // 상태는 바꾸지 않는다 — 커밋할 것이 없다
+            Commit 커밋하지_않는다 = (result, beforeTuples, afterTuples) -> Mono.empty();
+            return diffAndApply(그림, 그림, RelationTuple.userRef(저장본.id()), Set.of(), lease, 기록, 커밋하지_않는다, true);
+        });
+    }
+
+    /** 직원 하나를 저장하고 이력에 더한다. 바뀐 것이 없으면 이력은 줄을 만들지 않는다({@link AuditChanges#entries}). */
+    private Mono<Void> 직원을_저장한다(DirectoryUser 저장본, DirectoryUser 저장할것, AuditChanges 기록) {
+        return Mono.defer(() -> state.saveUser(저장본, 저장할것))
+                .then(남긴다(() -> 기록.user(저장본, 저장할것)));
+    }
+
+    /**
+     * OpenFGA 단계가 <b>오류</b>로 끝나도 직원의 의도({@code 의도})를 저장한다(설계 2026-10-20 §6.1·§6.2). 결과에 실패가 담겨 온 경우는 커밋이 이미 저장한다 —
+     * 이것은 커밋까지 가지 못한 경우(Check 오류, 쓰기 오류, 차단기로 멈춤)다. 리스를 다시 확인한 뒤 저장하고 이력에 남긴 다음, <b>원래 오류를 그대로 낸다</b> —
+     * 응답(503)은 바뀌지 않고 IdP 재시도도 그대로다. 재시도·다음 쓰기·하루 아카이빙은 Check 기준선과 저장된 의도의 차이로 남은 줄만 맞춘다.
+     *
+     * <p>잡는 범위는 {@code 반영}({@link #diffAndApply} 가 만든 것)뿐이다 — 한도·표지판·요청 계산의 오류(4xx·409)는 여기 오지 않는다. 그 밖에 저장하지 않는 경우:
+     * <ul>
+     *   <li>{@link LockUnavailableException} — 리스 확인이 실패했다. 남이 락을 쥐고 저장했을 수 있어 덮지 않는다. 도중에 리스를 잃은 것은 취소라 여기 오지 않는다.</li>
+     *   <li>커밋에 닿은 뒤의 오류 — 커밋이 이미 저장했거나(직원 삭제면 지웠을 수 있다) 저장하다 실패한 것이다. 다시 쓰면 지운 직원을 되살리거나 이력이 겹친다.</li>
+     *   <li>아직 저장된 적 없는 직원 — 부르는 쪽이 감싸지 않는다. 레코드를 만들면 재시도 POST 가 409 로 막힌다({@link #upsertUser}).</li>
+     * </ul>
+     * 저장이 실패하면 경고만 남기고 원래 오류를 낸다 — 의도를 못 남긴 것은 IdP 재시도가 다시 가져온다. <b>리스 확인이 실패하면</b> 원래 오류가 아니라
+     * {@link LockUnavailableException} 을 내고 원래 오류는 {@code addSuppressed} 로 붙인다. 응답은 같은 503 이다. 원래 오류를 그대로 내면 바깥의
+     * {@link #표지판을_정리한다} 가 리스 없이 표지판을 놓게 된다 — 그 정리는 {@link LockUnavailableException} 으로 끝난 일에는 하지 않는다.
+     */
+    private Mono<IncrementalSyncResult> 오류여도_의도를_저장한다(Mono<IncrementalSyncResult> 반영, AtomicBoolean 커밋에_닿았다,
+                                                        DirectoryUser 저장본, DirectoryUser 의도,
+                                                        LockLease lease, AuditChanges 기록) {
+        return 반영.onErrorResume(error -> !(error instanceof LockUnavailableException) && !커밋에_닿았다.get(),
+                error -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
+                        .onErrorMap(LockUnavailableException.class, 리스_오류 -> {
+                            리스_오류.addSuppressed(error);
+                            return 리스_오류;
+                        })
+                        .then(Mono.defer(() -> 직원을_저장한다(저장본, 의도, 기록))
+                                .onErrorResume(저장_오류 -> {
+                                    log.warn("OpenFGA 단계가 오류로 끝난 뒤 직원 '{}' 의 의도(active={})를 저장하지 못했다 — 원래 오류를 낸다",
+                                            의도.id(), 의도.active(), 저장_오류);
+                                    return Mono.empty();
+                                }))
+                        .then(Mono.<IncrementalSyncResult>error(error)));
     }
 
     /**
@@ -503,6 +578,11 @@ public class IncrementalSyncUseCase {
      * 하나라도 실패하면 직원 레코드 자체도 지우지 않는다 — 지워버리면 다음 재시도가 diff 할
      * "이전"이 사라져 남은 튜플을 영원히 다시 잡지 못한다.
      *
+     * <p><b>지우지 못하면 직원을 비활성으로 저장한다(설계 2026-10-20 §6.2).</b> 결과에 실패가 담겨 오든 OpenFGA 단계가 오류로 끝나든 같고, 저장하지 않는
+     * 경우(락·리스 상실)도 {@link #upsertUser} 와 같다({@link #오류여도_의도를_저장한다}). 응답은 지금처럼 503 이다. 재시도한 DELETE 는 남은 줄을 Check
+     * 기준선으로 지우고 레코드를 지운다. 재시도가 오지 않으면 비활성 레코드로 남는다 — 상태로는 권한이 없으니 이 직원을 건드리는 다음 쓰기·하루 아카이빙·재적재가
+     * 남은 줄을 지운다. {@code userName} 표지판은 레코드가 쥔 채로 남는다.
+     *
      * <p>대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      */
     public Mono<IncrementalSyncResult> removeUser(String userId) {
@@ -517,8 +597,12 @@ public class IncrementalSyncUseCase {
                     Mono<DirectorySnapshot> before = 직원한명_그림(headers, userId, Mono.just(user));
                     // 삭제 후에는 어느 조직에도 속하지 않으므로 조직이 하나도 없는 그림이 맞다.
                     Mono<DirectorySnapshot> after = 직원한명_그림(Set.of(), userId, Mono.empty());
+                    // 지우지 못하면 남길 모습 — 비활성이다(설계 2026-10-20 §6.2)
+                    DirectoryUser 비활성 = user.withActive(false);
+                    AtomicBoolean 커밋에_닿았다 = new AtomicBoolean();
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
+                        커밋에_닿았다.set(true);
                         // 튜플이 원래 있었는데 지워지지 않은 조직은 멤버십을 남긴다(아래 멤버십을_지운다).
                         // 나머지는 그 직원의 멤버 줄·소속 줄만 지운다 — 조직 멤버 목록 전체를 읽고 쓰지 않는다(설계 §5).
                         Mono<Void> saveGroups = Flux.fromIterable(headers)
@@ -528,14 +612,17 @@ public class IncrementalSyncUseCase {
                                         LOAD_CONCURRENCY)
                                 .then();
                         if (result.hasFailure()) {
-                            return saveGroups;
+                            // 레코드와 지우지 못한 소속은 남기고 직원은 비활성으로 — 회수 의도를 먼저 저장한다
+                            return 직원을_저장한다(user, 비활성, 기록).then(saveGroups);
                         }
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)))
                                 .then(남긴다(() -> 기록.user(user, null)));
                     };
 
                     return 표지판을_정리한다(
-                            diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit),
+                            오류여도_의도를_저장한다(
+                                    diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit),
+                                    커밋에_닿았다, user, 비활성, lease, 기록),
                             UniqueKind.USER_NAME, userId, 값들(user.userName()), 값들(user.userName()));
                 }));
     }
@@ -850,6 +937,17 @@ public class IncrementalSyncUseCase {
         return Duration.ofMillis(AcquireBackoff.지금() - 시작);
     }
 
+    /** 쓰기까지 반영하는 보통의 경우다 — 자세한 것은 아래 {@code 지우기만} 을 받는 쪽에 적는다. */
+    private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
+                                                      Mono<DirectorySnapshot> afterMono,
+                                                      String focus,
+                                                      Set<RelationTuple> 확인없이_지울것,
+                                                      LockLease lease,
+                                                      AuditChanges 기록,
+                                                      Commit commit) {
+        return diffAndApply(beforeMono, afterMono, focus, 확인없이_지울것, lease, 기록, commit, false);
+    }
+
     /**
      * 기준선을 <b>OpenFGA 에 물어서</b> 만든다 (설계 §5).
      *
@@ -862,15 +960,16 @@ public class IncrementalSyncUseCase {
      * {@code focus}(이번 연산의 초점 엔티티)를 언급하는 것만 남긴다 — {@link #mentioning} 참고.
      *
      * <p><b>Check 가 실패하면 폴백하지 않는다.</b> 상태 기준선으로 돌아가면 조용히 옛 동작이
-     * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다.
+     * 되고, 그게 하필 어긋남이 생기는 순간이다. 실패시켜 IdP 가 재시도하게 둔다. 직원 연산은 그 오류 뒤에도
+     * 직원의 의도를 저장한다({@link #오류여도_의도를_저장한다}, 설계 2026-10-20 §6.1).
      *
      * <p><b>리스는 OpenFGA 쓰기 직전과 커밋 직전에 늘 확인한다</b> — {@link #반영하고_커밋한다} 참고(설계 2026-10-02 §3.2).
      *
      * <p><b>설계 §7.2 와의 의도적 차이(버그가 아니다).</b> 스펙 표는 "전부 실패 → 저장하지 않음"
      * 이라고 적었지만 여기서는 실패해도 {@code commit} 을 부른다. 각 연산의 커밋 로직이
      * 이미 "실제로 반영된 만큼만" 상태에 남기도록 되어 있어 <b>멤버십은 어차피 그대로 유지</b>
-     * 되고, 그렇게 해서 남는 것은 조직/직원의 META 속성(displayName, email 같은 것)뿐이다.
-     * 이 필드들은 어느 것도 튜플 식별자가 아니라서 저장돼도 다음 diff 를 오염시키지 않는다.
+     * 되고, 그렇게 해서 남는 것은 조직/직원의 META 속성(displayName, email 같은 것과 직원의 {@code active})뿐이다.
+     * 기준선이 Check 라 이 필드들은 저장돼도 다음 diff 를 오염시키지 않는다 — {@code active} 도 그렇다(설계 2026-10-20 §6.1).
      * 오히려 이름 변경 같은 튜플과 무관한 수정이 튜플 실패에 발목잡히지 않아 스펙보다 낫다.
      * 단 하나의 예외가 <b>레코드의 존재 자체</b>다 — 그것은 부모의 child 엣지가 성립하는
      * 조건이므로 튜플 식별자에 해당한다. 그래서 {@link #upsertGroup} 은 새 조직에 한해,
@@ -880,6 +979,8 @@ public class IncrementalSyncUseCase {
      *
      * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      * @param 기록 이 요청의 변경 모음 — 반영한 튜플을 더한다
+     * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표는 그대로다. 어긋남은 로그에만 남기고
+     *                 {@link DriftObserver} 는 부르지 않는다(아카이빙 게이지가 같은 줄을 센다).
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
@@ -887,7 +988,8 @@ public class IncrementalSyncUseCase {
                                                       Set<RelationTuple> 확인없이_지울것,
                                                       LockLease lease,
                                                       AuditChanges 기록,
-                                                      Commit commit) {
+                                                      Commit commit,
+                                                      boolean 지우기만) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
             DirectorySnapshot afterSnapshot = both.getT2();
@@ -914,12 +1016,16 @@ public class IncrementalSyncUseCase {
                 int missing = (int) 상태기준선.stream().filter(t -> !actual.contains(t)).count();
                 if (extra > 0 || missing > 0) {
                     log.warn("OpenFGA 어긋남 발견: 있어선 안 될 튜플 {}건, 빠진 튜플 {}건", extra, missing);
-                    driftObserver.observed(extra, missing);
+                    // 지우기만 하는 복구는 세지 않는다 — 같은 줄을 아카이빙 게이지가 이미 세고, 세면 복구가 도는 날마다 쓰기 경로의 카운터가 오른다
+                    if (!지우기만) {
+                        driftObserver.observed(extra, missing);
+                    }
                 }
 
                 return 그래프.거른다(actual, 원하는것, focus).flatMap(거름 -> {
                     Set<RelationTuple> after = 거름.남길것();
-                    TupleDelta 계산 = TupleDiff.between(actual, after);
+                    TupleDelta 전체 = TupleDiff.between(actual, after);
+                    TupleDelta 계산 = 지우기만 ? TupleDelta.deleteOnly(전체.toDelete()) : 전체;
                     if (확인없이_지울것.isEmpty()) {
                         return 반영하고_커밋한다(계산, lease, 기록, result -> 보류와_함께_커밋한다(거름, result, actual, after, commit));
                     }
@@ -1014,18 +1120,6 @@ public class IncrementalSyncUseCase {
             }
         }
         return narrowed;
-    }
-
-    /**
-     * 반영이 실패하면 {@code active} 를 이전 값으로 되돌린 유저를 돌려준다. 다른 필드는
-     * 요청값을 그대로 쓴다 — 튜플에 영향을 주는 것은 {@code active} 뿐이라, 실패했을 때
-     * 그것만 되돌리면 다음 동기화가 같은 델타를 다시 계산해 재시도한다.
-     */
-    private static DirectoryUser reconcileUser(DirectoryUser existing, DirectoryUser requested, TupleWriteResult result) {
-        if (!result.hasFailure()) {
-            return requested;
-        }
-        return requested.withActive(existing.active());
     }
 
     /**

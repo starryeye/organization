@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ldap.NameNotFoundException;
 
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,6 +50,9 @@ class WrongSearchBaseTest extends EmbeddedLdapSupport {
         var properties = 이름기반();
         properties.getGroupOfNames().setUserSearchBase("ou=peeple");
         properties.setMaxRetries(3);
+        // 재시도가 잘못 걸려도 분 단위로 늘어지지 않고 읽은 횟수 단언이 실패로 알린다
+        properties.setRetryMinBackoff(Duration.ofMillis(10));
+        properties.setRetryMaxBackoff(Duration.ofMillis(50));
         var 전략 = new GroupOfNamesStrategy(properties);
         AtomicInteger 읽은_수 = new AtomicInteger();
         LdapMappingStrategy 세는_전략 = template -> {

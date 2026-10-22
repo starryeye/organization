@@ -29,6 +29,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntFunction;
+import java.util.function.Predicate;
 
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
@@ -37,7 +39,11 @@ import java.util.Set;
  * 나눈다({@link SnapshotChunks}). 튜플 한 줄을 아이템 하나로 쓰던 때는 10만 명(튜플 약 15만 줄)에 한 파티션으로 아이템 약 15만 개,
  * 쓰기 약 15만 WCU 가 몰렸다. 메타는 튜플 수({@code tupleCount})와 묶음 수({@code chunkCount})를 갖는다.
  *
- * <p>저장 순서는 메타 → 묶음 → 포인터다. 메타가 먼저라 묶음을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
+ * <p><b>불확실 줄(U)은 따로 된 묶음 계열이다</b>(설계 2026-10-20 §3.5). 장부에 있는지 모르는 줄은 본문과 같은 방식으로 압축해 정렬키
+ * {@code UNCERTAIN#} 묶음으로 나눈다. 비어 있지 않을 때만 메타에 줄 수({@code uncertainCount})와 묶음 수({@code uncertainChunkCount})를 적고,
+ * 메타에 그 칸이 없으면 빈 U 로 읽는다. 무결성 검사는 본문과 같다(묶음 수·번호·본문·줄 수).
+ *
+ * <p>저장 순서는 메타 → 본문 묶음 → U 묶음 → 포인터다. 메타가 먼저라 묶음을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
  * 포인터가 마지막이라 반쪽 스냅샷이 기준선이 되지 않는다.
  *
  * <p><b>스냅샷은 테이블 TTL({@link Keys#EXPIRES_AT})을 쓰지 않는다.</b> TTL 은 아이템마다 붙은 시각만 보고 지워 최신인지
@@ -57,10 +63,19 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String SOURCE = "source";
     private static final String TUPLE_COUNT = "tupleCount";
     private static final String CHUNK_COUNT = "chunkCount";
+    private static final String UNCERTAIN_COUNT = "uncertainCount";
+    private static final String UNCERTAIN_CHUNK_COUNT = "uncertainChunkCount";
     private static final String DATA = "data";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String RETAIN_UNTIL = "retainUntil";
     private static final String WRITING_SINCE = "writingSince";
+
+    /** 본문(B) 묶음 계열 — 정렬키 {@code CHUNK#}, 메타의 {@code tupleCount}·{@code chunkCount}. */
+    private static final ChunkSeries BODY = new ChunkSeries("", TUPLE_COUNT, CHUNK_COUNT,
+            Keys::isChunkSk, Keys::chunkSk, "메타에 묶음 수가 없다 — 옛 형식");
+    /** 불확실 줄(U) 묶음 계열 — 정렬키 {@code UNCERTAIN#}, 메타의 {@code uncertainCount}·{@code uncertainChunkCount}. */
+    private static final ChunkSeries UNCERTAIN = new ChunkSeries("불확실 ", UNCERTAIN_COUNT, UNCERTAIN_CHUNK_COUNT,
+            Keys::isUncertainChunkSk, Keys::uncertainChunkSk, "메타에 불확실 묶음 수가 없다");
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -92,9 +107,12 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private Mono<Void> doSave(TupleSnapshot snapshot, Instant retentionBase) {
         long retainUntil = retentionBase.plus(Duration.ofDays(properties.getSnapshotRetentionDays())).getEpochSecond();
 
-        return Mono.fromCallable(() -> SnapshotChunks.encode(snapshot.tuples(), chunkSize))
-                .flatMap(chunks -> writeMeta(snapshot, retainUntil, chunks.size())
-                        .then(writeChunks(snapshot.id(), chunks))
+        return Mono.fromCallable(() -> new EncodedChunks(
+                        SnapshotChunks.encode(snapshot.tuples(), chunkSize),
+                        snapshot.uncertain().isEmpty() ? List.of() : SnapshotChunks.encode(snapshot.uncertain(), chunkSize)))
+                .flatMap(chunks -> writeMeta(snapshot, retainUntil, chunks)
+                        .then(writeChunks(snapshot.id(), chunks.body(), BODY))
+                        .then(writeChunks(snapshot.id(), chunks.uncertain(), UNCERTAIN))
                         .then(writePointer(snapshot.id())));
     }
 
@@ -103,21 +121,22 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
      * 한 파티션의 쓰기 한도(초당 1,000)에 걸려 일부만 처리되고 {@link BatchRequests} 의 재시도 예산(약 1.5초)이 모자랄 수 있다. 하나씩이면
      * 스로틀이 요청 전체의 오류로 와 SDK 재시도(이 클라이언트의 DynamoDB 기본값, 최대 9번·지수 백오프)가 받는다.
      */
-    private Mono<Void> writeChunks(String snapshotId, List<byte[]> chunks) {
+    private Mono<Void> writeChunks(String snapshotId, List<byte[]> chunks, ChunkSeries series) {
         return Flux.range(0, chunks.size())
-                .concatMap(index -> putItem(chunkItem(snapshotId, index, chunks.get(index))))
+                .concatMap(index -> putItem(chunkItem(snapshotId, series.sk().apply(index), chunks.get(index))))
                 .then();
     }
 
-    private static Map<String, AttributeValue> chunkItem(String snapshotId, int index, byte[] data) {
+    private static Map<String, AttributeValue> chunkItem(String snapshotId, String sk, byte[] data) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshotId)));
-        item.put(Keys.SK, Attrs.s(Keys.chunkSk(index)));
+        item.put(Keys.SK, Attrs.s(sk));
         item.put(DATA, Attrs.b(data));
         return item;
     }
 
-    private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil, int chunkCount) {
+    /** 불확실 줄(U)이 비어 있으면 그 칸 둘({@code uncertainCount}·{@code uncertainChunkCount})을 적지 않는다 — 읽을 때 칸이 없으면 빈 U 다. */
+    private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil, EncodedChunks chunks) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
         item.put(Keys.SK, Attrs.s(Keys.META));
@@ -126,7 +145,11 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         item.put(CREATED_AT, Attrs.s(snapshot.createdAt().toString()));
         item.put(SOURCE, Attrs.s(snapshot.source().name()));
         item.put(TUPLE_COUNT, Attrs.n(snapshot.tuples().size()));
-        item.put(CHUNK_COUNT, Attrs.n(chunkCount));
+        item.put(CHUNK_COUNT, Attrs.n(chunks.body().size()));
+        if (!snapshot.uncertain().isEmpty()) {
+            item.put(UNCERTAIN_COUNT, Attrs.n(snapshot.uncertain().size()));
+            item.put(UNCERTAIN_CHUNK_COUNT, Attrs.n(chunks.uncertain().size()));
+        }
         item.put(RETAIN_UNTIL, Attrs.n(retainUntil));
         return putItem(item);
     }
@@ -175,11 +198,17 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .then();
     }
 
+    /**
+     * 포인터 줄을 강한 일관성으로 읽어 셋 가운데 하나로 답한다(설계 2026-10-20 §4). "기록 중" 칸이 먼저다 — 스냅샷 번호가 함께 있어도
+     * 지난 회차가 기록 전에 멈춘 것이다. 줄이 없거나 두 칸이 다 없으면 기준선 없음이다.
+     */
     @Override
-    public Mono<Boolean> isWriting() {
+    public Mono<BaselineState> baselineState() {
         return 포인터()
-                .map(item -> item.containsKey(WRITING_SINCE))
-                .defaultIfEmpty(false);
+                .map(item -> item.containsKey(WRITING_SINCE) ? BaselineState.WRITING
+                        : Attrs.str(item, SNAPSHOT_ID) != null ? BaselineState.PRESENT
+                        : BaselineState.NONE)
+                .defaultIfEmpty(BaselineState.NONE);
     }
 
     @Override
@@ -197,44 +226,57 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         if (meta == null) {
             return null;
         }
-        Set<RelationTuple> tuples = new LinkedHashSet<>(본문(snapshotId, meta, items));
-        int expected = Attrs.integer(meta, TUPLE_COUNT);
-        if (tuples.size() != expected) {
-            throw 온전하지_않다(snapshotId, "메타 튜플 %d · 읽음 %d".formatted(expected, tuples.size()));
-        }
+        Set<RelationTuple> tuples = 줄들(snapshotId, meta, items, BODY);
+        // 메타에 불확실 줄 수가 없으면 U 가 빈 것으로 읽는다(설계 2026-10-20 §3.5). 운영 배포 전이라 옛 스냅샷을 이관할 일도 없다
+        Set<RelationTuple> uncertain = meta.containsKey(UNCERTAIN_COUNT)
+                ? 줄들(snapshotId, meta, items, UNCERTAIN)
+                : Set.of();
         return new TupleSnapshot(
                 snapshotId,
                 Attrs.instant(meta, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(meta, SOURCE)),
-                tuples);
+                tuples,
+                uncertain);
+    }
+
+    /** 한 묶음 계열을 풀어 튜플 집합으로 만들고, 튜플 수가 메타와 같은지 본다. 본문(B)과 불확실 줄(U)이 같은 규칙을 쓴다. */
+    private Set<RelationTuple> 줄들(String snapshotId, Map<String, AttributeValue> meta,
+                                 List<Map<String, AttributeValue>> items, ChunkSeries series) {
+        Set<RelationTuple> tuples = new LinkedHashSet<>(묶음을_푼다(snapshotId, meta, items, series));
+        int expected = Attrs.integer(meta, series.tupleCountAttribute());
+        if (tuples.size() != expected) {
+            throw 온전하지_않다(snapshotId, "메타 %s튜플 %d · 읽음 %d".formatted(series.label(), expected, tuples.size()));
+        }
+        return tuples;
     }
 
     /**
      * 묶음을 번호 순서로 모아 푼다(설계 2026-10-09 §3.2). Query 는 정렬키 순서로 주고, 번호가 네 자리라 그 순서가 곧 번호 순서다.
-     * 메타에 묶음 수가 없으면 옛 형식(튜플 한 줄이 아이템 하나)이다 — 운영 배포 전이라 이관하지 않고 재적재로 고친다.
+     * 메타에 묶음 수가 없으면 본문은 옛 형식(튜플 한 줄이 아이템 하나)이다 — 운영 배포 전이라 이관하지 않고 재적재로 고친다.
      */
-    private List<RelationTuple> 본문(String snapshotId, Map<String, AttributeValue> meta, List<Map<String, AttributeValue>> items) {
-        if (!meta.containsKey(CHUNK_COUNT)) {
-            throw 온전하지_않다(snapshotId, "메타에 묶음 수가 없다 — 옛 형식");
+    private List<RelationTuple> 묶음을_푼다(String snapshotId, Map<String, AttributeValue> meta,
+                                          List<Map<String, AttributeValue>> items, ChunkSeries series) {
+        if (!meta.containsKey(series.chunkCountAttribute())) {
+            throw 온전하지_않다(snapshotId, series.missingCountReason());
         }
-        int expected = Attrs.integer(meta, CHUNK_COUNT);
+        int expected = Attrs.integer(meta, series.chunkCountAttribute());
         List<Map<String, AttributeValue>> chunks = items.stream()
-                .filter(item -> Keys.isChunkSk(Attrs.str(item, Keys.SK)))
+                .filter(item -> series.isSk().test(Attrs.str(item, Keys.SK)))
                 .toList();
         if (chunks.size() != expected) {
-            throw 온전하지_않다(snapshotId, "메타 묶음 %d · 읽음 %d".formatted(expected, chunks.size()));
+            throw 온전하지_않다(snapshotId, "메타 %s묶음 %d · 읽음 %d".formatted(series.label(), expected, chunks.size()));
         }
         List<byte[]> data = new ArrayList<>(chunks.size());
         for (int index = 0; index < chunks.size(); index++) {
-            if (!Keys.chunkSk(index).equals(Attrs.str(chunks.get(index), Keys.SK))) {
-                throw 온전하지_않다(snapshotId, "묶음 번호가 %d 에서 끊긴다".formatted(index));
+            if (!series.sk().apply(index).equals(Attrs.str(chunks.get(index), Keys.SK))) {
+                throw 온전하지_않다(snapshotId, "%s묶음 번호가 %d 에서 끊긴다".formatted(series.label(), index));
             }
             data.add(Attrs.bytes(chunks.get(index), DATA));
         }
         try {
             return SnapshotChunks.decode(data);
         } catch (IOException e) {
-            throw 온전하지_않다(snapshotId, "본문을 풀 수 없다: " + e);
+            throw 온전하지_않다(snapshotId, series.label() + "본문을 풀 수 없다: " + e);
         }
     }
 
@@ -306,14 +348,14 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     /**
-     * 메타가 아닌 줄(묶음, 옛 형식의 튜플 줄) 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다. 저장 순서
-     * (메타 → 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 지우는 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     * 메타가 아닌 줄(본문 묶음, 불확실 묶음, 옛 형식의 튜플 줄) 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다.
+     * 저장 순서(메타 → 본문 묶음 → U 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 지우는 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
      *
      * <p>묶음은 쓸 때와 같은 까닭으로 번호 순서로 하나씩 DeleteItem 으로 지운다(설계 2026-10-09 §3.3, §8). DeleteItem 도 지우는 아이템의
      * 크기만큼 쓰기 용량을 써서(묶음 하나가 최대 약 350 WCU) 묶음 열몇 개를 BatchWriteItem 에 담으면 한 파티션의 쓰기 한도(초당 1,000)에
      * 걸려 {@link BatchRequests} 의 재시도 예산이 모자라고, 그 실패가 {@link #purgeExpired()} 의 다른 스냅샷 정리까지 끊는다. 하나씩이면
      * 스로틀이 요청 전체의 오류로 와 SDK 재시도가 받는다. 끝내 실패해도 메타가 남으므로 다음 정리가 남은 것을 이어 지운다.
-     * 묶음이 아닌 줄(옛 형식의 튜플 줄)은 용량이 작아 지금처럼 묶음 요청(BatchWriteItem)으로 지운다.
+     * 본문 묶음과 불확실 묶음을 모두 이렇게 지운다. 묶음이 아닌 줄(옛 형식의 튜플 줄)은 용량이 작아 지금처럼 묶음 요청(BatchWriteItem)으로 지운다.
      */
     private Mono<Void> deleteSnapshot(String snapshotId) {
         String pk = Keys.snapshotPk(snapshotId);
@@ -325,17 +367,22 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .then(Mono.defer(() -> deleteItem(pk, Keys.META)));
     }
 
+    /** 본문 묶음(CHUNK#)과 불확실 묶음(UNCERTAIN#) 모두를 하나씩 지운다. */
     private Mono<Void> deleteChunks(String pk, List<String> sks) {
         return Flux.fromIterable(sks)
-                .filter(Keys::isChunkSk)
+                .filter(DynamoDbTupleSnapshotRepository::isChunkRow)
                 .concatMap(sk -> deleteItem(pk, sk))
                 .then();
+    }
+
+    private static boolean isChunkRow(String sk) {
+        return Keys.isChunkSk(sk) || Keys.isUncertainChunkSk(sk);
     }
 
     private Mono<Void> deleteOldFormatRows(String pk, List<String> sks) {
         BatchRequests 묶음 = new BatchRequests(client, properties.getTableName());
         return Flux.fromIterable(sks)
-                .filter(sk -> !Keys.isChunkSk(sk))
+                .filter(sk -> !isChunkRow(sk))
                 .map(sk -> WriteRequest.builder()
                         .deleteRequest(DeleteRequest.builder()
                                 .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(sk)))
@@ -347,6 +394,18 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     // ---------- 공통 ----------
+
+    /** 압축해 나눈 본문(B) 묶음과 불확실 줄(U) 묶음. U 가 비면 U 묶음도 없다. */
+    private record EncodedChunks(List<byte[]> body, List<byte[]> uncertain) {
+    }
+
+    /**
+     * 같은 규칙으로 저장하고 읽는 묶음 계열 하나. 이름({@code label})은 오류 메시지에 앞붙이로 들어간다 — 본문은 비어 있고, 불확실 계열은
+     * "불확실 " 이라 어느 계열이 온전하지 않은지 알 수 있다.
+     */
+    private record ChunkSeries(String label, String tupleCountAttribute, String chunkCountAttribute,
+                               Predicate<String> isSk, IntFunction<String> sk, String missingCountReason) {
+    }
 
     private Flux<Map<String, AttributeValue>> queryPartition(String pk) {
         QueryRequest request = QueryRequest.builder()

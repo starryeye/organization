@@ -16,6 +16,9 @@ ldap:
   base-dn: dc=example,dc=com
   bind-dn: cn=admin,dc=example,dc=com
   bind-password: adminpassword
+  # 읽기 재시도 사이 대기를 밀리초로 줄인다 — 운영 기본값(10초~2분)이면 재시도를 타는 시험이 분 단위로 늘어진다
+  retry-min-backoff: 10ms
+  retry-max-backoff: 50ms
   strategy: group-of-names
   # 기존 e2e·규모 테스트는 이름 기반으로 돈다. 기본값(entryUUID)은 LdapImmutableIdEndToEndTest(groupOfNames)·
   # LdapDitImmutableIdEndToEndTest(DIT)·LdapEntryUuidScaleTest 가 본다(설계 §8) — 그 클래스들이 아래 식별 속성을 되돌린다

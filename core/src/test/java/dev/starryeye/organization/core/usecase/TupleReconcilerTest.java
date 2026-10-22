@@ -4,12 +4,13 @@ import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.TupleFailure;
+import dev.starryeye.organization.core.port.RelationTupleScanner;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -47,10 +48,10 @@ class TupleReconcilerTest {
 
         // when
         var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
-                (desired, stale, scanned) -> Optional.of("멈춤(테스트)")).block();
+                (desired, stale, scanned) -> TupleReconciler.DeleteVerdict.holdAll("멈춤(테스트)")).block();
 
         // then
-        assertThat(reconciliation.held()).isTrue();
+        assertThat(reconciliation.heldEntirely()).isTrue();
         assertThat(reconciliation.heldReason()).isEqualTo("멈춤(테스트)");
         assertThat(writer.stored).containsExactlyInAnyOrder(김, 찌꺼기);
         assertThat(writer.deleted).isEmpty();
@@ -109,14 +110,16 @@ class TupleReconcilerTest {
         RelationTuple 이 = RelationTuple.directMember("lee", "DEV002");
         writer.stored.add(이);
         TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
-                desired.isEmpty() && !stale.isEmpty() ? Optional.of("빈 조직도") : Optional.empty();
+                desired.isEmpty() && !stale.isEmpty()
+                        ? TupleReconciler.DeleteVerdict.holdAll("빈 조직도")
+                        : TupleReconciler.DeleteVerdict.proceed(stale);
 
         // when
         var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(),
                 (desired, stale) -> Mono.just(Set.of(이)), 빈_조직도면_멈춘다).block();
 
         // then
-        assertThat(reconciliation.held()).isFalse();
+        assertThat(reconciliation.heldEntirely()).isFalse();
         assertThat(writer.deleted).isEmpty();
         assertThat(writer.stored).containsExactly(이);
     }
@@ -188,14 +191,16 @@ class TupleReconcilerTest {
         FakeTupleScanner scanner = new FakeTupleScanner(writer);
         RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
         TupleReconciler.DeleteCheck 빈_조직도면_멈춘다 = (desired, stale, scanned) ->
-                desired.isEmpty() && !stale.isEmpty() ? Optional.of("빈 조직도") : Optional.empty();
+                desired.isEmpty() && !stale.isEmpty()
+                        ? TupleReconciler.DeleteVerdict.holdAll("빈 조직도")
+                        : TupleReconciler.DeleteVerdict.proceed(stale);
 
         // when
         var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
                 (desired, stale) -> Mono.just(Set.of()), 빈_조직도면_멈춘다).block();
 
         // then
-        assertThat(reconciliation.held()).isTrue();
+        assertThat(reconciliation.heldEntirely()).isTrue();
         assertThat(writer.deleted).isEmpty();
         assertThat(writer.stored).containsExactly(김);
     }
@@ -218,5 +223,131 @@ class TupleReconcilerTest {
         // then
         assertThat(reconciliation.stopReason()).isNotNull();
         assertThat(알린_줄).containsExactly(찌꺼기);
+    }
+
+    // ---------- 결과를 모르는 지우기 (설계 2026-10-20 §3.4) ----------
+
+    @Test
+    @DisplayName("훑은 뒤 지우기가 불확실하게 실패하면 불확실 줄이고, 확정 실패는 장부(기준선)에 남는다")
+    void 훑은_뒤_지우기가_불확실하게_실패하면_불확실_줄이고_확정_실패는_기준선에_남는다() {
+        // given — 장부에 kim(D), 찌꺼기 둘. 한쪽은 지웠는데 응답을 잃고, 다른 쪽은 거절된다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 응답유실 = RelationTuple.directMember("ghost1", "DEV002");
+        RelationTuple 거절 = RelationTuple.directMember("ghost2", "DEV002");
+        writer.stored.addAll(Set.of(김, 응답유실, 거절));
+        writer.lostResponseFor(tuple -> tuple.equals(응답유실));
+        writer.failFor(tuple -> tuple.equals(거절));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김)).block();
+
+        // then — 결과를 모르는 줄은 불확실 줄로 가고 기준선에서 빠진다. 거절된 줄은 분명히 장부에 있으니 기준선에 남는다
+        assertThat(reconciliation.uncertain()).containsExactly(응답유실);
+        assertThat(reconciliation.ledger()).containsExactlyInAnyOrder(김, 거절);
+        assertThat(reconciliation.ledger()).doesNotContainAnyElementsOf(reconciliation.uncertain());
+        assertThat(reconciliation.result().failures()).extracting(TupleFailure::tuple)
+                .containsExactlyInAnyOrder(응답유실, 거절);
+        assertThat(writer.stored).as("응답을 잃은 지우기는 실제로 반영됐다").containsExactlyInAnyOrder(김, 거절);
+    }
+
+    @Test
+    @DisplayName("지우기가 연속 실패 차단기로 멈춰도 결과를 모르는 줄은 불확실 줄이다")
+    void 차단기로_멈춘_지우기도_불확실_줄을_남긴다() {
+        // given — 찌꺼기를 지우는 쓰기가 응답을 잃은 채 차단기로 멈춘다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 찌꺼기 = RelationTuple.directMember("ghost", "DEV002");
+        writer.stored.add(찌꺼기);
+        writer.lostResponseFor(tuple -> tuple.equals(찌꺼기));
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김)).block();
+
+        // then
+        assertThat(reconciliation.stopReason()).isNotNull();
+        assertThat(reconciliation.uncertain()).containsExactly(찌꺼기);
+        assertThat(reconciliation.ledger()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("다시 정해 더한 줄의 쓰기가 불확실하게 실패하면 불확실 줄이다 — 훑은 뒤에 쓴 줄이라 훑기가 알려 주지 못한다")
+    void 더한_줄의_쓰기가_불확실하게_실패하면_불확실_줄이다() {
+        // given — D 는 kim 하나. 다시 정하기가 park 을 더하는데 park 의 쓰기가 응답을 잃는다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.lostResponseFor(tuple -> tuple.equals(박));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김),
+                (desired, stale) -> Mono.just(Set.of(김, 박)), TupleReconciler.DeleteCheck.NONE).block();
+
+        // then
+        assertThat(reconciliation.uncertain()).containsExactly(박);
+        assertThat(reconciliation.ledger()).containsExactly(김);
+    }
+
+    @Test
+    @DisplayName("훑기 전 쓰기가 불확실하게 실패하고 훑을 때 장부에 없던 줄은 불확실 줄이다 — 서버가 훑은 뒤에 반영할 수 있다")
+    void 훑기_전_쓰기가_불확실하게_실패하고_훑을_때_없던_줄은_불확실_줄이다() {
+        // given — D 는 kim·park. 둘 다 쓰기 응답을 잃었다. kim 은 훑을 때 이미 장부에 있고, park 은 서버가 훑은 뒤에야 반영한다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner 장부 = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 박 = RelationTuple.directMember("park", "DEV002");
+        writer.lostResponseFor(tuple -> tuple.equals(김) || tuple.equals(박));
+        RelationTupleScanner 훑은_뒤에_반영한다 = () -> Flux.defer(() -> {
+            writer.stored.remove(박);
+            return 장부.scanAll();
+        }).doOnComplete(() -> writer.stored.add(박));
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, 훑은_뒤에_반영한다, Set.of(김, 박)).block();
+
+        // then — 훑기가 알려 준 kim 은 확실한 줄이고, 훑을 때 없던 park 은 반영됐는지 모르니 불확실 줄이다. 둘은 겹치지 않는다
+        assertThat(reconciliation.ledger()).containsExactly(김);
+        assertThat(reconciliation.uncertain()).containsExactly(박);
+        assertThat(writer.stored).as("서버는 훑은 뒤 park 을 반영했다").containsExactlyInAnyOrder(김, 박);
+    }
+
+    // ---------- 가드의 일부 반영 (설계 2026-10-20 §5.4) ----------
+
+    @Test
+    @DisplayName("장부 맞추기에서도 지우기 전 확인이 비활성 회수만 내주면 그것만 지우고, 보류한 후보는 장부에 그대로 있으니 기준선에 남긴다")
+    void 장부_맞추기에서도_비활성_회수만_지우고_보류한_후보는_기준선에_남긴다() {
+        // given — 장부에 kim(D), 막힌 lee, 찌꺼기 둘. 확인이 lee 의 지우기만 내주고 나머지는 보류한다
+        FakeTupleWriter writer = new FakeTupleWriter();
+        FakeTupleScanner scanner = new FakeTupleScanner(writer);
+        RelationTuple 김 = RelationTuple.directMember("kim", "DEV002");
+        RelationTuple 막힌_이 = RelationTuple.directMember("lee", "DEV002");
+        RelationTuple 유령1 = RelationTuple.directMember("ghost1", "DEV002");
+        RelationTuple 유령2 = RelationTuple.directMember("ghost2", "DEV002");
+        writer.stored.addAll(Set.of(김, 막힌_이, 유령1, 유령2));
+        List<Set<RelationTuple>> 본_후보 = new CopyOnWriteArrayList<>();
+        TupleReconciler.DeleteCheck 비활성_회수만 = (desired, stale, scanned) -> {
+            본_후보.add(Set.copyOf(stale));
+            return TupleReconciler.DeleteVerdict.partial(Set.of(막힌_이), "비활성 회수만(테스트)");
+        };
+
+        // when
+        var reconciliation = TupleReconciler.reconcile(writer, scanner, Set.of(김), 비활성_회수만).block();
+
+        // then — 내준 것만 지운다
+        assertThat(본_후보).containsExactly(Set.of(막힌_이, 유령1, 유령2));
+        assertThat(writer.deleted).containsExactly(막힌_이);
+        assertThat(writer.stored).containsExactlyInAnyOrder(김, 유령1, 유령2);
+        assertThat(reconciliation.result().deleted()).containsExactly(막힌_이);
+
+        // then — 통째로 보류한 것이 아니라 일부 반영이다. 보류한 후보는 장부에 그대로 있으니 기준선(B)에 든다 — 다음 회차가 지울 대상으로 본다
+        assertThat(reconciliation.heldEntirely()).isFalse();
+        assertThat(reconciliation.revokedOnly()).isTrue();
+        assertThat(reconciliation.heldReason()).isEqualTo("비활성 회수만(테스트)");
+        assertThat(reconciliation.ledger()).containsExactlyInAnyOrder(김, 유령1, 유령2);
+        assertThat(reconciliation.uncertain()).isEmpty();
     }
 }

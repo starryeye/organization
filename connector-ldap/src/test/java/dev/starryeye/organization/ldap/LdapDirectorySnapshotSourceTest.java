@@ -11,6 +11,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.ldap.core.LdapTemplate;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -89,9 +90,12 @@ class LdapDirectorySnapshotSourceTest {
         }
     }
 
+    /** 재시도 횟수만 정한 설정. 대기는 밀리초로 줄인다 — 운영 기본값(10초~2분)을 그대로 두면 재시도를 타는 시험마다 분 단위로 늘어난다. */
     private static LdapProperties 설정(int maxRetries) {
         LdapProperties properties = new LdapProperties();
         properties.setMaxRetries(maxRetries);
+        properties.setRetryMinBackoff(Duration.ofMillis(10));
+        properties.setRetryMaxBackoff(Duration.ofMillis(50));
         return properties;
     }
 
@@ -233,5 +237,28 @@ class LdapDirectorySnapshotSourceTest {
         // when, then
         assertThatThrownBy(() -> source.fetchAll().block()).isInstanceOf(org.springframework.ldap.CommunicationException.class);
         assertThat(전략.호출수).hasValue(4);
+    }
+
+    @Test
+    @DisplayName("재시도 규칙은 설정한 횟수와 최소·최대 대기를 쓴다 — 기본은 5번·10초~2분이다(설계 2026-10-20 §8)")
+    void 재시도_규칙은_설정한_횟수와_최소_최대_대기를_쓴다() {
+        // given — 아무것도 바꾸지 않은 기본값, 그리고 셋 다 바꾼 값
+        var 기본 = new LdapProperties();
+        var 바꾼 = new LdapProperties();
+        바꾼.setMaxRetries(2);
+        바꾼.setRetryMinBackoff(Duration.ofSeconds(3));
+        바꾼.setRetryMaxBackoff(Duration.ofSeconds(7));
+
+        // when
+        var 기본_규칙 = LdapDirectorySnapshotSource.재시도_규칙(기본);
+        var 바꾼_규칙 = LdapDirectorySnapshotSource.재시도_규칙(바꾼);
+
+        // then — DC 재부팅을 버티려면 대기를 합쳐 수 분이어야 한다(10초부터 두 배로 늘어 2분에서 멈춘다)
+        assertThat(기본_규칙.maxAttempts).isEqualTo(5);
+        assertThat(기본_규칙.minBackoff).isEqualTo(Duration.ofSeconds(10));
+        assertThat(기본_규칙.maxBackoff).isEqualTo(Duration.ofMinutes(2));
+        assertThat(바꾼_규칙.maxAttempts).isEqualTo(2);
+        assertThat(바꾼_규칙.minBackoff).isEqualTo(Duration.ofSeconds(3));
+        assertThat(바꾼_규칙.maxBackoff).isEqualTo(Duration.ofSeconds(7));
     }
 }

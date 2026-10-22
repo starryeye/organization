@@ -37,6 +37,7 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
+    private Predicate<RelationTuple> lostResponseWhen = tuple -> false;
     private Predicate<TupleDelta> abortWhen = delta -> false;
     private Runnable applyHook;
 
@@ -47,6 +48,14 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     public void failFor(Predicate<RelationTuple> failWhen) {
         this.failWhen = failWhen;
+    }
+
+    /**
+     * 이 조건에 걸리는 튜플은 "서버는 반영했는데 응답을 잃은" 것처럼 처리한다 — 가짜 장부({@link #stored}, {@link #written}·{@link #deleted} 기록)에는
+     * 실제로 반영하되, 결과에는 쓴·지운 줄로 넣지 않고 불확실 실패("테스트용 응답 유실")로 넣는다. {@link #failFor} 와 겹치면 {@code failFor} 가 이긴다.
+     */
+    public void lostResponseFor(Predicate<RelationTuple> lostResponseWhen) {
+        this.lostResponseWhen = lostResponseWhen;
     }
 
     /**
@@ -75,6 +84,10 @@ public class FakeTupleWriter implements RelationTupleWriter {
         for (RelationTuple tuple : delta.toWrite()) {
             if (failWhen.test(tuple)) {
                 failures.add(new TupleFailure(tuple, "테스트용 실패"));
+            } else if (lostResponseWhen.test(tuple)) {
+                this.written.add(tuple);
+                stored.add(tuple);
+                failures.add(TupleFailure.uncertain(tuple, "테스트용 응답 유실"));
             } else {
                 written.add(tuple);
                 this.written.add(tuple);
@@ -84,6 +97,10 @@ public class FakeTupleWriter implements RelationTupleWriter {
         for (RelationTuple tuple : delta.toDelete()) {
             if (failWhen.test(tuple)) {
                 failures.add(new TupleFailure(tuple, "테스트용 실패"));
+            } else if (lostResponseWhen.test(tuple)) {
+                this.deleted.add(tuple);
+                stored.remove(tuple);
+                failures.add(TupleFailure.uncertain(tuple, "테스트용 응답 유실"));
             } else {
                 deleted.add(tuple);
                 this.deleted.add(tuple);

@@ -40,7 +40,7 @@ public final class Keys {
      * 기동을 멈춘다.
      */
     public static final String GSI2PK = GSI1PK;
-    /** @see #GSI2PK — 직원 META 에만 쓰는 소문자 표시명({@link #indexKey}). */
+    /** @see #GSI2PK — 직원 META 에만 쓰는 소문자 표시명. 쓸 때는 {@link #indexKeyForWrite}, 물을 때는 {@link #indexKey} 다. */
     public static final String GSI2SK = "displayNameKey";
 
     /**
@@ -82,6 +82,8 @@ public final class Keys {
     public static final String TUPLE_PREFIX = "TUPLE#";
     /** 튜플 스냅샷 본문 묶음의 정렬키 접두사(설계 2026-10-09 §3.1). */
     public static final String CHUNK_PREFIX = "CHUNK#";
+    /** 튜플 스냅샷의 불확실 줄(U) 묶음의 정렬키 접두사(설계 2026-10-20 §3.5). {@link #CHUNK_PREFIX} 와 겹치지 않아 본문 묶음으로 읽히지 않는다. */
+    public static final String UNCERTAIN_CHUNK_PREFIX = "UNCERTAIN#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
     /** 변경 이력 파티션 접두사(설계 2026-10-10 §3.2). 대상마다 하나 — {@code AUDIT#USER#kim}, {@code AUDIT#GROUP#DEV}. */
     public static final String AUDIT_PREFIX = "AUDIT#";
@@ -142,10 +144,55 @@ public final class Keys {
     /**
      * GSI1 정렬키에 넣는 값. {@code userName}·조직 {@code displayName} 은 RFC 7643 에서
      * {@code caseExact=false} 라 대소문자를 가리지 않고 찾아야 한다 — 키만 소문자로 두고 속성은
-     * 보낸 그대로 둔다(S-1 설계 §5.1). 쓰는 쪽과 묻는 쪽이 반드시 이 한 메서드를 거친다.
+     * 보낸 그대로 둔다(S-1 설계 §5.1). 묻는 쪽은 이 메서드를 거치고, 쓰는 쪽은 {@link #indexKeyForWrite} 를 거친다 — 그것이 이 메서드를 부른 뒤
+     * 키 한도(1024바이트)로 자르므로 짧은 값은 둘이 같다.
      */
     public static String indexKey(String raw) {
         return raw.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 색인 정렬키(GSI1SK·GSI2SK)를 <b>쓸 때</b> 넣는 값 — {@link #indexKey} 를 UTF-8 {@link #MAX_SORT_KEY_BYTES} 바이트 이하로 자른다. 실제
+     * DynamoDB 는 그보다 긴 정렬키를 {@code ValidationException} 으로 거절하는데, LDAP 조직의 표시명은 자유 서술 {@code description} 이 될 수 있어
+     * 길이를 믿을 수 없다. 한 아이템이 거절되면 상태 교체가 매 회차 실패한다(설계 2026-10-20 §7). SCIM 은 같은 한도를 넘는 값을 코어에서 400 으로
+     * 거절하므로 이 자름은 LDAP 값에만 일어난다.
+     *
+     * <p>소문자로 <b>먼저</b> 바꾸고 자른다 — U+0130 은 소문자로 바꾸면 2바이트에서 3바이트가 되니, 원래 값을 먼저 자르면 소문자 키가 한도를 넘을 수
+     * 있다. 자르는 자리는 코드 포인트의 경계다 — 4바이트 문자(서로게이트 쌍)를 가르면 홀로 남은 서로게이트가 {@code ?} 로 바뀌어 키가 달라진다. 한도
+     * 안의 값은 {@link #indexKey} 와 같다.
+     *
+     * <p><b>쓰는 자리만 이 메서드를 쓴다.</b> 읽는 쪽은 계속 {@link #indexKey} 를 거친다 — 한도를 넘는 조회 키는 아이템이 있을 수 없어 DynamoDB 를 부르지
+     * 않고 "없음" 이다({@link #fitsSortKey}, 설계 2026-10-17 §4). 원래 값은 {@code displayName}·{@code userName} 속성에 그대로 있고, 키는 앞부분만
+     * 가진다. {@code externalId} 는 GSI3 의 파티션키 속성 자체라 자르지 않는다.
+     */
+    public static String indexKeyForWrite(String raw) {
+        String key = indexKey(raw);
+        if (fitsSortKey(key)) {
+            return key;
+        }
+        int bytes = 0;
+        int end = 0;
+        while (end < key.length()) {
+            int codePoint = key.codePointAt(end);
+            int size = utf8Length(codePoint);
+            if (bytes + size > MAX_SORT_KEY_BYTES) {
+                break;
+            }
+            bytes += size;
+            end += Character.charCount(codePoint);
+        }
+        return key.substring(0, end);
+    }
+
+    /** 코드 포인트 하나의 UTF-8 바이트 수. */
+    private static int utf8Length(int codePoint) {
+        if (codePoint < 0x80) {
+            return 1;
+        }
+        if (codePoint < 0x800) {
+            return 2;
+        }
+        return codePoint < 0x10000 ? 3 : 4;
     }
 
     /**
@@ -308,6 +355,22 @@ public final class Keys {
     /** 정렬키가 {@link #chunkSk} 로 만들어진 묶음 아이템인지 판별한다. */
     public static boolean isChunkSk(String sk) {
         return sk.startsWith(CHUNK_PREFIX);
+    }
+
+    /**
+     * 불확실 줄(U) 묶음의 정렬키(설계 2026-10-20 §3.5). 본문 묶음({@link #chunkSk})과 같은 규칙의 따로 된 계열이다 — 번호가 네 자리라 정렬키
+     * 순서가 곧 이어 붙일 순서다.
+     */
+    public static String uncertainChunkSk(int index) {
+        if (index < 0 || index > 9_999) {
+            throw new IllegalArgumentException("불확실 묶음 번호는 0~9999 다: " + index);
+        }
+        return UNCERTAIN_CHUNK_PREFIX + "%04d".formatted(index);
+    }
+
+    /** 정렬키가 {@link #uncertainChunkSk} 로 만들어진 불확실 묶음 아이템인지 판별한다. */
+    public static boolean isUncertainChunkSk(String sk) {
+        return sk.startsWith(UNCERTAIN_CHUNK_PREFIX);
     }
 
     /** {@code EDGE#<부모>|<자식>}. 아이디에는 {@code |} 가 없다({@code IdNormalizer}). */

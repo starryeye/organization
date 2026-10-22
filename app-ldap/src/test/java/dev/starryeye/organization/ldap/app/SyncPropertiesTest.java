@@ -1,0 +1,40 @@
+package dev.starryeye.organization.ldap.app;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.config.YamlPropertiesFactoryBean;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.scheduling.support.CronExpression;
+
+import java.time.LocalDateTime;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SyncPropertiesTest {
+
+    @Test
+    @DisplayName("기본 주기는 매시 정각이다 — 하루 한 번이면 퇴사 회수가 최악 하루 늦는다(설계 2026-10-20 §8)")
+    void 기본_주기는_매시_정각이다() {
+        // given, when
+        var cron = new SyncProperties().getCron();
+
+        // then
+        assertThat(cron).isEqualTo("0 0 * * * *");
+        assertThat(CronExpression.parse(cron).next(LocalDateTime.of(2026, 10, 23, 10, 20, 30)))
+                .isEqualTo(LocalDateTime.of(2026, 10, 23, 11, 0, 0));
+    }
+
+    @Test
+    @DisplayName("application.yml 의 sync.cron 도 매시 정각이다 — 코드 기본값과 어긋나면 운영은 yml 을 따른다")
+    void 설정_파일의_주기도_매시_정각이다() {
+        // given
+        var yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+
+        // when
+        var cron = yaml.getObject().getProperty("sync.cron");
+
+        // then
+        assertThat(cron).isEqualTo(new SyncProperties().getCron());
+    }
+}

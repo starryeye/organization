@@ -37,6 +37,15 @@ public record SyncOutcome(
         return new SyncOutcome(SyncStatus.ABORTED, 0, 0, 0, null, message);
     }
 
+    /**
+     * 삭제 가드가 걸렸지만 디렉터리가 막았다고 명시한 회수만 반영했다(설계 2026-10-20 §5.3). 가드가 걸린 회차라 ABORTED 이고, 건수는 실제로 나간
+     * 것이다. 스냅샷은 남겼다 — 현재상태는 바꾸지 않았다.
+     */
+    public static SyncOutcome revokedOnly(TupleWriteResult result, String snapshotId, String message) {
+        return new SyncOutcome(SyncStatus.ABORTED,
+                result.written().size(), result.deleted().size(), result.failures().size(), snapshotId, message);
+    }
+
     public static SyncOutcome failed(String message) {
         return new SyncOutcome(SyncStatus.FAILED, 0, 0, 0, null, message);
     }

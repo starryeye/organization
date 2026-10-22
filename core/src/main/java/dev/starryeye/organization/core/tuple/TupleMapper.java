@@ -10,6 +10,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -92,6 +93,30 @@ public final class TupleMapper {
             }
         }
         return candidates;
+    }
+
+    /**
+     * 디렉터리가 막았다고 명시한 직원의 소속 줄 — 그림에 있는 비활성 직원 u 가 조직 g 의 직원 멤버일 때의 {@code direct_member(u, g)}
+     * (설계 2026-10-20 §5.1).
+     *
+     * <p>곧 "디렉터리가 그 사람을 여전히 보여 주고 소속도 그대로인데 막았다고 말한" 줄이다. 엔트리가 사라졌거나(그림에 없음) 소속이 빠져서 생기는
+     * 지우기는 여기에 들지 않는다. 삭제 가드가 걸린 회차에 지울 줄 가운데 이것과 겹치는 부분만 떼어 다시 본다({@code DeletionGuard}).
+     * {@link #toTuples} 가 빼는 바로 그 줄이라 id 도 같은 규칙(정규화 없음)으로 만든다.
+     */
+    public static Set<RelationTuple> inactiveMemberTuples(DirectorySnapshot snapshot) {
+        Set<RelationTuple> tuples = new HashSet<>();
+        for (DirectoryGroup group : snapshot.groups().values()) {
+            for (MemberRef member : group.members()) {
+                if (member.type() != MemberType.USER) {
+                    continue;
+                }
+                DirectoryUser user = snapshot.users().get(member.id());
+                if (user != null && !user.active()) {
+                    tuples.add(RelationTuple.directMember(user.id(), group.id()));
+                }
+            }
+        }
+        return tuples;
     }
 
     /** 조직코드 사전순으로 부모 → 자식 인접 리스트를 만든다. 순서를 고정해야 결과가 결정적이다. */

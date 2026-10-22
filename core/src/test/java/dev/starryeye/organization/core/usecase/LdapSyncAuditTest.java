@@ -186,6 +186,34 @@ class LdapSyncAuditTest {
     }
 
     @Test
+    @DisplayName("삭제 가드가 걸려도 비활성 회수만 반영한 회차는 지운 줄을 남긴다 — 현재상태를 바꾸지 않았으니 조직도 변경은 없다(설계 2026-10-20 §5.3)")
+    void 비활성_회수만_반영한_회차는_지운_줄을_남긴다() {
+        // given — 기준 20건. 디렉터리에는 user1~5 만 남고 user0 은 막혔다(그림과 소속에 그대로 있다). 지울 15건으로 가드가 걸린다
+        Set<RelationTuple> 기준 = IntStream.range(0, 20)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV"))
+                .collect(Collectors.toSet());
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 기준)).block();
+        writer.stored.addAll(기준);
+        DirectoryUser[] 남은_직원 = IntStream.range(1, 6).mapToObj(i -> 직원("user" + i)).toArray(DirectoryUser[]::new);
+        DirectoryUser[] 모두 = new DirectoryUser[남은_직원.length + 1];
+        System.arraycopy(남은_직원, 0, 모두, 0, 남은_직원.length);
+        모두[남은_직원.length] = new DirectoryUser("user0", "uid=user0", "user0", "user0", "user0@example.com", false);
+        source.willReturn(조직도(모두));
+
+        // when
+        SyncRun run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(auditLog.events).singleElement().satisfies(event ->
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+        assertThat(auditLog.lastOf(MemberRef.user("user0")).revoked())
+                .containsExactly(RelationTuple.directMember("user0", "DEV"));
+        assertThat(auditLog.entriesOf(MemberRef.group("DEV"))).isEmpty();
+        assertThat(auditLog.entriesOf(MemberRef.user("user1"))).isEmpty();
+    }
+
+    @Test
     @DisplayName("이력은 락을 반납한 뒤에 쓴다")
     void 기록은_락을_반납한_뒤에_쓴다() {
         // given
@@ -301,6 +329,27 @@ class LdapSyncAuditTest {
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.created()).isTrue();
         assertThat(김의_줄.granted()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("기준선이 없는 첫 회차는 종류가 동기화 그대로이고 쓴 줄을 부여로, 지운 줄을 회수로 남긴다")
+    void 기준선이_없는_첫_회차는_쓴_줄을_부여로_남긴다() {
+        // given — 저장한 스냅샷이 없고 장부에는 찌꺼기가 있다. 가드는 이 테스트의 관심이 아니다(기준 10건 미만이라 걸리지 않는다)
+        writer.stored.add(유령_개발);
+        source.willReturn(조직도(직원("kim")));
+
+        // when
+        SyncRun run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 장부 맞추기와 달리 첫 적재의 부여 이력이 사라지지 않는다(설계 2026-10-10 §4.2)
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(auditLog.events).singleElement().satisfies(event ->
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+        AuditEntry 김의_줄 = auditLog.lastOf(김);
+        assertThat(김의_줄.created()).isTrue();
+        assertThat(김의_줄.granted()).containsExactly(김_개발);
+        assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
+        assertThat(auditLog.lastOf(유령).granted()).isEmpty();
     }
 
     @Test

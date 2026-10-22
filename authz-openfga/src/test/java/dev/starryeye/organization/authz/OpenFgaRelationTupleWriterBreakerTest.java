@@ -532,4 +532,56 @@ class OpenFgaRelationTupleWriterBreakerTest {
         assertThat(알린것).singleElement().satisfies(result ->
                 assertThat(result.written()).containsExactlyInAnyOrderElementsOf(batches.get(1).writes()));
     }
+
+    @Test
+    @DisplayName("차단기로 보내지 않은 묶음은 확정 실패다 — 서버에 가지 않았으니 결과를 모를 일이 없다. 보낸 묶음의 일시 오류는 불확실로 남는다")
+    void 차단기로_보내지_않은_묶음은_확정_실패다() {
+        // given — 일시 오류가 연달아 셋이라 차단기가 서고 일곱 묶음은 나가지 않는다
+        Function<Batch, Mono<TupleWriteResult>> 늘_일시_오류 = batch -> Mono.just(batch.uncertain("연결 거부"));
+
+        // when, then
+        assertThatThrownBy(() -> OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치들(10), 늘_일시_오류).block())
+                .isInstanceOfSatisfying(TupleWriteAbortedException.class, 멈춤 -> {
+                    assertThat(멈춤.partial().failures())
+                            .filteredOn(failure -> failure.reason().equals("연속 실패로 보내지 않음"))
+                            .hasSize(7)
+                            .allSatisfy(failure -> assertThat(failure.uncertain()).isFalse());
+                    assertThat(멈춤.partial().failures())
+                            .filteredOn(failure -> failure.reason().equals("연결 거부"))
+                            .hasSize(3)
+                            .allSatisfy(failure -> assertThat(failure.uncertain()).isTrue());
+                    assertThat(멈춤.partial().uncertain()).hasSize(3);
+                });
+    }
+
+    @Test
+    @DisplayName("앞 단계 실패로 보내지 않은 쓰기는 확정 실패다 — 일시 오류로 실패한 앞 단계 묶음의 줄만 불확실이다")
+    void 앞_단계_실패로_보내지_않은_쓰기는_확정_실패다() {
+        // given — 조직 지우기 셋 가운데 둘째만 일시 오류다. 뒤 단계는 옮기는 직원 하나(지우기와 쓰기), 쓰기만인 직원 하나, 조직 쓰기 둘
+        List<Batch> 조직_지우기 = 조직_지우기_배치들(3);
+        List<Batch> 직원 = List.of(
+                new Batch(List.of(RelationTuple.directMember("kim", "NEW")), List.of(RelationTuple.directMember("kim", "OLD"))),
+                Batch.writes(List.of(RelationTuple.directMember("park", "NEW"))));
+        List<Batch> 조직_쓰기 = 조직_쓰기_배치들(2);
+        List<Batch> 배치 = new ArrayList<>(조직_지우기);
+        배치.addAll(직원);
+        배치.addAll(조직_쓰기);
+        RelationTuple 실패할_줄 = 조직_지우기.get(1).deletes().get(0);
+        Function<Batch, Mono<TupleWriteResult>> send = batch ->
+                Mono.just(batch.deletes().contains(실패할_줄) ? batch.uncertain("연결 거부") : batch.succeeded());
+
+        // when
+        TupleWriteResult 결과 = OpenFgaRelationTupleWriter.보내되_연속_실패면_멈춘다(배치, send).block();
+
+        // then — 보내지 않은 쓰기 넷(kim, park, 조직 쓰기 둘)은 확정, 일시 오류인 조직 지우기 줄은 불확실
+        assertThat(결과.failures())
+                .filteredOn(failure -> failure.reason().equals("앞 단계 실패로 보내지 않음"))
+                .extracting(TupleFailure::tuple)
+                .containsExactlyInAnyOrderElementsOf(쓰기들(배치.subList(3, 7)));
+        assertThat(결과.failures())
+                .filteredOn(failure -> failure.reason().equals("앞 단계 실패로 보내지 않음"))
+                .allSatisfy(failure -> assertThat(failure.uncertain()).isFalse());
+        assertThat(결과.uncertain()).containsExactly(실패할_줄);
+        assertThat(결과.failures()).hasSize(1 + 4);
+    }
 }

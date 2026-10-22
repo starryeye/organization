@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
+import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
@@ -140,6 +141,38 @@ class ScimRebuildUseCaseTest {
         assertThat(writer.deleted).containsExactly(찌꺼기);
         assertThat(run.deletedCount()).isEqualTo(1);
         assertThat(scanner.scanCount).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("비활성화가 일부 실패해 남은 줄을 tuples 재적재가 지운다 — 저장된 비활성이 목표라 다시 쓰지 않는다(설계 2026-10-20 §6.1)")
+    void 실패한_비활성화_뒤_SCIM_재적재가_남은_줄을_지운다() {
+        // given — 활성 kim 이 DEV002 에 속하고 장부가 상태와 같다. 비활성화의 지우기가 실패해 상태는 비활성인데 줄이 남는다
+        조직도를_심는다();
+        writer.stored.addAll(Set.of(김_백엔드, 백엔드_개발본부));
+        writer.failFor(김_백엔드::equals);
+        FakeTupleChecker checker = new FakeTupleChecker() {
+            @Override
+            public Mono<Boolean> check(RelationTuple tuple) {
+                return super.check(tuple).map(ignored -> writer.stored.contains(tuple));
+            }
+        };
+        var 비활성화 = new IncrementalSyncUseCase(state, writer, checker, lock, Duration.ZERO,
+                IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP)
+                .changeUser("kim", user -> user.withActive(false)).block();
+        assertThat(비활성화.fullyApplied()).isFalse();
+        assertThat(state.users.get("kim").active()).isFalse();
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 백엔드_개발본부);
+        writer.failFor(tuple -> false);
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — 장부를 훑어 상태(비활성)가 요구하지 않는 줄을 지웠고, 그 줄을 다시 쓰지 않았다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactly(백엔드_개발본부);
+        assertThat(writer.deleted).containsExactly(김_백엔드);
+        assertThat(writer.written).doesNotContain(김_백엔드);
+        assertThat(state.users.get("kim").active()).isFalse();
     }
 
     @Test

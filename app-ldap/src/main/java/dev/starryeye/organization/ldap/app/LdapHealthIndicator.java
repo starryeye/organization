@@ -18,8 +18,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * LDAP 연결을 확인한다 (설계 §12.3).
  *
  * <p>이 앱의 파이프라인은 LDAP 읽기에서 시작한다. DynamoDB 와 OpenFGA 만 보고 UP 을
- * 보고하면 <b>정작 첫 단추가 끊겼는데 건강하다고 답하는</b> 상태가 된다. 하루 1회
- * 스케줄이라 다음 실행까지 24시간이 비므로, 그 사이 이상을 알아챌 수단이 헬스체크뿐이다.
+ * 보고하면 <b>정작 첫 단추가 끊겼는데 건강하다고 답하는</b> 상태가 된다. 정기 동기화는
+ * {@code sync.cron} 주기(기본 매시 정각)로 돌아 다음 실행까지 그 사이가 비므로, 그 사이 이상을 알아챌 수단이 헬스체크다.
  *
  * <p><b>빈 이름이 {@code ldapHealthIndicator} 다.</b> Spring Boot 는 {@code LdapOperations} 빈이 있으면 블로킹 기본 LDAP 인디케이터를 더하는데,
  * {@code ldapHealthIndicator}·{@code ldapHealthContributor} 라는 빈이 있으면 물러난다. 둘 다 헬스 이름이 {@code ldap} 이라, 다른 이름(예:
