@@ -20,6 +20,7 @@ import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository.BaselineState;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleDiff;
@@ -90,7 +91,7 @@ public class FullSyncUseCase {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
-            return snapshots.isWriting().flatMap(writing -> writing
+            return snapshots.baselineState().map(상태 -> 상태 == BaselineState.WRITING).flatMap(writing -> writing
                     ? 훑어_맞춘다(directory, mapping.tuples(), trigger, 기록)
                     : 비교해_맞춘다(directory, mapping.tuples(), trigger, 기록.changes()));
         });

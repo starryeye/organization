@@ -373,7 +373,7 @@ class LdapSyncEndToEndTest {
 
         // then
         assertThat(check("user:ghost", "member", "group:DEV001")).isFalse();
-        assertThat(snapshots.isWriting().block(Duration.ofSeconds(10))).isFalse();
+        assertThat(snapshots.baselineState().block(Duration.ofSeconds(10))).isNotEqualTo(TupleSnapshotRepository.BaselineState.WRITING);
     }
 
     @Test

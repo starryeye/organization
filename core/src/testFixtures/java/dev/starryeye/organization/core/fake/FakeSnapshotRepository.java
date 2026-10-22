@@ -81,9 +81,12 @@ public class FakeSnapshotRepository implements TupleSnapshotRepository {
         });
     }
 
+    /** 기록 중 표시가 있으면 기록 중, 저장한 것이 없으면 없음, 아니면 있음. */
     @Override
-    public Mono<Boolean> isWriting() {
-        return Mono.fromSupplier(writing::get);
+    public Mono<BaselineState> baselineState() {
+        return Mono.fromSupplier(() -> writing.get() ? BaselineState.WRITING
+                : saved.isEmpty() ? BaselineState.NONE
+                : BaselineState.PRESENT);
     }
 
     @Override

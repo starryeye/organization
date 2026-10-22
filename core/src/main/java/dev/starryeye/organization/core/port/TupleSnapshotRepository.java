@@ -17,11 +17,14 @@ public interface TupleSnapshotRepository {
 
     /**
      * 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono(처음 설치). 포인터가 가리키는 스냅샷의 메타가 없거나 본문을 온전히 읽지 못하면(빠진 조각, 풀 수 없는 본문, 메타와 다른 튜플 수 등)
-     * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다.
+     * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다. 불확실 줄(U)도 본문과 같은 검사를 받는다.
      */
     Mono<TupleSnapshot> findLatest();
 
-    /** 메타 → 본문 → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이 되지 않는다. */
+    /**
+     * 메타 → 본문 → 불확실 줄(U) → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이
+     * 되지 않는다. U 가 비어 있으면 U 는 쓰지 않는다.
+     */
     Mono<Void> save(TupleSnapshot snapshot);
 
     Flux<SnapshotMeta> listRecent(int days);
@@ -35,8 +38,22 @@ public interface TupleSnapshotRepository {
      */
     Mono<Void> markWriting();
 
-    /** "기록 중" 표시가 남아 있는가 — 지난 회차가 쓰기 시작한 뒤 기록 전에 멈췄다. 강한 일관성으로 읽는다. */
-    Mono<Boolean> isWriting();
+    /**
+     * 기준선(스냅샷 포인터)이 지금 어떤 상태인가(설계 2026-10-20 §4). 강한 일관성으로 읽는다.
+     * <ul>
+     *   <li>{@link BaselineState#NONE} — 포인터 줄이 없다(첫 설치이거나 새 테이블). 포인터 줄에 "기록 중" 칸도 스냅샷 번호도 없는 경우도 같다.</li>
+     *   <li>{@link BaselineState#WRITING} — "기록 중" 표시가 남아 있다. 지난 회차가 쓰기 시작한 뒤 기록 전에 멈췄다. 스냅샷 번호가 있어도 표시가 먼저다.</li>
+     *   <li>{@link BaselineState#PRESENT} — 표시 없이 스냅샷 번호가 있다.</li>
+     * </ul>
+     */
+    Mono<BaselineState> baselineState();
+
+    /** {@link #baselineState()} 의 값. */
+    enum BaselineState {
+        NONE,
+        WRITING,
+        PRESENT
+    }
 
     /**
      * 보존 기간이 지난 스냅샷을 지운다. 최신 포인터가 가리키는 스냅샷은 기간과 상관없이 지우지 않는다 — 비교 기준이다.

@@ -82,6 +82,8 @@ public final class Keys {
     public static final String TUPLE_PREFIX = "TUPLE#";
     /** 튜플 스냅샷 본문 묶음의 정렬키 접두사(설계 2026-10-09 §3.1). */
     public static final String CHUNK_PREFIX = "CHUNK#";
+    /** 튜플 스냅샷의 불확실 줄(U) 묶음의 정렬키 접두사(설계 2026-10-20 §3.5). {@link #CHUNK_PREFIX} 와 겹치지 않아 본문 묶음으로 읽히지 않는다. */
+    public static final String UNCERTAIN_CHUNK_PREFIX = "UNCERTAIN#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
     /** 변경 이력 파티션 접두사(설계 2026-10-10 §3.2). 대상마다 하나 — {@code AUDIT#USER#kim}, {@code AUDIT#GROUP#DEV}. */
     public static final String AUDIT_PREFIX = "AUDIT#";
@@ -308,6 +310,22 @@ public final class Keys {
     /** 정렬키가 {@link #chunkSk} 로 만들어진 묶음 아이템인지 판별한다. */
     public static boolean isChunkSk(String sk) {
         return sk.startsWith(CHUNK_PREFIX);
+    }
+
+    /**
+     * 불확실 줄(U) 묶음의 정렬키(설계 2026-10-20 §3.5). 본문 묶음({@link #chunkSk})과 같은 규칙의 따로 된 계열이다 — 번호가 네 자리라 정렬키
+     * 순서가 곧 이어 붙일 순서다.
+     */
+    public static String uncertainChunkSk(int index) {
+        if (index < 0 || index > 9_999) {
+            throw new IllegalArgumentException("불확실 묶음 번호는 0~9999 다: " + index);
+        }
+        return UNCERTAIN_CHUNK_PREFIX + "%04d".formatted(index);
+    }
+
+    /** 정렬키가 {@link #uncertainChunkSk} 로 만들어진 불확실 묶음 아이템인지 판별한다. */
+    public static boolean isUncertainChunkSk(String sk) {
+        return sk.startsWith(UNCERTAIN_CHUNK_PREFIX);
     }
 
     /** {@code EDGE#<부모>|<자식>}. 아이디에는 {@code |} 가 없다({@code IdNormalizer}). */

@@ -205,6 +205,27 @@ class KeysTest {
     }
 
     @Test
+    @DisplayName("불확실 묶음 정렬키는 네 자리 번호라 정렬키 순서가 번호 순서고, 본문 묶음과 접두어가 겹치지 않는다")
+    void 불확실_묶음_정렬키는_네_자리_번호다() {
+        // given, when
+        var 키들 = List.of(Keys.uncertainChunkSk(10), Keys.uncertainChunkSk(2), Keys.uncertainChunkSk(0), Keys.uncertainChunkSk(9_999));
+
+        // then
+        assertThat(키들).containsExactly("UNCERTAIN#0010", "UNCERTAIN#0002", "UNCERTAIN#0000", "UNCERTAIN#9999");
+        assertThat(키들.stream().sorted().toList())
+                .containsExactly("UNCERTAIN#0000", "UNCERTAIN#0002", "UNCERTAIN#0010", "UNCERTAIN#9999");
+        assertThat(Keys.isUncertainChunkSk("UNCERTAIN#0000")).isTrue();
+        assertThat(Keys.isUncertainChunkSk(Keys.chunkSk(0))).as("본문 묶음은 불확실 묶음이 아니다").isFalse();
+        assertThat(Keys.isChunkSk(Keys.uncertainChunkSk(0))).as("불확실 묶음은 본문 묶음이 아니다").isFalse();
+        assertThat(Keys.isUncertainChunkSk(Keys.META)).isFalse();
+        assertThat(Keys.isUncertainChunkSk("TUPLE#user:kim|direct_member|group:DEV")).isFalse();
+
+        // and — 번호가 네 자리를 넘거나 음수면 만들지 않는다
+        assertThatThrownBy(() -> Keys.uncertainChunkSk(10_000)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.uncertainChunkSk(-1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("이력 키 — 대상 종류별 파티션과, 시각·원인·네 자리 조각 번호의 정렬키")
     void 이력_키() {
         // given

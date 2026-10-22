@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
+import dev.starryeye.organization.core.port.TupleSnapshotRepository.BaselineState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -64,6 +65,17 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                         UUID.nameUUIDFromBytes(("user" + i).getBytes(StandardCharsets.UTF_8)).toString(),
                         UUID.nameUUIDFromBytes(("group" + (i % 1_000)).getBytes(StandardCharsets.UTF_8)).toString()))
                 .collect(Collectors.toSet());
+    }
+
+    /** 장부에 있는지 모르는 줄(U). 확실한 줄({@link #튜플들})과 겹치지 않는다. */
+    private static Set<RelationTuple> 불확실_튜플들(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> RelationTuple.directMember("lost" + i, "DEV003"))
+                .collect(Collectors.toSet());
+    }
+
+    private static TupleSnapshot 스냅샷(String id, Instant at, Set<RelationTuple> tuples, Set<RelationTuple> uncertain) {
+        return new TupleSnapshot(id, at, SyncSource.LDAP, tuples, uncertain);
     }
 
     /** 묶음을 작게(바이트) 잘라 작은 스냅샷도 여러 묶음이 되게 하는 저장소. */
@@ -257,6 +269,10 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         return items.stream().map(item -> item.get(Keys.SK).s()).filter(Keys::isChunkSk).toList();
     }
 
+    private static List<String> 불확실_묶음_키들(List<Map<String, AttributeValue>> items) {
+        return items.stream().map(item -> item.get(Keys.SK).s()).filter(Keys::isUncertainChunkSk).toList();
+    }
+
     private static Map<String, AttributeValue> 메타(List<Map<String, AttributeValue>> items) {
         return items.stream().filter(item -> Keys.META.equals(item.get(Keys.SK).s())).findFirst().orElseThrow();
     }
@@ -291,6 +307,37 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                             && Keys.isChunkSk(request.item().get(Keys.SK).s())
                             && 묶음_쓰기_수.incrementAndGet() == 2) {
                         return CompletableFuture.failedFuture(new IllegalStateException("묶음 쓰기 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
+    /** 두 번째 불확실 묶음(정렬키 UNCERTAIN#) PutItem 만 실패시키고 나머지는 진짜 클라이언트로 보낸다. */
+    private DynamoDbAsyncClient 두번째_불확실_묶음_쓰기가_실패하는_클라이언트() {
+        AtomicInteger 불확실_묶음_쓰기_수 = new AtomicInteger();
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("putItem") && args != null && args[0] instanceof PutItemRequest request
+                            && Keys.isUncertainChunkSk(request.item().get(Keys.SK).s())
+                            && 불확실_묶음_쓰기_수.incrementAndGet() == 2) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("불확실 묶음 쓰기 실패(테스트)"));
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
+    /** PutItem 을 보낸 순서를 종류(메타·본문·불확실·포인터)로 적는다. 호출은 진짜 클라이언트로 그대로 보낸다. */
+    private DynamoDbAsyncClient 쓴_순서를_적는_클라이언트(List<String> 순서) {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("putItem") && args != null && args[0] instanceof PutItemRequest request) {
+                        String sk = request.item().get(Keys.SK).s();
+                        순서.add(Keys.META.equals(sk) ? "메타"
+                                : Keys.isChunkSk(sk) ? "본문"
+                                : Keys.isUncertainChunkSk(sk) ? "불확실"
+                                : Keys.LATEST.equals(sk) ? "포인터" : sk);
                     }
                     return method.invoke(client, args);
                 });
@@ -658,26 +705,292 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
 
-    // ---------- 기록 중 표시 (설계 2026-09-30 §4.1) ----------
+    // ---------- 불확실 줄 (설계 2026-10-20 §3.2, §3.5) ----------
 
     @Test
-    @DisplayName("아무 일도 없었으면 기록 중이 아니다")
-    void 처음엔_기록_중이_아니다() {
-        // when, then
-        assertThat(repository.isWriting().block()).isFalse();
+    @DisplayName("불확실 줄이 있는 스냅샷을 저장하고 그대로 읽는다 — 본문과 따로 된 묶음 계열이고 메타에 수가 적힌다")
+    void 불확실_줄이_있는_스냅샷을_저장하고_그대로_읽는다() {
+        // given — 확실한 줄 3개와 불확실한 줄 2개. 묶음을 작게 잘라 불확실 줄도 묶음 여럿이 되게 한다
+        var 확실 = 튜플들(3);
+        var 불확실 = 불확실_튜플들(2);
+
+        // when
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 확실, 불확실)).block();
+        var latest = repository.findLatest().block();
+
+        // then — 두 집합이 그대로 돌아온다
+        assertThat(latest.tuples()).isEqualTo(확실);
+        assertThat(latest.uncertain()).isEqualTo(불확실);
+
+        // and — 불확실 묶음은 UNCERTAIN# 계열로 0부터 이어지고, 메타가 수와 묶음 수를 적는다. 본문 묶음 계열은 따로다
+        var items = 파티션("20260814T030000-LDAP");
+        var 불확실_키 = 불확실_묶음_키들(items);
+        assertThat(불확실_키).hasSizeGreaterThan(1);
+        assertThat(불확실_키).isEqualTo(IntStream.range(0, 불확실_키.size()).mapToObj(Keys::uncertainChunkSk).toList());
+        assertThat(메타(items).get("uncertainCount").n()).isEqualTo("2");
+        assertThat(메타(items).get("uncertainChunkCount").n()).isEqualTo(String.valueOf(불확실_키.size()));
+        assertThat(메타(items).get("tupleCount").n()).as("튜플 수는 확실한 줄만 센다").isEqualTo("3");
+        assertThat(메타(items).get("chunkCount").n()).isEqualTo(String.valueOf(묶음_키들(items).size()));
+        assertThat(items).noneMatch(item -> Keys.isTupleSk(item.get(Keys.SK).s()));
+
+        // and — 목록의 튜플 수도 확실한 줄만 센다
+        assertThat(repository.listRecent(7).collectList().block()).singleElement()
+                .satisfies(meta -> assertThat(meta.tupleCount()).isEqualTo(3));
     }
 
     @Test
-    @DisplayName("기록 중 표시를 남기면 isWriting 이 참이고, 기준선은 그대로다")
-    void 기록_중_표시를_남긴다() {
-        // given
+    @DisplayName("불확실 줄이 없으면 메타에 칸을 남기지 않고 불확실 묶음도 쓰지 않으며, 읽으면 빈 집합이다")
+    void 불확실_줄이_없으면_메타에_칸을_남기지_않고_빈_집합으로_읽는다() {
+        // given, when
         repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
-
-        // when
-        repository.markWriting().block();
+        var latest = repository.findLatest().block();
 
         // then
-        assertThat(repository.isWriting().block()).isTrue();
+        var items = 파티션("20260814T030000-LDAP");
+        assertThat(latest.tuples()).hasSize(3);
+        assertThat(latest.uncertain()).isEmpty();
+        assertThat(메타(items)).doesNotContainKeys("uncertainCount", "uncertainChunkCount");
+        assertThat(불확실_묶음_키들(items)).isEmpty();
+        assertThat(items).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("이 설계 전 모양(메타에 불확실 칸이 없다)의 스냅샷도 읽힌다 — 불확실 줄이 빈 집합이다")
+    void 메타에_불확실_칸이_없으면_빈_집합이다() {
+        // given — 불확실 줄이 있는 스냅샷에서 메타의 불확실 칸과 묶음을 걷어낸다
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        불확실_묶음_키들(파티션("20260814T030000-LDAP")).forEach(sk -> 아이템을_지운다("20260814T030000-LDAP", sk));
+        메타를_고친다("20260814T030000-LDAP", meta -> {
+            meta.remove("uncertainCount");
+            meta.remove("uncertainChunkCount");
+        });
+
+        // when
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.tuples()).hasSize(3);
+        assertThat(latest.uncertain()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("불확실 묶음 하나가 빠지면 오류다 — 반쪽 불확실 줄로 기준선을 만들지 않는다")
+    void 불확실_묶음이_빠지면_무결성_예외다() {
+        // given — 불확실 묶음 여럿인 스냅샷에서 두 번째 묶음이 사라졌다
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        int 불확실_묶음_수 = 불확실_묶음_키들(파티션("20260814T030000-LDAP")).size();
+        assertThat(불확실_묶음_수).isGreaterThan(2);
+        아이템을_지운다("20260814T030000-LDAP", Keys.uncertainChunkSk(1));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타 불확실 묶음 %d · 읽음 %d".formatted(불확실_묶음_수, 불확실_묶음_수 - 1))
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+    }
+
+    @Test
+    @DisplayName("불확실 묶음이 메타보다 많으면 오류다")
+    void 불확실_묶음이_남으면_무결성_예외다() {
+        // given — 번호는 0부터 이어지지만 메타의 불확실 묶음 수보다 하나 더 많다
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        var 묶음들 = 파티션("20260814T030000-LDAP").stream()
+                .filter(item -> Keys.isUncertainChunkSk(item.get(Keys.SK).s()))
+                .toList();
+        int 불확실_묶음_수 = 묶음들.size();
+        Map<String, AttributeValue> 남는_묶음 = new HashMap<>(묶음들.get(불확실_묶음_수 - 1));
+        남는_묶음.put(Keys.SK, AttributeValue.fromS(Keys.uncertainChunkSk(불확실_묶음_수)));
+        아이템을_쓴다(남는_묶음);
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("메타 불확실 묶음 %d · 읽음 %d".formatted(불확실_묶음_수, 불확실_묶음_수 + 1));
+    }
+
+    @Test
+    @DisplayName("불확실 묶음 번호가 0부터 이어지지 않으면 오류다")
+    void 불확실_묶음_번호가_건너뛰면_무결성_예외다() {
+        // given — 마지막 불확실 묶음이 다른 번호로 옮겨졌다(묶음 수는 그대로)
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        var 묶음들 = 파티션("20260814T030000-LDAP").stream()
+                .filter(item -> Keys.isUncertainChunkSk(item.get(Keys.SK).s()))
+                .toList();
+        int 마지막 = 묶음들.size() - 1;
+        Map<String, AttributeValue> 옮긴_묶음 = new HashMap<>(묶음들.get(마지막));
+        옮긴_묶음.put(Keys.SK, AttributeValue.fromS(Keys.uncertainChunkSk(9_999)));
+        아이템을_쓴다(옮긴_묶음);
+        아이템을_지운다("20260814T030000-LDAP", Keys.uncertainChunkSk(마지막));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("불확실 묶음 번호가 %d 에서 끊긴다".formatted(마지막));
+    }
+
+    @Test
+    @DisplayName("풀어서 센 불확실 줄 수가 메타와 다르면 오류다")
+    void 불확실_줄_수가_다르면_무결성_예외다() {
+        // given — 메타는 불확실 줄 3개라는데 본문에는 2개다
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        메타를_고친다("20260814T030000-LDAP", meta -> meta.put("uncertainCount", AttributeValue.fromN("3")));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("메타 불확실 튜플 3 · 읽음 2");
+    }
+
+    @Test
+    @DisplayName("불확실 본문이 깨지면 오류다")
+    void 불확실_본문이_깨지면_무결성_예외다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        Map<String, AttributeValue> 묶음 = new HashMap<>(파티션("20260814T030000-LDAP").stream()
+                .filter(item -> Keys.isUncertainChunkSk(item.get(Keys.SK).s()))
+                .findFirst().orElseThrow());
+        묶음.put("data", AttributeValue.fromB(SdkBytes.fromUtf8String("깨진 본문")));
+        아이템을_쓴다(묶음);
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("불확실 본문을 풀 수 없다");
+    }
+
+    @Test
+    @DisplayName("메타에 불확실 줄 수만 있고 묶음 수가 없으면 오류다")
+    void 불확실_묶음_수가_없으면_무결성_예외다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2))).block();
+        메타를_고친다("20260814T030000-LDAP", meta -> meta.remove("uncertainChunkCount"));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("메타에 불확실 묶음 수가 없다");
+    }
+
+    @Test
+    @DisplayName("저장 순서는 메타 → 본문 묶음 → 불확실 묶음 → 포인터다")
+    void 저장_순서는_메타_본문_불확실_포인터다() {
+        // given
+        List<String> 순서 = new ArrayList<>();
+        var 적는_저장소 = new DynamoDbTupleSnapshotRepository(
+                쓴_순서를_적는_클라이언트(순서), properties, Clock.fixed(지금, ZoneOffset.UTC), 16);
+
+        // when
+        적는_저장소.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(30), 불확실_튜플들(10))).block();
+
+        // then — 같은 종류를 이어 붙여 보면 메타, 본문 여럿, 불확실 여럿, 포인터 순서로 한 번씩 이어진다
+        var 이어진_순서 = new ArrayList<String>();
+        순서.forEach(종류 -> {
+            if (이어진_순서.isEmpty() || !이어진_순서.get(이어진_순서.size() - 1).equals(종류)) {
+                이어진_순서.add(종류);
+            }
+        });
+        assertThat(이어진_순서).containsExactly("메타", "본문", "불확실", "포인터");
+        assertThat(순서.stream().filter("본문"::equals).count()).isGreaterThan(1);
+        assertThat(순서.stream().filter("불확실"::equals).count()).isGreaterThan(1);
+    }
+
+    @Test
+    @DisplayName("불확실 묶음 쓰기가 도중에 실패하면 포인터는 직전 스냅샷 그대로고, 반쪽 스냅샷은 정리 대상이다")
+    void 불확실_묶음_쓰기가_실패하면_포인터는_직전_스냅샷_그대로다() {
+        // given — 직전 스냅샷 S1 이 최신이다. S2 를 저장하다 두 번째 불확실 묶음 쓰기가 실패한다
+        repository.save(스냅샷("20260813T030000-LDAP", 지금.minusSeconds(86400), 튜플들(2))).block();
+        var 실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                두번째_불확실_묶음_쓰기가_실패하는_클라이언트(), properties, Clock.fixed(지금, ZoneOffset.UTC), 16);
+
+        // when
+        assertThatThrownBy(() -> 실패하는_저장소.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(30), 불확실_튜플들(10))).block());
+
+        // then — 불확실 묶음은 첫 묶음만 있고, 포인터는 S1 이다
+        var items = 파티션("20260814T030000-LDAP");
+        assertThat(불확실_묶음_키들(items)).containsExactly(Keys.uncertainChunkSk(0));
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260813T030000-LDAP");
+
+        // and — 보존 기간 뒤 정리하면 반쪽 S2 는 불확실 묶음까지 지워지고 최신 S1 은 남는다
+        var 여드레_뒤 = new DynamoDbTupleSnapshotRepository(client, properties,
+                Clock.fixed(지금.plusSeconds(8 * 86400), ZoneOffset.UTC));
+        assertThat(여드레_뒤.purgeExpired().block()).isEqualTo(1);
+        assertThat(파티션("20260814T030000-LDAP")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("정리는 불확실 묶음도 하나씩 DeleteItem 으로 지워 파티션이 빈다 — 묶음 요청에 담지 않는다")
+    void 정리는_불확실_묶음도_지운다() {
+        // given — 만료된 후보(본문 묶음 여럿 + 불확실 묶음 여럿)와, 정리 대상이 아닌 최신 스냅샷
+        작은_묶음_저장소(16).saveWithCreatedAt(스냅샷("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), 튜플들(30), 불확실_튜플들(10))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
+        var 만료_파티션 = 파티션("20260804T030000-LDAP");
+        int 본문_묶음_수 = 묶음_키들(만료_파티션).size();
+        int 불확실_묶음_수 = 불확실_묶음_키들(만료_파티션).size();
+        assertThat(본문_묶음_수).isGreaterThanOrEqualTo(2);
+        assertThat(불확실_묶음_수).isGreaterThanOrEqualTo(2);
+
+        AtomicInteger deleteItem수 = new AtomicInteger();
+        AtomicInteger batchWriteItem수 = new AtomicInteger();
+        var 세는_저장소 = new DynamoDbTupleSnapshotRepository(
+                지우기_호출을_세는_클라이언트(deleteItem수, batchWriteItem수), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        var purged = 세는_저장소.purgeExpired().block();
+
+        // then — 본문 묶음 + 불확실 묶음마다 DeleteItem 하나 + 메타 하나, 묶음 요청(BatchWriteItem)은 없다
+        assertThat(purged).isEqualTo(1);
+        assertThat(deleteItem수.get()).isEqualTo(본문_묶음_수 + 불확실_묶음_수 + 1);
+        assertThat(batchWriteItem수.get()).isZero();
+        assertThat(파티션("20260804T030000-LDAP")).isEmpty();
+        assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    // ---------- 기록 중 표시와 포인터 상태 (설계 2026-09-30 §4.1, 2026-10-20 §4) ----------
+
+    @Test
+    @DisplayName("포인터가 없으면 기준선 없음이다")
+    void 포인터가_없으면_기준선_없음이다() {
+        // when, then
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.NONE);
+    }
+
+    @Test
+    @DisplayName("포인터 줄에 스냅샷 번호도 기록 중 칸도 없으면 기준선 없음이다")
+    void 포인터_줄에_칸이_없으면_기준선_없음이다() {
+        // given — 키만 있는 포인터 줄
+        아이템을_쓴다(Map.of(
+                Keys.PK, AttributeValue.fromS(Keys.SNAPSHOT_POINTER),
+                Keys.SK, AttributeValue.fromS(Keys.LATEST)));
+
+        // when, then
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.NONE);
+    }
+
+    @Test
+    @DisplayName("스냅샷을 저장하면 기준선 있음이다")
+    void 스냅샷을_저장하면_기준선_있음이다() {
+        // given, when
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+
+        // then
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.PRESENT);
+    }
+
+    @Test
+    @DisplayName("기록 중 표시가 있으면 기록 중이다 — 포인터가 없을 때도, 스냅샷이 있을 때도 그렇고 기준선은 그대로다")
+    void 기록_중이면_기록_중이다() {
+        // given — 포인터가 없는데 표시만 남긴다
+        repository.markWriting().block();
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.WRITING);
+
+        // when — 스냅샷을 저장하면 표시가 사라지고, 그 위에 다시 표시를 남긴다
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.PRESENT);
+        repository.markWriting().block();
+
+        // then — 스냅샷 번호가 있어도 표시가 먼저다. 기준선(최신 스냅샷)은 그대로 읽힌다
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.WRITING);
         assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
     }
 
@@ -692,7 +1005,7 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
 
         // then
-        assertThat(repository.isWriting().block()).isFalse();
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.PRESENT);
         assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
     }
 
@@ -703,7 +1016,7 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         repository.markWriting().block();
 
         // then
-        assertThat(repository.isWriting().block()).isTrue();
+        assertThat(repository.baselineState().block()).isEqualTo(BaselineState.WRITING);
         assertThat(repository.findLatest().blockOptional()).isEmpty();
         assertThat(repository.purgeExpired().block()).isZero();
     }
