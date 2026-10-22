@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * SCIM 은 회수 의도를 저장한다(설계 2026-10-20 §6.1·§6.2). OpenFGA 단계가 실패·오류로 끝나도 요청한 {@code active} 를 저장하고, 직원 삭제가 실패하면
@@ -165,17 +166,20 @@ class IncrementalSyncRevocationIntentTest {
     }
 
     @Test
-    @DisplayName("Check 가 실패한 뒤 리스 확인도 실패하면 저장하지 않고 원래 오류를 낸다(설계 §6.1)")
-    void Check가_실패한_뒤_리스를_잃었으면_저장하지_않고_원래_오류를_낸다() {
+    @DisplayName("Check 가 실패한 뒤 리스 확인도 실패하면 저장하지 않고 리스 오류를 내며 원래 오류를 붙인다(설계 §6.1)")
+    void Check가_실패한_뒤_리스를_잃었으면_저장하지_않고_리스_오류에_원래_오류를_붙여_낸다() {
         // given — Check 보다 앞서는 리스 확인은 없다. 의도를 저장하기 직전의 확인이 처음이다
         두_조직에_속한_활성_김을_심는다(state);
         checker.failFor(tuple -> true);
         lock.failRenew = true;
 
-        // when, then
-        assertThatThrownBy(() -> 유스케이스().changeUser("kim", user -> user.withActive(false)).block())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Check 실패(테스트)");
+        // when
+        Throwable 던진_것 = catchThrowable(() -> 유스케이스().changeUser("kim", user -> user.withActive(false)).block());
+
+        // then — 응답은 같은 503(LockUnavailableException)이고, 원래 오류는 suppressed 로 남는다. block() 이 붙이는 표시도 suppressed 에 든다
+        assertThat(던진_것).isInstanceOf(LockUnavailableException.class);
+        assertThat(던진_것.getSuppressed()).anySatisfy(붙은_것 -> assertThat(붙은_것)
+                .isInstanceOf(IllegalStateException.class).hasMessage("Check 실패(테스트)"));
         assertThat(lock.renewAttempted).as("저장 전에 리스를 확인했다").hasValue(1);
         assertThat(state.users.get("kim").active()).isTrue();
     }
@@ -199,6 +203,34 @@ class IncrementalSyncRevocationIntentTest {
         assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.stored).isEmpty();
         assertThat(state.users.get("kim").active()).isFalse();
+        assertThat(state.users.get("kim").displayName()).isEqualTo("김철수");
+    }
+
+    @Test
+    @DisplayName("재활성화가 실패해도 활성으로 저장하고, 빠진 줄은 이 직원을 건드리는 다음 쓰기가 쓴다(설계 §6.1)")
+    void 활성화가_실패해도_활성으로_저장하고_빠진_줄은_다음_쓰기가_쓴다() {
+        // given — 비활성 kim 이 DEV001 의 멤버다(비활성이라 장부에 줄이 없다). 재활성화의 쓰기가 실패한다
+        state.saveUser(직원("kim", false)).block();
+        state.saveGroup(new DirectoryGroup("DEV001", "DEV001", "개발본부", Set.of(김))).block();
+        writer.failFor(김_개발::equals);
+        IncrementalSyncUseCase useCase = 유스케이스();
+
+        // when
+        var 실패한_재활성화 = useCase.changeUser("kim", user -> user.withActive(true)).block();
+
+        // then — 요청한 활성을 저장했는데 줄은 빠져 있다. GET-diff IdP 는 이 상태를 다시 보내지 않는다
+        assertThat(실패한_재활성화.fullyApplied()).isFalse();
+        assertThat(state.users.get("kim").active()).isTrue();
+        assertThat(writer.stored).isEmpty();
+        writer.failFor(tuple -> false);
+
+        // when — active 를 싣지 않고 이름만 바꾸는 다음 쓰기
+        var 다음_쓰기 = useCase.changeUser("kim", user -> user.withDisplayName("김철수")).block();
+
+        // then — 저장된 활성과 Check 기준선의 차이로 빠진 줄을 쓴다
+        assertThat(다음_쓰기.fullyApplied()).isTrue();
+        assertThat(writer.stored).contains(김_개발);
+        assertThat(state.users.get("kim").active()).isTrue();
         assertThat(state.users.get("kim").displayName()).isEqualTo("김철수");
     }
 

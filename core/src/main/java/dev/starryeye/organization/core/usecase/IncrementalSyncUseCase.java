@@ -315,19 +315,25 @@ public class IncrementalSyncUseCase {
      *   <li>커밋에 닿은 뒤의 오류 — 커밋이 이미 저장했거나(직원 삭제면 지웠을 수 있다) 저장하다 실패한 것이다. 다시 쓰면 지운 직원을 되살리거나 이력이 겹친다.</li>
      *   <li>아직 저장된 적 없는 직원 — 부르는 쪽이 감싸지 않는다. 레코드를 만들면 재시도 POST 가 409 로 막힌다({@link #upsertUser}).</li>
      * </ul>
-     * 리스 확인이나 저장이 실패하면 경고만 남기고 원래 오류를 낸다 — 의도를 못 남긴 것은 IdP 재시도가 다시 가져온다.
+     * 저장이 실패하면 경고만 남기고 원래 오류를 낸다 — 의도를 못 남긴 것은 IdP 재시도가 다시 가져온다. <b>리스 확인이 실패하면</b> 원래 오류가 아니라
+     * {@link LockUnavailableException} 을 내고 원래 오류는 {@code addSuppressed} 로 붙인다. 응답은 같은 503 이다. 원래 오류를 그대로 내면 바깥의
+     * {@link #표지판을_정리한다} 가 리스 없이 표지판을 놓게 된다 — 그 정리는 {@link LockUnavailableException} 으로 끝난 일에는 하지 않는다.
      */
     private Mono<IncrementalSyncResult> 오류여도_의도를_저장한다(Mono<IncrementalSyncResult> 반영, AtomicBoolean 커밋에_닿았다,
                                                         DirectoryUser 저장본, DirectoryUser 의도,
                                                         LockLease lease, AuditChanges 기록) {
         return 반영.onErrorResume(error -> !(error instanceof LockUnavailableException) && !커밋에_닿았다.get(),
                 error -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
-                        .then(Mono.defer(() -> 직원을_저장한다(저장본, 의도, 기록)))
-                        .onErrorResume(저장_오류 -> {
-                            log.warn("OpenFGA 단계가 오류로 끝난 뒤 직원 '{}' 의 의도(active={})를 저장하지 못했다 — 원래 오류를 낸다",
-                                    의도.id(), 의도.active(), 저장_오류);
-                            return Mono.empty();
+                        .onErrorMap(LockUnavailableException.class, 리스_오류 -> {
+                            리스_오류.addSuppressed(error);
+                            return 리스_오류;
                         })
+                        .then(Mono.defer(() -> 직원을_저장한다(저장본, 의도, 기록))
+                                .onErrorResume(저장_오류 -> {
+                                    log.warn("OpenFGA 단계가 오류로 끝난 뒤 직원 '{}' 의 의도(active={})를 저장하지 못했다 — 원래 오류를 낸다",
+                                            의도.id(), 의도.active(), 저장_오류);
+                                    return Mono.empty();
+                                }))
                         .then(Mono.<IncrementalSyncResult>error(error)));
     }
 

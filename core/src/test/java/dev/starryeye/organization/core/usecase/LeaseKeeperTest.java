@@ -54,12 +54,14 @@ class LeaseKeeperTest {
         LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofMillis(50), observer);
 
-        // when
-        String 결과 = keeper.keep(lease, Mono.delay(Duration.ofMillis(300)).thenReturn("끝"), "테스트").block();
+        // when — 일의 길이는 갱신 주기(50ms)의 배수가 아니게 둔다. 300ms 면 여섯 번째 tick 이 일이 끝나는 순간과 겹친다
+        String 결과 = keeper.keep(lease, Mono.delay(Duration.ofMillis(275)).thenReturn("끝"), "테스트").block();
 
         // then
         assertThat(결과).isEqualTo("끝");
         assertThat(lock.renewed.get()).isGreaterThanOrEqualTo(3);
+        // 갱신을 멈추는 doFinally 는 block() 이 돌아온 뒤에 돌 수 있다 — 멈출 틈을 준 뒤에 센다
+        Thread.sleep(100);
         int 끝났을때 = lock.renewAttempted.get();
         Thread.sleep(200);
         assertThat(lock.renewAttempted.get()).as("일이 끝난 뒤에는 갱신하지 않는다").isEqualTo(끝났을때);

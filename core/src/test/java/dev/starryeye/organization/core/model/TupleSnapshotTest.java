@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TupleSnapshotTest {
 
@@ -53,6 +54,35 @@ class TupleSnapshotTest {
         assertThat(빈.tuples()).isEmpty();
         assertThat(빈.uncertain()).isEmpty();
         assertThat(snapshot.uncertain()).containsExactly(다);
+    }
+
+    @Test
+    @DisplayName("확실한 줄과 불확실한 줄이 겹치면 겹친 줄 하나를 밝혀 거절한다")
+    void 두_집합이_겹치면_거절한다() {
+        // given — 줄 '나'가 두 집합에 모두 든다. 어느 쪽이 더 크든 잡는다
+        Set<RelationTuple> 확실 = Set.of(가, 나);
+        Set<RelationTuple> 불확실 = Set.of(나, 다);
+
+        // when, then
+        assertThatThrownBy(() -> new TupleSnapshot("S1", 시각, SyncSource.LDAP, 확실, 불확실))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("겹친다")
+                .hasMessageContaining(나.toString());
+        assertThatThrownBy(() -> new TupleSnapshot("S1", 시각, SyncSource.LDAP, Set.of(나), Set.of(가, 나, 다)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(나.toString());
+        assertThatThrownBy(() -> new TupleSnapshot("S1", 시각, SyncSource.LDAP, Set.of(가, 나, 다), Set.of(나)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(나.toString());
+    }
+
+    @Test
+    @DisplayName("한쪽이 비었거나 서로 다른 줄이면 거절하지 않는다")
+    void 겹치지_않으면_거절하지_않는다() {
+        // given, when, then
+        assertThat(new TupleSnapshot("S1", 시각, SyncSource.LDAP, Set.of(), Set.of(가)).uncertain()).containsExactly(가);
+        assertThat(new TupleSnapshot("S2", 시각, SyncSource.LDAP, Set.of(가), Set.of()).tuples()).containsExactly(가);
+        assertThat(new TupleSnapshot("S3", 시각, SyncSource.LDAP, null, null).tuples()).isEmpty();
     }
 
     @Test
