@@ -144,7 +144,8 @@ public final class Keys {
     /**
      * GSI1 정렬키에 넣는 값. {@code userName}·조직 {@code displayName} 은 RFC 7643 에서
      * {@code caseExact=false} 라 대소문자를 가리지 않고 찾아야 한다 — 키만 소문자로 두고 속성은
-     * 보낸 그대로 둔다(S-1 설계 §5.1). 쓰는 쪽과 묻는 쪽이 반드시 이 한 메서드를 거친다.
+     * 보낸 그대로 둔다(S-1 설계 §5.1). 묻는 쪽은 이 메서드를 거치고, 쓰는 쪽은 {@link #indexKeyForWrite} 를 거친다 — 그것이 이 메서드를 부른 뒤
+     * 키 한도(1024바이트)로 자르므로 짧은 값은 둘이 같다.
      */
     public static String indexKey(String raw) {
         return raw.toLowerCase(Locale.ROOT);

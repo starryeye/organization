@@ -78,7 +78,8 @@ public class LdapDirectorySnapshotSource implements DirectorySnapshotSource {
     /**
      * 다시 읽어도 같은 실패인가(설계 2026-10-05 §4.1, 점검 S23). 데이터·설정이 어긋났거나({@link DirectoryDataException}), LDAP 표준(RFC 4511) 결과 코드가
      * "요청 자체가 틀렸다" 는 것이다 — 49 인증 실패, 50 권한 없음, 32 없는 이름(검색 베이스 오타), 34 DN 문법, 4 크기 한도, 그리고 보내기 전에 거절된 필터 문법.
-     * Spring LDAP 이 결과 코드를 예외 종류로 옮겨 준다. 그 밖은 — 모르는 종류까지 — 일시 장애로 보고 재시도한다: 일시 장애 한 번에 하루치 동기화를 잃지 않는다.
+     * Spring LDAP 이 결과 코드를 예외 종류로 옮겨 준다. 그 밖은 — 모르는 종류까지 — 일시 장애로 보고 재시도한다: 일시 장애 한 번에 한 회차의 동기화를 잃지 않는다 — 잃으면 회수가 다음 주기(기본 매시 정각)까지 늦어진다.
+     * 재시도 창은 {@code ldap.max-retries}·{@code ldap.retry-min-backoff}·{@code ldap.retry-max-backoff}(기본 5번·10초~2분, 설계 2026-10-20 §8)다.
      */
     static boolean 다시_읽어도_같은가(Throwable 실패) {
         return 실패 instanceof DirectoryDataException
