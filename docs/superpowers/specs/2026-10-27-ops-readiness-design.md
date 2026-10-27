@@ -226,7 +226,7 @@ modelId 를 클라이언트에 고정하는 일은 하지 않는다(§20).
 
 검증은 규모 시험이 한다. 거기서 끊기면 시험 yml 만 늘리고, 그 사실을 §19 결과에 적는다.
 
-**SCIM 쓰기의 락 획득** (13 §7.11, `IncrementalSyncUseCase.줄을_선다`·`AcquireBackoff`)
+**SCIM 쓰기의 락 획득** (13 §7.11, `IncrementalSyncUseCase.잡는다`·`AcquireBackoff`)
 - **시도마다 한도.** 획득 시도 하나에 요청 단위 `apiCallTimeout` 을 준다.
   - 값은 `min(남은 획득 한도, 1초)` 이고, 하한은 200ms 다.
   - 1초로 자르는 이유가 있다. 락을 잡는 PutItem 은 보통 수십 ms 다. 한 시도가 남은 한도를 다 쓰면 끊긴 뒤 다시 시도할 여지가 없다. 3초 한도라면 매달린 시도가 와도 두세 번 다시 시도할 수 있다.
@@ -345,7 +345,7 @@ admin-api 에 `@RestControllerAdvice` 를 둔다. 적용 범위는 네 컨트롤
 | 입력 오류(`ServerWebInputException` 등) | 400 | 스프링이 준 이유 |
 | 그 밖 | 500 | "내부 오류" — 예외 문구를 싣지 않는다 |
 
-- **판정 순서.** 위 표의 위에서부터 판정한다. 락 경합 판정이 분류기보다 먼저여야 한다. `LockUnavailableException` 은 `TemporaryFailureException` 의 하위 타입이다. 또 app-scim `AdminSyncController` 는 이것을 원인으로 품은 `ResponseStatusException(409)` 로 감싼다. 분류기는 원인 사슬을 따라가므로, 먼저 보면 409 가 503 이 된다.
+- **판정 순서.** 위 표의 위에서부터 판정한다. 락 경합 판정이 분류기보다 먼저여야 한다. `LockUnavailableException` 은 `TemporaryFailureException` 의 하위 타입이다. 또 두 앱의 `AdminSyncController` 는 이것을 원인으로 품은 `ResponseStatusException(409)` 로 감싼다. 분류기는 원인 사슬을 따라가므로, 먼저 보면 409 가 503 이 된다.
   - 그래서 `ResponseStatusException` 은 자기 상태로 먼저 답한다.
   - 원인 사슬에 `LockUnavailableException` 이 있으면 409 다.
   - 그다음에 분류기를 본다.
@@ -456,7 +456,7 @@ admin-api 에 `@RestControllerAdvice` 를 둔다. 적용 범위는 네 컨트롤
 
 목록의 출처는 `.superpowers/onboarding/writer-findings.md` C·D·E 와 `report-foundation.md` 다. 고칠 때마다 코드로 다시 확인한다.
 
-**D13 (온보딩 문서).** `docs/onboarding/` 에서 바뀐 절만 고치고, 모든 문서 머리의 기준 커밋을 이 슬라이드의 머지 커밋으로 갱신한다.
+**D13 (온보딩 문서).** `docs/onboarding/` 에서 바뀐 절만 고치고, 모든 문서 머리의 기준 커밋을 이 브랜치의 마지막 코드 커밋으로 갱신한다(머지 커밋은 머지 전에 알 수 없다. 머지는 커밋을 그대로 main 에 들인다).
 - 13 §7 에서 고친 항목은 지우거나 "고침(커밋)" 으로 바꾼다. 13 은 지금의 한계만 담는다.
 - 11 운영: 새 설정·IAM·probes·경보 식.
 - 12 장애와 복구: 테이블·store 가 없을 때, 복원본.
