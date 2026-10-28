@@ -112,6 +112,7 @@ import java.util.stream.Collectors;
  *
  * <p>이 유스케이스는 회차 기록({@code SyncRun})을 남기지 않는다. SCIM 은 요청 단위라 요청마다 회차를 열면 동기화 이력이 폭증한다. 변경 이력은
  * 요청마다 남긴다 — 요청의 traceId 를 원인으로, 락을 반납한 뒤·응답 전에 쓴다({@link #withLock}, 설계 2026-10-10 §4.2·§4.4).
+ * 커밋된 회수는 이력에 더하는 자리와 같은 자리에서 {@link RevocationObserver} 로 센다(설계 2026-10-27 §8, {@link #센다}).
  *
  * <p><b>부분 실패(design §7.2).</b> OpenFGA 배치는 트랜잭션이므로 SCIM 단건 변경은 대개
  * 전부 성공이거나 전부 실패다. 대형 그룹 PUT 으로 배치가 쪼개질 때만 부분 성공이 가능한데,
@@ -160,19 +161,24 @@ public class IncrementalSyncUseCase {
      * 유일 값 표지판을 넘겨받는 기준 — 락 TTL 이다(설계 2026-10-14 §4.1). 이보다 오래된 표지판은 주인이 그 값을 쥐지 않으면 넘겨받는다.
      */
     private final Duration lockTtl;
+    /**
+     * 커밋된 회수를 센다 — {@code scim.revocations{kind}}(설계 2026-10-27 §8). 상태 쓰기가 성공한 뒤 이력에 더하는 자리에서 부르고, 던지면 경고만 남긴다
+     * ({@link #센다}). 막지 않고 보이게만 한다(§17.4).
+     */
+    private final RevocationObserver revocationObserver;
     /** 서버 안의 SCIM 쓰기 줄(설계 2026-10-07 §3.1) — 이 유스케이스 하나, 곧 서버 하나에 하나다. */
     private final LocalWriteQueue 줄 = new LocalWriteQueue();
     /** 다른 서버가 쥔 락을 다시 시도하는 간격(§3.2). */
     private final AcquireBackoff 백오프 = AcquireBackoff.무작위로();
 
-    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
                                   LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
     }
 
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 11인자 생성자로 이력과 traceId 를 넘긴다. */
+    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 이력과 traceId 를 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver) {
@@ -180,13 +186,22 @@ public class IncrementalSyncUseCase {
                 AuditRecorder.NONE, TraceIds.NONE);
     }
 
-    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
+    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver,
                                   AuditRecorder audit, TraceIds traceIds) {
         this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
                 DEFAULT_LOCK_TTL);
+    }
+
+    /** 회수를 세지 않는다({@link RevocationObserver#NOOP}) — 회수 지표와 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 지표를 넘긴다. */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, Duration renewInterval,
+                                  DriftObserver driftObserver, LockObserver lockObserver,
+                                  AuditRecorder audit, TraceIds traceIds, Duration lockTtl) {
+        this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
+                lockTtl, RevocationObserver.NOOP);
     }
 
     /**
@@ -301,10 +316,15 @@ public class IncrementalSyncUseCase {
         });
     }
 
-    /** 직원 하나를 저장하고 이력에 더한다. 바뀐 것이 없으면 이력은 줄을 만들지 않는다({@link AuditChanges#entries}). */
+    /**
+     * 직원 하나를 저장하고 이력에 더한다. 바뀐 것이 없으면 이력은 줄을 만들지 않는다({@link AuditChanges#entries}).
+     * 활성이던 직원을 비활성으로 저장했으면 회수 {@code deactivate} 로 센다 — 삭제가 일부 실패해 비활성으로 남기는 경우도 여기를 지난다(설계 2026-10-27 §8).
+     */
     private Mono<Void> 직원을_저장한다(DirectoryUser 저장본, DirectoryUser 저장할것, AuditChanges 기록) {
+        boolean 비활성화한다 = 저장본 != null && 저장본.active() && !저장할것.active();
         return Mono.defer(() -> state.saveUser(저장본, 저장할것))
-                .then(남긴다(() -> 기록.user(저장본, 저장할것)));
+                .then(남긴다(() -> 기록.user(저장본, 저장할것)))
+                .then(센다(RevocationObserver.Kind.DEACTIVATE, 비활성화한다 ? 1 : 0));
     }
 
     /**
@@ -436,11 +456,13 @@ public class IncrementalSyncUseCase {
                         }
                         DirectoryGroup reconciled = reconcileGroupMembers(
                                 existingOrEmpty, group, beforeTuples, afterTuples, result);
+                        Set<MemberRef> 뺀것 = 차집합(existingOrEmpty.members(), reconciled.members());
                         return Mono.defer(() -> state.saveGroup(reconciled))
                                 .then(남긴다(() -> 기록.group(existing.map(IncrementalSyncUseCase::이름표).orElse(null),
                                         이름표(reconciled),
                                         차집합(reconciled.members(), existingOrEmpty.members()),
-                                        차집합(existingOrEmpty.members(), reconciled.members()))));
+                                        뺀것)))
+                                .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)));
                     };
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit);
@@ -511,7 +533,8 @@ public class IncrementalSyncUseCase {
                             Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
                             Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
                             return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것))
-                                    .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)));
+                                    .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)))
+                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)));
                         };
 
                         boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
@@ -618,8 +641,10 @@ public class IncrementalSyncUseCase {
                             // 레코드와 지우지 못한 소속은 남기고 직원은 비활성으로 — 회수 의도를 먼저 저장한다
                             return 직원을_저장한다(user, 비활성, 기록).then(saveGroups);
                         }
+                        // 이미 비활성이면 비활성으로 남길 때 deactivate 로 센 직원이다 — 직원 하나의 회수는 한 번만 센다(설계 2026-10-27 §8)
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)))
-                                .then(남긴다(() -> 기록.user(user, null)));
+                                .then(남긴다(() -> 기록.user(user, null)))
+                                .then(센다(RevocationObserver.Kind.DELETE_USER, user.active() ? 1 : 0));
                     };
 
                     return 표지판을_정리한다(
@@ -682,7 +707,8 @@ public class IncrementalSyncUseCase {
                     .then(남긴다(() -> {
                         기록.group(header, null, Set.of(), group.members());
                         parentIds.forEach(parent -> 기록.membership(parent, Set.of(), Set.of(이조직)));
-                    }));
+                    }))
+                    .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(group.members())));
         }
         Set<MemberRef> 지운멤버 = group.members().stream()
                 .filter(member -> result.deleted().contains(tupleFor(member, group.id())))
@@ -694,7 +720,8 @@ public class IncrementalSyncUseCase {
                         .then(남긴다(() -> 기록.membership(parent.id(), Set.of(), Set.of(이조직)))), LOAD_CONCURRENCY)
                 .then();
         return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)))
-                .then(남긴다(() -> 기록.membership(group.id(), Set.of(), 지운멤버)));
+                .then(남긴다(() -> 기록.membership(group.id(), Set.of(), 지운멤버)))
+                .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(지운멤버)));
     }
 
     /**
@@ -1223,6 +1250,28 @@ public class IncrementalSyncUseCase {
     /** 커밋 자리가 이력의 변경 모음에 더하는 일 — 앞의 커밋이 성공한 뒤에만 돈다(설계 2026-10-10 §4.4). */
     private static Mono<Void> 남긴다(Runnable 더하기) {
         return Mono.fromRunnable(더하기);
+    }
+
+    /**
+     * 커밋된 회수를 센다(설계 2026-10-27 §8) — {@link #남긴다} 처럼 앞의 상태 쓰기가 성공한 뒤에만 돈다. 0 이면 부르지 않는다.
+     * 관찰자가 던지면 경고만 남기고 삼킨다 — 커밋은 이미 끝났고, 지표는 막지 않고 보이게만 한다(§17.4).
+     */
+    private Mono<Void> 센다(RevocationObserver.Kind kind, int count) {
+        return Mono.fromRunnable(() -> {
+            if (count == 0) {
+                return;
+            }
+            try {
+                revocationObserver.revoked(kind, count);
+            } catch (RuntimeException e) {
+                log.warn("회수 지표({} {}건)를 남기지 못했다 — 커밋은 그대로다", kind.tag(), count, e);
+            }
+        });
+    }
+
+    /** 멤버 가운데 직원 수 — 회수는 직원만 센다. 하위 조직 연결은 권한을 잃는 사람이 아니다. */
+    private static int 직원_수(Set<MemberRef> members) {
+        return (int) members.stream().filter(member -> member.type() == MemberType.USER).count();
     }
 
     /**

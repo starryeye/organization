@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim.app;
 import dev.starryeye.organization.core.usecase.ArchiveDriftObserver;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase.DriftObserver;
 import dev.starryeye.organization.core.usecase.LockObserver;
+import dev.starryeye.organization.core.usecase.RevocationObserver;
 import dev.starryeye.organization.scim.IgnoredAttributeObserver;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -15,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 설계 §7 의 지표 넷과 받아서 버린 속성(설계 2026-10-06 §3.3), 아카이빙 어긋남(설계 2026-10-20 §6.4)을 Micrometer 로 낸다.
+ * 설계 §7 의 지표 넷과 받아서 버린 속성(설계 2026-10-06 §3.3), 아카이빙 어긋남(설계 2026-10-20 §6.4), 커밋된 회수(설계 2026-10-27 §8)를 Micrometer 로 낸다.
  *
  * <table>
  *   <caption>설계 §7</caption>
@@ -26,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <tr><td>{@code scim.patch.ignored}</td><td>Counter</td><td>{@code attribute} = RFC 정규 이름 / other</td></tr>
  *   <tr><td>{@code scim.archive.drift}</td><td>Gauge</td><td>{@code kind} = extra / missing</td></tr>
  *   <tr><td>{@code scim.archive.drift.observed}</td><td>Gauge</td><td>–</td></tr>
+ *   <tr><td>{@code scim.revocations}</td><td>Counter</td><td>{@code kind} = deactivate / delete_user / remove_member / delete_group</td></tr>
  * </table>
  *
  * <p><b>어긋남.</b> Check 기준선을 넣으면 "있어야 했던 것"과 "진짜 있는 것"을 둘 다 갖게 된다.
@@ -43,9 +45,13 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p><b>리스 상실.</b> 리스를 잃는 갈래(작업·쓰기 도중 갱신 실패, 쓰기 직전·커밋 직전 재확인 실패, 반납 실패 —
  * {@link LockObserver})는 응답에 흔적이 없거나(반납 실패) 503 뿐이다. 이 카운터가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
+ *
+ * <p><b>회수.</b> SCIM 쓰기가 커밋한 회수를 종류별로 센다({@link RevocationObserver}, 설계 2026-10-27 §8). 대량 회수를 막지 않고 보이게만 한다(§17.4) —
+ * 1시간 증가량이 평소보다 크게 늘면 경보를 울린다.
  */
 @Slf4j
-public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, LockObserver, IgnoredAttributeObserver {
+public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, LockObserver, IgnoredAttributeObserver,
+        RevocationObserver {
 
     private static final String DRIFT_DESCRIPTION =
             "마지막 아카이빙의 어긋남 줄 수 — kind=extra 는 장부에 있지만 상태가 요구하지 않는 줄(끝나지 않은 회수), kind=missing 은 상태가 요구하지만 장부에 없는 줄. "
@@ -115,5 +121,13 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
     @Override
     public void ignored(Set<String> names) {
         names.forEach(name -> registry.counter("scim.patch.ignored", "attribute", name).increment());
+    }
+
+    /** 커밋된 회수 — 태그 값은 {@link Kind#tag()} 넷뿐이다. 0 은 올리지 않는다(카운터도 만들지 않는다). */
+    @Override
+    public void revoked(Kind kind, int count) {
+        if (count > 0) {
+            registry.counter("scim.revocations", "kind", kind.tag()).increment(count);
+        }
     }
 }

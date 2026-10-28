@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.core.usecase.RevocationObserver;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -149,5 +150,30 @@ class ScimSyncMetricsTest {
         // then
         assertThat(registry.counter("scim.patch.ignored", "attribute", "phoneNumbers").count()).isEqualTo(2);
         assertThat(registry.counter("scim.patch.ignored", "attribute", "other").count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("커밋된 회수는 kind 태그 넷으로 센 수만큼 오르고, 0 은 올리지 않는다(설계 2026-10-27 §8)")
+    void 회수를_종류별로_센다() {
+        // when — 0 은 회수가 없었다는 뜻이다
+        metrics.revoked(RevocationObserver.Kind.DELETE_GROUP, 0);
+
+        // then — 카운터를 만들지도 않는다
+        assertThat(registry.find("scim.revocations").counters()).isEmpty();
+
+        // when
+        metrics.revoked(RevocationObserver.Kind.DEACTIVATE, 1);
+        metrics.revoked(RevocationObserver.Kind.DELETE_USER, 1);
+        metrics.revoked(RevocationObserver.Kind.REMOVE_MEMBER, 2);
+        metrics.revoked(RevocationObserver.Kind.REMOVE_MEMBER, 3);
+        metrics.revoked(RevocationObserver.Kind.DELETE_GROUP, 4);
+        metrics.revoked(RevocationObserver.Kind.DEACTIVATE, 0);
+
+        // then
+        assertThat(registry.get("scim.revocations").tag("kind", "deactivate").counter().count()).isEqualTo(1);
+        assertThat(registry.get("scim.revocations").tag("kind", "delete_user").counter().count()).isEqualTo(1);
+        assertThat(registry.get("scim.revocations").tag("kind", "remove_member").counter().count()).isEqualTo(5);
+        assertThat(registry.get("scim.revocations").tag("kind", "delete_group").counter().count()).isEqualTo(4);
+        assertThat(registry.find("scim.revocations").counters()).hasSize(4);
     }
 }
