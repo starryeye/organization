@@ -197,6 +197,10 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 `application-prod.yml`(prod 프로필)이 로컬과 다른 값을 준다. **설정 실수는 기동 때 멈춘다** — 엉뚱한 테이블·store 에 조용히 붙거나 틀린 비밀번호로
 바인드하지 않는다(설계 `docs/superpowers/specs/2026-10-27-ops-readiness-design.md`).
 
+**prod 프로필은 로컬 `application.yml` 위에 얹힌다** — `application-prod.yml` 이 덮지 않는 값(`dynamodb.endpoint: http://localhost:8000`, `openfga.api-url`,
+`ldap.url`·`base-dn`·`bind-dn` 등)은 로컬 값 그대로다. 실제 AWS 에서는 `dynamodb.endpoint` 를 빈 값으로 덮어쓴다(예: `--dynamodb.endpoint=`) — 값이 있으면 그
+주소에 가짜 자격증명(`local`)으로 붙는다(`DynamoDbConfig`). 나머지는 환경마다 적는다.
+
 | 설정 | 클래스 기본값 | 로컬 `application.yml` | `application-prod.yml` | 뜻 |
 |---|---|---|---|---|
 | `dynamodb.table-name` | 없음 | `organization`(app-ldap)·`organization-scim`(app-scim) | 로컬 값 | 비면 기동을 멈춘다 |
@@ -261,12 +265,12 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는다(아직 해석 전이면 이름으로 찾기만 하고 만들지 않는다). 둘 다 2초 안에 답이 없으면 DOWN 이다.
 app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
 
-**관리 API 의 오류는 RFC 9457 problem details(`application/problem+json`)다** — `type`(about:blank)·`title`·`status`·`detail` 을 싣는다. `/admin/sync`·
+**관리 API 의 오류는 RFC 9457 problem details(`application/problem+json`)다** — `type`(about:blank)·`title`·`status`·`detail`·`instance`(요청 경로 — 스프링이 채운다) 등을 싣는다. `/admin/sync`·
 조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다).
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, `limit` 범위 밖, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록 | 그 사유 |
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록 | 그 사유 |
 | 409 | 락 경합 — 다른 작업이 락을 쥐고 있다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등) |
 | 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패 | `일시 장애 — 잠시 뒤 다시 시도한다` |
 | 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 간다(인증이 없는 엔드포인트다) |
@@ -1042,7 +1046,7 @@ SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는
 | 설정 | 의미 |
 |---|---|
 | `dynamodb.lock-ttl` (기본 30초) | 락 리스 길이. SCIM 쓰기 p99보다 한참 길어야 한다 — 짧으면 아직 일하는 중인데 만료돼 다른 인스턴스가 가져간다. 두 경로 모두에 적용된다. 만료는 각 서버의 시계로 판단하므로 서버 시계를 NTP 로 맞춘다 — 어긋남은 TTL − 2×갱신 주기(기본 10초)보다 작아야 한다 — 그보다 크면 남의 락을 가져갈 수 있다 |
-| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊는다 — 스로틀로 매달린 시도 하나가 한도를 다 먹지 않게. 끊긴 시도는 결과를 모르므로 기다리지 않고 같은 토큰으로 다시 시도하고(서버에서 잡혔으면 그대로 다시 얻는다), 결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다. 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
+| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊는다 — 스로틀로 매달린 시도 하나가 한도를 다 먹지 않게. 끊긴 시도는 결과를 모르므로 기다리지 않고 같은 토큰으로 다시 시도하고(서버에서 잡혔으면 그대로 다시 얻는다), 결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다. 끊긴 시도로 한도에 닿았거나 저장소 오류로 포기하면 쥔 쪽을 모르므로 `Retry-After` 는 기본 10초다. 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
 | `dynamodb.lock-renew-interval` (기본 10초) | 락을 쥔 동안 리스를 갱신하는 주기 — SCIM 쓰기·재적재·동기화 모두. TTL보다 충분히 짧아야 한다. 갱신이 일시 오류(스로틀·네트워크)로 실패하면 짧게 쉬며 다시 시도하고, 마지막으로 성공한 갱신을 보낸 때에서 주기 두 번 안에 성공하지 못할 때만 멈춘다(만료가 보낸 때 + TTL 이라 TTL 전 여유는 늘 TTL − 2×주기다). 남이 가져간 것이 확인되면(토큰 조건 실패) 곧바로 멈춘다 |
 
 **큰 변경도 락을 지키며 끝까지 간다.** 10만 명 조직 삭제처럼 오래 걸리는 SCIM 쓰기는 락을 쥔 동안 리스를 `lock-renew-interval`마다
@@ -1183,7 +1187,7 @@ sum(increase(scim_revocations_total[1h])) > 5 * sum(increase(scim_revocations_to
 sum(increase(scim_revocations_total[1h])) > 100
 ```
 
-인스턴스마다 따로 세므로 `sum` 으로 모은다. 울리면 IdP 프로비저닝 로그와 직원·조직의 변경 이력(`GET /admin/employees/{employeeId}/history`)으로 의도한 회수인지 본다.
+인스턴스마다 따로 세므로 `sum` 으로 모은다. 계열 넷은 기동 때부터 0 으로 있다 — 그래서 기동 직후의 첫 대량 회수도 `increase()` 에 잡힌다. 울리면 IdP 프로비저닝 로그와 직원·조직의 변경 이력(`GET /admin/employees/{employeeId}/history`)으로 의도한 회수인지 본다.
 
 ## 불변 id 로 옮기기
 

@@ -47,7 +47,8 @@ import java.util.function.Predicate;
  * 포인터가 마지막이라 반쪽 스냅샷이 기준선이 되지 않는다.
  *
  * <p><b>스냅샷은 테이블 TTL({@link Keys#EXPIRES_AT})을 쓰지 않는다.</b> TTL 은 아이템마다 붙은 시각만 보고 지워 최신인지
- * 모른다 — 최신(비교 기준)까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다(점검 C1). 보관 기한은 메타의
+ * 모른다 — 최신(비교 기준)까지 지워지면 LDAP 의 다음 회차가 포인터가 가리키는 메타를 읽지 못해 {@code SnapshotIntegrityException} 으로 FAILED 이고
+ * 재적재로만 풀린다(점검 C1 당시에는 빈 기준선으로 돌아 삭제를 하나도 안 했다). 보관 기한은 메타의
  * {@code retainUntil} 에만 적고, {@link #purgeExpired()} 가 최신을 건너뛰며 지운다.
  */
 @Slf4j
