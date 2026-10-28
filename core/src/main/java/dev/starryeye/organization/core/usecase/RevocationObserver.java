@@ -13,8 +13,11 @@ package dev.starryeye.organization.core.usecase;
  * <p><b>무엇을 세나.</b> 상태 쓰기가 성공한 뒤, 이력에 더하는 자리와 같은 자리에서 센다 — 커밋 전에 세지 않는다. 그룹 쪽은 실패하면 의도를 저장하지 않으므로
  * 커밋된 만큼만 세고, IdP 의 재시도는 남은 것만 센다. 그래서 장애 중 재시도가 거짓 경보를 울리지 않는다.
  *
- * <p><b>직원 하나의 회수는 한 번만 센다.</b> 삭제가 일부 실패해 비활성으로 남기면 {@link Kind#DEACTIVATE} 로 세고, 그 뒤 DELETE 재시도가 레코드를 지울 때는
- * 이미 비활성이므로 {@link Kind#DELETE_USER} 로 세지 않는다. 직원을 지우며 함께 빠지는 소속은 {@link Kind#REMOVE_MEMBER} 로 세지 않는다.
+ * <p><b>세는 단위가 직원 수와 꼭 같지는 않다.</b> 직원 하나를 두 번 세지 않는 것은 {@link Kind#DEACTIVATE} 와 {@link Kind#DELETE_USER} 사이뿐이다 —
+ * 삭제가 일부 실패해 비활성으로 남기면 {@link Kind#DEACTIVATE} 로 세고, 그 뒤 DELETE 재시도가 레코드를 지울 때는 이미 비활성이므로
+ * {@link Kind#DELETE_USER} 로 세지 않는다. {@link Kind#REMOVE_MEMBER}·{@link Kind#DELETE_GROUP} 은 빠진 직원 멤버 줄을 세므로 이미 비활성인 직원
+ * (권한이 원래 없던 줄)도 들고, 비활성화된 직원이 뒤에 조직에서 빠지면 두 종류에 함께 든다. 직원을 지우며 함께 빠지는 소속은 {@link Kind#REMOVE_MEMBER} 로
+ * 세지 않는다.
  */
 public interface RevocationObserver {
 
@@ -24,9 +27,9 @@ public interface RevocationObserver {
         DEACTIVATE("deactivate"),
         /** 직원 레코드를 지웠다. 그때 활성이던 직원만 센다. 1. */
         DELETE_USER("delete_user"),
-        /** 조직에서 직원 멤버를 뺀 것이 커밋됐다(PATCH remove, PUT 으로 빠짐). 커밋된 뺀 직원 수. 하위 조직은 세지 않는다. */
+        /** 조직에서 직원 멤버를 뺀 것이 커밋됐다(PATCH remove, PUT 으로 빠짐). 커밋된 뺀 직원 수 — 비활성 직원도 든다. 하위 조직은 세지 않는다. */
         REMOVE_MEMBER("remove_member"),
-        /** 조직 삭제가 커밋됐다. 커밋 때 지운 직원 멤버 수. 하위 조직은 세지 않는다. */
+        /** 조직 삭제가 커밋됐다. 커밋 때 지운 직원 멤버 수 — 비활성 직원도 든다. 하위 조직은 세지 않는다. */
         DELETE_GROUP("delete_group");
 
         private final String tag;

@@ -90,8 +90,8 @@ type group
 쓰는 것은 사고를 부른다. 튜플의 식별자는 **직원의 불변 id와 조직의 불변 id뿐**이다. 조직명은 DynamoDB의
 현재상태에만 보관되고, 조회가 필요하면 거기서 가져온다.
 
-**불변 id는 디렉터리가 정한다.** SCIM은 서버가 직원·조직을 만들 때 발급하는 UUID, LDAP은 엔트리마다 서버가 만들어 두는
-`entryUUID`(AD는 `objectGUID`)다. 계정명이나 조직명이 바뀌어도 id는 그대로라 튜플이 바뀌지 않고, 지운 직원의 이름을 새 입사자가
+**불변 id는 이름에서 만들지 않는다.** SCIM은 이 서버가 직원·조직 POST 때 발급하는 UUID(`UUID.randomUUID()` — IdP 가 정하지 않는다), LDAP은 디렉터리
+서버가 엔트리마다 만들어 두는 `entryUUID`(AD는 `objectGUID`)다. 계정명이나 조직명이 바뀌어도 id는 그대로라 튜플이 바뀌지 않고, 지운 직원의 이름을 새 입사자가
 쓰더라도 옛 id로 남은 권한을 물려받지 않는다. 대신 **권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다** — 아래 "조회 API"의
 `?userName=`·`?externalId=`로 찾는다. 튜플이 UUID 라 OpenFGA 를 직접 열어 보면 읽기 어렵다 — 누구의 튜플인지는 관리 API 로 본다.
 
@@ -110,10 +110,11 @@ type group
 | 모듈 | 책임 |
 |---|---|
 | `core` | 도메인 모델, 포트, 유스케이스, 튜플 변환·비교, 삭제 가드 |
-| `storage-dynamodb` | 현재상태 / 스냅샷 / 실행이력 저장소 |
+| `storage-dynamodb` | 현재상태·조회, 스냅샷, 실행이력, 변경 이력, 작업·쓰기 락, 하루 1회 표지, 유일 값 표지판, 책갈피 저장소와 기동 때 테이블 검사 |
 | `authz-openfga` | store 해석, 인가 모델 등록, 멱등 튜플 쓰기 |
 | `connector-ldap` | groupOfNames / DIT 두 매핑 전략 |
 | `connector-scim` | SCIM 2.0 엔드포인트 |
+| `admin-api` | 관리 조회 API(직원·조직·변경 이력)와 관리 API 예외 처리기 — 두 앱이 함께 쓴다 |
 | `app-ldap` | LDAP 동기화 인스턴스 (8081) |
 | `app-scim` | SCIM 수신 인스턴스 (8082) |
 
@@ -127,13 +128,12 @@ docker compose up -d
 ./gradlew :app-ldap:bootRun
 ```
 
-`docker-compose.yml`은 OpenFGA, DynamoDB Local, (수동 검증용) OpenLDAP을 띄운다. app-ldap을
-띄우면 시작 시점에 OpenFGA store와 인가 모델이 자동으로 준비된다.
+`docker-compose.yml`은 OpenFGA, DynamoDB Local, (수동 검증용) OpenLDAP을 띄운다. 로컬 `application.yml` 은
+`openfga.create-store: true` 라 app-ldap을 띄우면 시작 시점에 OpenFGA store를 만들고 인가 모델을 쓴다(모델은 최신과 내용이 다를 때만 쓴다).
 
-DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때만 만들어진다. 로컬
-기본값은 `true` 이고, **실제 AWS 에서는 끄는 것을 전제로 한다** — 테이블 수명주기는 배포
-도구가 관리해야 하고, 애플리케이션이 부팅할 때마다 스키마를 만들려 드는 것은 인덱스 구성이
-바뀔 때 특히 위험하다(follow-ups §7).
+DynamoDB 테이블은 기동 때 늘 확인하고, 없을 때 `dynamodb.create-table-on-startup` 이 켜져 있어야만 만든다. 이 값은 로컬
+`application.yml` 만 `true` 이고 클래스 기본값과 `application-prod.yml` 은 `false` 다 — **운영에서는 앱이 테이블·store 를 만들지 않는다.**
+이름 오타가 빈 테이블·store 를 새로 만들어 쓰기가 엉뚱한 곳으로 가지 않게, 없으면 기동을 멈춘다(아래 "운영 배포").
 
 **이 브랜치는 키 레이아웃을 바꾼다** — 멤버십 아이템이 GSI1 키를 잃고, 대신 멤버 쪽 파티션에
 `BELONGS_TO#` 줄이 새로 생긴다(`2026-09-16-strong-membership-lookup-design.md`). 그래서 기존에
@@ -142,13 +142,16 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 결과만 돌려주며, 그 상태에서 일어나는 삭제는 조용히 권한을 남긴다.
 
 **S-1(SCIM 목록·필터)도 키를 바꾼다** — GSI1 정렬키가 소문자가 되고(`userName`·조직명을 대소문자 없이 찾기 위해)
-`externalId` 로 찾는 GSI3 가 생기고, 테이블 TTL(`expiresAt`)이 켜진다. 이 TTL 은 책갈피 전용이 아니다 —
-페이지 책갈피뿐 아니라 동기화 실행 이력·쓰기 락 아이템도 함께 만료시킨다(튜플 스냅샷은 TTL 을 쓰지 않는다 — 위 "스냅샷이 왜 있는가").
+`externalId` 로 찾는 GSI3 가 생기고, 테이블 TTL(`expiresAt`)이 켜진다. 이 TTL 은 책갈피 전용이 아니다 — 이 속성을 쓰는 아이템은
+다섯이다: 페이지 책갈피, 동기화 실행 이력, 쓰기 락, 변경 이력(감사), 하루 1회 표지(튜플 스냅샷은 TTL 을 쓰지 않는다 — 위 "스냅샷이 왜 있는가").
 기존 테이블은 다시 만들어야 한다.
 
 **⑥-3(관리자 표시명 검색)도 키를 바꾼다** — GSI2 의 정렬키가 직원 META 에만 쓰는 소문자 표시명(`displayNameKey`)이 되고, 조직은 GSI2 에
-실리지 않는다(`2026-10-08-audit-finish-design.md`). 기존 테이블은 다시 만들어야 한다. `create-table-on-startup` 이 켜져 있으면 GSI2 가
-옛 모양(정렬키 `displayName`)이거나 없는 테이블에서 서버가 "테이블을 다시 만들어야 한다" 며 기동을 멈춘다.
+실리지 않는다(`2026-10-08-audit-finish-design.md`). 기존 테이블은 다시 만들어야 한다. 기동 때 모양 검사가 늘 돌므로(`create-table-on-startup` 과
+상관없다) GSI2 가 옛 모양(정렬키 `displayName`)이거나 없는 테이블에서 서버가 "테이블을 다시 만들어야 한다" 며 기동을 멈춘다.
+
+**운영 준비(직원 응답의 `externalId`)는 GSI2 프로젝션을 바꾼다** — GSI2 가 `externalId` 도 싣는다(`2026-10-27-ops-readiness-design.md` §11).
+프로젝션이 옛 셋인 테이블은 기동 때 멈춘다. 다시 만든다.
 
 **②-a(유일 값 표지판)는 SCIM 테이블에 줄을 더한다** — 직원 `userName`·조직 `externalId` 의 유일성을 `UNIQUE#USERNAME`·`UNIQUE#GROUP_EXTERNAL_ID`
 표지판 줄로 지킨다(`2026-10-14-unique-markers-design.md`). 테이블·GSI 정의는 바뀌지 않는다. 표지판 없이 저장된 직원·조직은 중복을 막지 못하므로,
@@ -162,8 +165,9 @@ DynamoDB 테이블은 `dynamodb.create-table-on-startup` 이 켜져 있을 때�
 이력에 남기지 않으므로 처음 부여 이력 일부가 빠진다. app-scim 은 스냅샷이 비교 기준이 아니라 해당하지 않는다.
 
 직접 만든 AWS 테이블이라면 다음을 갖춰야 한다: GSI1(파티션키 `GSI1PK`, 정렬키 `GSI1SK`, 프로젝션 `ALL`),
-GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` — `userName`·`displayName`·`active`), GSI3(파티션키
-`externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL.
+GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` — `userName`·`displayName`·`active`·`externalId`), GSI3(파티션키
+`externalId`, 정렬키 `PK`, 프로젝션 `KEYS_ONLY`), 그리고 `expiresAt` 속성에 켠 TTL. 기동 때 모양 검사가 GSI1·2·3 의 키, GSI2 프로젝션, TTL(`expiresAt` 에
+ENABLED 또는 ENABLING)을 보고 다르면 다른 점을 모두 적어 "테이블을 다시 만들어야 한다" 며 멈춘다.
 
 | 서비스 | 주소 |
 |---|---|
@@ -171,6 +175,59 @@ GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` �
 | DynamoDB Local | http://localhost:8000 |
 | OpenLDAP | ldap://localhost:1389 |
 | app-ldap | http://localhost:8081 |
+
+**시드 생성기.** 손으로 띄워 두드려 볼 5,000명 조직도(`OrgChartFixture.오천명()`)를 파일로 만든다. 자동화 테스트는 이 파일 없이 돈다. 만든 파일은 git 에 넣지 않는다.
+
+```bash
+# LDAP — docker/ldap/scale-groupofnames/scale.ldif 와 docker/ldap/scale-dit/scale.ldif(겸직을 푼 DIT)를 만든다
+./gradlew :connector-ldap:generateScaleSeed
+LDAP_SEED_DIR=./docker/ldap/scale-groupofnames docker compose up -d   # DIT 는 ./docker/ldap/scale-dit + ldap.strategy=dit
+./gradlew :app-ldap:bootRun
+curl -XPOST localhost:8081/admin/sync/full
+
+# SCIM — docker/scim/initial-sync.ndjson(IdP 의 최초 싱크 요청, 한 줄에 요청 하나)을 만들고 순차로 쏜다
+./gradlew :connector-scim:generateScimSeed
+docker compose up -d openfga dynamodb-local
+./gradlew :app-scim:bootRun
+python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 인자로 바꾼다. POST 응답의 id 로 뒤 요청의 경로·멤버를 바꿔 보낸다
+```
+
+## 운영 배포
+
+`application-prod.yml`(prod 프로필)이 로컬과 다른 값을 준다. **설정 실수는 기동 때 멈춘다** — 엉뚱한 테이블·store 에 조용히 붙거나 틀린 비밀번호로
+바인드하지 않는다(설계 `docs/superpowers/specs/2026-10-27-ops-readiness-design.md`).
+
+| 설정 | 클래스 기본값 | 로컬 `application.yml` | `application-prod.yml` | 뜻 |
+|---|---|---|---|---|
+| `dynamodb.table-name` | 없음 | `organization`(app-ldap)·`organization-scim`(app-scim) | 로컬 값 | 비면 기동을 멈춘다 |
+| `dynamodb.create-table-on-startup` | `false` | `true` | `false` | 테이블이 없을 때 만든다. 꺼져 있으면 `DynamoDB 테이블 <name> 이 없다 — 처음 설치라면 dynamodb.create-table-on-startup=true 로 한 번 띄우거나 미리 만든다` 로 멈춘다 |
+| `dynamodb.require-protection` | `false` | `false` | `true` | 만들 때 삭제 보호와 PITR 을 켠다(PITR 은 2분 안에서 다시 시도하고, 못 켜면 `테이블은 만들었으나 PITR 을 켜지 못했다 — 콘솔·CLI 로 켠 뒤 다시 띄운다`). 있는 테이블은 둘 다 켜져 있어야 하고, 아니면 꺼진 것을 적어 멈춘다 |
+| `dynamodb.api-call-attempt-timeout` | 10초 | — | — | SDK 시도 한 번의 한도 — 매달린 연결을 끊는다 |
+| `dynamodb.api-call-timeout` | 60초 | — | — | SDK 재시도를 포함한 호출 하나의 한도 |
+| `openfga.store-name` | 없음 | `organization`·`organization-scim` | 로컬 값 | 비면 기동을 멈춘다 |
+| `openfga.create-store` | `false` | `true` | `false` | store 가 없을 때 만든다. 꺼져 있으면 `OpenFGA store <name> 이 없다 — 처음 설치라면 openfga.create-store=true 로 한 번 띄운다` 로 멈춘다. OpenFGA 에 닿지 않아 확인하지 못했으면 경고만 남기고 뜬다 |
+| `ldap.strategy`(app-ldap) | `group-of-names` | `group-of-names` | — | `group-of-names`·`dit`(대소문자 무시) 밖이면 오타도 멈춘다 |
+| `ldap.bind-password`(app-ldap) | 없음 | `adminpassword` | `${LDAP_BIND_PASSWORD}` | 환경 변수로 받는다. 바인드 DN 이 있는데 비었거나 풀리지 않은 자리표시자면 멈춘다 — 오류 문구에 값을 싣지 않는다 |
+| `ldap.require-tls`(app-ldap) | `false` | — | `true` | `ldap.url` 이 `ldaps://` 가 아니면 멈춘다. StartTLS 는 지원하지 않는다 |
+
+- **PITR 로 복원한 테이블**이면 기동 때 WARN 을 한 번 남긴다: `PITR 로 복원한 테이블이다 — 장부보다 낡은 기준선일 수 있어 재적재를 권한다(SCIM 은 mode=tuples)`. 자동으로 재적재하지는 않는다.
+- **`ldaps://` 는 JVM 트러스트스토어로 연다.** 사설 CA 가 서명한 인증서면 `-Djavax.net.ssl.trustStore=<트러스트스토어 파일>` 로 넘긴다.
+- **두 앱이 같은 테이블·store 를 쓰는 것을 막는 실행 시점 검사는 없다.** 이름을 서로 다르게 적는 것은 배포의 몫이다(아래 SCIM 절).
+- **cron·기한의 기본값은 속성 클래스(`SyncProperties`·`ScimSyncProperties`)에만 있다** — yml 에는 덮어쓸 때만 적는다. `-` 는 그 작업을 끈다. 하루 1회 작업의
+  창 규칙은 아래 "여러 대 띄우기".
+
+**IAM 권한.** 앱이 부르는 DynamoDB API 다. GSI 를 Query 하므로 리소스에 테이블과 그 인덱스(`table/<이름>/index/*`)를 함께 준다.
+
+| 언제 | 권한 |
+|---|---|
+| 늘 — 읽기·쓰기 | `GetItem`·`PutItem`·`UpdateItem`·`DeleteItem`·`Query`·`BatchGetItem`·`BatchWriteItem` |
+| 늘 — 기동 검사·헬스 | `DescribeTable`·`DescribeTimeToLive` |
+| `require-protection` 일 때 | `DescribeContinuousBackups` |
+| 처음 생성할 때만(`create-table-on-startup=true`) | `CreateTable`·`UpdateTimeToLive`, `require-protection` 이면 `UpdateContinuousBackups` 도 |
+
+**헬스와 프로브.** 두 앱 모두 `management.endpoint.health.probes.enabled: true` 다. `/actuator/health/liveness`·`/actuator/health/readiness` 는 부트 기본
+구성 그대로라 외부 의존(OpenFGA·DynamoDB·LDAP)을 보지 않는다 — 그 장애로 인스턴스가 재시작되지 않게 한다. 외부 의존은 `/actuator/health` 가 본다(아래 "관리 API").
+세부(`show-details`)는 두 앱 모두 `when-authorized` 라 인증이 없는 지금은 상태만 나온다 — 주소·테이블 이름·예외 문구를 공개하지 않는다.
 
 ## 관리 API
 
@@ -184,7 +241,7 @@ GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` �
 |---|---|
 | `POST /admin/sync/full` | 전체 동기화를 건다 — 202 + 실행 기록(`runId`, `RUNNING`) |
 | `POST /admin/sync/full?force=true` | 삭제 가드를 건너뛰고 건다 |
-| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true` |
+| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true`(기록의 `trigger` 가 `FORCED_REBUILD`) |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
 | `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 없으면 404 |
 
@@ -197,8 +254,22 @@ GSI2(파티션키 `GSI1PK`, 정렬키 `displayNameKey`, 프로젝션 `INCLUDE` �
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 (재적재 + 하루 1회 아카이빙) |
 | `GET /admin/sync/runs/{runId}` | 실행 기록 하나. 없으면 404 |
 
-`GET /actuator/health`는 두 앱 공통이며 DynamoDB / OpenFGA 연결 상태를 포함한다.
-app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다.
+**실행 기록은 이번 달·지난달(UTC, 시작 시각 기준) 파티션만 읽는다.** `runs`·`runs/{runId}`·app-ldap 의 `sync_last_success` 가 모두 같다 —
+`dynamodb.syncrun-retention-days`(기본 30일)를 늘려도 그보다 앞선 달의 기록은 테이블에 남아 있을 뿐 관리 API 로 찾지 못한다.
+
+`GET /actuator/health`는 두 앱 공통이며 DynamoDB(DescribeTable) / OpenFGA 상태를 포함한다. OpenFGA 는 캐시한 store 번호를 `GetStore` 로 실제로 묻는다 —
+OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는다(아직 해석 전이면 이름으로 찾기만 하고 만들지 않는다). 둘 다 2초 안에 답이 없으면 DOWN 이다.
+app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
+
+**관리 API 의 오류는 RFC 9457 problem details(`application/problem+json`)다** — `type`(about:blank)·`title`·`status`·`detail` 을 싣는다. `/admin/sync`·
+조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다).
+
+| 상태 | 언제 | `detail` |
+|---|---|---|
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, `limit` 범위 밖, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록 | 그 사유 |
+| 409 | 락 경합 — 다른 작업이 락을 쥐고 있다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등) |
+| 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+| 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 간다(인증이 없는 엔드포인트다) |
 
 ### 재적재·수동 동기화 (두 앱 공통)
 
@@ -226,7 +297,8 @@ app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 �
 기록한 뒤 락·가드를 푼다. OpenFGA 쓰기 배치가 **3번 연달아 한 줄도 반영되지 못하면**(배치마다 재시도한 뒤에도) 남은 배치를 보내지
 않고 `FAILED`로 끝낸다 — OpenFGA가 죽은 채로 배치 1,100개를 하나하나 재시도하며 락을 쥐지 않는다. 드문 실패 한두
 건은 지금처럼 `PARTIAL`이다. 멈춰도 이미 나간 쓰기는 되돌리지 않는다. 차단기로 멈추면 그때까지 나간 쓰기로 새 스냅샷을
-남긴 뒤 `FAILED`로 기록한다(LDAP 기준선이 장부를 따라간다 — 결과를 모르는 줄은 스냅샷의 U 칸에 따로 적는다). 기한·서버 종료로 멈추면(재적재가 쓰기 단계에서 차단기로 멈춰도)
+남긴 뒤 `FAILED`로 기록한다(LDAP 기준선이 장부를 따라간다 — 결과를 모르는 줄은 스냅샷의 U 칸에 따로 적는다). 그때 현재상태까지 디렉터리대로 교체한 회차(app-ldap — 비교 경로, 재적재·훑어 맞추기의
+지우기 단계)는 메시지 끝에 ` — 현재상태는 디렉터리대로 교체했다` 가 붙는다 — `FAILED` 만 보고 현재상태도 못 바꿨다고 읽지 않게 한다. 기한·서버 종료로 멈추면(재적재가 쓰기 단계에서 차단기로 멈춰도)
 새 스냅샷을 남기지 않는다 — app-ldap 은 "기록 중" 표시가 남아 다음 동기화가 장부를 훑어 맞추고(아래), app-scim 은 필요하면 재적재를 다시 건다.
 
 OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아이디 등) 다시 보내도 같으므로 재시도하지 않는다. 대신 그 배치를 반씩(대상 — 옮겨 가는 직원·하위 조직 — 경계로, 한 대상까지 좁혀도 거절되면 줄 단위로)
@@ -235,7 +307,9 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 
 **서버가 내려가면** 도는 작업을 멈추고 락을 푼 뒤 `FAILED`("서버 종료로 중단")로 기록한다(최대 10초 기다린다).
 강제로 죽으면(kill -9, 정전) 그 기록은 `RUNNING`으로 남고 락은 TTL(30초) 뒤 풀린다. 다음에 락을 잡은 작업이 시작하면서 그 기록을
-`FAILED`("비정상 종료로 중단")로 닫는다 — 락을 쥐었으니 남은 `RUNNING`은 죽은 작업이다(SCIM 아카이빙 기록은 건드리지 않는다).
+`FAILED`("비정상 종료로 중단")로 닫는다 — 락을 쥐었으니 같은 앱의 남은 `RUNNING`은 죽은 작업이다. 락을 잡지 않는 SCIM 아카이빙 기록은 이 규칙으로 닫지 않는다.
+대신 누구든(동기화·재적재·아카이빙) 시작할 때 시작한 지 `sync.job-timeout` + 10분이 지난 `RUNNING` 을 종류와 상관없이 "비정상 종료로 중단(기한 + 10분 경과)"으로
+닫는다 — 작업은 기한을 넘기면 스스로 끝나므로 그 뒤에도 `RUNNING` 이면 죽은 것이다. 둘 다 두 달 파티션(위 "실행 기록은 이번 달·지난달 파티션만 읽는다")의 `RUNNING` 전부를 본다.
 닫기는 아직 RUNNING 일 때만 한다 — 방금 끝난 실행의 결과를 덮어쓰지 않는다. 락을 푼 뒤에 하는 일(app-scim 재적재의 스냅샷 저장 —
 10만 명이면 몇 초, 압축 묶음 열몇 개)은 이 멈춤과 기한 밖이다. 서버가 그 사이 내려가면 DynamoDB 클라이언트가 닫히며 저장이 실패하고 기록은
 `RUNNING`으로 남는다 — 강제로 죽은 경우처럼 다음 락 작업이 "비정상 종료로 중단"으로 닫는다.
@@ -252,16 +326,19 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 않으며, 기준선 없음 회차는 종류가 `SYNC` 그대로이고 첫 적재의 부여(쓴 줄)도 남긴다.
 
 **삭제 가드는 훑어 맞추기와 재적재에도 걸린다.** 지울 줄이 훑은 장부의 30%(`sync.deletion-guard`)를 넘으면 지우지 않고 `ABORTED`다 —
-LDAP이 설정 실수로 0명을 돌려주면 장부 전체가 지워지던 것을 막는다. 사람이 확인한 뒤 `POST /admin/sync/full?force=true` 또는
+검색 베이스·필터 실수로 디렉터리의 큰 부분이 빠진 그림이 장부를 크게 지우는 것을 막는다(사람 소속이 하나도 없는 그림은 그 전에 데이터 오류로 멈춘다 — LDAP 절). 사람이 확인한 뒤 `POST /admin/sync/full?force=true` 또는
 `POST /admin/sync/rebuild?force=true`로 넘긴다. 훑어 맞추기가 가드에 걸려 하나도 반영하지 못했다면 "기록 중" 표시가 남아 다음 회차도 다시 확인한다 — 기준선 없는 첫 회차가 통째로 걸리면 스냅샷이
-없으니 다음 회차도 장부를 다시 훑는다. 비활성 회수만 일부 반영했다면 스냅샷을 남겨 표시가 지워지고, 다음 회차는 비교 경로에서 같은 판정을 다시 받는다(아래).
+없으니 다음 회차도 장부를 다시 훑는다. 있어야 할 줄은 가드를 보기 전에 이미 썼으므로 그 수는 기록의 쓴 수(`writtenCount`)에 남는다. 비활성 회수만 일부 반영했다면 스냅샷을 남겨 표시가
+지워지고, 다음 회차는 비교 경로로 간다 — 그 회차가 받는 판정은 아래 "가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다" 끝에 있다.
 
 **가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다**(설계 2026-10-20 §5). 큰 개편 하나로 가드가 걸려도 퇴사 회수가 `force` 할 때까지 멈추지 않게 한다. 지울 줄
 전체가 가드를 넘으면 그 가운데 **비활성으로 생긴 지우기** — 이번 회차의 디렉터리 그림에 여전히 있고 소속도 그대로인데 막힌(`active=false`) 직원의 `direct_member` 줄 —
 만 떼어 같은 가드(같은 기준 수·임계치)로 다시 본다. 그것이 가드 안이면 **그 지우기만** 반영한다. 부여, 나머지 지우기, 현재상태 교체는 보류한다 — 부여만 반영하면 이동자가
 옛 소속과 새 소속을 함께 갖는다. 실행 기록은 `ABORTED` 이고 메시지는 "삭제 가드 발동 — 비활성 회수 N건만 반영하고 나머지 지우기 M건·쓰기 K건은 보류" 뒤에 " / " 와 전체 지우기의
 초과 문구가 붙는다. **일부 반영하는 동안 현재상태는 회차 전 그대로다** — 관리 API 의 직원 `active` 에는 막힌 직원이 활성으로 보이고, 실제 판정은 `openFgaCheck`(Check 결과)가
-보여 준다. 스냅샷은 남으므로 다음 회차는 비교 경로에서 같은 판정을 다시 받고, 사람이 확인해 `force=true` 로 넘기면 나머지가 반영된다. 비활성 부분도 가드를 넘으면(시계 오류나
+보여 준다. **다음 회차는 같은 판정을 받지 않는다.** 스냅샷은 지운 회수를 뺀 장부라, 다음 회차는 남은 지우기를 줄어든 기준 수에 대어 가드를 다시 본다 — 그사이 새로 막힌 계정이
+없으면 비활성 부분이 비어 대개 전부 보류(`ABORTED`, 아무것도 반영하지 않음)이고, 새로 막힌 계정이 있으면 그 회수만 다시 반영한다. 남은 비율이 임계 아래로 내려가면 `force` 없이
+나머지가 그대로 반영된다(코드로 따진 것이고 시험하지 않았다). 사람이 확인해 `force=true` 로 넘기면 나머지가 반영된다. 비활성 부분도 가드를 넘으면(시계 오류나
 잘못된 정책으로 대량 비활성) 지금처럼 하나도 반영하지 않는다. 훑어 맞추기·재적재는 가드를 보기 전에 있어야 할 줄을 이미 다 썼으므로 보류할 쓰기가 없고, 그 경로에서 가드가
 걸리면 이동자가 옛·새 소속을 함께 가질 수 있다. 판정의 `accountExpires` 는 앱 시계를 쓴다.
 app-scim `mode=tuples`는 조직도가 비었는데 장부에 줄이 있으면 지우지 않고 `FAILED`다("조직도가 비어 있다 — 장부를 비우려면 mode=wipe").
@@ -279,7 +356,7 @@ app-scim `mode=tuples`는 조직도가 비었는데 장부에 줄이 있으면 �
 **튜플 스냅샷은 락을 푼 뒤 저장한다.** `mode=tuples`는 장부(OpenFGA)를 맞춘 뒤 락을 먼저 풀고 스냅샷을 저장한다 — 10만 명이면
 저장에 몇 초가 걸리는데(압축 묶음 열몇 개 — 위 "스냅샷이 왜 있는가"), 그동안 SCIM 쓰기가 받아진다(SCIM 쓰기는 이 스냅샷을 읽지 않는다). `FAILED`의 사유가
 "장부는 맞췄다 — 스냅샷 저장 실패: …"이면 튜플은 맞았고 스냅샷만 못 남겼다는 뜻이다. 재적재를 다시 돌릴 필요는 없다 — 다음 재적재나
-하루 1회 아카이빙(`sync.archive-cron`, 기본 새벽 3시)이 새 스냅샷을 남긴다.
+하루 1회 아카이빙(`sync.archive-cron`, 기본 새벽 3~8시 창에서 성공할 때까지 매시)이 새 스냅샷을 남긴다.
 
 **막 만든 직원·조직의 권한을 지우지 않는다.** 재적재는 직원·조직을 GSI(최종 일관성)로 훑는다. 락 직전에 만든 대상이 아직 GSI 에 없어도
 장부(OpenFGA)에 그 대상의 줄이 있으므로, 지우기 전에 본 테이블에서 강한 일관성으로 다시 읽어 조직도에 넣는다. `mode=wipe` 도 같은 방법으로
@@ -306,8 +383,9 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 **감사 이력은 지우지 않는다.** 스냅샷과 실행 이력은 그대로 남는다. 사고 뒤에 무슨 일이
 있었는지 볼 유일한 기록이기 때문이다.
 
-`sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 이상 응답(예: 필터가 아무도
-고르지 못해 0건)을 주면 삭제 가드가 `ABORTED`로 막고, `force=true`로 사람이 확인한 뒤 우회할 수 있다.
+`sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 사람 소속이 하나도 없는 그림(예: 필터가 아무도
+고르지 못해 0건)을 주면 데이터 오류로 `FAILED` 이고 `force=true` 로도 넘기지 못한다(LDAP 절). 일부가 크게 빠진 그림은 삭제 가드가 `ABORTED`로 막고,
+`force=true`로 사람이 확인한 뒤 우회할 수 있다.
 
 ### 조회 API
 
@@ -346,6 +424,9 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 - `userName` — 원본 계정명. SCIM은 IdP가 보낸 `userName`, LDAP은 `user-login-attribute`(기본 `uid`)의 값을 정규화하지 않고
   그대로 싣는다
 - `displayName` — 사람이 읽는 이름
+
+직원 검색과 상세 응답에는 `externalId` 도 실린다 — LDAP 은 서버가 준 절대 DN, SCIM 은 IdP 가 보낸 값이고 없으면 null 이다. 표시명 검색은 GSI2
+프로젝션에서 바로 싣는다(위 "로컬 실행"의 GSI2 모양). 조직 멤버 목록의 줄에는 없다.
 
 조직도 같다. `orgCode`가 불변 id이고 튜플의 `group:{orgCode}`에 실린다. 조직에는 `userName`이 없고 `displayName`이 이름이다.
 
@@ -392,7 +473,8 @@ SCIM 조직의 `externalId`는 겹치면 409지만(아래 SCIM 절) 직원의 `e
 이 API는 그것을 **감지**할 뿐 고치지 않는다. 대응은 배포마다 다르다.
 
 - **app-ldap** — `POST /admin/sync/rebuild`로 재적재해 튜플을 상태와 다시 맞춘다. 다음
-  `sync.cron` 주기의 전체 동기화도 같은 일을 한다.
+  `sync.cron` 주기의 전체 동기화는 이것을 고치지 못한다 — 기준선이 있으면 디렉터리를 스냅샷과만 비교하므로, 장부만 스냅샷과 갈린 줄은 델타에 잡히지 않는다
+  ("기록 중" 표시가 남았거나 포인터가 없는 회차만 장부를 훑는다).
 - **app-scim** — `POST /admin/sync/rebuild?mode=tuples`로 재적재한다.
   현재상태가 요구하는 튜플을 전부 쓰고 장부를 훑어 요구하지 않는 줄을 지우므로, 튜플 쪽 어긋남은 무엇이든 사라진다.
   조직도는 건드리지 않는다.
@@ -614,15 +696,20 @@ absent(max(sync_last_success{source="LDAP"}) > 0)
 - DIT 에서 부모 조직을 찾지 못한 직원 — 직원으로는 적재하되 소속이 없다.
 - groupOfNames 에서 그룹의 `member` 값이 읽은 직원도 조직도 아닌 것(컴퓨터·연락처, 위에서 건너뛴 엔트리를 가리키는 값) — 값마다가 아니라 요약 한 줄이다. 이것으로는 멈추지 않는다.
 
-**실패는 아무도 남지 않을 때뿐이다**(재시도 없음). 직원 검색이 엔트리를 받았는데 남은 직원이 0명, 그룹(OU) 검색이 엔트리를 받았는데 남은 조직이 0개,
-DIT 에서 직원이 남았는데 부모 조직을 가진 직원이 0명이면 데이터 오류다. 마지막은 `root-dn` 아래 컨테이너가 OU 가 아닌 경우(AD 의 `CN=Users`)이고,
-`org-unit-filter` 에 그 컨테이너를 더해 답한다(위 권장값). 일부만 빠지는 경우는 막지 않는다 — 이미 적재된 장부가 있으면 삭제 가드(30%)가 큰 빠짐을 막고, 첫 적재에서는 경고 한 줄이
-유일한 신호다.
+**실패는 아무도 남지 않을 때뿐이다**(데이터 오류 — 재시도 없음, `force` 로도 넘기지 못한다).
+
+- 직원 검색이 엔트리를 받았는데 건너뛰고 나니 남은 직원이 0명, 그룹(OU) 검색이 엔트리를 받았는데 남은 조직이 0개.
+- **그림에 사람 소속이 하나도 없다**(두 전략 공통) — 조직의 직원 멤버 가운데 읽은 직원을 가리키는 것이 0이다. 검색이 0건이어도 걸린다. RFC 4511 에서 0건
+  검색은 오류가 아니라 성공이라(베이스·필터가 틀려도, 읽을 권한이 없어도 0건과 성공 코드가 온다) 표준 신호로는 가를 수 없고, 그 그림을 받으면 장부의 모든 사람이
+  "디렉터리에서 사라진" 것이 되기 때문이다. 오류에 직원 수·조직 수와 비어 있는 쪽의 단서가 실린다. DIT 에서 부모 조직을 가진 직원이 0명인 것도 여기 든다 —
+  `root-dn` 아래 컨테이너가 OU 가 아닌 경우(AD 의 `CN=Users`)이고, `org-unit-filter` 에 그 컨테이너를 더해 답한다(위 권장값).
+
+일부만 빠지는 경우는 막지 않는다 — 이미 적재된 장부가 있으면 삭제 가드(30%)가 큰 빠짐을 막고, 첫 적재에서는 경고 한 줄이 유일한 신호다.
 
 **다시 읽어도 결과가 같은 실패는 재시도하지 않는다.** 데이터나 설정을 고쳐야 하는 문제라 곧바로 실패로 기록된다.
 
 - 데이터·설정 오류 — 정수가 아닌 계정 상태 값이나 `primaryGroupID`, 16바이트가 아닌 `objectGUID`, SID 형식이 아닌 `objectSid`, 같은 RID 의 그룹 둘, 해석할 수 없는 DN,
-  멤버가 하나도 대조되지 않는 설정, 아무도 남지 않는 읽기(위).
+  멤버가 하나도 대조되지 않는 설정, 아무도 남지 않는 읽기·사람 소속이 없는 그림(위).
 - 요청 자체가 틀렸다는 LDAP 결과 코드(RFC 4511) — 49 인증 실패(비밀번호 오류·잠긴 서비스 계정), 50 권한 없음, 32 없는 이름(검색 베이스 오타), 34 DN 문법,
   4 크기 한도 — 와 서버에 보내기 전에 거절된 필터 문법.
 
@@ -681,12 +768,12 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 `filter` 를 붙이면 403 이고 GET 외의 메서드는 405 다. 스키마에는 응답이 실제로 저장하고 돌려주는 속성만 싣는다.
 
 목록·필터 조회(RFC 7644 §3.4.2)와, 같은 조회를 본문으로 보내는 `POST /scim/v2/Users/.search`·`/Groups/.search` 를
-지원한다.
+지원한다. 같은 경로의 GET(`GET /scim/v2/Users/.search`)은 아이디가 `.search` 인 단건 조회로 읽혀 405 가 아니라 404 다.
 
 | | 지원 범위 |
 |---|---|
-| `filter` | `eq` 와 `and` 만. 직원은 `id`·`userName`·`externalId`, 조직은 `id`·`displayName`·`externalId` 중 하나의 `eq` 가 있어야 한다(`and` 뒤에는 직원 `displayName`·`active` 도 온다). 그 밖은 400 `invalidFilter` |
-| 대소문자 | `userName`·조직 `displayName` 은 가리지 않는다(RFC 7643 `caseExact=false`) — `Kim` 이 있으면 `kim` 생성은 409 다. `id`·`externalId` 는 가린다 |
+| `filter` | `eq` 와 `and` 만. 직원은 `id`·`userName`·`externalId`, 조직은 `id`·`displayName`·`externalId` 중 하나의 `eq` 가 있어야 한다(`and` 뒤에는 직원 `displayName`·`active` 도 온다). 그 밖은 400 `invalidFilter` — 문구에 싣는 입력 조각은 각각 앞 100자에 `…` 를 붙여 자른다 |
+| 대소문자 | `userName`·조직 `displayName`·직원 `displayName`(`and` 뒤) 은 가리지 않는다(RFC 7643 `caseExact=false`) — `Kim` 이 있으면 `kim` 생성은 409 다. `id`·`externalId` 는 가린다 |
 | `startIndex`·`count` | `count` 기본값·상한 100 |
 | `sortBy`·`sortOrder` | 직원 `userName`, 조직 `displayName` 만 |
 | `attributes`·`excludedAttributes` | 리소스를 돌려주는 모든 응답. 조직에서 `members` 를 빼면 멤버를 읽지 않는다 |
@@ -747,7 +834,7 @@ IdP 의 매칭 속성은 `userName` 이나 `externalId` 를 쓴다.
 
 **조직 PATCH 는 `attributes` 가 없으면 성공 시 `204 No Content` 다**(본문 없음). RFC 7644 §3.5.2 가 허용하고, Entra 는 조직 PATCH 에
 멤버 전체를 담아 돌려주는 것을 권하지 않으며 Okta 도 204 를 받는다. `attributes` 를 붙이면 RFC 가 MUST 로 정한 대로 200 과 요청한
-속성을 돌려준다. PUT 과 직원 PATCH 는 200 과 리소스다.
+속성을 돌려준다. PUT 과 직원 PATCH 는 200 과 리소스다. **조직 PUT 은 전체 교체라 본문에 `members` 가 없으면 빈 목록과 같다 — 멤버를 모두 뺀다.**
 
 **Microsoft Entra ID 로 연결할 때는 SCIM 테넌트 URL 끝에 `?aadOptscim062020` 을 반드시 붙인다.** 이 옵션이 없으면 Entra 는 멤버
 한 명을 `{"op":"Remove","path":"members","value":[{"value":"…"}]}` 로 빼는데, RFC 7644 로 읽으면 이것은 "멤버 전원 삭제" 이고
@@ -843,20 +930,22 @@ remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. 멤버 �
 | 상태 | 언제 | IdP 는 |
 |---|---|---|
 | 400 (`invalidSyntax`·`invalidPath`·`invalidValue`·`invalidFilter`·`noTarget`·`mutability`) | 요청이 틀렸다 | 고쳐 보낸다 |
+| 403 | `/Schemas`·`/ResourceTypes` 에 `filter` 를 붙였다(RFC 7644 §4) | — |
 | 404 | 없는 리소스·경로 | — |
 | 405 + `Allow` | 경로가 받지 않는 메서드(`Allow` 는 그 경로가 받는 메서드, 이름순) | — |
 | 409 `uniqueness` | `userName`·조직 `externalId` 가 겹친다 | — |
 | 413 | 본문이 한도(기본 256KB, `spring.codec.max-in-memory-size`)를 넘었다 | 멤버를 PATCH 로 나눠 보낸다 |
 | 415 | Content-Type 이 `application/scim+json`·`application/json` 이 아니다 | — |
 | 501 | 지원하지 않는 기능 — Bulk, `/Me`, 서버 루트 조회 | — |
-| 503 + `Retry-After` | 일시 장애 — 다른 SCIM 쓰기가 락을 쥐고 있다(2초), 재적재가 락을 쥐고 있다(60초), OpenFGA·DynamoDB 장애·리스 상실·쓰기 차단·부분 실패(10초) | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
-| 500 | 우리 버그 | 로그를 본다 |
+| 503 + `Retry-After` | 일시 장애 — 다른 SCIM 쓰기가 락을 쥐고 있다(2초), 다른 쓰기가 같은 `userName`·조직 `externalId` 의 표지판을 차지하고 아직 저장하지 않았다(2초), 재적재가 락을 쥐고 있다(60초), OpenFGA·DynamoDB 의 일시 장애(아래 분류)·리스 상실·쓰기 차단·부분 실패(10초) | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
+| 500 | 일시 장애로 분류되지 않는 예외 — 우리 버그, 또는 사람이 고칠 상태(같은 이름 store 가 둘 등). OpenFGA·DynamoDB 오류여도 아래 분류에 들지 않으면 500 이다 | 로그를 본다 |
 
 `noTarget` 은 값 경로 필터가 가리킨 값이 없을 때와, `path` 없는 `remove` 일 때(무엇을 지울지 가리키지 않았다, RFC 7644 §3.5.2.2)다.
 `Retry-After` 는 정수 초(RFC 9110 §10.2.3)로 올림하며 최소 1초다. 429 는 쓰지 않는다 — HTTP 에서 429 는 속도 제한이다. 503 의 `detail` 은 우리가
 쓴 문구뿐이다. OpenFGA 서버 메시지·라이브러리 예외 문자열·락을 쥔 쪽의 용도 같은 내부 원인은 인증 없는 엔드포인트로 내보내지 않고 서버 로그에만 남긴다.
 
-**500 은 버그에만 남는다.** 재시도하면 낫는 실패는 503, 요청이 틀렸으면 4xx 이고, 어느 쪽도 아닌 예기치 않은 예외만 500 과 ERROR 로그다. 튜플 일부만
+**500 은 분류되지 않은 예외에만 남는다.** 재시도하면 낫는 실패는 503, 요청이 틀렸으면 4xx 이고, 어느 쪽도 아닌 예외만 500 과 ERROR 로그다 — 대개 버그지만,
+같은 이름 store 가 둘이라 멈춘 것처럼 다시 보내도 같은 OpenFGA·DynamoDB 오류도 여기 온다. 이 분류기는 관리 API 도 함께 쓴다. 튜플 일부만
 반영된 **부분 실패도 503** 이다 — 상태는 이미 커밋됐지만 IdP 가 같은 요청을 다시 보내면 같은 최종 상태를 목표로 다시 계산해 나머지를 반영한다. 다만
 IdP 가 503 과 `Retry-After` 를 어떻게 다루는지는 문서·추정이다(Entra 는 개별 오류를 다음 주기에 재시도한다고 문서화했고, Okta 의 5xx 반응은 문서에 없다).
 AWS SDK(`SdkClientException`·스로틀링·5xx·SDK 가 재시도 가능하다고 표시한 것)와
@@ -867,16 +956,20 @@ OpenFGA 가 거절할 아이디가 거의 없다). 설계: `docs/superpowers/spe
 
 **회수 의도는 저장하고, 남은 줄은 하루 아카이빙이 지운다**(설계 2026-10-20 §6). 직원의 `active` 는 OpenFGA 단계가 어떻게 끝나든 — 실패가 담겨 오든, Check·쓰기가 오류로 끝나든, 차단기가 서든 —
 요청한 값을 저장하고 응답은 그대로 503 이다. 예전에는 일부라도 실패하면 `active` 를 이전 값(활성)으로 되돌려, IdP 가 재시도하지 않으면 회수 의도가 시스템 어디에도 남지 않았다. 재시도의 델타는
-저장된 `active` 가 아니라 Check 로 나오므로 되돌릴 근거가 없다. 직원 DELETE 가 일부 실패하면 레코드와 지우지 못한 소속을 남기되 직원은 **비활성으로 저장**한다. 저장하지 않는 경우는 셋이다 —
-락을 못 잡았거나 리스를 잃은 경우(다른 인스턴스의 저장을 덮을 수 있다), 요청 계산이 던진 4xx, 아직 저장된 적 없는 직원(POST)이 실패한 경우(레코드를 만들지 않는 규칙은 그대로다). 조직의 멤버
+저장된 `active` 가 아니라 Check 로 나오므로 되돌릴 근거가 없다. 직원 DELETE 가 일부 실패하면 레코드와 지우지 못한 소속을 남기되 직원은 **비활성으로 저장**한다. 저장하지 않는 경우는 넷이다 —
+락을 못 잡았거나 리스를 잃은 경우(다른 인스턴스의 저장을 덮을 수 있다), 요청 계산이 던진 4xx, 아직 저장된 적 없는 직원(POST)이 실패한 경우(레코드를 만들지 않는 규칙은 그대로다), 커밋에 닿은
+뒤의 오류(커밋이 이미 저장했거나 — 직원 삭제면 지웠을 수 있다 — 저장하다 실패한 것이라 다시 쓰면 지운 직원을 되살리거나 이력이 겹친다). 조직의 멤버
 빼기는 그대로 IdP 재시도에 맡긴다.
 
 **IdP 가 다시 보내지 않을 수 있다.** 비활성으로 저장하면, 재시도 전에 대상을 다시 읽어 차이만 보내는 IdP 는 이미 비활성인 것을 보고 다시 보내지 않을 수 있다(Entra 가 그렇게 동작한다고 알려져
 있지만 확인하지 않았다). 그래서 하루 아카이빙(`SnapshotArchiveUseCase`)이 IdP 재시도를 대신한다 — 상태가 요구하지 않는데 장부에 남은 직원 줄(`direct_member`)을 찾으면, 그 직원마다 차례로
 락 안에서 SCIM 쓰기와 같은 길(락·리스·Check 기준선·이력)로 **지우기만** 한다. 빠진 줄은 다시 쓰지 않는다 — 비교가 락 밖의 낡을 수 있는 상태로 한 것이라, 직원 삭제가 OpenFGA 에서는 끝났는데
 DynamoDB 커밋이 실패한 경우처럼 쓰면 지운 직원의 권한이 되살아난다. 비교와 복구 사이에 바뀐 직원은 락 안의 Check 가 다시 보고, 그새 지워진 직원은 건너뛴다. 한 명이 실패해도 나머지는 이어서 하고
-실패한 직원은 다음 날 다시 잡힌다. 아카이빙 기록(`trigger=ARCHIVE`)의 메시지는 "어긋난 직원 N명 다시 맞춤(실패 M명)" 이고, 남은 줄이 잡힌 직원이 없으면 메시지가 없다. 복구의 이력은
-`SCIM_REQUEST` 이고 원인 id 는 아카이빙 스케줄러의 traceId 다. 그러므로 **IdP 재시도 없이 회수가 끝나기까지 최대 하루**다(`sync.archive-cron`, 기본 새벽 3시). 조직 연결 줄(`child`)의
+실패한 직원은 다음 날 다시 잡힌다. 아카이빙 기록(`trigger=ARCHIVE`)의 메시지는 "어긋난 직원 N명 다시 맞춤(실패 M명)" 이고, 남은 줄이 잡힌 직원이 없으면 메시지가 없다. 기록의
+`writtenCount` 는 스냅샷에 담은 줄 수(OpenFGA 에 쓴 수가 아니다. 저장하지 못했으면 0), `deletedCount`·`failureCount` 는 복구가 지운·지우지 못한 줄 수다. 어긋남의 수는 비교가 끝나는 즉시 내고, 스냅샷
+저장과 복구는 서로를 막지 않는다 — 저장이 실패해도 복구는 하고 기록은 `FAILED` 다. 복구의 이력은
+`SCIM_REQUEST` 이고 원인 id 는 아카이빙 스케줄러의 traceId 다. 그러므로 **IdP 재시도 없이 회수가 끝나는 것은 다음 아카이빙 때**다(`sync.archive-cron`, 기본 새벽 3~8시 창에서
+성공할 때까지 매시 — 두 날의 비교 간격은 길면 약 29.5시간, 아래 경보 절). 조직 연결 줄(`child`)의
 어긋남은 지표로만 내고, 멤버 줄이 없는 고아 튜플은 여전히 재적재 몫이다.
 
 SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기면 이력이 금방 폭증한다. 이력으로
@@ -889,10 +982,10 @@ SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기
 ```
 
 포트는 8082다. **LDAP 인스턴스와 같은 DynamoDB 테이블·OpenFGA store를 동시에 쓰지 않는다** —
-한 조직도는 하나의 소스로만 동기화한다는 것이 이 서버의 전제다. 그래서 app-scim의 기본값은
-app-ldap과 겹치지 않게 `dynamodb.table-name: organization-scim`, `openfga.store-name:
-organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
-테이블·store와는 항상 다르게 유지해야 한다.
+한 조직도는 하나의 소스로만 동기화한다는 것이 이 서버의 전제다. 두 이름에는 클래스 기본값이 없고(빠뜨리면 기동을 멈춘다), app-scim의
+`application.yml` 은 app-ldap(`organization`)과 겹치지 않게 `dynamodb.table-name: organization-scim`, `openfga.store-name:
+organization-scim`을 적는다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
+테이블·store와는 항상 다르게 유지해야 한다 — 같은 이름을 막는 실행 시점 검사는 없다.
 
 ### 여러 대 띄우기 — 작업은 한 번에 하나, 하루 한 번 작업은 한 번만
 
@@ -901,8 +994,17 @@ organization-scim`으로 잡혀 있다. 다른 이름을 쓰려면 설정으로 
 작업 동안 리스를 `dynamodb.lock-renew-interval`마다 갱신한다. 남이 가져간 것이 확인되면(토큰 조건 실패) 곧바로, 일시 오류가 마지막 성공에서 주기 두 번 넘게 이어지면 그때 멈추고 `FAILED`로 남긴다.
 
 **하루 한 번 작업(app-scim 아카이빙·만료 스냅샷 정리, app-ldap 만료 스냅샷 정리)은 `DAILY#<작업>#<날짜>` 표지를 먼저 잡은 인스턴스만
-돈다**(날짜는 UTC, 표지는 사흘 뒤 TTL로 사라진다). 아카이빙은 재적재가 락을 쥐고 있으면 그날은 건너뛰고 `ABORTED`("재적재 중이라 건너뜀")로
-남긴다 — 재적재 도중의 잠깐 어긋난 장부를 "실제"로 찍지 않기 위해서다. 락은 들여다보기만 한다(잡으면 그동안 SCIM 쓰기가 503이다).
+돈다**(날짜는 UTC, 표지는 사흘 뒤 TTL로 사라진다). 표지는 잡음(`CLAIMED`)과 완료(`DONE`) 둘이다.
+
+- **성공해야 `DONE` 이다.** 그날의 나머지 시도는 표지를 보고 건너뛴다. 정리는 오류 없이 끝나면, 아카이빙은 `SUCCEEDED` 여야 성공이다.
+- **실패하면 표지를 푼다** — 오류, 아카이빙의 `FAILED`·`ABORTED`. 잡은 인스턴스가 죽으면 풀 주체가 없으므로 임대(잡은 때 + `sync.job-timeout` + 5분)가 끝난 뒤 다시 잡힌다.
+- **그래서 cron 은 하루 창 안에서 매시 시도한다.** 기본값은 app-ldap `sync.purge-cron` `0 0 4-8 * * *`, app-scim `sync.archive-cron` `0 0 3-8 * * *`·`sync.purge-cron` `0 0 4-8 * * *` 이다.
+- **창은 UTC 자정을 넘지 않아야 한다.** 표지의 날짜가 UTC 라 그래야 한 창이 한 날로 묶인다. cron 은 서버 시간대로 돌고, 기본 창은 서버가 UTC 든 KST 든(KST 03~08시는 전날
+  UTC 18~23시) 이 조건을 지킨다. 다른 시간대에서 창을 바꿀 때 지킨다 — 어겨도 정확성은 깨지지 않고 창이 두 날로 갈려 하루에 두 번 돌 수 있을 뿐이다.
+- **아카이빙에는 기한이 있다**(`sync.job-timeout`, 30분). 넘으면 `FAILED`("기한 초과 — 30분")이고 다음 정각에 다시 돈다. 정리에는 기한이 없다.
+
+아카이빙은 재적재가 락을 쥐고 있으면 `ABORTED`("재적재 중이라 건너뜀")로 남기고 다음 정각에 다시 본다 — 재적재 도중의 잠깐 어긋난 장부를 "실제"로 찍지 않기 위해서다.
+락은 들여다보기만 한다(잡으면 그동안 SCIM 쓰기가 503이다).
 
 ### app-scim 여러 대 띄우기(동시성 제어)
 
@@ -940,7 +1042,7 @@ SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는
 | 설정 | 의미 |
 |---|---|
 | `dynamodb.lock-ttl` (기본 30초) | 락 리스 길이. SCIM 쓰기 p99보다 한참 길어야 한다 — 짧으면 아직 일하는 중인데 만료돼 다른 인스턴스가 가져간다. 두 경로 모두에 적용된다. 만료는 각 서버의 시계로 판단하므로 서버 시계를 NTP 로 맞춘다 — 어긋남은 TTL − 2×갱신 주기(기본 10초)보다 작아야 한다 — 그보다 크면 남의 락을 가져갈 수 있다 |
-| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
+| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊는다 — 스로틀로 매달린 시도 하나가 한도를 다 먹지 않게. 끊긴 시도는 결과를 모르므로 기다리지 않고 같은 토큰으로 다시 시도하고(서버에서 잡혔으면 그대로 다시 얻는다), 결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다. 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
 | `dynamodb.lock-renew-interval` (기본 10초) | 락을 쥔 동안 리스를 갱신하는 주기 — SCIM 쓰기·재적재·동기화 모두. TTL보다 충분히 짧아야 한다. 갱신이 일시 오류(스로틀·네트워크)로 실패하면 짧게 쉬며 다시 시도하고, 마지막으로 성공한 갱신을 보낸 때에서 주기 두 번 안에 성공하지 못할 때만 멈춘다(만료가 보낸 때 + TTL 이라 TTL 전 여유는 늘 TTL − 2×주기다). 남이 가져간 것이 확인되면(토큰 조건 실패) 곧바로 멈춘다 |
 
 **큰 변경도 락을 지키며 끝까지 간다.** 10만 명 조직 삭제처럼 오래 걸리는 SCIM 쓰기는 락을 쥔 동안 리스를 `lock-renew-interval`마다
@@ -963,7 +1065,8 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 권한을 가진 사람이 없다 — ①이 끝나면 조직 그래프는 (앞 ∩ 뒤)이고, ② 동안 각 직원은 줄이 모두 앞이거나 모두 뒤라 권한이 앞 이하이거나 뒤 이하이며, ③에서는 모든 직원이 이미 뒤에 있고 그래프는 뒤를
 향해 자라기만 한다. 한 요청은 OpenFGA 가 원자적으로 반영하므로 조직을 옮기는 직원은 옛 조직에서 새 조직으로 한 번에 넘어간다(권한 공백도, 두 조직 동시 권한도 없다).
 직원 한 명의 변경이 한도보다 많으면 그 직원만 여러 요청으로 나누는데, 그 직원의 지우기 조각은 ②에 두고 쓰기 조각은 ② 뒤·③ 앞에 따로 보낸다 — 지우기 조각이 모두 끝난 뒤에야
-쓰기 조각이 나가고, ②에 실패가 있으면 쓰기 조각은 나가지 않으므로(아래) 옛 소속과 새 소속을 함께 갖는 순간이 없다.
+쓰기 조각이 나가고, ②에 실패가 있으면 쓰기 조각은 나가지 않으므로(아래) 옛 소속과 새 소속을 함께 갖는 순간이 없다. 그래서 코드의 단계 값
+(`OpenFgaRelationTupleWriter.Phase`)은 넷이다 — `조직_지우기`(①), `직원`(②), `직원_넘침_쓰기`(②와 ③ 사이의 이 쓰기 조각), `조직_쓰기`(③). 넘침 조각이 없으면 셋째는 비고 세 단계와 같다.
 이 보장은 **쓰기 한 번(`apply`) 안의 것이다.** 서로 다른 쓰기 사이에는 단계가 없다 — 재적재와, 기록 전에 멈춘 뒤·기준선이 없는 첫 회차의 LDAP 동기화는 있어야 할 줄을 먼저 다 쓰고 나서 장부의
 나머지를 지우므로 그 사이 옮기는 직원이 두 조직의 권한을 함께 갖는다(인가 공백을 두지 않으려고 고른 틈이다). SCIM 커밋의 "보류 줄 → 멤버 줄 → 풀린 줄"도 서로 다른 쓰기다.
 
@@ -1008,24 +1111,32 @@ Prometheus 이름은 `scim_archive_drift{kind}`·`scim_archive_drift_observed` �
 끝나지 않은 회수다 — 이고, `kind=missing` 은 상태가 요구하는데 장부에 없는 줄이다. **값은 복구 전 비교 시점의 수다.** 아카이빙은 남은 줄(`extra` 의 직원 줄)을 이어서 지우므로, 한 번 보인
 `extra` 는 대개 이미 지운 것이고 다음 아카이빙에서 0 으로 내려온다. 이어서 남아 있으면 지우지 못한 회수다. 쓰기 경로의 `scim.drift.detected` 는 이 복구가 올리지 않는다 — 같은 줄을 이 게이지가 센다.
 `observed` 는 이 인스턴스가 마지막으로 비교한 시각(epoch 초)이고, 비교한 적이 없으면 NaN 이다. **게이지는 인스턴스마다 따로다** — 하루 아카이빙은 클러스터에서 한 대만 돌려
-그 대만 갱신하고 다른 대는 낡은 값(시작 값 0)을 쥔다. 그래서 경보는 `observed` 가 최근인 계열만 본다. 아카이빙이 하루에 한 번 돌고 조금 늦을 수 있으니 "최근"의 창은 24시간이 아니라 여유를 둔 30시간이다.
+그 대만 갱신하고 다른 대는 낡은 값(시작 값 0)을 쥔다. 그래서 경보는 `observed` 가 최근인 계열만 본다. "최근"의 창은 **32시간**이다.
+
+**창의 셈 — 설정을 바꾸면 다시 한다.** `observed` 는 아카이빙이 비교를 마친 시각이다(저장·복구 전). 아카이빙은 하루 창(`sync.archive-cron` 기본 `0 0 3-8 * * *`, 서버 시간대)에서
+성공할 때까지 매시 시도하고, 한 번은 기한(`sync.job-timeout` 기본 30분) 안에 끝난다. 그래서 하루의 비교는 03:00~08:30 사이에 있다. 이웃한 두 날의 비교 간격은
+가장 짧으면 18.5시간(08:30 → 다음 날 03:00)이고, **가장 길면 29.5시간**이다 — 앞날 03:00 첫 시도에서 성공하고, 다음 날은 03~07시 시도가 모두 비교 전에 실패하거나
+재적재로 건너뛰어 08:00 마지막 시도가 08:30 직전에 비교한 경우다. 서버 시간대에 일광 절약 시간이 있으면 한 시간 더(30.5시간)다. 창 32시간은 이 최대를 넘고, 남은 1.5시간은
+스크레이프 간격과 인스턴스 사이 시계 어긋남 몫이다. 창은 이 최대보다 길고 아래 `for`(36시간)보다 짧아야 한다.
 
 ```promql
-# 아카이빙이 본 남은 회수가 이틀 연달아 보인다 — 30시간 안에 비교한 인스턴스의 계열만 모아 가장 큰 값을 본다(경보 규칙의 for: 36h)
+# 아카이빙이 본 남은 회수가 이틀 연달아 보인다 — 32시간 안에 비교한 인스턴스의 계열만 모아 가장 큰 값을 본다(경보 규칙의 for: 36h)
 max(
   scim_archive_drift{kind="extra"}
-    and on(instance) ((time() - scim_archive_drift_observed) < 30 * 3600)
+    and on(instance) ((time() - scim_archive_drift_observed) < 32 * 3600)
 ) > 0
 ```
 
-`observed` 에는 `kind` 라벨이 없어 `on(instance)` 로만 맞춘다. 창(30시간)을 `for`(36시간)보다 짧게 둔 까닭: 하루 보인 남은 줄은 그날 아카이빙이 지우므로 이 식은 길어야 약 30시간만 참이라 울리지 않는다 —
-다음 날 다른 인스턴스가 0 을 관찰해도 같다. 이틀 연달아 보이면 참이 끊기지 않아 36시간 뒤 울리고, 인스턴스가 번갈아 돌아도, 아카이빙이 24시간 주기에서 최대 약 6시간 늦어도 그렇다. 창이 `for` 이상이면 이미 지운 남은 줄에도 울린다.
+`observed` 에는 `kind` 라벨이 없어 `on(instance)` 로만 맞춘다. 창(32시간)을 `for`(36시간)보다 짧게 둔 까닭: 하루 보인 남은 줄은 그날 아카이빙이 지우므로, 다음 날 같은 인스턴스가 0 을
+관찰하면 곧바로, 다른 인스턴스가 관찰하면 그 계열이 창 밖으로 나갈 때(관찰 뒤 32시간) 이 식이 거짓이 된다 — 길어야 32시간만 참이라 울리지 않는다. 이틀 연달아 보이면 두 관찰의 간격(18.5~29.5시간)이
+창보다 짧아 참이 끊기지 않고 36시간 뒤 울린다 — 인스턴스가 번갈아 돌아도 그렇다. 창이 `for` 이상이면 이미 지운 남은 줄에도 울리고, 창이 간격의 최대보다 짧으면 이틀 연달아 보여도 참이 끊겨
+울리지 않을 수 있다.
 
 ```promql
 # 상태가 요구하는데 장부에 없는 줄이 이틀 연달아 보인다 — 위와 같은 모양, 같은 창(경보 규칙의 for: 36h)
 max(
   scim_archive_drift{kind="missing"}
-    and on(instance) ((time() - scim_archive_drift_observed) < 30 * 3600)
+    and on(instance) ((time() - scim_archive_drift_observed) < 32 * 3600)
 ) > 0
 ```
 
@@ -1040,16 +1151,39 @@ max(
 아카이빙이 아예 돌지 않는 것은 다음 식이 잡는다.
 
 ```promql
-# 어느 인스턴스도 30시간 안에 비교한 적이 없다 — 아카이빙이 멈췄다(경보 규칙의 for: 1h)
-time() - max(scim_archive_drift_observed) > 30 * 3600
+# 어느 인스턴스도 32시간 안에 비교한 적이 없다 — 아카이빙이 멈췄다(경보 규칙의 for: 1h). 창은 위 셈과 같다
+time() - max(scim_archive_drift_observed) > 32 * 3600
 
-# 값이 없다(NaN 이거나 계열이 사라짐) — 비교한 적이 한 번도 없다. 재시작 뒤 첫 아카이빙(기본 03:00)까지는 NaN 이므로 길게 둔다(경보 규칙의 for: 36h)
+# 값이 없다(NaN 이거나 계열이 사라짐) — 비교한 적이 한 번도 없다. 재시작 뒤 첫 비교(다음 하루 창, 늦으면 약 29.5시간 뒤)까지는 NaN 이므로 길게 둔다(경보 규칙의 for: 36h)
 absent(max(scim_archive_drift_observed) > 0)
 ```
 
-NaN 과의 비교는 늘 거짓이라 첫 식은 비교한 적이 없을 때 조용해진다 — 둘째 식이 막는다. 울리면 `GET /admin/sync/runs` 의 `trigger=ARCHIVE` 기록(실패하면 `FAILED`)을 본다.
+NaN 과의 비교는 늘 거짓이라 첫 식은 비교한 적이 없을 때 조용해진다 — 둘째 식이 막는다. 울리면 `GET /admin/sync/runs` 의 `trigger=ARCHIVE` 기록(실패하면 `FAILED`, 재적재 중이면 `ABORTED`)을 본다.
 
 **`scim.patch.ignored`(Counter, 태그 `attribute`)** — 직원 PATCH 가 받아서 버린 RFC 속성이다. 태그 `attribute` 는 RFC 이름 또는 `other` 다. 꾸준히 오르는 이름이 있으면 IdP 매핑에서 빼도 된다는 신호다.
+
+**`scim.revocations`(Counter, 태그 `kind`)** — SCIM 쓰기가 **커밋한** 회수다. Prometheus 이름은 `scim_revocations_total{kind}` 다. 상태 쓰기가 성공한 뒤에 세므로 장애 중
+IdP 재시도는 남은 것만 센다. 대량 회수(IdP 의 잘못된 매핑·대량 퇴사)를 막지 않고 보이게만 한다 — 시간 창으로 막으면 정당한 회수가 늦어진다.
+
+| `kind` | 언제 | 한 번에 |
+|---|---|---|
+| `deactivate` | `active` 가 true → false 로 저장됐다(삭제가 일부 실패해 비활성으로 남긴 경우 포함) | 1 |
+| `delete_user` | 직원 레코드를 지웠다 — 그때 활성이던 직원만 | 1 |
+| `remove_member` | 조직에서 직원 멤버를 뺀 것이 커밋됐다(PATCH remove, PUT·replace 로 빠짐) | 뺀 직원 멤버 수 |
+| `delete_group` | 조직 삭제가 커밋됐다 | 지운 직원 멤버 수 |
+
+**세는 단위가 직원 수와 꼭 같지는 않다.** 직원 하나를 두 번 세지 않는 것은 `deactivate` 와 `delete_user` 사이뿐이다(비활성으로 남긴 뒤 DELETE 재시도가 지우면 `delete_user` 로 세지 않는다).
+`remove_member`·`delete_group` 은 빠진 직원 멤버 줄을 세므로 이미 비활성인 직원(권한이 원래 없던 줄)도 들고, 비활성화된 직원이 뒤에 조직에서 빠지면 두 `kind` 에 함께 든다.
+하위 조직 멤버와, 직원을 지우며 함께 빠지는 소속은 세지 않는다.
+
+```promql
+# 예 — 지난 1시간의 회수가 지난 7일 시간당 평균의 5배를 넘고 100건 이상이다. 배수·바닥은 배포의 평소 값에 맞춘다
+sum(increase(scim_revocations_total[1h])) > 5 * sum(increase(scim_revocations_total[7d])) / (7 * 24)
+  and
+sum(increase(scim_revocations_total[1h])) > 100
+```
+
+인스턴스마다 따로 세므로 `sum` 으로 모은다. 울리면 IdP 프로비저닝 로그와 직원·조직의 변경 이력(`GET /admin/employees/{employeeId}/history`)으로 의도한 회수인지 본다.
 
 ## 불변 id 로 옮기기
 
@@ -1073,7 +1207,7 @@ NaN 과의 비교는 늘 거짓이라 첫 식은 비교한 적이 없을 때 조
 ```
 
 **규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 20개 클래스(`@ScaleTest`
-가 붙은 것)가 전체 시간의 대부분(약 9분)을 차지해서다. 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
+가 붙은 것)가 전체 시간의 대부분을 차지해서다 — `scaleTest` 한 번에 약 [[TODO-컨트롤러: 머지 전 scaleTest 실행 시간(분)]]분 걸렸다([[TODO-컨트롤러: 실행 날짜]] 실행). 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
 않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
 테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.
 

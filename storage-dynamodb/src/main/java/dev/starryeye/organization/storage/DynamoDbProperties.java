@@ -58,6 +58,9 @@ public class DynamoDbProperties {
     /** 락 획득 대기 한도. 넘으면 503 이 나가고 IdP 가 재시도한다. */
     private Duration lockAcquireTimeout = Duration.ofSeconds(3);
 
-    /** 재적재처럼 오래 쥐는 작업의 갱신 주기. TTL 보다 충분히 짧아야 한다. */
+    /**
+     * 락을 쥔 동안 리스를 갱신하는 주기 — SCIM 쓰기·재적재·동기화 모두 쓴다(큰 SCIM 쓰기도 TTL 을 넘겨 쥘 수 있다). TTL 보다 충분히 짧아야 한다 —
+     * 마지막으로 성공한 갱신을 보낸 때에서 주기 두 번 안에 다시 성공하지 못하면 멈춘다({@code LeaseKeeper}).
+     */
     private Duration lockRenewInterval = Duration.ofSeconds(10);
 }

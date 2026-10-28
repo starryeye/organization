@@ -16,9 +16,10 @@ package dev.starryeye.organization.ldap.strategy;
  * 상한이 숫자인 범위 옵션(<code>member;range=0-1499</code>)으로 온다. 둘의 구분은 우리가
  * 짐작하는 것이 아니라 <b>서버가 프로토콜로 알려주는 값</b>이다.
  *
- * <p>이것이 올라가면 그 회차의 동기화가 실패로 끝나고 <b>아무것도 쓰지 않는다.</b> 이전
- * 상태가 그대로 남고 다음 회차가 재시도한다 — LDAP 은 회차마다 전체를 다시 계산하므로 그렇게
- * 수렴한다(설계 §1.1). 틀린 상태를 쓰는 것보다 이번 회차를 건너뛰는 편이 낫다.
+ * <p>이것이 올라가면 <b>아무것도 쓰지 않는다.</b> 데이터 오류({@link DirectoryDataException})가 아니므로 일시 장애로 보고, 회차 안에서
+ * 디렉터리를 처음부터 다시 읽는다({@code ldap.max-retries}, 기본 5번 — {@code LdapDirectorySnapshotSource}). 그래도 끝까지 못 읽으면 그 회차가
+ * 실패로 끝나고, 이전 상태가 그대로 남아 다음 회차가 다시 읽는다 — LDAP 은 회차마다 전체를 다시 계산하므로 그렇게 수렴한다(설계 §1.1).
+ * 틀린 상태를 쓰는 것보다 이번 회차를 건너뛰는 편이 낫다.
  */
 public class IncompleteAttributeReadException extends RuntimeException {
 

@@ -28,8 +28,8 @@ public class ScimSyncProperties {
     private String archiveCron = "0 0 3-8 * * *";
 
     /**
-     * 만료 스냅샷 정리. 스냅샷은 테이블 TTL 을 쓰지 않으므로 이 정리가 보존 기간이 지난 스냅샷을 지우는 유일한 경로다. {@code "-"} 로 끄면 스냅샷(각 약 10만
-     * 아이템)이 끝없이 쌓인다. 하루 창(04~08시) 안에서 매시 시도한다 — 표지({@code scim-purge})·UTC 자정 조건은 {@link #archiveCron} 과 같다(정리는 멱등).
+     * 만료 스냅샷 정리. 스냅샷은 테이블 TTL 을 쓰지 않으므로 이 정리가 보존 기간이 지난 스냅샷을 지우는 유일한 경로다. {@code "-"} 로 끄면 스냅샷(10만 명 규모에서 한
+     * 벌에 압축 묶음 열몇 개·약 6MB)이 끝없이 쌓인다. 하루 창(04~08시) 안에서 매시 시도한다 — 표지({@code scim-purge})·UTC 자정 조건은 {@link #archiveCron} 과 같다(정리는 멱등).
      */
     private String purgeCron = "0 0 4-8 * * *";
 

@@ -1094,7 +1094,8 @@ class FullSyncUseCaseTest {
         assertThat(writer.deleted).containsExactly(막힌_직원);
         assertThat(run.deletedCount()).isEqualTo(1);
 
-        // then — 스냅샷을 남겨 표시가 꺼진다. 보류한 후보(user6~19)는 장부에 그대로 있으니 기준선에 들어, 다음 회차는 비교 경로에서 같은 판정을 받는다
+        // then — 스냅샷을 남겨 표시가 꺼진다. 보류한 후보(user6~19)는 장부에 그대로 있으니 기준선에 든다. 다음 회차는 비교 경로에서 남은 지우기 14건을
+        // 기준 수 19건에 대어 가드를 다시 본다 — 같은 판정이 아니라, 새로 막힌 계정이 없으면 비활성 부분이 비어 전부 보류다
         assertThat(snapshots.writing).isFalse();
         assertThat(snapshots.saved).hasSize(1);
         Set<RelationTuple> 남은_장부 = new HashSet<>(장부);
