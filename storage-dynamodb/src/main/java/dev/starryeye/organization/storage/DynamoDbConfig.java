@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
@@ -23,9 +24,18 @@ import java.time.Clock;
 @EnableConfigurationProperties(DynamoDbProperties.class)
 public class DynamoDbConfig {
 
+    /**
+     * 클라이언트 전체의 시간 한도를 건다(설계 2026-10-27 §6). 재시도 정책은 SDK 기본 그대로다 — 한도만 걸어,
+     * 스로틀이 이어질 때 호출 하나가 SDK 재시도로 수십 초 매달리지 않게 한다. 요청마다 더 짧은 한도를 줄 수 있다.
+     */
     @Bean(destroyMethod = "close")
     public DynamoDbAsyncClient dynamoDbAsyncClient(DynamoDbProperties properties) {
-        var builder = DynamoDbAsyncClient.builder().region(Region.of(properties.getRegion()));
+        var builder = DynamoDbAsyncClient.builder()
+                .region(Region.of(properties.getRegion()))
+                .overrideConfiguration(ClientOverrideConfiguration.builder()
+                        .apiCallAttemptTimeout(properties.getApiCallAttemptTimeout())
+                        .apiCallTimeout(properties.getApiCallTimeout())
+                        .build());
         if (properties.getEndpoint() != null && !properties.getEndpoint().isBlank()) {
             // DynamoDB Local 은 자격증명을 검증하지 않지만 SDK 가 존재 자체는 요구한다
             builder.endpointOverride(URI.create(properties.getEndpoint()))
