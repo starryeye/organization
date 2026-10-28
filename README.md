@@ -1211,7 +1211,7 @@ sum(increase(scim_revocations_total[1h])) > 100
 ```
 
 **규모 테스트는 기본 `test` 에서 빠진다.** 5,000명 조직도와 Testcontainers 를 띄우는 20개 클래스(`@ScaleTest`
-가 붙은 것)가 전체 시간의 대부분을 차지해서다 — `scaleTest` 한 번에 약 [[TODO-컨트롤러: 머지 전 scaleTest 실행 시간(분)]]분 걸렸다([[TODO-컨트롤러: 실행 날짜]] 실행). 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
+가 붙은 것)가 전체 시간의 대부분을 차지해서다 — `scaleTest` 한 번에 약 16~19분 걸렸다(2026-10-28 머지 전 두 번 실행, 89건). 그래서 `./gradlew build`·`check` 도 규모 테스트를 돌리지
 않는다. **대신 브랜치를 머지하기 전에는 `scaleTest` 까지 반드시 돌린다** — CI 가 아직 없어 이 약속이 규모
 테스트가 도는 유일한 자리다. 새 규모 테스트를 만들면 클래스에 `@ScaleTest` 를 붙인다.
 
