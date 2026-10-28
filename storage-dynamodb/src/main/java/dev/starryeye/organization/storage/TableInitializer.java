@@ -78,6 +78,11 @@ public class TableInitializer implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() {
+        // 이름 기본값이 없다 — 키를 빠뜨린 배포가 describe 에서 null 로 터지지 않고 무엇이 비었는지 말하며 멈춘다
+        String table = properties.getTableName();
+        if (table == null || table.isBlank()) {
+            throw new IllegalStateException("dynamodb.table-name 이 비어 있다 — 설정에 테이블 이름을 적는다");
+        }
         ensureTable().block();
     }
 

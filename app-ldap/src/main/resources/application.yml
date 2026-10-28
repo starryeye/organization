@@ -74,6 +74,9 @@ ldap:
 openfga:
   api-url: http://localhost:8080
   store-name: organization
+  # 기동 때 store 가 없으면 만든다. 로컬만 true — 운영(application-prod.yml)은 false 라 이름 오타가 빈 store 를 새로 만들지 않고 기동을 멈춘다.
+  # 켜든 끄든 인가 모델은 최신과 내용이 다를 때만 쓴다
+  create-store: true
   write-batch-size: 100
   max-retries: 3
   request-concurrency: 4

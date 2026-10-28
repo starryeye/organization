@@ -172,6 +172,26 @@ class TableInitializerTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("테이블 이름이 비어 있으면 기동을 멈춘다 — 이름 기본값이 없어 키를 빠뜨린 배포가 엉뚱한 이름으로 뜨지 않는다")
+    void 테이블_이름이_비어_있으면_기동을_멈춘다() {
+        // given — 이름을 적지 않은 설정과 빈칸만 적은 설정. 생성은 켜져 있어도 이름 검사가 먼저다
+        var 없음 = new DynamoDbProperties();
+        없음.setCreateTableOnStartup(true);
+        var 빈칸 = new DynamoDbProperties();
+        빈칸.setTableName("  ");
+        빈칸.setCreateTableOnStartup(true);
+
+        // when, then
+        assertThat(없음.getTableName()).as("클래스 기본값이 없어야 이름을 빠뜨린 배포가 조용히 지나가지 않는다").isNull();
+        assertThatThrownBy(() -> new TableInitializer(client, 없음).afterPropertiesSet())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("dynamodb.table-name 이 비어 있다 — 설정에 테이블 이름을 적는다");
+        assertThatThrownBy(() -> new TableInitializer(client, 빈칸).afterPropertiesSet())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("dynamodb.table-name 이 비어 있다 — 설정에 테이블 이름을 적는다");
+    }
+
+    @Test
     @DisplayName("속성 기본값은 테이블 생성도 보호 요구도 꺼짐이다 — 켜는 곳은 yml 이 정한다")
     void 속성_기본값은_둘_다_꺼짐이다() {
         // given, when

@@ -19,3 +19,8 @@ logging:
 dynamodb:
   create-table-on-startup: false
   require-protection: true
+
+# 운영 OpenFGA store 도 앱이 만들지 않는다(설계 2026-10-27 §4). 처음 설치라면 create-store=true 로 한 번 띄운다.
+# 없으면 기동을 멈춘다 — 이름 오타가 빈 store 를 새로 만들어 쓰기가 엉뚱한 곳으로 가지 않는다
+openfga:
+  create-store: false

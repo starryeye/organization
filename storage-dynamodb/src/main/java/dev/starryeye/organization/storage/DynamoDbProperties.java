@@ -14,7 +14,12 @@ public class DynamoDbProperties {
     /** DynamoDB Local 주소. 비우면 실제 AWS 엔드포인트를 쓴다 */
     private String endpoint;
     private String region = "ap-northeast-2";
-    private String tableName = "organization";
+
+    /**
+     * 기본값이 없다(설계 2026-10-27 §4) — 키를 빠뜨리거나 비워 두면 {@link TableInitializer} 가 기동을 멈춘다. 두 앱의
+     * {@code application.yml} 이 각자 값을 적는다.
+     */
+    private String tableName;
 
     /**
      * 기동 때 테이블이 없으면 만든다(설계 2026-10-27 §3). 기본값은 꺼짐이다 — 이름 오타가 빈 테이블을 새로 만들어

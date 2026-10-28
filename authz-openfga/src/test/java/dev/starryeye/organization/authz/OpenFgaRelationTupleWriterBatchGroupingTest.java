@@ -37,6 +37,8 @@ class OpenFgaRelationTupleWriterBatchGroupingTest {
     private final OpenFgaProperties properties = new OpenFgaProperties();
 
     private OpenFgaRelationTupleWriter writer(int 한도) {
+        // 네트워크를 타지 않는 시험이지만, 이름 기본값이 없어 부트스트래퍼를 만들려면 이름이 있어야 한다
+        properties.setStoreName("batch-grouping-test");
         properties.setWriteBatchSize(한도);
         return new OpenFgaRelationTupleWriter(new StoreBootstrapper(properties), properties);
     }

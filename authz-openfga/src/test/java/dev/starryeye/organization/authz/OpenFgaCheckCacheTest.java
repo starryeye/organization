@@ -37,6 +37,7 @@ class OpenFgaCheckCacheTest {
         OpenFgaProperties properties = new OpenFgaProperties();
         properties.setApiUrl("http://" + CACHED_OPENFGA.getHost() + ":" + CACHED_OPENFGA.getMappedPort(8080));
         properties.setStoreName("cache-test-" + UUID.randomUUID());
+        properties.setCreateStore(true);
         properties.setWriteBatchSize(100);
         properties.setMaxRetries(3);
         bootstrapper = new StoreBootstrapper(properties);

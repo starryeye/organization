@@ -1,9 +1,12 @@
 package dev.starryeye.organization.authz;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
+import dev.openfga.sdk.api.model.AuthorizationModel;
 import dev.openfga.sdk.api.model.CreateStoreRequest;
 import dev.openfga.sdk.api.model.Store;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
@@ -15,6 +18,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -25,6 +29,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>앱의 어느 곳도 storeId 나 modelId 를 알지 못한다. 설정에는 store-name 만 있고,
  * write 호출에는 authorization_model_id 를 넘기지 않아 서버가 최신 모델을 쓴다.
  *
+ * <p>store 는 {@code openfga.create-store} 가 켜져 있을 때만 만든다(설계 2026-10-27 §4). 꺼져 있는데 그 이름의 store 가 없으면
+ * {@link StoreNotFoundException} 이다 — 이름 오타가 빈 store 를 새로 만들어 쓰기가 엉뚱한 곳으로 가지 않는다. 인가 모델은 최신과
+ * 내용이 다를 때만 쓴다 — 기동마다 같은 모델 버전이 쌓이지 않는다.
+ *
  * <p><b>store 번호는 한 번 만들면 바뀌지 않는다(설계 2026-09-29 §2).</b> 재적재도 store 를 지우고 다시 만들지 않는다 — 장부 안에서
  * 청소한다. 이 클래스가 store 를 지우는 경우는 하나뿐이다: 동시에 처음 뜬 인스턴스끼리 같은 이름 store 를 둘 만들었을 때 늦게 만든
  * 쪽이 자기 것을 지운다({@link #convergeAfterCreate}).
@@ -33,6 +41,15 @@ import java.util.concurrent.atomic.AtomicReference;
 public class StoreBootstrapper {
 
     private static final String MODEL_RESOURCE = "authorization-model.json";
+
+    /**
+     * 모델 비교용. 서버가 돌려준 모델과 우리 요청을 같은 매퍼로 JSON 트리로 바꿔 견준다 — 빈 칸과 없는 칸이 같아진다.
+     * (비교가 틀려 다르다고 읽으면 지금처럼 쓰게 되므로 안전한 쪽으로 틀린다.)
+     */
+    private static final ObjectMapper 모델_비교용 = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_EMPTY);
+
+    /** 모델에서 견주는 칸. {@code id} 는 서버가 매기므로 견주지 않는다. */
+    private static final List<String> 견주는_칸 = List.of("schema_version", "type_definitions", "conditions");
 
     /** 같은 이름 store 가 여럿일 때 이기는 쪽: 가장 먼저 만들어진 것, 같으면 id 사전순. */
     private static final Comparator<Store> 먼저_만든_순 = Comparator
@@ -57,7 +74,7 @@ public class StoreBootstrapper {
 
     /**
      * 진행 중인 해석을 공유하기 위한 in-flight Mono. resolveStore() 를 동시에 여러 곳에서
-     * 호출해도 실제 찾기 → 만들기 → 수렴 → 모델 등록 파이프라인은 한 번만 구성/구독되고, 모든 호출자가 같은 결과를 공유한다.
+     * 호출해도 실제 찾기 → (생성이 켜져 있으면) 만들기 → 수렴 → 모델 등록 파이프라인은 한 번만 구성/구독되고, 모든 호출자가 같은 결과를 공유한다.
      *
      * <p>성공하면 storeIdRef 가 채워져 이후 호출은 이 필드를 아예 거치지 않는다(빠른 경로).
      * 실패하면 doFinally 에서 이 필드를 비워, 다음 호출이 캐시된 에러를 영원히 받는 대신
@@ -65,12 +82,18 @@ public class StoreBootstrapper {
      */
     private final AtomicReference<Mono<String>> resolutionRef = new AtomicReference<>();
 
+    /** @throws IllegalStateException {@code openfga.store-name} 이 비어 있을 때 — 이름 기본값이 없다 */
     public StoreBootstrapper(OpenFgaProperties properties) {
+        String name = properties.getStoreName();
+        if (name == null || name.isBlank()) {
+            throw new IllegalStateException("openfga.store-name 이 비어 있다 — 설정에 store 이름을 적는다");
+        }
         this.properties = properties;
     }
 
     /**
-     * 이미 해석했으면 캐시된 storeId 를 준다. 없으면 찾고, 그래도 없으면 만든다. 쓰기·Check·장부 훑기가 모두 이것을 탄다 —
+     * 이미 해석했으면 캐시된 storeId 를 준다. 없으면 찾고, 그래도 없으면 {@code openfga.create-store} 가 켜져 있을 때만 만든다 —
+     * 꺼져 있으면 {@link StoreNotFoundException} 이다. 쓰기·Check·장부 훑기가 모두 이것을 탄다 —
      * 시작 때 OpenFGA 가 안 닿았어도 첫 요청 때 닿으면 그때 준비된다(점검 M6).
      */
     public Mono<String> resolveStore() {
@@ -113,7 +136,7 @@ public class StoreBootstrapper {
         }
 
         Mono<String> created = findStoreIdByName()
-                .switchIfEmpty(Mono.defer(() -> createStore().flatMap(this::convergeAfterCreate)))
+                .switchIfEmpty(Mono.defer(this::없으면_만들거나_멈춘다))
                 .flatMap(this::attachAndWriteModel)
                 .doFinally(signal -> resolutionRef.set(null))
                 .cache();
@@ -122,6 +145,19 @@ public class StoreBootstrapper {
             return created;
         }
         return resolutionRef.get();
+    }
+
+    /**
+     * 찾기가 비었을 때. 생성이 켜져 있으면 만들고, 꺼져 있으면 {@link StoreNotFoundException} 으로 멈춘다 — 목록 조회가 성공했는데
+     * 그 이름이 없다는 뜻이라 일시 장애가 아니고 설정 오류다(이름 오타이거나 처음 설치).
+     */
+    private Mono<String> 없으면_만들거나_멈춘다() {
+        if (!properties.isCreateStore()) {
+            return Mono.error(new StoreNotFoundException(
+                    "OpenFGA store %s 이 없다 — 처음 설치라면 openfga.create-store=true 로 한 번 띄운다"
+                            .formatted(properties.getStoreName())));
+        }
+        return createStore().flatMap(this::convergeAfterCreate);
     }
 
     /**
@@ -185,8 +221,8 @@ public class StoreBootstrapper {
         return listStoresNamed().flatMap(this::resolveUniqueMatch);
     }
 
-    /** 이 이름의 store 전부. */
-    private Mono<List<Store>> listStoresNamed() {
+    /** 이 이름의 store 전부. 패키지 전용 — 시험이 덮어 첫 목록 조회를 실패시킨다. */
+    Mono<List<Store>> listStoresNamed() {
         return listAllStores(null, new ArrayList<>())
                 .map(all -> all.stream()
                         .filter(store -> properties.getStoreName().equals(store.getName()))
@@ -257,27 +293,79 @@ public class StoreBootstrapper {
     }
 
     /**
-     * 인가 모델을 쓴 <b>뒤에만</b> storeId 를 기억한다(점검 M6). 먼저 기억하면 모델 쓰기가 실패해도 캐시가 남아, 다음
+     * 인가 모델을 맞춘 <b>뒤에만</b> storeId 를 기억한다(점검 M6). 먼저 기억하면 모델 쓰기가 실패해도 캐시가 남아, 다음
      * {@link #resolveStore()} 가 캐시를 보고 다시 시도하지 않는다 — 이 프로세스는 재시작 전까지 모델 없는 store 에 쓰고 묻는다.
+     *
+     * <p><b>모델은 최신과 내용이 다를 때만 쓴다</b>(설계 2026-10-27 §4). 모델은 쓸 때마다 새 버전이 되고 지워지지 않아, 내용이 같아도
+     * 기동마다 쓰면 버전이 끝없이 쌓인다. 최신 모델을 읽어 견주고, 없거나 읽기가 오류거나 다르면 쓴다. 쓰든 안 쓰든 끝나면 번호를
+     * 기억한다. ({@code ReadLatestAuthorizationModel} 은 이 프로젝트가 제한하는 튜플 Read 가 아니다.)
      *
      * <p>client 는 {@link #clientFor} 의 것을 쓴다. Check 도 요청마다 이 준비 과정을 타므로, 모델 쓰기가 계속 실패하는 동안 시도마다
      * 새로 만들면 HTTP client 가 시도 수만큼 쌓인다.
      */
     private Mono<String> attachAndWriteModel(String storeId) {
         return Mono.fromCallable(() -> clientFor(storeId))
-                .flatMap(client -> Mono.fromFuture(() -> {
-                            try {
-                                return client.writeAuthorizationModel(authorizationModel());
-                            } catch (Exception e) {
-                                throw new IllegalStateException("인가 모델 등록 실패", e);
-                            }
-                        })
-                        .doOnNext(response -> {
-                            log.info("OpenFGA 인가 모델을 등록했다");
+                .flatMap(client -> 모델을_맞춘다(client)
+                        .then(Mono.fromRunnable(() -> {
                             clientRef.set(client);
                             storeIdRef.set(storeId);
-                        }))
+                        })))
                 .thenReturn(storeId);
+    }
+
+    /** 최신 모델이 우리 모델과 같으면 그대로 두고, 아니면 쓴다. */
+    private Mono<Void> 모델을_맞춘다(OpenFgaClient client) {
+        WriteAuthorizationModelRequest 우리 = authorizationModel();
+        return 써야_하는가(client, 우리).flatMap(써야 -> {
+            if (써야) {
+                return 모델을_쓴다(client, 우리);
+            }
+            log.info("OpenFGA 인가 모델이 최신과 같아 쓰지 않았다");
+            return Mono.empty();
+        });
+    }
+
+    /** 최신 모델을 읽어 우리 모델과 견준다. 모델이 없거나 읽기가 오류면 쓴다 — 견주지 못했으니 지금처럼 쓰는 쪽이 안전하다. */
+    private Mono<Boolean> 써야_하는가(OpenFgaClient client, WriteAuthorizationModelRequest 우리) {
+        return Mono.fromFuture(() -> {
+                    try {
+                        return client.readLatestAuthorizationModel();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("최신 인가 모델 조회 실패", e);
+                    }
+                })
+                .map(response -> !같은_모델인가(response.getAuthorizationModel(), 우리))
+                .onErrorResume(error -> {
+                    log.warn("최신 인가 모델을 읽지 못해 견주지 않고 쓴다", error);
+                    return Mono.just(true);
+                });
+    }
+
+    private Mono<Void> 모델을_쓴다(OpenFgaClient client, WriteAuthorizationModelRequest 우리) {
+        return Mono.fromFuture(() -> {
+                    try {
+                        return client.writeAuthorizationModel(우리);
+                    } catch (Exception e) {
+                        throw new IllegalStateException("인가 모델 등록 실패", e);
+                    }
+                })
+                .doOnNext(response -> log.info("OpenFGA 인가 모델을 등록했다"))
+                .then();
+    }
+
+    /**
+     * 서버의 최신 모델과 우리 요청이 {@code schema_version}·{@code type_definitions}·{@code conditions} 세 칸에서 같은가.
+     * 둘을 같은 매퍼로 JSON 트리로 바꿔 견주므로 없는 칸은 빈 칸과 같다. 모델이 없으면 다르다.
+     *
+     * <p>패키지 전용 — 견주는 규칙을 시험이 직접 본다.
+     */
+    static boolean 같은_모델인가(AuthorizationModel 최신, WriteAuthorizationModelRequest 우리) {
+        if (최신 == null) {
+            return false;
+        }
+        JsonNode 최신_트리 = 모델_비교용.valueToTree(최신);
+        JsonNode 우리_트리 = 모델_비교용.valueToTree(우리);
+        return 견주는_칸.stream().allMatch(칸 -> Objects.equals(최신_트리.get(칸), 우리_트리.get(칸)));
     }
 
     /** 등록할 인가 모델. 패키지 전용 — 모델 등록이 실패하는 경로를 테스트가 흉내 낸다. */

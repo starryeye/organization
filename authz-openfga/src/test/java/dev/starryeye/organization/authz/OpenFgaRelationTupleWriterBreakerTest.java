@@ -444,6 +444,7 @@ class OpenFgaRelationTupleWriterBreakerTest {
     void 넘치는_직원의_지우기가_실패하면_쓰기_조각은_보내지_않는다() {
         // given — 한도 3. kim 은 지우기 2 + 쓰기 3 이라 나뉘고, lee 는 쓰기 1. kim 의 지우기가 든 요청은 실패한다
         OpenFgaProperties properties = new OpenFgaProperties();
+        properties.setStoreName("breaker-test");
         properties.setWriteBatchSize(3);
         var writer = new OpenFgaRelationTupleWriter(new StoreBootstrapper(properties), properties);
         Set<RelationTuple> kim의_쓰기 = Set.of(RelationTuple.directMember("kim", "A"), RelationTuple.directMember("kim", "B"),

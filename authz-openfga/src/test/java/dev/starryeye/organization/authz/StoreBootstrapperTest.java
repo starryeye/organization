@@ -2,6 +2,7 @@ package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
+import dev.openfga.sdk.api.model.TypeDefinition;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         OpenFgaProperties freshProperties = new OpenFgaProperties();
         freshProperties.setApiUrl(properties.getApiUrl());
         freshProperties.setStoreName("concurrent-" + UUID.randomUUID());
+        freshProperties.setCreateStore(true);
         freshProperties.setWriteBatchSize(properties.getWriteBatchSize());
         freshProperties.setMaxRetries(properties.getMaxRetries());
         StoreBootstrapper freshBootstrapper = new StoreBootstrapper(freshProperties);
@@ -205,6 +207,73 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         // then
         assertThat(new HashSet<>(번호들)).as("두 인스턴스가 같은 장부를 써야 한다").hasSize(1);
         assertThat(countStoresNamed(속성.getStoreName())).isEqualTo(1);
+    }
+
+    // ---------- store 생성 스위치·이름 필수·모델 비교(설계 2026-10-27 D2) ----------
+
+    @Test
+    @DisplayName("같은 store 로 두 번 부트스트랩하면 인가 모델은 하나다 — 기동마다 모델 버전이 쌓이지 않는다")
+    void 같은_store_로_두_번_부트스트랩하면_모델은_하나다() {
+        // given — 시험 도우미가 이미 store 를 만들고 모델을 한 번 썼다
+        String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+
+        // when — 재시작한 앱처럼 새 부트스트래퍼가 같은 이름을 다시 해석한다
+        String 다시 = new StoreBootstrapper(properties).resolveStore().block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(다시).isEqualTo(번호);
+        assertThat(모델_수(번호)).as("내용이 같은 모델을 다시 쓰면 기동마다 버전이 하나씩 쌓인다").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("최신 모델이 우리 모델과 다르면 새로 쓴다")
+    void 모델이_다르면_새로_쓴다() throws Exception {
+        // given — 누군가 타입 하나짜리 다른 모델을 최신으로 써 두었다(도우미가 쓴 것과 합쳐 둘)
+        String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+        OpenFgaClient raw = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(번호));
+        raw.writeAuthorizationModel(new WriteAuthorizationModelRequest()
+                .schemaVersion("1.1")
+                .typeDefinitions(List.of(new TypeDefinition().type("user")))).get();
+        assertThat(모델_수(번호)).isEqualTo(2);
+
+        // when
+        new StoreBootstrapper(properties).resolveStore().block(Duration.ofSeconds(10));
+
+        // then — 우리 모델이 최신이 되도록 하나 더 썼다
+        assertThat(모델_수(번호)).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("새 이름인데 생성이 꺼져 있으면 오류이고 store 를 만들지 않는다 — 이름 오타가 빈 store 를 새로 만들지 않는다")
+    void 새_이름에_생성이_꺼져_있으면_오류이고_store_를_만들지_않는다() {
+        // given — 운영 기본값(생성 꺼짐)과 이 컨테이너에 없는 이름
+        OpenFgaProperties 속성 = 새_속성("no-create-");
+        속성.setCreateStore(false);
+
+        // when, then
+        assertThatThrownBy(() -> new StoreBootstrapper(속성).resolveStore().block(Duration.ofSeconds(10)))
+                .isInstanceOf(StoreNotFoundException.class)
+                .hasMessage("OpenFGA store %s 이 없다 — 처음 설치라면 openfga.create-store=true 로 한 번 띄운다"
+                        .formatted(속성.getStoreName()));
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
+    }
+
+    @Test
+    @DisplayName("store 이름이 비어 있으면 부트스트래퍼를 만들 수 없다 — 이름 기본값이 없다")
+    void store_이름이_비어_있으면_만들_수_없다() {
+        // given — 이름을 적지 않은 설정과 빈칸만 적은 설정
+        OpenFgaProperties 없음 = new OpenFgaProperties();
+        OpenFgaProperties 빈칸 = new OpenFgaProperties();
+        빈칸.setStoreName("  ");
+
+        // when, then
+        assertThat(없음.getStoreName()).as("클래스 기본값이 없어야 이름을 빠뜨린 배포가 조용히 지나가지 않는다").isNull();
+        assertThatThrownBy(() -> new StoreBootstrapper(없음))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("openfga.store-name 이 비어 있다 — 설정에 store 이름을 적는다");
+        assertThatThrownBy(() -> new StoreBootstrapper(빈칸))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("openfga.store-name 이 비어 있다 — 설정에 store 이름을 적는다");
     }
 
     // ---------- 모델 등록 뒤에만 번호를 기억한다(점검 M6) ----------
