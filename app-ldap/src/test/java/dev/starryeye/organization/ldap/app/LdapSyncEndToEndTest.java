@@ -38,6 +38,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -419,6 +420,24 @@ class LdapSyncEndToEndTest {
                 .expectBody()
                 .jsonPath("$.items[0].cause.kind").isEqualTo("LEDGER_ALIGNMENT")
                 .jsonPath("$.items[0].revoked[0]").isEqualTo("user:ghost direct_member group:DEV001");
+    }
+
+    // ---------- 프로브 (설계 2026-10-27 §7) ----------
+
+    @Test
+    @Order(15)
+    @DisplayName("liveness·readiness 프로브는 외부 의존을 보지 않는다 — LDAP·OpenFGA·DynamoDB 장애가 재시작을 부르지 않는다")
+    void 프로브는_외부_의존을_보지_않는다() {
+        // given, when, then — 외부 의존의 상태는 /actuator/health 본 그룹에서 본다(순서 7)
+        for (String 경로 : List.of("/actuator/health/liveness", "/actuator/health/readiness")) {
+            client.get().uri(경로).exchange()
+                    .expectStatus().isOk()
+                    .expectBody()
+                    .jsonPath("$.status").isEqualTo("UP")
+                    .jsonPath("$.components.openFga").doesNotExist()
+                    .jsonPath("$.components.dynamoDb").doesNotExist()
+                    .jsonPath("$.components.ldap").doesNotExist();
+        }
     }
 
     private void 동기화한다() {

@@ -339,4 +339,59 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         assertThat(countStoresNamed(속성.getStoreName())).isEqualTo(1);
         assertThat(부트스트래퍼.client()).isNotNull();
     }
+
+    // ---------- findExistingStore: 캐시한 store 를 실제로 묻는다(설계 2026-10-27 §7) ----------
+
+    @Test
+    @DisplayName("해석한 store 가 있으면 findExistingStore 는 그 번호를 준다")
+    void 해석한_store_가_있으면_findExistingStore_가_그_번호를_준다() {
+        // given — OpenFGA를_준비한다() 가 이미 해석했다. 캐시한 번호가 있다
+        String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+
+        // when
+        String 찾은_번호 = bootstrapper.findExistingStore().block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(찾은_번호).isEqualTo(번호);
+    }
+
+    @Test
+    @DisplayName("해석한 store 가 지워지면 findExistingStore 가 빈다 — 캐시한 번호를 묻지 않고 돌려주지 않는다")
+    void 해석한_store_가_지워지면_findExistingStore_가_빈다() throws Exception {
+        // given — 이미 해석했고(캐시한 번호가 있다), 누군가 부트스트래퍼를 거치지 않고 그 store 를 지웠다
+        String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+        new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(번호)).deleteStore().get();
+
+        // when
+        String 찾은_번호 = bootstrapper.findExistingStore().block(Duration.ofSeconds(10));
+
+        // then — 캐시를 믿고 번호를 주면 지운 store 도 있다고 읽힌다
+        assertThat(찾은_번호).isNull();
+    }
+
+    @Test
+    @DisplayName("store 를 묻는 호출이 not found 가 아닌 오류로 끝나면 빈 결과가 아니라 오류다 — 닿지 않는 OpenFGA 를 store 가 없다고 읽지 않는다")
+    void 그_밖의_오류면_findExistingStore_는_오류다() {
+        // given — 해석을 마친 뒤로는 닿지 않는 주소를 보는 client 를 주는 부트스트래퍼
+        AtomicBoolean 닿지_않는다 = new AtomicBoolean(false);
+        StoreBootstrapper 부트스트래퍼 = new StoreBootstrapper(새_속성("unreachable-")) {
+            @Override
+            public OpenFgaClient clientFor(String storeId) {
+                if (!닿지_않는다.get()) {
+                    return super.clientFor(storeId);
+                }
+                try {
+                    return new OpenFgaClient(new ClientConfiguration().apiUrl("http://127.0.0.1:1").storeId(storeId));
+                } catch (Exception e) {
+                    throw new IllegalStateException("테스트용 client 생성 실패", e);
+                }
+            }
+        };
+        부트스트래퍼.resolveStore().block(Duration.ofSeconds(10));
+        닿지_않는다.set(true);
+
+        // when, then — 오류가 그대로 나온다. 빈 결과였다면 block 은 null 을 주고 던지지 않는다
+        assertThatThrownBy(() -> 부트스트래퍼.findExistingStore().block(Duration.ofSeconds(10)))
+                .isInstanceOf(RuntimeException.class);
+    }
 }

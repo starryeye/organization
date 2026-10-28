@@ -57,6 +57,10 @@ management:
       # openfga.api-url, dynamodb.table-name, Health.down(error) 의 예외 메시지가
       # 그대로 공개된다.
       show-details: when-authorized
+      # liveness·readiness 그룹은 부트 기본 구성 그대로 둔다 — 외부 의존(OpenFGA·DynamoDB)을 넣지 않는다. 그 장애가 재시작을 부르면
+      # 안 되기 때문이다. 외부 의존은 /actuator/health 본 그룹에서 본다.
+      probes:
+        enabled: true
 
   tracing:
     sampling:

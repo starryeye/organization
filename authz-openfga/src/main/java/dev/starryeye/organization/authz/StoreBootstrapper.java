@@ -127,21 +127,38 @@ public class StoreBootstrapper {
     }
 
     /**
-     * 헬스체크 전용 read-only 조회. 캐시된 storeId 가 있으면 그것을 쓰고, 없으면 이름으로 store 존재 여부만 확인한다 —
-     * {@link #resolveStore()} 와 달리 store 를 만들거나 인가 모델을 쓰지 않는다.
+     * 헬스체크 전용 read-only 조회. 캐시한 storeId 가 있으면 {@code GetStore} 로 <b>실제로 묻고</b>, 없으면 이름으로 store 존재 여부만
+     * 확인한다 — {@link #resolveStore()} 와 달리 store 를 만들거나 인가 모델을 쓰지 않는다(설계 2026-10-27 §7).
+     *
+     * <p>캐시한 번호를 묻지 않고 돌려주면 OpenFGA 가 죽거나 store 가 지워진 뒤에도 헬스가 UP 이다. 그래서 캐시가 있어도 묻는다.
+     * {@code GetStore} 가 404({@code FgaApiNotFoundError}) 면 store 가 없는 것이라 {@link Mono#empty()} 이고, 그 밖의 오류는 오류로 그대로
+     * 낸다 — 닿지 않는 것을 "없다"로 읽지 않는다. ({@code GetStore} 는 이 프로젝트가 제한하는 튜플 Read 가 아니다.)
      *
      * <p>헬스 프로브는 관찰만 해야지 인프라를 만들면 안 된다. 인증 없는
      * {@code GET /actuator/health} 는 k8s 프로브·로드밸런서·오타난 {@code openfga.store-name}
      * 설정 등 무엇이든 호출할 수 있는데, 이 경로가 {@link #resolveStore()} 를 타면 오타난 이름으로 빈 store 를 새로 만든 채
-     * 조용히 UP 을 보고하게 된다. store 가 없으면 {@link Mono#empty()} 를 그대로 돌려주고, DOWN 으로의 번역은 호출자(헬스 인디케이터)
-     * 몫이다.
+     * 조용히 UP 을 보고하게 된다. store 가 없으면 {@link Mono#empty()} 를 그대로 돌려주고, DOWN 으로의 번역과 2초 상한은 호출자(헬스
+     * 인디케이터) 몫이다.
      */
     public Mono<String> findExistingStore() {
         String cached = storeIdRef.get();
         if (cached != null) {
-            return Mono.just(cached);
+            return 캐시한_store_를_묻는다(cached);
         }
         return findStoreIdByName();
+    }
+
+    /** {@code GetStore} 로 그 번호의 store 가 아직 있는지 묻는다. 404 면 빈 Mono, 그 밖의 오류는 오류다. */
+    private Mono<String> 캐시한_store_를_묻는다(String storeId) {
+        return Mono.fromFuture(() -> {
+                    try {
+                        return clientFor(storeId).getStore();
+                    } catch (Exception e) {
+                        throw new IllegalStateException("store 조회 실패", e);
+                    }
+                })
+                .thenReturn(storeId)
+                .onErrorResume(OpenFgaErrors::없는_store_인가, error -> Mono.empty());
     }
 
     /**
