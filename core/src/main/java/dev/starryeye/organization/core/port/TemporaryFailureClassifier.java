@@ -1,8 +1,6 @@
-package dev.starryeye.organization.scim;
+package dev.starryeye.organization.core.port;
 
 import com.fasterxml.jackson.core.JacksonException;
-import dev.starryeye.organization.core.port.TemporaryFailureException;
-import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -17,6 +15,8 @@ import java.util.concurrent.TimeoutException;
  * 예외가 일시 장애(다시 보내면 나을 수 있다)인지 원인 사슬을 따라가며 가른다(설계 2026-10-05 §3.3). core 표지 → 어댑터 인식기 → I/O 실패·시간 초과 순으로 본다.
  * I/O 규칙은 Jackson 의 해석·매핑 실패({@code JacksonException}, {@code IOException} 하위)를 뺀다 — 다시 보내도 같은 결과다.
  * 어디에도 없으면 일시 장애가 아니다 — 500(버그).
+ *
+ * <p>SCIM 라우터(connector-scim)와 관리 API 예외 처리기(admin-api) 두 HTTP 층이 같은 분류기를 쓴다(설계 2026-10-27 §10). 둘이 모두 core 에 기대므로 자리는 core 다.
  */
 public final class TemporaryFailureClassifier {
 

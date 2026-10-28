@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.admin.AdminApi;
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
@@ -28,6 +29,7 @@ import java.util.function.Supplier;
  * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다. 락은 클러스터 전체에서 하나라 다른 인스턴스가 쥐고 있으면 409 다(설계 2026-09-30 §3).
  */
 @Slf4j
+@AdminApi
 @RestController
 @RequestMapping("/admin/sync")
 @RequiredArgsConstructor

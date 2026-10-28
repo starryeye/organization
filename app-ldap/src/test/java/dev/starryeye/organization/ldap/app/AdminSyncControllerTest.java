@@ -1,24 +1,31 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.admin.AdminExceptionHandler;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.storage.DynamoDbTemporaryFailures;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
+import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -39,7 +46,10 @@ class AdminSyncControllerTest {
         rebuild = Mockito.mock(RebuildUseCase.class);
         runs = Mockito.mock(SyncRunRepository.class);
         client = WebTestClient.bindToController(
-                new AdminSyncController(fullSync, rebuild, runs, new SyncMetrics(new SimpleMeterRegistry()))).build();
+                        new AdminSyncController(fullSync, rebuild, runs, new SyncMetrics(new SimpleMeterRegistry())))
+                .controllerAdvice(new AdminExceptionHandler(
+                        new TemporaryFailureClassifier(List.of(new DynamoDbTemporaryFailures()))))
+                .build();
     }
 
     private static SyncRun 도는실행(SyncTrigger trigger) {
@@ -101,18 +111,51 @@ class AdminSyncControllerTest {
                 .thenReturn(Mono.error(new LockUnavailableException("다른 인스턴스가 변경 락을 쥐고 있습니다")));
 
         // when, then
-        client.post().uri("/admin/sync/full").exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
-        client.post().uri("/admin/sync/rebuild").exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isEqualTo(HttpStatus.CONFLICT)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().doesNotExist("Retry-After")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(409)
+                .jsonPath("$.detail").isEqualTo("다른 동기화·재적재가 진행 중입니다");
+        client.post().uri("/admin/sync/rebuild").exchange()
+                .expectStatus().isEqualTo(HttpStatus.CONFLICT)
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("다른 동기화·재적재가 진행 중입니다");
     }
 
     @Test
-    @DisplayName("유스케이스가 Mono 를 만들기도 전에 던져도 매달리지 않고 5xx 다")
+    @DisplayName("실행 기록을 열지 못한 일시 장애는 503 이고 Retry-After 가 있다 — 작업은 시작하지 않았으니 다시 걸어도 된다")
+    void 실행_기록을_열지_못한_일시_장애는_503_이다() {
+        // given — 스로틀링 판정은 SDK 가 응답의 오류 코드로 한다 — DynamoDB 가 실제로 싣는 코드를 단다
+        var 스로틀링 = ProvisionedThroughputExceededException.builder().message("처리량 초과").statusCode(400)
+                .awsErrorDetails(AwsErrorDetails.builder().errorCode("ProvisionedThroughputExceededException").build())
+                .build();
+        Mockito.when(fullSync.start(any(), any())).thenReturn(Mono.error(스로틀링));
+
+        // when, then
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().valueEquals("Retry-After", "10")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(503)
+                .jsonPath("$.detail").isEqualTo("일시 장애 — 잠시 뒤 다시 시도한다");
+    }
+
+    @Test
+    @DisplayName("유스케이스가 Mono 를 만들기도 전에 던져도 매달리지 않고 500 이며 예외 문구를 싣지 않는다")
     void 동기_예외는_5xx다() {
         // given
         Mockito.when(fullSync.start(any(), any())).thenThrow(new IllegalStateException("Mono 구성 전 동기 예외"));
 
         // when, then
-        client.post().uri("/admin/sync/full").exchange().expectStatus().is5xxServerError();
+        client.post().uri("/admin/sync/full").exchange()
+                .expectStatus().isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(500)
+                .jsonPath("$.detail").isEqualTo("내부 오류");
     }
 
     @Test

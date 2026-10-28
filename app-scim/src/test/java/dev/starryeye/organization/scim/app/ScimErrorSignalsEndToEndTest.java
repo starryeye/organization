@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.openfga.sdk.errors.ApiException;
 import dev.starryeye.organization.core.fixture.Containers;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
-import dev.starryeye.organization.scim.TemporaryFailureClassifier;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -108,6 +108,29 @@ class ScimErrorSignalsEndToEndTest {
         client.post().uri("/scim/v2/Users").contentType(SCIM_JSON).bodyValue(직원_본문("kim"))
                 .exchange()
                 .expectStatus().isCreated();
+    }
+
+    @Test
+    @DisplayName("관리 API 재적재가 락 경합이면 503 이 아니라 409 problem details 다 — 처리기 결선과 판정 순서를 실제 컨텍스트에서 본다(설계 2026-10-27 §10)")
+    void 관리_API_재적재가_락_경합이면_409_problem_details_다() {
+        // given — 시험이 재적재 용도로 락을 쥔다
+        var lease = lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
+
+        try {
+            // when, then — 컨트롤러가 감싼 409 의 원인이 TemporaryFailureException 의 하위지만 분류기보다 락 경합을 먼저 본다
+            client.post().uri("/admin/sync/rebuild")
+                    .exchange()
+                    .expectStatus().isEqualTo(HttpStatus.CONFLICT)
+                    .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                    .expectHeader().doesNotExist(HttpHeaders.RETRY_AFTER)
+                    .expectBody()
+                    .jsonPath("$.type").isEqualTo("about:blank")
+                    .jsonPath("$.title").isEqualTo("Conflict")
+                    .jsonPath("$.status").isEqualTo(409)
+                    .jsonPath("$.detail").value(detail -> assertThat((String) detail).contains("REBUILD"));
+        } finally {
+            lock.release(lease).block(Duration.ofSeconds(10));
+        }
     }
 
     @Test

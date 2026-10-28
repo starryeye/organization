@@ -3,6 +3,7 @@ package dev.starryeye.organization.scim;
 import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.PageBookmarkRepository;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import org.springframework.beans.factory.ObjectProvider;

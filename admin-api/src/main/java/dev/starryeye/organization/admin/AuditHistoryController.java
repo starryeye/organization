@@ -25,6 +25,7 @@ import reactor.core.publisher.Mono;
  *
  * <p>인증이 없다 — 지금 관리 API 와 같은 노출 수준이다(설계 §10). 이력에는 이전 값(이름·이메일 등)이 담긴다.
  */
+@AdminApi
 @RestController
 @RequestMapping("/admin")
 @RequiredArgsConstructor

@@ -4,6 +4,12 @@ dependencies {
     api libs.reactor.core
     api libs.slf4j.api
 
+    // TemporaryFailureClassifier 가 Jackson 의 해석·매핑 실패(JacksonException)를 일시 장애에서 뺀다. 버전은 Boot BOM 이 정한다.
+    // 두 HTTP 층(connector-scim, admin-api)이 core 에 기대므로 분류기 자리는 여기다 — 두 앱에는 이미 jackson-core 가 실린다.
+    implementation 'com.fasterxml.jackson.core:jackson-core'
+    // 분류기 시험이 실제 파서·매퍼가 던진 예외로 그 규칙을 본다
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+
     // @ScaleTest 가 JUnit 의 @Tag 를 담는다. 버전은 Boot BOM 이 정한다.
     testFixturesApi 'org.junit.jupiter:junit-jupiter-api'
 

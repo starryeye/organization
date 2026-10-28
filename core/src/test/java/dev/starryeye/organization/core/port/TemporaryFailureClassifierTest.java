@@ -1,4 +1,4 @@
-package dev.starryeye.organization.scim;
+package dev.starryeye.organization.core.port;
 
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -6,8 +6,6 @@ import com.fasterxml.jackson.databind.exc.MismatchedInputException;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.springframework.core.codec.DecodingException;
-import org.springframework.web.server.ServerWebInputException;
 
 import java.net.SocketException;
 import java.time.Duration;
@@ -80,9 +78,9 @@ class TemporaryFailureClassifierTest {
     @Test
     @DisplayName("깨진 JSON(JsonParseException)은 일시 장애가 아니다 — IOException 의 하위 타입이지만 입출력이 아니고 다시 보내도 같다")
     void 깨진_JSON은_일시_장애가_아니다() {
-        // given — 실제 파서가 던진 예외를 WebFlux 가 감싸 오는 모양 그대로
+        // given — 실제 파서가 던진 예외를 디코더와 요청 처리가 겹겹이 감싸 오는 모양(스프링 예외로 감싼 실제 경로는 SCIM 라우터 시험이 본다)
         Throwable 파싱_실패 = catchThrowable(() -> new ObjectMapper().readValue("{\"userName\":", Map.class));
-        var 감싼 = new ServerWebInputException("Failed to read HTTP message", null, new DecodingException("JSON decoding error", 파싱_실패));
+        var 감싼 = new IllegalArgumentException("Failed to read HTTP message", new IllegalStateException("JSON decoding error", 파싱_실패));
 
         // when, then
         assertThat(파싱_실패).isInstanceOf(JsonParseException.class);
@@ -94,7 +92,7 @@ class TemporaryFailureClassifierTest {
     void 타입이_안_맞는_JSON도_일시_장애가_아니다() {
         // given
         Throwable 매핑_실패 = catchThrowable(() -> new ObjectMapper().readValue("{\"userName\":{\"x\":1}}", 이름만.class));
-        var 감싼 = new DecodingException("JSON decoding error", 매핑_실패);
+        var 감싼 = new IllegalStateException("JSON decoding error", 매핑_실패);
 
         // when, then
         assertThat(매핑_실패).isInstanceOf(MismatchedInputException.class);
@@ -105,7 +103,7 @@ class TemporaryFailureClassifierTest {
     @DisplayName("Jackson 예외 뒤에 진짜 입출력 실패가 있으면 그것은 일시 장애다 — 사슬은 끝까지 본다")
     void Jackson_예외_뒤의_입출력_실패는_찾는다() {
         // given
-        var 깊이 = new DecodingException("JSON decoding error",
+        var 깊이 = new IllegalStateException("JSON decoding error",
                 new JsonParseException(null, "읽다 끊김", new SocketException("reset")));
 
         // when, then

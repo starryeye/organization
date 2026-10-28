@@ -8,12 +8,14 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.query.UserSummary;
 import dev.starryeye.organization.core.usecase.AdminQueryUseCase;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Set;
@@ -32,7 +34,9 @@ class AdminQueryControllerTest {
     void 컨트롤러를_준비한다() {
         var useCase = new AdminQueryUseCase(state, search, checker);
         var metrics = new AdminQueryMetrics(registry);
-        client = WebTestClient.bindToController(new AdminQueryController(useCase, metrics)).build();
+        client = WebTestClient.bindToController(new AdminQueryController(useCase, metrics))
+                .controllerAdvice(new AdminExceptionHandler(TemporaryFailureClassifier.표지만()))
+                .build();
     }
 
     @Test
@@ -55,7 +59,11 @@ class AdminQueryControllerTest {
     void 검색_파라미터가_없으면_400이다() {
         // when, then — 빈 접두사는 전체 열거가 되므로 입구에서 막는다
         client.get().uri("/admin/employees")
-                .exchange().expectStatus().isBadRequest();
+                .exchange().expectStatus().isBadRequest()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(400)
+                .jsonPath("$.detail").isEqualTo("userName·displayName·externalId 중 정확히 하나를 지정해야 한다");
     }
 
     @Test
