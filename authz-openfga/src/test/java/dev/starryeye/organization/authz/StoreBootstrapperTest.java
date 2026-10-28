@@ -1,6 +1,7 @@
 package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.client.OpenFgaClient;
+import dev.openfga.sdk.api.client.model.ClientReadAuthorizationModelResponse;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.model.TypeDefinition;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
@@ -13,6 +14,7 @@ import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -241,6 +243,35 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
 
         // then — 우리 모델이 최신이 되도록 하나 더 썼다
         assertThat(모델_수(번호)).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("최신 모델 읽기가 값 없이 끝나면 견줄 수 없으니 쓴다 — 읽기를 건너뛰고 번호만 기억하는 쪽으로 틀리지 않는다")
+    void 최신_모델_읽기가_비어_끝나면_쓴다() {
+        // given — 모델이 이미 하나 있고, 최신 모델 읽기가 응답 없이 끝나는 클라이언트를 쓰는 부트스트래퍼
+        String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+        assertThat(모델_수(번호)).isEqualTo(1);
+        StoreBootstrapper 비어_읽는_부트스트래퍼 = new StoreBootstrapper(properties) {
+            @Override
+            public OpenFgaClient clientFor(String storeId) {
+                try {
+                    return new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(storeId)) {
+                        @Override
+                        public CompletableFuture<ClientReadAuthorizationModelResponse> readLatestAuthorizationModel() {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                    };
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+
+        // when
+        비어_읽는_부트스트래퍼.resolveStore().block(Duration.ofSeconds(10));
+
+        // then — 같은 모델이어도 견주지 못했으니 썼다. 건너뛰었다면 1 이다
+        assertThat(모델_수(번호)).isEqualTo(2);
     }
 
     @Test

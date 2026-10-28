@@ -2,7 +2,11 @@ package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.model.AuthorizationModel;
 import dev.openfga.sdk.api.model.Condition;
+import dev.openfga.sdk.api.model.Metadata;
+import dev.openfga.sdk.api.model.RelationMetadata;
+import dev.openfga.sdk.api.model.RelationReference;
 import dev.openfga.sdk.api.model.TypeDefinition;
+import dev.openfga.sdk.api.model.Userset;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -31,6 +35,24 @@ class StoreBootstrapperModelComparisonTest {
                 .schemaVersion(요청.getSchemaVersion())
                 .typeDefinitions(요청.getTypeDefinitions())
                 .conditions(요청.getConditions());
+    }
+
+    /**
+     * 한 타입에 직접 관계 하나를 둔 요청. {@code this}(직접 관계)와 {@code directly_related_user_types} 의 {@code wildcard} 는
+     * 값이 빈 객체 {@code {}} 하나뿐인 표지 칸이다 — 있고 없고가 곧 모델의 내용이다.
+     */
+    private static WriteAuthorizationModelRequest 직접_관계_모델(Userset 관계, RelationReference 참조) {
+        return new WriteAuthorizationModelRequest()
+                .schemaVersion("1.1")
+                .typeDefinitions(List.of(new TypeDefinition()
+                        .type("group")
+                        .relations(Map.of("viewer", 관계))
+                        .metadata(new Metadata().relations(Map.of("viewer",
+                                new RelationMetadata().directlyRelatedUserTypes(List.of(참조)))))));
+    }
+
+    private static Userset 직접_관계() {
+        return new Userset()._this(Map.of());
     }
 
     @Test
@@ -83,5 +105,41 @@ class StoreBootstrapperModelComparisonTest {
 
         // when, then
         assertThat(StoreBootstrapper.같은_모델인가(서버, 요청)).isFalse();
+    }
+
+    @Test
+    @DisplayName("와일드카드가 있고 없고만 다르면 다르다 — [user] 를 [user:*] 로 바꾼 모델을 같다고 보고 건너뛰지 않는다")
+    void 와일드카드의_유무만_다르면_다르다() {
+        // given — 서버에는 user 만, 우리 요청에는 user:* 가 있다. wildcard 의 값은 빈 객체뿐이다
+        WriteAuthorizationModelRequest 요청 = 직접_관계_모델(직접_관계(),
+                new RelationReference().type("user").wildcard(Map.of()));
+        AuthorizationModel 서버 = 서버의(직접_관계_모델(직접_관계(), new RelationReference().type("user")));
+
+        // when, then
+        assertThat(StoreBootstrapper.같은_모델인가(서버, 요청)).isFalse();
+    }
+
+    @Test
+    @DisplayName("직접 관계 표지(this)가 있고 없고만 다르면 다르다")
+    void 직접_관계_표지의_유무만_다르면_다르다() {
+        // given — 서버 모델의 viewer 에는 풀이가 없다
+        WriteAuthorizationModelRequest 요청 = 직접_관계_모델(직접_관계(), new RelationReference().type("user"));
+        AuthorizationModel 서버 = 서버의(직접_관계_모델(new Userset(), new RelationReference().type("user")));
+
+        // when, then
+        assertThat(StoreBootstrapper.같은_모델인가(서버, 요청)).isFalse();
+    }
+
+    @Test
+    @DisplayName("직접 관계 표지(this)와 와일드카드가 양쪽에 똑같이 있으면 같다")
+    void 빈_객체_표지가_양쪽에_있으면_같다() {
+        // given
+        WriteAuthorizationModelRequest 요청 = 직접_관계_모델(직접_관계(),
+                new RelationReference().type("user").wildcard(Map.of()));
+        AuthorizationModel 서버 = 서버의(직접_관계_모델(직접_관계(),
+                new RelationReference().type("user").wildcard(Map.of())));
+
+        // when, then
+        assertThat(StoreBootstrapper.같은_모델인가(서버, 요청)).isTrue();
     }
 }

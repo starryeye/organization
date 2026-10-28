@@ -8,7 +8,9 @@ import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
 import dev.openfga.sdk.api.model.AuthorizationModel;
 import dev.openfga.sdk.api.model.CreateStoreRequest;
+import dev.openfga.sdk.api.model.RelationReference;
 import dev.openfga.sdk.api.model.Store;
+import dev.openfga.sdk.api.model.Userset;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
@@ -43,10 +45,30 @@ public class StoreBootstrapper {
     private static final String MODEL_RESOURCE = "authorization-model.json";
 
     /**
-     * 모델 비교용. 서버가 돌려준 모델과 우리 요청을 같은 매퍼로 JSON 트리로 바꿔 견준다 — 빈 칸과 없는 칸이 같아진다.
-     * (비교가 틀려 다르다고 읽으면 지금처럼 쓰게 되므로 안전한 쪽으로 틀린다.)
+     * 모델 비교용. 서버가 돌려준 모델과 우리 요청을 같은 매퍼로 JSON 트리로 바꿔 견준다 — 빈 목록·빈 맵과 없는 칸이 같아진다.
+     *
+     * <p><b>빈 객체 표지는 지우지 않는다.</b> {@code NON_EMPTY} 는 빈 맵도 지우는데, SDK 모델에서 값이 {@code Object} 이고 의미 있는 값이
+     * 빈 객체 {@code {}} 하나뿐인 칸 — {@code Userset.this}(직접 관계)와 {@code RelationReference.wildcard}({@code user:*}) —
+     * 은 있고 없고가 곧 내용이다. 그대로 두면 {@code [user]} 를 {@code [user:*]} 로 바꾼 모델이 같다고 읽혀 쓰이지 않는다. 그래서 이 두 칸만
+     * {@code NON_NULL} 로 둔다. (모델에 닿는 SDK 클래스 중 {@code Object} 칸은 이 둘뿐이다. 나머지는 요청 맥락의 {@code context} 다.)
+     * 비교가 틀리면 지금처럼 쓰게 되도록, 헷갈리는 칸은 다르다고 읽는 쪽이 안전하다(설계 2026-10-27 §4).
      */
-    private static final ObjectMapper 모델_비교용 = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_EMPTY);
+    private static final ObjectMapper 모델_비교용 = new ObjectMapper()
+            .setSerializationInclusion(JsonInclude.Include.NON_EMPTY)
+            .addMixIn(Userset.class, 직접_관계_표지.class)
+            .addMixIn(RelationReference.class, 와일드카드_표지.class);
+
+    /** {@link Userset} 의 {@code this} 를 빈 객체여도 남기는 믹스인. */
+    private abstract static class 직접_관계_표지 {
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public abstract Object getThis();
+    }
+
+    /** {@link RelationReference} 의 {@code wildcard} 를 빈 객체여도 남기는 믹스인. */
+    private abstract static class 와일드카드_표지 {
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public abstract Object getWildcard();
+    }
 
     /** 모델에서 견주는 칸. {@code id} 는 서버가 매기므로 견주지 않는다. */
     private static final List<String> 견주는_칸 = List.of("schema_version", "type_definitions", "conditions");
@@ -335,6 +357,8 @@ public class StoreBootstrapper {
                     }
                 })
                 .map(response -> !같은_모델인가(response.getAuthorizationModel(), 우리))
+                // 응답 없이 끝나도 견주지 못한 것이다 — 건너뛰고 번호를 기억하는 쪽으로 틀리지 않고 쓴다
+                .defaultIfEmpty(true)
                 .onErrorResume(error -> {
                     log.warn("최신 인가 모델을 읽지 못해 견주지 않고 쓴다", error);
                     return Mono.just(true);

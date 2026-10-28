@@ -28,7 +28,8 @@ import java.util.Set;
 /**
  * OpenFGA 에 인가 판정을 묻는다. 열거 API 는 쓰지 않는다 — {@code Check} 는 점 조회다.
  *
- * <p><b>쓰기와 같은 준비 과정({@code resolveStore()})을 탄다(점검 M6).</b> store 가 없으면 만들고 인가 모델을 등록한다. 시작 때
+ * <p><b>쓰기와 같은 준비 과정({@code resolveStore()})을 탄다(점검 M6).</b> store 가 없으면 {@code openfga.create-store} 가 켜져 있을 때만
+ * 만들고(꺼져 있으면 {@link StoreNotFoundException}), 인가 모델은 최신과 다를 때만 등록한다. 시작 때
  * OpenFGA 가 안 닿아 준비하지 못했어도 첫 요청 때 닿으면 그때 준비되고, 안 닿으면 그 요청만 실패하고 다음 요청이 다시 시도한다
  * (실패는 캐시하지 않는다). 전에는 {@code findExistingStore()} 를 써서 store 가 없으면 재시작 전까지 멤버 추가가 전부 500 이었다.
  * 헬스 체크만 여전히 {@code findExistingStore()}(보기만)다 — 오타 난 이름으로 빈 store 를 만들지 않는다.
