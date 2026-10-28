@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.actuate.health.HealthEndpointGroups;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
@@ -71,6 +72,7 @@ class ScimEndToEndTest {
     @Autowired SnapshotArchiveUseCase archive;
     @Autowired SyncRunRepository runs;
     @Autowired ArchiveScheduler scheduler;
+    @Autowired HealthEndpointGroups healthGroups;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -310,15 +312,21 @@ class ScimEndToEndTest {
     @Order(11)
     @DisplayName("liveness·readiness 프로브는 외부 의존을 보지 않는다 — OpenFGA·DynamoDB 장애가 재시작을 부르지 않는다")
     void 프로브는_외부_의존을_보지_않는다() {
-        // given, when, then — 외부 의존의 상태는 /actuator/health 본 그룹에서 본다(순서 8)
-        for (String 경로 : List.of("/actuator/health/liveness", "/actuator/health/readiness")) {
-            client.get().uri(경로)
+        // given, when, then — 외부 의존의 상태는 /actuator/health 본 그룹에서 본다(순서 8).
+        // 프로브 그룹은 응답에 컴포넌트를 싣지 않는다(부트가 만든 그룹은 show-details 와 상관없이 늘 감춘다). 그래서 응답에 외부 의존이 "없다"는 단언은
+        // 저절로 통과한다 — 그룹의 구성원을 직접 본다
+        for (String 프로브 : List.of("liveness", "readiness")) {
+            client.get().uri("/actuator/health/" + 프로브)
                     .exchange()
                     .expectStatus().isOk()
                     .expectBody()
-                    .jsonPath("$.status").isEqualTo("UP")
-                    .jsonPath("$.components.openFga").doesNotExist()
-                    .jsonPath("$.components.dynamoDb").doesNotExist();
+                    .jsonPath("$.status").isEqualTo("UP");
+
+            var 그룹 = healthGroups.get(프로브);
+            assertThat(그룹.isMember(프로브 + "State")).as("%s 그룹의 구성원", 프로브).isTrue();
+            assertThat(List.of("openFga", "dynamoDb"))
+                    .as("%s 그룹에 든 외부 의존", 프로브)
+                    .noneMatch(그룹::isMember);
         }
     }
 

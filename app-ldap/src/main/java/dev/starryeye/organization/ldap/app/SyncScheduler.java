@@ -29,7 +29,7 @@ public class SyncScheduler {
      * 작업 락은 {@code FullSyncUseCase#start} 가 잡는다(설계 2026-09-30 §3). 여러 대가 같은 초에 불러도 한 대만 돌고, 나머지는 락을 못 잡아 기록 없이
      * 건너뛴다 — 오류가 아니다.
      */
-    @Scheduled(cron = "${sync.cron}")
+    @Scheduled(cron = "#{@syncProperties.cron}")
     public void 전체동기화() {
         관측하며실행("sync.ldap.full",
                 Mono.defer(() -> fullSync.start(SyncTrigger.SCHEDULED, run -> {
@@ -49,7 +49,7 @@ public class SyncScheduler {
      * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
      * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1).
      */
-    @Scheduled(cron = "${sync.purge-cron}")
+    @Scheduled(cron = "#{@syncProperties.purgeCron}")
     public void 만료스냅샷정리() {
         관측하며실행("sync.ldap.purge",
                 dailyOnce.run("ldap-purge", Mono.defer(snapshots::purgeExpired))

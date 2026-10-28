@@ -23,16 +23,23 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
-import java.time.Duration;
 
 @Slf4j
 @Configuration
 public class ScimUseCaseConfig {
+
+    /**
+     * 빈 이름이 {@code scimSyncProperties} 여야 한다 — {@code ArchiveScheduler} 의 {@code @Scheduled(cron = "#{@scimSyncProperties.archiveCron}")} 이
+     * 이 이름으로 참조한다(설계 2026-10-27 §5). 값은 클래스의 {@code @ConfigurationProperties("sync")} 가 바인딩한다.
+     */
+    @Bean
+    public ScimSyncProperties scimSyncProperties() {
+        return new ScimSyncProperties();
+    }
 
     @Bean
     public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry, Clock clock) {
@@ -88,9 +95,10 @@ public class ScimUseCaseConfig {
      */
     @Bean(destroyMethod = "shutdown")
     public SyncJobs syncJobs(SyncRunRepository runs, MutationLock lock, DynamoDbProperties dynamoDb,
-                             ScimSyncMetrics metrics, @Value("${sync.job-timeout:30m}") Duration jobTimeout,
+                             ScimSyncMetrics metrics, ScimSyncProperties properties,
                              AuditRecorder auditRecorder) {
-        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), metrics, jobTimeout, auditRecorder);
+        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), metrics, properties.getJobTimeout(),
+                auditRecorder);
     }
 
     @Bean

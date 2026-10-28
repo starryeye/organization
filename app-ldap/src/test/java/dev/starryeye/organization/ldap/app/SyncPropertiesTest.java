@@ -25,16 +25,16 @@ class SyncPropertiesTest {
     }
 
     @Test
-    @DisplayName("application.yml 의 sync.cron 도 매시 정각이다 — 코드 기본값과 어긋나면 운영은 yml 을 따른다")
-    void 설정_파일의_주기도_매시_정각이다() {
+    @DisplayName("application.yml 에는 cron·기한 키가 없다 — 기본값은 속성 클래스에만 있어 yml 과 어긋날 수 없다")
+    void 설정_파일에는_cron_키가_없다() {
         // given
         var yaml = new YamlPropertiesFactoryBean();
         yaml.setResources(new ClassPathResource("application.yml"));
 
         // when
-        var cron = yaml.getObject().getProperty("sync.cron");
+        var 키들 = yaml.getObject().stringPropertyNames();
 
         // then
-        assertThat(cron).isEqualTo(new SyncProperties().getCron());
+        assertThat(키들).doesNotContain("sync.cron", "sync.purge-cron", "sync.job-timeout");
     }
 }

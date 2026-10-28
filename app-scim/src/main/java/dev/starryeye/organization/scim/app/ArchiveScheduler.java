@@ -28,7 +28,7 @@ public class ArchiveScheduler {
      *
      * <p>하루 1회 표지를 먼저 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1) — 여러 대가 같은 시각에 불러도 스냅샷은 하루 하나다.
      */
-    @Scheduled(cron = "${sync.archive-cron:0 0 3 * * *}")
+    @Scheduled(cron = "#{@scimSyncProperties.archiveCron}")
     public void 스냅샷아카이빙() {
         관측하며실행("sync.scim.archive",
                 dailyOnce.run("scim-archive", Mono.defer(archive::execute))
@@ -42,7 +42,7 @@ public class ArchiveScheduler {
      * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
      * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다.
      */
-    @Scheduled(cron = "${sync.purge-cron:0 0 4 * * *}")
+    @Scheduled(cron = "#{@scimSyncProperties.purgeCron}")
     public void 만료스냅샷정리() {
         관측하며실행("sync.scim.purge",
                 dailyOnce.run("scim-purge", Mono.defer(snapshots::purgeExpired))

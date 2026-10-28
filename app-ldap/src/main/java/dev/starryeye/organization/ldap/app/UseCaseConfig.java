@@ -19,15 +19,22 @@ import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
 import dev.starryeye.organization.storage.DynamoDbProperties;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
 
 @Configuration
-@EnableConfigurationProperties(SyncProperties.class)
 public class UseCaseConfig {
+
+    /**
+     * 빈 이름이 {@code syncProperties} 여야 한다 — {@code SyncScheduler} 의 {@code @Scheduled(cron = "#{@syncProperties.cron}")} 가 이 이름으로 참조한다
+     * (설계 2026-10-27 §5). 값은 클래스의 {@code @ConfigurationProperties("sync")} 가 바인딩한다.
+     */
+    @Bean
+    public SyncProperties syncProperties() {
+        return new SyncProperties();
+    }
 
     @Bean
     public DeletionGuard deletionGuard(SyncProperties properties) {

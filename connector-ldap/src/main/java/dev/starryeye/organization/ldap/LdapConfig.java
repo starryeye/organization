@@ -20,8 +20,40 @@ import java.util.Map;
 @EnableConfigurationProperties(LdapProperties.class)
 public class LdapConfig {
 
+    /**
+     * 기동 때 설정을 검사한다(설계 2026-10-27 §5) — {@link #ldapContextSource}·{@link #ldapMappingStrategy} 가 맨 먼저 부른다. 비밀번호는 오류 문구에
+     * 싣지 않는다.
+     *
+     * <ul>
+     *   <li><b>전략.</b> {@code group-of-names}·{@code dit} 만 받는다(대소문자 무시). 예전에는 {@code dit} 가 아니면 오타까지 모두 groupOfNames 로 읽었다.
+     *   <li><b>바인드 비밀번호.</b> 부트의 {@code @ConfigurationProperties} 바인딩은 풀리지 않은 자리표시자를 무시하고 {@code "${LDAP_BIND_PASSWORD}"}
+     *       문자열을 그대로 넣는다. 그 값으로 바인드하면 계정 잠금만 부르므로, 바인드 DN 이 있는데 비밀번호가 비었거나 <code>&#36;&#123;</code> 로 시작하면 멈춘다.
+     *       바인드 DN 이 없는 익명 바인드는 비밀번호를 보지 않는다.
+     *   <li><b>TLS.</b> {@code ldap.require-tls} 인데 {@code ldap.url} 이 {@code ldaps://} 가 아니면 멈춘다.
+     * </ul>
+     */
+    static void 설정을_검사한다(LdapProperties properties) {
+        String 전략 = properties.getStrategy();
+        if (!"group-of-names".equalsIgnoreCase(전략) && !"dit".equalsIgnoreCase(전략)) {
+            throw new IllegalStateException(
+                    "ldap.strategy 는 group-of-names 또는 dit 다(받은 값: %s)".formatted(전략));
+        }
+        String 바인드_DN = properties.getBindDn();
+        String 비밀번호 = properties.getBindPassword();
+        if (바인드_DN != null && !바인드_DN.isBlank()
+                && (비밀번호 == null || 비밀번호.isBlank() || 비밀번호.startsWith("${"))) {
+            throw new IllegalStateException("ldap.bind-dn 이 있는데 ldap.bind-password 가 비었거나 풀리지 않은 자리표시자다"
+                    + " — 환경 변수 LDAP_BIND_PASSWORD 를 준다");
+        }
+        String 주소 = properties.getUrl();
+        if (properties.isRequireTls() && (주소 == null || !주소.startsWith("ldaps://"))) {
+            throw new IllegalStateException("ldap.require-tls 인데 ldap.url 이 ldaps:// 가 아니다 — StartTLS 는 지원하지 않는다");
+        }
+    }
+
     @Bean
     public LdapContextSource ldapContextSource(LdapProperties properties) {
+        설정을_검사한다(properties);
         LdapContextSource contextSource = new LdapContextSource();
         contextSource.setUrl(properties.getUrl());
         contextSource.setBase(properties.getBaseDn());
@@ -81,6 +113,7 @@ public class LdapConfig {
 
     @Bean
     public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties, Clock clock) {
+        설정을_검사한다(properties);
         // 계정 만료를 동기화 시각과 비교한다 — 앱의 Clock 빈(DynamoDbConfig)을 쓴다
         return "dit".equalsIgnoreCase(properties.getStrategy())
                 ? new DitStrategy(properties, clock)

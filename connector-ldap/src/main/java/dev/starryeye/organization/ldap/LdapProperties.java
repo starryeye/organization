@@ -53,8 +53,14 @@ public class LdapProperties {
      */
     private Duration readTimeout = Duration.ofSeconds(150);
 
-    /** group-of-names | dit */
+    /** group-of-names | dit. 대소문자는 가리지 않는다. 그 밖의 값은 기동을 멈춘다({@code LdapConfig#설정을_검사한다}) */
     private String strategy = "group-of-names";
+
+    /**
+     * 켜면 {@link #url} 이 {@code ldaps://} 가 아닐 때 기동을 멈춘다 — 평문 LDAP 으로 바인드 자격증명과 디렉터리 전체가 오가지 않게 한다(운영은 켠다).
+     * {@code ldaps://} 는 JNDI 가 JVM 트러스트스토어로 연다 — 사설 CA 는 {@code -Djavax.net.ssl.trustStore} 로 넘긴다. StartTLS 는 지원하지 않는다.
+     */
+    private boolean requireTls = false;
 
     private GroupOfNames groupOfNames = new GroupOfNames();
     private Dit dit = new Dit();
