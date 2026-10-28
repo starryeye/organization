@@ -426,6 +426,8 @@ class ImmutableIdentifierTest extends EmbeddedLdapSupport {
     @DisplayName("DIT 의 root-dn 이 비어 있어도(컨텍스트 베이스가 루트 OU) 이름 속성이 없는 루트 OU 의 표시명은 그 OU 의 RDN 값이다")
     void DIT_루트_OU_의_표시명도_RDN_값이다() throws Exception {
         // given — 컨텍스트 베이스가 description 없는 ou=Sales Team 이고 root-dn 이 "" 라, 루트 OU 의 상대 DN 이 빈 문자열이다
+        // 사람 소속이 하나도 없는 그림은 데이터 오류라서(설계 2026-10-27 §13) 루트 OU 바로 아래 직원 한 명을 둔다
+        server.add("dn: uid=sales1," + 이름_없는_OU, "objectClass: inetOrgPerson", "uid: sales1", "cn: sales1", "sn: sales1");
         var properties = DIT_기본값_그대로();
         properties.setBaseDn(이름_없는_OU);
         properties.getDit().setRootDn("");

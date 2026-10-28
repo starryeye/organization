@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
+import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
 import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
@@ -24,9 +25,32 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 지시하는데, 파이프라인의 다른 외부 호출(OpenFGA·DynamoDB)과 달리 LDAP 만 보호되지
  * 않고 있었다. 하루 1회 스케줄이라 한 번 실패하면 다음 기회가 24시간 뒤다.
  */
-class LdapDirectorySnapshotSourceTest {
+class LdapDirectorySnapshotSourceTest extends EmbeddedLdapSupport {
 
     private static final LdapTemplate 안_쓰는_템플릿 = null;
+
+    /** 대부분의 시험은 서버를 쓰지 않는다 — 빈 소속 그림 시험만 이 디렉터리를 읽는다(직원도 조직 member 도 없다). */
+    @Override
+    protected String ldif() {
+        return """
+                dn: dc=example,dc=com
+                objectClass: top
+                objectClass: domain
+                dc: example
+
+                dn: ou=people,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: people
+
+                dn: ou=groups,dc=example,dc=com
+                objectClass: organizationalUnit
+                ou: groups
+
+                dn: cn=DEV,ou=groups,dc=example,dc=com
+                objectClass: groupOfNames
+                cn: DEV
+                """;
+    }
 
     /** N 번 실패한 뒤 성공하는 전략. 호출 횟수를 세어 재시도가 실제로 일어났는지 본다. */
     private static class 흔들리는전략 implements LdapMappingStrategy {
@@ -260,5 +284,29 @@ class LdapDirectorySnapshotSourceTest {
         assertThat(바꾼_규칙.maxAttempts).isEqualTo(2);
         assertThat(바꾼_규칙.minBackoff).isEqualTo(Duration.ofSeconds(3));
         assertThat(바꾼_규칙.maxBackoff).isEqualTo(Duration.ofSeconds(7));
+    }
+
+    @Test
+    @DisplayName("사람 소속이 하나도 없는 그림은 다시 읽지 않는다 — 재시도 3번을 두어도 읽기는 한 번이고 데이터 오류다(재적재도 같은 fetchAll 이다)")
+    void 빈_소속_그림은_다시_읽지_않는다() {
+        // given — 직원이 없고 조직(DEV)에 member 도 없는 디렉터리를 진짜 전략으로 읽는다. 전략을 몇 번 불렀는지 센다
+        var properties = 이름기반();
+        properties.setMaxRetries(3);
+        // 재시도가 잘못 걸려도 분 단위로 늘어지지 않고 읽은 횟수 단언이 실패로 알린다
+        properties.setRetryMinBackoff(Duration.ofMillis(10));
+        properties.setRetryMaxBackoff(Duration.ofMillis(50));
+        var 전략 = new GroupOfNamesStrategy(properties);
+        AtomicInteger 읽은_수 = new AtomicInteger();
+        LdapMappingStrategy 세는_전략 = template -> {
+            읽은_수.incrementAndGet();
+            return 전략.read(template);
+        };
+        var source = new LdapDirectorySnapshotSource(ldapTemplate, 세는_전략, properties);
+
+        // when, then
+        assertThatThrownBy(() -> source.fetchAll().block())
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다");
+        assertThat(읽은_수).hasValue(1);
     }
 }

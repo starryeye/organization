@@ -152,7 +152,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         건너뛴_member.요약을_남긴다();
         UnmatchedMemberGuard.확인한다(groups.size(), 멤버값수, 사용자대조수, 조직대조수);
 
-        return new DirectorySnapshot(users, groups);
+        // 가드는 DN 대조만 센다(기본 그룹 RID 소속은 뺀다) — 직원 0명·조직 0개·member 값 0개처럼 가드가 보지 않는 빈 그림은 여기서 막는다
+        DirectorySnapshot 그림 = new DirectorySnapshot(users, groups);
+        EmptyMembershipGuard.확인한다(그림, "member 값 " + 멤버값수 + "개");
+        return 그림;
     }
 
     /**

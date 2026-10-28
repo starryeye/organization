@@ -110,7 +110,6 @@ public class DitStrategy implements LdapMappingStrategy {
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
         SkippedEntries 건너뛴_직원 = new SkippedEntries("직원", config.getUserIdAttribute());
-        int 소속수 = 0;
         for (UserEntry entry : userEntries) {
             String userId = entry.id();
             if (userId == null) {
@@ -132,24 +131,25 @@ public class DitStrategy implements LdapMappingStrategy {
                 continue;
             }
             membersByCode.get(parentCode).add(MemberRef.user(userId));
-            소속수++;
         }
 
         건너뛴_조직.요약을_남긴다();
         건너뛴_조직.아무도_남지_않으면_멈춘다(orgEntries.size(), groups.size());
         건너뛴_직원.요약을_남긴다();
         건너뛴_직원.아무도_남지_않으면_멈춘다(userEntries.size(), users.size());
-        if (!users.isEmpty() && 소속수 == 0) {
-            throw new DirectoryDataException(("DIT 직원 %d명 중 부모 조직을 찾은 직원이 없다 — root-dn 과 org-unit-filter 가 직원이 있는 곳을 조직으로 읽는지"
-                    + " 확인하라(AD 의 CN=Users 는 OU 가 아니다, 점검 S22) — %s").formatted(users.size(), 건너뛴_직원.요약()));
-        }
 
         membersByCode.forEach((code, members) -> {
             DirectoryGroup base = groups.get(code);
             groups.put(code, new DirectoryGroup(base.id(), base.externalId(), base.displayName(), members));
         });
 
-        return new DirectorySnapshot(users, groups);
+        // 소속이 하나도 없는 그림 — 직원 0명·조직 0개·부모 조직을 찾은 직원 0명(점검 S22). 두 전략이 같은 규칙을 쓴다
+        DirectorySnapshot 그림 = new DirectorySnapshot(users, groups);
+        String 세부 = "부모 조직을 찾은 직원 0명 — root-dn 과 org-unit-filter 가 직원이 있는 곳을 조직으로 읽는지"
+                + " 확인하라(AD 의 CN=Users 는 OU 가 아니다, 점검 S22)";
+        // 직원 검색이 비었으면 건너뛴 것도 없다 — 빈 요약("0건을 건너뛰었다")은 싣지 않는다
+        EmptyMembershipGuard.확인한다(그림, 건너뛴_직원.건너뛴_것이_있는가() ? 세부 + " — " + 건너뛴_직원.요약() : 세부);
+        return 그림;
     }
 
     /** OU 검색이 요청하는 속성. {@link #orgMapper} 가 읽는 속성과 같아야 한다 — 요청하지 않은 속성은 오지 않는다. */

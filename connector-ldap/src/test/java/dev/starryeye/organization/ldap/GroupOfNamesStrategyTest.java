@@ -1,11 +1,14 @@
 package dev.starryeye.organization.ldap;
 
 import dev.starryeye.organization.core.model.MemberRef;
+import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
+import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class GroupOfNamesStrategyTest extends EmbeddedLdapSupport {
 
@@ -193,5 +196,73 @@ class GroupOfNamesStrategyTest extends EmbeddedLdapSupport {
 
         // then — cn 값에 공백이 있으므로 정규화되어 밑줄로 바뀐다
         assertThat(snapshot.users()).containsKey("Kim_Chulsoo");
+    }
+
+    @Test
+    @DisplayName("직원 검색이 0건이고 member 값도 없으면 사람 소속이 하나도 없는 그림이라 데이터 오류다 — 사용자 수·조직 수·member 값 수가 메시지에 실린다")
+    void 사용자_검색이_0건이면_데이터_오류다() throws Exception {
+        // given — member 값이 있으면 DN 대조 가드가 먼저 멈춘다. 가드가 보지 않는 모양(직원도 값도 없다)을 만든다
+        server.modify("dn: cn=DEV001,ou=groups," + BASE_DN, "changetype: modify", "delete: member");
+        server.modify("dn: cn=DEV002,ou=groups," + BASE_DN, "changetype: modify", "delete: member");
+        var properties = 기본설정();
+        properties.getGroupOfNames().setUserFilter("(objectClass=없는클래스)");
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(DirectoryDataException.class)
+                .isNotInstanceOf(MemberMatchingFailedException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다")
+                .hasMessageContaining("사용자 0명")
+                .hasMessageContaining("조직 2개")
+                .hasMessageContaining("member 값 0개");
+    }
+
+    @Test
+    @DisplayName("조직 검색이 0건이면 직원이 있어도 사람 소속이 없으므로 데이터 오류다 — DN 대조 가드는 조직이 없으면 말이 없다")
+    void 조직_검색이_0건이면_데이터_오류다() {
+        // given
+        var properties = 기본설정();
+        properties.getGroupOfNames().setGroupFilter("(objectClass=없는클래스)");
+        var strategy = new GroupOfNamesStrategy(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다")
+                .hasMessageContaining("사용자 3명")
+                .hasMessageContaining("조직 0개");
+    }
+
+    @Test
+    @DisplayName("member 값은 있는데 사람으로 대조된 것이 하나도 없으면 DN 대조 가드가 DN 형태 힌트로 멈춘다 — 새 규칙 앞에서 그대로 남아 있다")
+    void member_대조가_0건이면_가드가_DN_힌트로_멈춘다() throws Exception {
+        // given — 두 그룹의 member 값을 모두 읽은 적 없는 DN 으로 바꾼다. 직원 셋과 조직 둘은 읽힌다
+        server.modify("dn: cn=DEV001,ou=groups," + BASE_DN, "changetype: modify",
+                "replace: member", "member: uid=ghost1,ou=people," + BASE_DN);
+        server.modify("dn: cn=DEV002,ou=groups," + BASE_DN, "changetype: modify",
+                "replace: member", "member: uid=ghost2,ou=people," + BASE_DN);
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(MemberMatchingFailedException.class)
+                .hasMessageContaining("DN 형태");
+    }
+
+    @Test
+    @DisplayName("일부만 대조되어도 사람 소속이 있으므로 통과한다 — 직원 하나가 사라져도 회차는 성공한다")
+    void 일부만_대조되면_통과한다() throws Exception {
+        // given — park 을 지우면 DEV001 의 member 하나가 어긋나지만 DEV002 의 kim·lee 는 그대로 대조된다
+        server.delete("uid=park,ou=people," + BASE_DN);
+        var strategy = new GroupOfNamesStrategy(기본설정());
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("kim", "lee");
+        assertThat(snapshot.groups().get("DEV002").members())
+                .containsExactlyInAnyOrder(MemberRef.user("kim"), MemberRef.user("lee"));
     }
 }

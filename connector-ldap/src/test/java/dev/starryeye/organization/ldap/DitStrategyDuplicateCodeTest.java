@@ -57,6 +57,13 @@ class DitStrategyDuplicateCodeTest extends EmbeddedLdapSupport {
                 objectClass: organizationalUnit
                 ou: support
                 description: 운영지원팀
+
+                # 사람 소속이 하나도 없는 그림은 데이터 오류라서(설계 2026-10-27 §13) 직원 한 명을 둔다
+                dn: uid=kim,ou=DEV001,ou=company,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: kim
+                cn: Kim
+                sn: Kim
                 """;
     }
 
