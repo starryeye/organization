@@ -14,6 +14,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -523,6 +525,63 @@ class SnapshotArchiveUseCaseTest {
         assertThat(run.failureCount()).isEqualTo(2);
         assertThat(run.deletedCount()).isEqualTo(1);
         assertThat(run.message()).isEqualTo("어긋난 직원 2명 다시 맞춤(실패 1명)");
+    }
+
+    @Test
+    @DisplayName("아카이빙을 시작할 때 시작한 지 기한 + 10분이 지난 RUNNING 기록을 닫는다 — 최근 것은 둔다")
+    void 아카이빙을_시작할_때_오래된_기록을_닫는다() {
+        // given — 기한 30분, 닫는 나이는 40분. 41분 전의 아카이빙과 5분 전의 아카이빙
+        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(41))));
+        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(5))));
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        SyncRun 오래된것 = runs.findById("오래된-아카이빙").block();
+        assertThat(오래된것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(오래된것.message()).isEqualTo(StaleRuns.기한_경과_사유);
+        assertThat(runs.findById("최근-아카이빙").block().status()).isEqualTo(SyncStatus.RUNNING);
+    }
+
+    @Test
+    @DisplayName("재적재 중이라 건너뛰는 날에도 오래된 RUNNING 기록을 닫는다")
+    void 건너뛰는_날에도_오래된_기록을_닫는다() {
+        // given
+        lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block();
+        runs.seed(SyncRun.started("오래된-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 고정시각.minus(Duration.ofMinutes(41))));
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        SyncRun 오래된것 = runs.findById("오래된-재적재").block();
+        assertThat(오래된것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(오래된것.message()).isEqualTo(StaleRuns.기한_경과_사유);
+    }
+
+    @Test
+    @DisplayName("오래된 기록을 찾지 못해도 아카이빙은 계속한다 — 기록 정리는 부가 일이다")
+    void 오래된_기록을_찾지_못해도_아카이빙은_계속한다() {
+        // given — findRunning 이 실패하는 저장소
+        var 찾지_못하는_저장소 = new FakeSyncRunRepository(고정시각) {
+            @Override
+            public Flux<SyncRun> findRunning() {
+                return Flux.error(new IllegalStateException("DynamoDB 가 답하지 않는다"));
+            }
+        };
+        var 아카이빙 = new SnapshotArchiveUseCase(state, checker, snapshots, 찾지_못하는_저장소, lock,
+                Clock.fixed(고정시각, ZoneOffset.UTC), (extra, missing) -> {
+        }, 직원 -> Mono.empty(), 기한);
+
+        // when
+        var run = 아카이빙.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(snapshots.saved).hasSize(1);
     }
 
     @Test

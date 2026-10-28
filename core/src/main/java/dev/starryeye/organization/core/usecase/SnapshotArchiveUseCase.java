@@ -113,12 +113,23 @@ public class SnapshotArchiveUseCase {
     private Mono<SyncRun> 건너뛴다() {
         log.warn("재적재 중이라 오늘 아카이빙을 건너뛴다");
         return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
+                .flatMap(run -> 오래된_기록을_닫는다(run).then(Mono.just(run)))
                 .flatMap(run -> runs.finish(run, SyncOutcome.aborted(재적재_중)));
+    }
+
+    /**
+     * 시작한 지 기한 + 10분이 지난 RUNNING 기록을 종류와 상관없이 닫는다(설계 2026-10-27 §12). 이 아카이빙은 락을 잡지 않아 락을 쥔 회차의 정리에 기대지 못하므로,
+     * 죽은 아카이빙 기록이 TTL 로 사라질 때까지 RUNNING 으로 남지 않게 시작할 때마다 직접 본다. 방금 연 자기 기록은 건드리지 않고, 실패해도 아카이빙은 계속한다.
+     */
+    private Mono<Void> 오래된_기록을_닫는다(SyncRun 지금) {
+        return StaleRuns.닫는다(runs, 지금.runId(),
+                run -> StaleRuns.오래됐다(run, clock.instant(), 기한) ? StaleRuns.기한_경과_사유 : null);
     }
 
     private Mono<SyncRun> 아카이빙한다() {
         return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
                 .doOnNext(run -> log.info("[{}] 스냅샷 아카이빙 시작", run.runId()))
+                .flatMap(run -> 오래된_기록을_닫는다(run).then(Mono.just(run)))
                 .flatMap(run -> Mono.defer(this::archive)
                         .timeout(기한, Mono.error(() -> new IllegalStateException("기한 초과 — " + SyncJobs.사람말로(기한))))
                         .onErrorResume(error -> {

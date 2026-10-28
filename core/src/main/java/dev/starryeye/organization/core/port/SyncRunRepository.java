@@ -17,6 +17,15 @@ public interface SyncRunRepository {
     Flux<SyncRun> findRecent(int limit);
 
     /**
+     * 이번 달·지난달 파티션에서 RUNNING 인 기록을 모두, 최신순으로 준다(설계 2026-10-27 §12). 죽은 기록을 닫는 쪽
+     * ({@code StaleRuns.닫는다})이 쓴다 — 최근 N건만 보면 죽은 기록 뒤로 끝난 기록이 쌓여 영영 닫히지 않는다.
+     *
+     * <p><b>비용.</b> 두 파티션의 Query 이고 Scan 이 아니다. 거름식(status = RUNNING)은 읽은 뒤에 걸러 읽기 용량은 파티션 전체 크기만큼 든다 — app-ldap 은
+     * 매시 회차마다 두 달치(약 1,500건) 를 읽는다. 아이템이 작아 용량은 수십 단위다.
+     */
+    Flux<SyncRun> findRunning();
+
+    /**
      * 실행 기록 하나. 없으면 빈 Mono.
      *
      * <p>관리 API {@code GET /admin/sync/runs/{runId}} 가 쓴다 — 재적재·수동 동기화는 202 로 곧바로 답하고, 결과는 이것으로 본다
