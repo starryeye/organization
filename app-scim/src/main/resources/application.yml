@@ -27,7 +27,11 @@ dynamodb:
   endpoint: http://localhost:8000
   region: ap-northeast-2
   table-name: organization-scim
+  # 기동 때 테이블이 없으면 만든다. 로컬만 true — 운영(application-prod.yml)은 false 라 이름 오타가 빈 테이블을 새로 만들지 않고 기동을 멈춘다.
+  # 켜든 끄든 기동 때 테이블의 모양(GSI·TTL)은 늘 확인한다
   create-table-on-startup: true
+  # true 면 만들 때 삭제 보호와 PITR 을 켜고, 이미 있는 테이블은 둘이 켜져 있는지 확인한다. 로컬 DynamoDB 는 PITR 을 받지 않으므로 false
+  require-protection: false
   snapshot-retention-days: 7
   syncrun-retention-days: 30
   # 변경 이력 보관 일수. 늘리려면 syncrun-retention-days 와 함께 늘린다 — 이력의 원인 회차가 먼저 사라지면 거슬러 갈 곳이 없다

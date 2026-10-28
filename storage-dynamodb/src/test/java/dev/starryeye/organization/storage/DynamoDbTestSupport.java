@@ -10,7 +10,9 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.DeleteTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.DescribeTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
 
 import java.net.URI;
 import java.util.concurrent.CompletionException;
@@ -35,7 +37,7 @@ public abstract class DynamoDbTestSupport {
         properties = new DynamoDbProperties();
         properties.setEndpoint(endpoint);
         properties.setTableName("organization-test");
-        properties.setCreateTableOnStartup(false);
+        properties.setCreateTableOnStartup(true);
 
         client = DynamoDbAsyncClient.builder()
                 .region(Region.of(properties.getRegion()))
@@ -48,10 +50,19 @@ public abstract class DynamoDbTestSupport {
         new TableInitializer(client, properties).ensureTable().block();
     }
 
-    private void dropTableIfExists() {
+    /**
+     * 테이블을 지운다. 삭제 보호가 켜져 있으면 먼저 끈다 — 운영 설정(D1)으로 만든 테이블이 다음 시험으로 남아도 지워진다.
+     * 없으면 아무것도 하지 않는다.
+     */
+    protected void dropTableIfExists() {
+        String table = properties.getTableName();
         try {
-            client.deleteTable(DeleteTableRequest.builder()
-                    .tableName(properties.getTableName()).build()).join();
+            var described = client.describeTable(DescribeTableRequest.builder().tableName(table).build()).join().table();
+            if (Boolean.TRUE.equals(described.deletionProtectionEnabled())) {
+                client.updateTable(UpdateTableRequest.builder()
+                        .tableName(table).deletionProtectionEnabled(false).build()).join();
+            }
+            client.deleteTable(DeleteTableRequest.builder().tableName(table).build()).join();
         } catch (CompletionException e) {
             if (!(e.getCause() instanceof ResourceNotFoundException)) {
                 throw e;

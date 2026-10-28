@@ -13,8 +13,11 @@ import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.Projection;
 import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
+import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import software.amazon.awssdk.services.dynamodb.model.TimeToLiveSpecification;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveStatus;
+import software.amazon.awssdk.services.dynamodb.model.UpdateTimeToLiveRequest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -49,8 +52,9 @@ class TableInitializerTest extends DynamoDbTestSupport {
         assertThat(gsi2.keySchema()).extracting(k -> k.attributeName())
                 .containsExactly("GSI1PK", "displayNameKey");
         // 표시명은 이제 키가 아니므로 프로젝션에 명시돼야 검색 결과의 표시명 칸이 빈칸이 되지 않는다
+        // externalId 는 직원 응답에 싣는 값이다(설계 2026-10-27 D9) — GSI3 의 파티션키이지만 GSI2 에서는 비키 속성이다
         assertThat(gsi2.projection().nonKeyAttributes())
-                .containsExactlyInAnyOrder("userName", "displayName", "active");
+                .containsExactlyInAnyOrder("userName", "displayName", "active", "externalId");
     }
 
     @Test
@@ -101,6 +105,89 @@ class TableInitializerTest extends DynamoDbTestSupport {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("정렬키 displayName")
                 .hasMessageContaining("다시 만들어야");
+    }
+
+    @Test
+    @DisplayName("생성이 꺼져 있는데 테이블이 없으면 만들지 않고 기동을 멈춘다 — 이름 오타가 빈 테이블을 새로 만들지 않는다")
+    void 생성이_꺼져_있는데_테이블이_없으면_기동을_멈춘다() {
+        // given
+        dropTableIfExists();
+        properties.setCreateTableOnStartup(false);
+
+        // when, then — 기동 경로(afterPropertiesSet)가 생성 여부와 상관없이 확인한다
+        assertThatThrownBy(() -> new TableInitializer(client, properties).afterPropertiesSet())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("DynamoDB 테이블 organization-test 이 없다 — 처음 설치라면 dynamodb.create-table-on-startup=true 로 한 번 띄우거나 미리 만든다");
+        assertThatThrownBy(() -> client.describeTable(DescribeTableRequest.builder()
+                .tableName(properties.getTableName()).build()).join())
+                .hasCauseInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    @DisplayName("GSI2 프로젝션이 이 변경 전의 셋(externalId 없음)인 테이블이면 생성이 켜져 있어도 기동을 멈추고 테이블은 그대로 둔다")
+    void 이_변경_전에_만든_테이블이면_기동을_멈춘다() {
+        // given — 이 변경 전의 모양: GSI2 프로젝션만 userName·displayName·active 이고 TTL 은 켜져 있다
+        CreateTableRequest 요청 = TableInitializer.테이블_요청(properties.getTableName(), false);
+        dropTableIfExists();
+        client.createTable(요청.toBuilder()
+                .globalSecondaryIndexes(요청.globalSecondaryIndexes().stream()
+                        .map(index -> Keys.GSI2.equals(index.indexName())
+                                ? index.toBuilder().projection(Projection.builder()
+                                        .projectionType(ProjectionType.INCLUDE)
+                                        .nonKeyAttributes("userName", "displayName", "active")
+                                        .build()).build()
+                                : index)
+                        .toList())
+                .build()).join();
+        손으로_TTL_을_켠다();
+
+        // when, then
+        assertThatThrownBy(() -> new TableInitializer(client, properties).ensureTable().block())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("GSI2")
+                .hasMessageContaining("프로젝션")
+                .hasMessageContaining("다시 만들어야")
+                .hasMessageNotContaining("TTL");
+        var table = client.describeTable(DescribeTableRequest.builder()
+                .tableName(properties.getTableName()).build()).join().table();
+        assertThat(table.globalSecondaryIndexes()).as("테이블을 지우거나 고치지 않았다")
+                .filteredOn(index -> Keys.GSI2.equals(index.indexName()))
+                .singleElement()
+                .satisfies(gsi2 -> assertThat(gsi2.projection().nonKeyAttributes())
+                        .containsExactlyInAnyOrder("userName", "displayName", "active"));
+    }
+
+    @Test
+    @DisplayName("TTL 이 꺼진 테이블이면 기동을 멈춘다 — 실행 기록·감사 이력·책갈피가 끝없이 쌓인다")
+    void TTL_이_꺼진_테이블이면_기동을_멈춘다() {
+        // given — 모양은 맞고 TTL 만 켜지 않은(손으로 만들다 빠뜨린) 테이블
+        dropTableIfExists();
+        client.createTable(TableInitializer.테이블_요청(properties.getTableName(), false)).join();
+
+        // when, then
+        assertThatThrownBy(() -> new TableInitializer(client, properties).ensureTable().block())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("TTL")
+                .hasMessageContaining("다시 만들어야");
+    }
+
+    @Test
+    @DisplayName("속성 기본값은 테이블 생성도 보호 요구도 꺼짐이다 — 켜는 곳은 yml 이 정한다")
+    void 속성_기본값은_둘_다_꺼짐이다() {
+        // given, when
+        var 기본 = new DynamoDbProperties();
+
+        // then
+        assertThat(기본.isCreateTableOnStartup()).isFalse();
+        assertThat(기본.isRequireProtection()).isFalse();
+    }
+
+    private void 손으로_TTL_을_켠다() {
+        client.updateTimeToLive(UpdateTimeToLiveRequest.builder()
+                .tableName(properties.getTableName())
+                .timeToLiveSpecification(TimeToLiveSpecification.builder()
+                        .attributeName(Keys.EXPIRES_AT).enabled(true).build())
+                .build()).join();
     }
 
     private void GSI2_없는_옛_테이블을_만든다() {

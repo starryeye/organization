@@ -13,3 +13,9 @@ logging:
       console: ecs
   level:
     dev.starryeye.organization: INFO
+
+# 운영 DynamoDB 테이블은 앱이 만들지 않는다(설계 2026-10-27 §3). 처음 설치라면 create-table-on-startup=true 로 한 번 띄우거나 미리 만든다.
+# require-protection 은 삭제 보호와 PITR 을 요구한다 — 하나라도 꺼져 있으면 기동을 멈춘다
+dynamodb:
+  create-table-on-startup: false
+  require-protection: true

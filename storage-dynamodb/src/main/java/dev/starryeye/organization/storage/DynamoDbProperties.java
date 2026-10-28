@@ -15,7 +15,20 @@ public class DynamoDbProperties {
     private String endpoint;
     private String region = "ap-northeast-2";
     private String tableName = "organization";
-    private boolean createTableOnStartup = true;
+
+    /**
+     * 기동 때 테이블이 없으면 만든다(설계 2026-10-27 §3). 기본값은 꺼짐이다 — 이름 오타가 빈 테이블을 새로 만들어
+     * 신원이 갈라지지 않게, 운영은 만들지 않고 멈춘다. 로컬 {@code application.yml} 만 켠다.
+     * 켜든 끄든 기동 때 테이블은 늘 확인한다.
+     */
+    private boolean createTableOnStartup = false;
+
+    /**
+     * 운영 보호를 요구한다(설계 2026-10-27 §3). 켜면 만들 때 삭제 보호와 PITR 을 켜고, 이미 있는 테이블은 둘이 켜져 있는지 확인한다.
+     * 하나라도 꺼져 있으면 기동을 멈춘다. {@code application-prod.yml} 만 켠다.
+     */
+    private boolean requireProtection = false;
+
     private int snapshotRetentionDays = 7;
     private int syncrunRetentionDays = 30;
 
