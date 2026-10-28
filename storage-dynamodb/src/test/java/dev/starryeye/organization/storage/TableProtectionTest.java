@@ -150,6 +150,19 @@ class TableProtectionTest extends DynamoDbTestSupport {
         }
     }
 
+    @Test
+    @DisplayName("남이 막 만드는 중(CREATING)인 테이블은 ACTIVE 를 기다린 뒤 다시 읽어 검사한다 — 아직 꺼진 TTL 을 보고 다시 만들라며 멈추지 않는다")
+    void 만드는_중인_테이블은_ACTIVE_를_기다린_뒤_다시_읽어_검사한다() {
+        // given — 함께 뜬 다른 대가 막 만든 테이블이다. 첫 설명은 CREATING 이고 TTL 은 아직 꺼짐으로 보인다. 보호는 모두 켜져 있다
+        삭제_보호를_켠다();
+        스텁.PITR_상태를_정한다(PointInTimeRecoveryStatus.ENABLED);
+        스텁.처음_설명은_만드는_중으로_보이게_한다();
+
+        // when, then
+        assertThatCode(() -> 초기화기().ensureTable().block()).doesNotThrowAnyException();
+        assertThat(스텁.설명_요청()).as("기다린 뒤 다시 읽었다").isEqualTo(2);
+    }
+
     private void 삭제_보호를_켠다() {
         client.updateTable(UpdateTableRequest.builder()
                 .tableName(properties.getTableName()).deletionProtectionEnabled(true).build()).join();

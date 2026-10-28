@@ -23,6 +23,7 @@ import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.TableDescription;
+import software.amazon.awssdk.services.dynamodb.model.TableStatus;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveDescription;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveSpecification;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveStatus;
@@ -42,8 +43,8 @@ import java.util.Optional;
  * <ul>
  *   <li>없을 때: 생성이 꺼져 있으면 기동을 멈춘다 — 이름 오타가 빈 테이블을 새로 만들어 신원이 갈라지지 않게. 켜져 있으면 만든다.
  *       {@code require-protection} 이면 삭제 보호를 켜서 만들고 PITR 도 켠다.</li>
- *   <li>있을 때: 모양(GSI 키·GSI2 프로젝션·TTL)이 이 버전과 다르면 기동을 멈춘다. {@code require-protection} 이면
- *       삭제 보호와 PITR 이 켜져 있는지도 본다. PITR 복원본이면 경고만 한다.</li>
+ *   <li>있을 때: ACTIVE 가 아니면(남이 막 만드는 중 등) ACTIVE 를 기다린 뒤 다시 읽는다. 모양(GSI 키·GSI2 프로젝션·TTL)이
+ *       이 버전과 다르면 기동을 멈춘다. {@code require-protection} 이면 삭제 보호와 PITR 이 켜져 있는지도 본다. PITR 복원본이면 경고만 한다.</li>
  * </ul>
  *
  * <p>운영 배포 전이라 옛 모양의 테이블은 이관하지 않는다 — 처방은 "테이블을 다시 만든다" 다.
@@ -88,14 +89,43 @@ public class TableInitializer implements InitializingBean {
 
     public Mono<Void> ensureTable() {
         String table = properties.getTableName();
-        // "없음" 은 describe 한 번에만 해당한다 — 아래 검사·생성이 던지는 ResourceNotFoundException 을 없음으로 읽지 않는다
-        return Mono.fromFuture(() -> client.describeTable(DescribeTableRequest.builder()
-                        .tableName(table).build()))
-                .map(response -> Optional.of(response.table()))
+        // "없음" 은 첫 describe 한 번에만 해당한다 — 아래 대기·다시 읽기·검사·생성이 던지는 ResourceNotFoundException 을 없음으로 읽지 않는다
+        return 설명한다(table)
+                .map(Optional::of)
                 .onErrorReturn(ResourceNotFoundException.class, Optional.empty())
                 .flatMap(described -> described
-                        .map(description -> 있는_테이블을_검사한다(table, description))
+                        .map(description -> ACTIVE_인_설명(table, description)
+                                .flatMap(active -> 있는_테이블을_검사한다(table, active)))
                         .orElseGet(() -> 없는_테이블을_처리한다(table)));
+    }
+
+    private Mono<TableDescription> 설명한다(String table) {
+        return Mono.fromFuture(() -> client.describeTable(DescribeTableRequest.builder()
+                        .tableName(table).build()))
+                .map(response -> response.table());
+    }
+
+    /**
+     * ACTIVE 가 아니면 ACTIVE 를 기다린 뒤 다시 읽은 설명을 돌려준다. 처음 설치에 여러 대가 함께 뜨거나 IaC 가 배포 직전에 만들면 테이블이 아직
+     * CREATING 이다 — 그때는 TTL 이 꺼짐으로 보이고 PITR 조회가 실패할 수 있어, 그대로 검사하면 막 만든 테이블에 "다시 만들어야 한다" 로 멈춘다.
+     * 기다림은 만들기와 같은 대기({@code waitUntilTableExists})다. 남은 틈: 만든 쪽은 ACTIVE 를 본 뒤에야 TTL·PITR 을 켜므로, 이쪽이 먼저 깨어나면
+     * 여전히 꺼짐으로 보인다 — 그래서 처음 설치는 만드는 한 대를 먼저 띄운다(온보딩 11 §2.1).
+     */
+    private Mono<TableDescription> ACTIVE_인_설명(String table, TableDescription description) {
+        if (description.tableStatus() == TableStatus.ACTIVE) {
+            return Mono.just(description);
+        }
+        log.info("DynamoDB 테이블 '{}' 이 {} 이다 — ACTIVE 가 되기를 기다린 뒤 확인한다", table, description.tableStatusAsString());
+        return ACTIVE_를_기다린다(table).then(설명한다(table));
+    }
+
+    private Mono<Void> ACTIVE_를_기다린다(String table) {
+        return Mono.usingWhen(
+                        Mono.fromSupplier(client::waiter),
+                        waiter -> Mono.fromFuture(() -> waiter.waitUntilTableExists(
+                                DescribeTableRequest.builder().tableName(table).build())),
+                        waiter -> Mono.fromRunnable(waiter::close))
+                .then();
     }
 
     private Mono<Void> 없는_테이블을_처리한다(String table) {
@@ -154,11 +184,7 @@ public class TableInitializer implements InitializingBean {
 
         // TTL 은 테이블이 ACTIVE 가 된 뒤에만 켤 수 있다 — AWS 에서는 생성 직후 CREATING 이다
         Mono<Void> 만들기 = Mono.fromFuture(() -> client.createTable(request))
-                .then(Mono.usingWhen(
-                        Mono.fromSupplier(client::waiter),
-                        waiter -> Mono.fromFuture(() -> waiter.waitUntilTableExists(
-                                DescribeTableRequest.builder().tableName(table).build())),
-                        waiter -> Mono.fromRunnable(waiter::close)))
+                .then(ACTIVE_를_기다린다(table))
                 .then(Mono.fromFuture(() -> client.updateTimeToLive(UpdateTimeToLiveRequest.builder()
                         .tableName(table)
                         .timeToLiveSpecification(TimeToLiveSpecification.builder()

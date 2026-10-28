@@ -15,6 +15,9 @@ import software.amazon.awssdk.services.dynamodb.model.DescribeTimeToLiveResponse
 import software.amazon.awssdk.services.dynamodb.model.PointInTimeRecoveryDescription;
 import software.amazon.awssdk.services.dynamodb.model.PointInTimeRecoveryStatus;
 import software.amazon.awssdk.services.dynamodb.model.RestoreSummary;
+import software.amazon.awssdk.services.dynamodb.model.TableStatus;
+import software.amazon.awssdk.services.dynamodb.model.TimeToLiveDescription;
+import software.amazon.awssdk.services.dynamodb.model.TimeToLiveStatus;
 import software.amazon.awssdk.services.dynamodb.model.UpdateContinuousBackupsRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateContinuousBackupsResponse;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
@@ -38,6 +41,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>PITR 의 처음 상태는 꺼짐이다. {@link #처음_n번_거절한다}·{@link #늘_거절한다} 로 막 만든 테이블을 흉내 내고,
  * 받아들인 켜기 요청은 상태를 켜짐으로 바꾼다.
+ *
+ * <p>{@link #처음_설명은_만드는_중으로_보이게_한다} 는 남이 막 만드는 테이블을 흉내 낸다 — 첫 {@code describeTable} 은 {@code CREATING} 이고,
+ * 다음 {@code describeTable} 전까지는 TTL 도 아직 꺼짐으로 보인다. {@code waiter()} 는 Local 의 것이라 곧바로 ACTIVE 를 본다.
  */
 final class ContinuousBackupsStubClient implements DynamoDbAsyncClient {
 
@@ -48,6 +54,8 @@ final class ContinuousBackupsStubClient implements DynamoDbAsyncClient {
     private volatile boolean 늘_거절 = false;
     private volatile PointInTimeRecoveryStatus pitr_상태 = PointInTimeRecoveryStatus.DISABLED;
     private volatile boolean 복원본 = false;
+    private volatile boolean 만드는_중 = false;
+    private final AtomicInteger 설명_요청 = new AtomicInteger();
 
     ContinuousBackupsStubClient(DynamoDbAsyncClient local) {
         this.local = local;
@@ -71,6 +79,16 @@ final class ContinuousBackupsStubClient implements DynamoDbAsyncClient {
     /** DescribeTable 응답에 {@code restoreSummary} 를 붙인다 — PITR 로 복원한 테이블이다. */
     void 복원본으로_보이게_한다() {
         this.복원본 = true;
+    }
+
+    /** 첫 DescribeTable 은 {@code CREATING} 이고, 다음 DescribeTable 전까지는 TTL 이 꺼짐으로 보인다 — 남이 막 만드는 테이블이다. */
+    void 처음_설명은_만드는_중으로_보이게_한다() {
+        this.만드는_중 = true;
+    }
+
+    /** {@code DescribeTable} 이 들어온 횟수. */
+    int 설명_요청() {
+        return 설명_요청.get();
     }
 
     /** {@code UpdateContinuousBackups} 가 들어온 횟수(거절한 것 포함). */
@@ -107,7 +125,17 @@ final class ContinuousBackupsStubClient implements DynamoDbAsyncClient {
 
     @Override
     public CompletableFuture<DescribeTableResponse> describeTable(DescribeTableRequest request) {
+        boolean 첫_설명 = 설명_요청.incrementAndGet() == 1;
+        if (만드는_중 && !첫_설명) {
+            만드는_중 = false;
+        }
+        boolean 만드는_중으로_보인다 = 만드는_중 && 첫_설명;
         return local.describeTable(request).thenApply(response -> {
+            if (만드는_중으로_보인다) {
+                return response.toBuilder()
+                        .table(response.table().toBuilder().tableStatus(TableStatus.CREATING).build())
+                        .build();
+            }
             if (!복원본) {
                 return response;
             }
@@ -140,6 +168,13 @@ final class ContinuousBackupsStubClient implements DynamoDbAsyncClient {
 
     @Override
     public CompletableFuture<DescribeTimeToLiveResponse> describeTimeToLive(DescribeTimeToLiveRequest request) {
+        if (만드는_중) {
+            // 만드는 쪽은 ACTIVE 가 된 뒤에야 TTL 을 켠다 — 그 전에는 꺼짐으로 보인다
+            return CompletableFuture.completedFuture(DescribeTimeToLiveResponse.builder()
+                    .timeToLiveDescription(TimeToLiveDescription.builder()
+                            .timeToLiveStatus(TimeToLiveStatus.DISABLED).build())
+                    .build());
+        }
         return local.describeTimeToLive(request);
     }
 
