@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.DailyOnce;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
@@ -26,12 +27,13 @@ public class ArchiveScheduler {
      * {@code Mono.defer} 로 감싸는 이유: 유스케이스가 Mono 를 반환하기 전에 동기 예외를 던지면
      * 그것이 스케줄러 메서드 밖으로 새어나가 에러 처리를 건너뛴다. 그러면 실패가 로그에 남지 않는다.
      *
-     * <p>하루 1회 표지를 먼저 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1) — 여러 대가 같은 시각에 불러도 스냅샷은 하루 하나다.
+     * <p>하루 1회 표지를 먼저 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1) — 여러 대가 같은 시각에 불러도 스냅샷은 하루 하나다. SUCCEEDED 만 성공이다 —
+     * FAILED 와 ABORTED(재적재 중)는 표지를 풀어 하루 창 안의 다음 정각에 다시 돈다(설계 2026-10-27 §9).
      */
     @Scheduled(cron = "#{@scimSyncProperties.archiveCron}")
     public void 스냅샷아카이빙() {
         관측하며실행("sync.scim.archive",
-                dailyOnce.run("scim-archive", Mono.defer(archive::execute))
+                dailyOnce.run("scim-archive", Mono.defer(archive::execute), run -> run.status() == SyncStatus.SUCCEEDED)
                         .doOnNext(run -> log.info("스냅샷 아카이빙 완료: status={} snapshotId={}",
                                 run.status(), run.snapshotId()))
                         .doOnError(error -> log.error("스냅샷 아카이빙이 예기치 않게 실패했다", error)));
@@ -40,12 +42,12 @@ public class ArchiveScheduler {
     /**
      * 스냅샷은 테이블 TTL 을 쓰지 않으므로(최신까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다) 이 정리가
      * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
-     * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다.
+     * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다. 오류 없이 끝나면 성공이다.
      */
     @Scheduled(cron = "#{@scimSyncProperties.purgeCron}")
     public void 만료스냅샷정리() {
         관측하며실행("sync.scim.purge",
-                dailyOnce.run("scim-purge", Mono.defer(snapshots::purgeExpired))
+                dailyOnce.run("scim-purge", Mono.defer(snapshots::purgeExpired), count -> true)
                         .doOnNext(count -> log.info("만료 스냅샷 정리 완료: {}건", count))
                         .doOnError(error -> log.error("만료 스냅샷 정리에 실패했다", error)));
     }

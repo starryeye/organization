@@ -47,12 +47,13 @@ public class SyncScheduler {
     /**
      * 스냅샷은 테이블 TTL 을 쓰지 않으므로(최신까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다) 이 정리가
      * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
-     * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1).
+     * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1). 오류 없이 끝나면 성공이다 — 실패하면 표지를 풀어 하루 창 안의 다음
+     * 정각에 다시 돈다(설계 2026-10-27 §9).
      */
     @Scheduled(cron = "#{@syncProperties.purgeCron}")
     public void 만료스냅샷정리() {
         관측하며실행("sync.ldap.purge",
-                dailyOnce.run("ldap-purge", Mono.defer(snapshots::purgeExpired))
+                dailyOnce.run("ldap-purge", Mono.defer(snapshots::purgeExpired), count -> true)
                         .doOnNext(count -> log.info("만료 스냅샷 정리 완료: {}건", count))
                         .doOnError(error -> log.error("만료 스냅샷 정리에 실패했다", error)));
     }

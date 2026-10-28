@@ -56,10 +56,13 @@ public class UseCaseConfig {
                 auditRecorder);
     }
 
-    /** 하루 1회 작업(만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). */
+    /**
+     * 하루 1회 작업(만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). 표지의 임대는 잡은 때 + {@code sync.job-timeout} + 5분이다
+     * (설계 2026-10-27 §9).
+     */
     @Bean
-    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock) {
-        return new DailyOnce(claims, clock);
+    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock, SyncProperties properties) {
+        return new DailyOnce(claims, clock, properties.getJobTimeout());
     }
 
     /** 변경 이력을 남긴다(설계 2026-10-10 §4). 쓰지 못한 줄은 {@code audit.write.failures} 로 센다(§4.5). */

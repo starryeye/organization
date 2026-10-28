@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -49,7 +50,7 @@ class SyncSchedulerTest {
 
     private static SyncScheduler 스케줄러(FullSyncUseCase fullSync, FakeSnapshotRepository snapshots,
                                      FakeDailyJobClaims claims) {
-        return new SyncScheduler(fullSync, snapshots, new DailyOnce(claims, 오늘),
+        return new SyncScheduler(fullSync, snapshots, new DailyOnce(claims, 오늘, Duration.ofMinutes(30)),
                 new SyncMetrics(new SimpleMeterRegistry()), ObservationRegistry.NOOP);
     }
 

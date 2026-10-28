@@ -21,6 +21,7 @@ import org.springframework.scheduling.config.ScheduledTaskHolder;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,7 +36,7 @@ class ArchiveSchedulerCronTest {
     private static class 놀고_있는_아카이빙 extends SnapshotArchiveUseCase {
 
         놀고_있는_아카이빙() {
-            super(null, null, null, null, null, Clock.systemUTC(), null, null);
+            super(null, null, null, null, null, Clock.systemUTC(), null, null, Duration.ofMinutes(30));
         }
 
         @Override
@@ -58,7 +59,7 @@ class ArchiveSchedulerCronTest {
         @Bean
         ArchiveScheduler archiveScheduler() {
             return new ArchiveScheduler(new 놀고_있는_아카이빙(), new FakeSnapshotRepository(), ObservationRegistry.NOOP,
-                    new DailyOnce(new FakeDailyJobClaims(), Clock.systemUTC()));
+                    new DailyOnce(new FakeDailyJobClaims(), Clock.systemUTC(), Duration.ofMinutes(30)));
         }
     }
 

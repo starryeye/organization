@@ -22,6 +22,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -67,6 +68,11 @@ public class SnapshotArchiveUseCase {
     private final ArchiveDriftObserver driftObserver;
     /** 직원 한 명의 남은 회수를 락 안에서 지운다. 빈 결과는 그 직원이 그새 지워졌다는 뜻이다. */
     private final Function<String, Mono<IncrementalSyncResult>> 남은_회수를_지운다;
+    /**
+     * 아카이빙 한 번의 기한({@code sync.job-timeout}, 설계 2026-10-27 §9). 넘으면 FAILED("기한 초과 — N분")로 끝낸다. 하루 1회 표지의 임대(job-timeout +
+     * 5분)보다 먼저 끝나야 두 인스턴스가 함께 돌지 않는다.
+     */
+    private final Duration 기한;
 
     static final String 재적재_중 = "재적재 중이라 건너뜀";
 
@@ -99,6 +105,7 @@ public class SnapshotArchiveUseCase {
         return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
                 .doOnNext(run -> log.info("[{}] 스냅샷 아카이빙 시작", run.runId()))
                 .flatMap(run -> Mono.defer(this::archive)
+                        .timeout(기한, Mono.error(() -> new IllegalStateException("기한 초과 — " + SyncJobs.사람말로(기한))))
                         .onErrorResume(error -> {
                             log.error("[{}] 스냅샷 아카이빙 실패", run.runId(), error);
                             return Mono.just(SyncOutcome.failed(error.getMessage()));

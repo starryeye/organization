@@ -23,6 +23,7 @@ import org.springframework.scheduling.config.ScheduledTaskHolder;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -62,7 +63,7 @@ class SyncSchedulerCronTest {
         @Bean
         SyncScheduler syncScheduler() {
             return new SyncScheduler(new 놀고_있는_동기화(), new FakeSnapshotRepository(),
-                    new DailyOnce(new FakeDailyJobClaims(), Clock.systemUTC()),
+                    new DailyOnce(new FakeDailyJobClaims(), Clock.systemUTC(), Duration.ofMinutes(30)),
                     new SyncMetrics(new SimpleMeterRegistry()), ObservationRegistry.NOOP);
         }
     }

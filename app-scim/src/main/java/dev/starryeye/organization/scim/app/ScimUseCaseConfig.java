@@ -113,7 +113,7 @@ public class ScimUseCaseConfig {
 
     /**
      * 하루 아카이빙. 어긋남의 수는 게이지로 내고({@link ScimSyncMetrics}), 남은 회수는 SCIM 쓰기와 같은 길(락·리스·Check 기준선·이력)로 지운다
-     * ({@link IncrementalSyncUseCase#revokeLeftovers}, 설계 2026-10-20 §6.4).
+     * ({@link IncrementalSyncUseCase#revokeLeftovers}, 설계 2026-10-20 §6.4). 기한은 {@code sync.job-timeout} 이다(설계 2026-10-27 §9).
      */
     @Bean
     public SnapshotArchiveUseCase snapshotArchiveUseCase(DirectoryStateRepository state,
@@ -123,14 +123,18 @@ public class ScimUseCaseConfig {
                                                           MutationLock lock,
                                                           Clock clock,
                                                           ScimSyncMetrics metrics,
-                                                          IncrementalSyncUseCase incrementalSyncUseCase) {
+                                                          IncrementalSyncUseCase incrementalSyncUseCase,
+                                                          ScimSyncProperties properties) {
         return new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock, clock,
-                metrics, incrementalSyncUseCase::revokeLeftovers);
+                metrics, incrementalSyncUseCase::revokeLeftovers, properties.getJobTimeout());
     }
 
-    /** 하루 1회 작업(아카이빙·만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). */
+    /**
+     * 하루 1회 작업(아카이빙·만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). 표지의 임대는 잡은 때 + {@code sync.job-timeout}
+     * + 5분이다(설계 2026-10-27 §9).
+     */
     @Bean
-    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock) {
-        return new DailyOnce(claims, clock);
+    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock, ScimSyncProperties properties) {
+        return new DailyOnce(claims, clock, properties.getJobTimeout());
     }
 }

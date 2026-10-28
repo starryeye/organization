@@ -343,7 +343,8 @@ public class SyncJobs {
         return Duration.ofNanos(System.nanoTime() - 시작나노);
     }
 
-    private static String 사람말로(Duration duration) {
+    /** 기한 초과 메시지의 기한 — 아카이빙({@link SnapshotArchiveUseCase})도 같은 문구를 쓴다. */
+    static String 사람말로(Duration duration) {
         return duration.toMinutes() > 0 ? duration.toMinutes() + "분" : duration.toMillis() + "ms";
     }
 }

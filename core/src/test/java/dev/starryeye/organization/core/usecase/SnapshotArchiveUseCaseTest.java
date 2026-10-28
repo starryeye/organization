@@ -24,6 +24,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -38,6 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SnapshotArchiveUseCaseTest {
 
     private static final Instant 고정시각 = Instant.parse("2026-08-15T03:00:00Z");
+    private static final Duration 기한 = Duration.ofMinutes(30);
 
     private static final DirectoryUser 퇴사한_김 = new DirectoryUser("kim", null, "kim", "김철수", null, false);
     private static final DirectoryUser 활성_김 = new DirectoryUser("kim", null, "kim", "김철수", null, true);
@@ -84,7 +86,7 @@ class SnapshotArchiveUseCaseTest {
                 Clock.fixed(고정시각, ZoneOffset.UTC), (extra, missing) -> {
             알린_어긋남.add(new 어긋남(extra, missing));
             복구_전에.run();
-        }, incremental::revokeLeftovers);
+        }, incremental::revokeLeftovers, 기한);
     }
 
     @AfterEach
@@ -435,6 +437,36 @@ class SnapshotArchiveUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(run.message()).isEqualTo("어긋난 직원 2명 다시 맞춤(실패 1명)");
         assertThat(writer.stored).containsExactly(김_개발);
+    }
+
+    @Test
+    @DisplayName("기한(sync.job-timeout)을 넘기면 FAILED '기한 초과' 로 끝낸다 — 하루 1회 표지의 임대보다 먼저 끝난다")
+    void 기한을_넘기면_FAILED_기한_초과로_끝낸다() {
+        // given — 체커가 답하지 않는다
+        var 답하지_않는_체커 = new FakeTupleChecker() {
+            @Override
+            public Mono<Set<RelationTuple>> existing(Set<RelationTuple> candidates) {
+                return Mono.never();
+            }
+        };
+        var 멈춘_아카이빙 = new SnapshotArchiveUseCase(state, 답하지_않는_체커, snapshots, runs, lock,
+                Clock.fixed(고정시각, ZoneOffset.UTC), (extra, missing) -> {
+        }, 직원 -> Mono.empty(), 기한);
+
+        // when, then
+        StepVerifier.withVirtualTime(멈춘_아카이빙::execute)
+                .expectSubscription()
+                .expectNoEvent(기한.minusSeconds(1))
+                .thenAwait(Duration.ofSeconds(1))
+                .assertNext(run -> {
+                    assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+                    assertThat(run.message()).isEqualTo("기한 초과 — 30분");
+                })
+                .expectComplete()
+                .verify(Duration.ofSeconds(5));
+        assertThat(runs.finished).singleElement()
+                .satisfies(run -> assertThat(run.status()).isEqualTo(SyncStatus.FAILED));
+        assertThat(snapshots.saved).isEmpty();
     }
 
     private record 어긋남(long extra, long missing) {
