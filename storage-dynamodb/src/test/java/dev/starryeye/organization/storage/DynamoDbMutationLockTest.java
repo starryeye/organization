@@ -7,7 +7,16 @@ import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -233,17 +242,34 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
 
     @Test
     @DisplayName("시도 한도로 끊긴 획득은 결과를 모르는 예외다 — 서버에서 성공했을 수 있어 조건 실패(남이 쥠)와 가른다(설계 2026-10-27 §6)")
-    void 시도_한도로_끊긴_획득은_결과를_모르는_예외다() {
-        // when, then — 1ms 안에는 DynamoDB Local 의 응답이 오지 않는다
-        assertThatThrownBy(() -> 인스턴스1.acquire(LockPurpose.WRITE, "토큰", Duration.ofMillis(1)).block())
-                .isInstanceOf(LockAttemptTimeoutException.class)
-                .isNotInstanceOf(LockUnavailableException.class);
+    void 시도_한도로_끊긴_획득은_결과를_모르는_예외다() throws IOException {
+        // given — 연결은 커널 대기열이 받지만 아무도 꺼내 읽지 않아 응답이 영영 오지 않는 끝점이다(DynamoDB Local 은 1ms 안에도 답할 수 있다)
+        //   묶은 주소와 부르는 주소를 127.0.0.1 로 맞춘다 — localhost 는 ::1 로 풀려 다른 프로그램에 닿을 수 있다(ContainersSquatterTest)
+        try (var 답하지_않는_끝점 = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+             var 닿지_않는_클라이언트 = DynamoDbAsyncClient.builder()
+                     .region(Region.of(properties.getRegion()))
+                     .endpointOverride(URI.create("http://127.0.0.1:" + 답하지_않는_끝점.getLocalPort()))
+                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("local", "local")))
+                     .build()) {
+            var 응답_없는_락 = new DynamoDbMutationLock(닿지_않는_클라이언트, properties, clock, "instance-1");
+
+            // when
+            Throwable error = catchThrowable(() ->
+                    응답_없는_락.acquire(LockPurpose.WRITE, "토큰", Duration.ofMillis(200)).block(Duration.ofSeconds(10)));
+
+            // then — 시도 한도(SDK 의 apiCallTimeout)로 끊겼고, 조건 실패로 읽히지 않는다
+            assertThat(error)
+                    .isInstanceOf(LockAttemptTimeoutException.class)
+                    .isNotInstanceOf(LockUnavailableException.class)
+                    .hasCauseInstanceOf(ApiCallTimeoutException.class);
+        }
     }
 
     @Test
     @DisplayName("끊긴 뒤 같은 토큰으로 다시 시도하면 잡고, 남의 토큰은 막힌다 — 끊긴 시도가 서버에서 성공했어도 자기 락에 막히지 않는다")
     void 끊긴_뒤_같은_토큰은_잡고_남의_토큰은_막힌다() {
         // given — 응답을 기다리지 못하고 끊긴 시도. 서버에서는 성공했을 수도, 아닐 수도 있다
+        // 1ms 시도가 실제로 끊겼든 Local 이 그 안에 답했든 결과는 같다 — 어느 쪽이든 락 줄은 없거나 내 토큰의 줄이다
         catchThrowable(() -> 인스턴스1.acquire(LockPurpose.WRITE, "토큰", Duration.ofMillis(1)).block());
 
         // when
