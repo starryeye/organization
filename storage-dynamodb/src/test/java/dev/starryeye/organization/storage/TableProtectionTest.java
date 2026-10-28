@@ -25,7 +25,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TableProtectionTest extends DynamoDbTestSupport {
 
     private static final Duration PITR_간격 = Duration.ofMillis(10);
-    private static final Duration PITR_한도 = Duration.ofMillis(200);
+    /** 넉넉히 둔다 — 재시도는 실제 병렬 스케줄러에서 돌아, 바쁜 전체 실행에서 200ms 로는 "잠시 거절" 시험이 두 번째 거절 뒤 한도를 넘길 수 있다. */
+    private static final Duration PITR_한도 = Duration.ofSeconds(1);
 
     private ContinuousBackupsStubClient 스텁;
 
