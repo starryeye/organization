@@ -25,8 +25,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashSet;
-import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -54,6 +57,18 @@ import java.util.stream.Collectors;
  * 빠진 줄은 수로만 내고 IdP 재시도·다음 쓰기·재적재가 채운다. 조직 연결 줄({@code child})의 어긋남도 수로만 낸다. 설계 2026-09-01 §1.4 는 5분마다 전체를
  * 다시 계산하는 "주기 리컨실러"를 비용 때문에 버렸다 — 이것은 하루 한 번 이미 하는 비교의 결과에서 어긋난 직원만 맞추고, OpenFGA Read 를 쓰지 않는다. 그 문서의
  * 전제("수렴 기제는 IdP 재시도")가 IdP 의 동작에 따라 성립하지 않을 수 있어, 비교를 복구로 잇는다.
+ *
+ * <p><b>순서와 독립(설계 2026-10-27 §12).</b> 비교가 끝나면 곧바로 어긋남의 수를 알린다 — 관찰 시각이 비교한 시각이어야 하고, 이어지는 저장·복구의 실패에 가려지지
+ * 않는다. 그다음 스냅샷을 저장하고, 저장이 실패했어도 남은 회수를 지운다. 둘은 서로를 막지 않는다 — 스냅샷은 지우기 전에 본 실제라 순서와 상관없이 같고, 저장 디스크가
+ * 말썽이라고 권한 회수를 미룰 이유가 없다. 저장이 실패하면 기록은 FAILED 이고 메시지에 복구 결과를 잇는다.
+ *
+ * <p><b>실행 기록의 건수가 뜻하는 것.</b>
+ * <ul>
+ *   <li>{@code writtenCount} — 스냅샷에 담은 줄 수(OpenFGA 에 쓴 수가 아니다). 저장하지 못했으면 0.</li>
+ *   <li>{@code deletedCount} — 복구가 실제로 지운 줄의 합({@code writeResult().deleted()}). 저장 성공 여부와 상관없다.</li>
+ *   <li>{@code failureCount} — 복구가 지우지 못한 줄의 합({@code writeResult().failures()}). 오류로 끝난 직원은 결과가 없으므로 그 직원의 남은 줄
+ *       ({@code direct_member}) 수를 더한다.</li>
+ * </ul>
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -143,6 +158,8 @@ public class SnapshotArchiveUseCase {
                         .collect(Collectors.toCollection(LinkedHashSet::new));
                 long 빠짐 = 있어야할것.stream().filter(tuple -> !actual.contains(tuple)).count();
                 어긋남을_남긴다(여분.size(), 빠짐);
+                // 비교한 직후다 — 저장·복구가 어떻게 끝나든 수는 이미 나갔다
+                수를_알린다(여분.size(), 빠짐);
 
                 Instant now = clock.instant();
                 TupleSnapshot snapshot = new TupleSnapshot(
@@ -151,14 +168,37 @@ public class SnapshotArchiveUseCase {
                         SyncSource.SCIM,
                         actual);
 
-                // 스냅샷은 복구 전에 본 실제다 — 지우기 전의 모습이 기록에 남는다
-                return snapshots.save(snapshot)
-                        .then(Mono.fromRunnable(() -> 수를_알린다(여분.size(), 빠짐)))
-                        .then(Mono.defer(() -> 차례로_지운다(남은_회수의_직원들(여분))))
-                        .map(복구 -> new SyncOutcome(SyncStatus.SUCCEEDED,
-                                actual.size(), 0, 0, snapshot.id(), 복구.메시지()));
+                // 스냅샷은 복구 전에 본 실제다 — 지우기 전의 모습이 기록에 남는다. 저장이 실패해도 지우기는 돈다
+                return 저장한다(snapshot).flatMap(저장오류 -> 차례로_지운다(남은_회수의_직원별_줄_수(여분))
+                        .map(복구 -> 결론(저장오류, snapshot, 복구)));
             });
         });
+    }
+
+    /** 저장 오류는 잡아 돌려준다(없으면 빈 값) — 다음 단계(남은 회수 지우기)를 막지 않는다. */
+    private Mono<Optional<Throwable>> 저장한다(TupleSnapshot snapshot) {
+        return Mono.defer(() -> snapshots.save(snapshot))
+                .then(Mono.just(Optional.<Throwable>empty()))
+                .onErrorResume(error -> {
+                    log.error("스냅샷 저장 실패 — 남은 회수 지우기는 이어서 한다", error);
+                    return Mono.just(Optional.of(error));
+                });
+    }
+
+    /**
+     * 저장이 됐으면 SUCCEEDED, 아니면 FAILED 다. 지운·실패한 줄은 어느 쪽이든 복구가 센 그대로 남긴다. FAILED 는 쓴 수 0·스냅샷 없음이고,
+     * 메시지는 저장 실패의 원인에 복구 메시지가 있으면 잇는다.
+     */
+    private static SyncOutcome 결론(Optional<Throwable> 저장오류, TupleSnapshot snapshot, 복구결과 복구) {
+        int 지운줄 = Math.toIntExact(복구.지운줄());
+        int 실패줄 = Math.toIntExact(복구.실패줄());
+        if (저장오류.isEmpty()) {
+            return new SyncOutcome(SyncStatus.SUCCEEDED, snapshot.tuples().size(), 지운줄, 실패줄, snapshot.id(), 복구.메시지());
+        }
+        Throwable 원인 = 저장오류.get();
+        String 저장실패 = "스냅샷 저장 실패 — " + Objects.toString(원인.getMessage(), 원인.getClass().getSimpleName());
+        String 메시지 = 복구.메시지() == null ? 저장실패 : 저장실패 + " / " + 복구.메시지();
+        return new SyncOutcome(SyncStatus.FAILED, 0, 지운줄, 실패줄, null, 메시지);
     }
 
     /**
@@ -182,13 +222,14 @@ public class SnapshotArchiveUseCase {
         }
     }
 
-    /** 남은 줄({@code direct_member})의 직원 — 조직 연결 줄은 직원 회수가 아니라 여기 들지 않는다. 순서가 일정하도록 아이디순이다. */
-    private static List<String> 남은_회수의_직원들(Set<RelationTuple> 여분) {
-        return 여분.stream()
-                .flatMap(tuple -> tuple.directMemberUserId().stream())
-                .distinct()
-                .sorted()
-                .toList();
+    /**
+     * 남은 줄({@code direct_member})의 직원과 그 직원의 남은 줄 수 — 조직 연결 줄은 직원 회수가 아니라 여기 들지 않는다. 순서가 일정하도록 아이디순이다.
+     * 줄 수는 지우기가 오류로 끝난 직원의 실패 건수로 쓴다.
+     */
+    private static Map<String, Long> 남은_회수의_직원별_줄_수(Set<RelationTuple> 여분) {
+        Map<String, Long> 직원별 = new TreeMap<>();
+        여분.forEach(tuple -> tuple.directMemberUserId().ifPresent(직원 -> 직원별.merge(직원, 1L, Long::sum)));
+        return 직원별;
     }
 
     /**
@@ -196,26 +237,35 @@ public class SnapshotArchiveUseCase {
      * 결과의 분류:
      * <ul>
      *   <li>빈 결과 — 비교 뒤 그 직원이 지워졌다. 건너뛰고 세지 않는다.</li>
-     *   <li>일부만 반영, 또는 오류 — 실패로 센다.</li>
+     *   <li>일부만 반영 — 실패로 센다. 줄은 결과가 센 대로 더한다.</li>
+     *   <li>오류 — 실패로 센다. 결과가 없으니 그 직원의 남은 줄 수 전부를 실패한 줄로 더한다.</li>
      * </ul>
+     *
+     * @param 직원별_줄_수 직원과 그 직원의 남은 줄({@code direct_member}) 수
      */
-    private Mono<복구결과> 차례로_지운다(List<String> 직원들) {
-        if (직원들.isEmpty()) {
+    private Mono<복구결과> 차례로_지운다(Map<String, Long> 직원별_줄_수) {
+        if (직원별_줄_수.isEmpty()) {
             return Mono.just(복구결과.없음);
         }
-        return Flux.fromIterable(직원들)
-                .concatMap(직원 -> Mono.defer(() -> 남은_회수를_지운다.apply(직원))
-                        .map(결과 -> 결과.fullyApplied() ? 한명.지움 : 한명.실패)
-                        .onErrorResume(error -> {
-                            log.warn("직원 '{}' 의 남은 회수를 지우지 못했다 — 다음 아카이빙이 다시 잡는다", 직원, error);
-                            return Mono.just(한명.실패);
-                        })
-                        .defaultIfEmpty(한명.건너뜀))
+        return Flux.fromIterable(직원별_줄_수.entrySet())
+                .concatMap(항목 -> {
+                    String 직원 = 항목.getKey();
+                    return Mono.defer(() -> 남은_회수를_지운다.apply(직원))
+                            .map(결과 -> new 한명결과(결과.fullyApplied() ? 한명.지움 : 한명.실패,
+                                    결과.writeResult().deleted().size(), 결과.writeResult().failures().size()))
+                            .onErrorResume(error -> {
+                                log.warn("직원 '{}' 의 남은 회수를 지우지 못했다 — 다음 아카이빙이 다시 잡는다", 직원, error);
+                                return Mono.just(new 한명결과(한명.실패, 0, 항목.getValue()));
+                            })
+                            .defaultIfEmpty(한명결과.건너뜀);
+                })
                 .collectList()
                 .map(결과들 -> {
-                    long 건너뜀 = 결과들.stream().filter(결과 -> 결과 == 한명.건너뜀).count();
-                    long 실패 = 결과들.stream().filter(결과 -> 결과 == 한명.실패).count();
-                    return new 복구결과(결과들.size(), 결과들.size() - 건너뜀, 실패);
+                    long 건너뜀 = 결과들.stream().filter(결과 -> 결과.분류() == 한명.건너뜀).count();
+                    long 실패 = 결과들.stream().filter(결과 -> 결과.분류() == 한명.실패).count();
+                    return new 복구결과(결과들.size(), 결과들.size() - 건너뜀, 실패,
+                            결과들.stream().mapToLong(한명결과::지운줄).sum(),
+                            결과들.stream().mapToLong(한명결과::실패줄).sum());
                 });
     }
 
@@ -224,13 +274,24 @@ public class SnapshotArchiveUseCase {
     }
 
     /**
+     * @param 지운줄 이 직원에게서 실제로 지운 줄 수
+     * @param 실패줄 이 직원에게서 지우지 못한 줄 수
+     */
+    private record 한명결과(한명 분류, long 지운줄, long 실패줄) {
+
+        static final 한명결과 건너뜀 = new 한명결과(한명.건너뜀, 0, 0);
+    }
+
+    /**
      * @param 대상 비교에서 남은 줄이 잡힌 직원 수
      * @param 맞춘직원 그 가운데 다시 맞추려 한 직원 수 — 그새 지워져 건너뛴 직원은 세지 않는다
      * @param 실패 맞추려 한 직원 가운데 다 지우지 못한 직원 수
+     * @param 지운줄 직원마다 실제로 지운 줄의 합
+     * @param 실패줄 직원마다 지우지 못한 줄의 합 — 오류로 끝난 직원은 그 직원의 남은 줄 수를 더했다
      */
-    private record 복구결과(long 대상, long 맞춘직원, long 실패) {
+    private record 복구결과(long 대상, long 맞춘직원, long 실패, long 지운줄, long 실패줄) {
 
-        static final 복구결과 없음 = new 복구결과(0, 0, 0);
+        static final 복구결과 없음 = new 복구결과(0, 0, 0, 0, 0);
 
         /** 남은 줄이 잡힌 직원이 없었으면 메시지도 없다 — 평소의 아카이빙 기록은 지금처럼 조용하다. */
         String 메시지() {
