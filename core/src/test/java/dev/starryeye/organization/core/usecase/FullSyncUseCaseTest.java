@@ -277,6 +277,27 @@ class FullSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("차단기로 멈춘 비교 경로는 현재상태를 디렉터리대로 교체했으므로 메시지 끝에 그렇게 적는다")
+    void 차단기로_멈춘_비교_경로는_교체했다고_적는다() {
+        // given — 직전 kim, lee / 목표 kim, park. 쓰기가 나간 뒤 차단기가 멈춘다
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("kim", "DEV002"),
+                       RelationTuple.directMember("lee", "DEV002")))).block();
+        source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 권한은 틀리지 않는다(현재상태는 디렉터리대로 바뀐다). 그 사실이 메시지에 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(state.users).as("현재상태를 실제로 교체했다").containsOnlyKeys("kim", "park");
+        assertThat(run.message())
+                .contains("연속 실패로 멈췄다")
+                .endsWith(" — 현재상태는 디렉터리대로 교체했다");
+    }
+
+    @Test
     @DisplayName("기준선 스냅샷이 깨져 있으면 아무것도 쓰지 않고 FAILED 로 끝나며, 이유에 복구 방법이 남는다")
     void 기준선이_깨지면_쓰지_않고_FAILED() {
         // given — 포인터는 있는데 스냅샷이 깨졌다(포인터가 없으면 장부를 훑어 맞추므로 미리 저장해 포인터를 둔다)
@@ -583,6 +604,25 @@ class FullSyncUseCaseTest {
         assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
         assertThat(run.message()).contains("기준선 없음").contains("훑은 장부").contains("임계치");
         assertThat(writer.stored).as("지우지 않았다").hasSize(20);
+        assertThat(writer.deleted).isEmpty();
+    }
+
+    @Test
+    @DisplayName("장부 맞추기가 전부 보류로 끝나도 D 를 이미 쓴 만큼 쓴 수를 남긴다 — 지운 수는 0, 스냅샷은 없다")
+    void 전부_보류한_장부_맞추기도_쓴_수를_남긴다() {
+        // given — 장부에 20줄(user0~19), 목표는 그중 10명뿐이라 지울 줄이 50% 다. 기준선이 없어 장부를 훑어 맞춘다
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(직원들(0, 10), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 가드가 지우기를 막았지만 D 10줄은 이미 나갔다. 쓴 수가 0 으로 남으면 sync.tuples.written 도 센다
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.writtenCount()).as("쓴 D 의 줄 수").isEqualTo(10);
+        assertThat(run.deletedCount()).isZero();
+        assertThat(run.failureCount()).isZero();
+        assertThat(run.snapshotId()).isNull();
         assertThat(writer.deleted).isEmpty();
     }
 
@@ -999,6 +1039,24 @@ class FullSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("비활성 회수만 반영하다 차단기로 멈추면 현재상태를 바꾸지 않았으므로 교체했다고 적지 않는다")
+    void 비활성_회수만_반영하다_차단기로_멈추면_교체했다고_적지_않는다() {
+        // given
+        대부분이_빠지고_한_명이_막혔다(Set.of());
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 현재상태는 그대로다. 바꾸지 않은 것을 바꿨다고 적으면 거짓이다
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(state.users).isEmpty();
+        assertThat(run.message())
+                .contains("연속 실패로 멈췄다")
+                .doesNotContain("현재상태는 디렉터리대로 교체했다");
+    }
+
+    @Test
     @DisplayName("FORCED 는 지금처럼 가드를 건너뛴다 — 막힌 직원만이 아니라 지울 줄을 모두 지우고 현재상태도 바꾼다")
     void 강제_실행은_비활성_회수만이_아니라_모두_지운다() {
         // given
@@ -1031,11 +1089,13 @@ class FullSyncUseCaseTest {
         assertThat(run.message())
                 .contains("기준선 의심")
                 .contains("비활성 회수 1건만 반영하고 나머지 지우기 14건·쓰기 0건은 보류")
-                .contains("훑은 장부 20건");
+                .contains("훑은 장부 20건")
+                .doesNotContain("현재상태는 디렉터리대로 교체했다");
         assertThat(writer.deleted).containsExactly(막힌_직원);
         assertThat(run.deletedCount()).isEqualTo(1);
 
-        // then — 스냅샷을 남겨 표시가 꺼진다. 보류한 후보(user6~19)는 장부에 그대로 있으니 기준선에 들어, 다음 회차는 비교 경로에서 같은 판정을 받는다
+        // then — 스냅샷을 남겨 표시가 꺼진다. 보류한 후보(user6~19)는 장부에 그대로 있으니 기준선에 든다. 다음 회차는 비교 경로에서 남은 지우기 14건을
+        // 기준 수 19건에 대어 가드를 다시 본다 — 같은 판정이 아니라, 새로 막힌 계정이 없으면 비활성 부분이 비어 전부 보류다
         assertThat(snapshots.writing).isFalse();
         assertThat(snapshots.saved).hasSize(1);
         Set<RelationTuple> 남은_장부 = new HashSet<>(장부);

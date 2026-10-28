@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.admin.AdminApi;
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
@@ -28,6 +29,7 @@ import java.util.function.Supplier;
  * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다. 락은 클러스터 전체에서 하나라 다른 인스턴스가 쥐고 있으면 409 다(설계 2026-09-30 §3).
  */
 @Slf4j
+@AdminApi
 @RestController
 @RequestMapping("/admin/sync")
 @RequiredArgsConstructor
@@ -55,7 +57,9 @@ public class AdminSyncController {
 
     /**
      * 전체 재적재를 건다. 모드는 하나다 — LDAP 을 다시 읽어 있어야 할 줄을 쓰고, 장부를 훑어 없어야 할 줄을 지운다. 지울 줄이 훑은 장부의
-     * 임계치를 넘으면(LDAP 이 설정 실수로 0명을 돌려주는 경우 등) ABORTED 다 — 사람이 확인한 뒤 {@code force=true} 로 넘긴다. 가드가 걸려도 디렉터리가
+     * 임계치를 넘으면(검색 베이스·필터 실수로 디렉터리의 큰 부분이 빠진 경우 등) ABORTED 다 — 사람이 확인한 뒤 {@code force=true} 로 넘긴다. LDAP 이
+     * 사람 소속이 하나도 없는 그림(0명 등)을 주면 가드까지 가지 않고 데이터 오류로 FAILED 이고, {@code force} 로도 넘기지 못한다(설계 2026-10-27 §13).
+     * 가드가 걸려도 디렉터리가
      * 막았다고 명시한 회수(비활성 직원의 줄)를 따로 떼어 같은 가드로 보아, 그 회수만으로 가드 안이면 그것만 지우고 나머지는 보류한다(설계 2026-10-20 §5.4).
      * 그 회수가 없거나 그것도 가드를 넘으면 아무것도 지우지 않는다. 옛 {@code mode} 파라미터가 오면 400 으로 알린다.
      */

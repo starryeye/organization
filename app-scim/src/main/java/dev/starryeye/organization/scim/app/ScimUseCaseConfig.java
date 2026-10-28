@@ -23,16 +23,23 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
-import java.time.Duration;
 
 @Slf4j
 @Configuration
 public class ScimUseCaseConfig {
+
+    /**
+     * 빈 이름이 {@code scimSyncProperties} 여야 한다 — {@code ArchiveScheduler} 의 {@code @Scheduled(cron = "#{@scimSyncProperties.archiveCron}")} 이
+     * 이 이름으로 참조한다(설계 2026-10-27 §5). 값은 클래스의 {@code @ConfigurationProperties("sync")} 가 바인딩한다.
+     */
+    @Bean
+    public ScimSyncProperties scimSyncProperties() {
+        return new ScimSyncProperties();
+    }
 
     @Bean
     public ScimSyncMetrics scimSyncMetrics(MeterRegistry registry, Clock clock) {
@@ -77,20 +84,22 @@ public class ScimUseCaseConfig {
                                                           TraceIds traceIds) {
         return new IncrementalSyncUseCase(state, writer, checker, lock,
                 dynamoDb.getLockAcquireTimeout(), dynamoDb.getLockRenewInterval(), metrics, metrics,
-                auditRecorder, traceIds, dynamoDb.getLockTtl());
+                auditRecorder, traceIds, dynamoDb.getLockTtl(), metrics);
     }
 
     /**
      * 재적재를 요청과 떼어 돌린다(설계 2026-09-29 §4·§5). 작업 락(SCIM 쓰기와 같은 락)을 잡고 갱신하고 반납하는 일도 여기서 한다(설계 2026-09-30 §3) —
      * 락 대기·리스 상실 지표는 SCIM 쓰기와 같은 {@link ScimSyncMetrics} 로 남긴다. 앱이 내려갈 때 도는 재적재를 FAILED("서버 종료로 중단")로 기록하고
      * 락을 반납한다 — DynamoDB 클라이언트보다 먼저 닫힌다(이 빈이 실행 기록 저장소를 거쳐 클라이언트에 기대므로 스프링이 먼저 닫는다).
-     * 회차의 변경 이력도 여기서 남긴다(설계 2026-10-15 §3).
+     * 회차의 변경 이력도 여기서 남긴다(설계 2026-10-15 §3). 시작한 지 {@code sync.job-timeout} + 10분이 지난 RUNNING 기록은 종류와 상관없이 닫는다
+     * (설계 2026-10-27 §12) — 그 나이를 이 앱의 {@link Clock} 으로 잰다.
      */
     @Bean(destroyMethod = "shutdown")
     public SyncJobs syncJobs(SyncRunRepository runs, MutationLock lock, DynamoDbProperties dynamoDb,
-                             ScimSyncMetrics metrics, @Value("${sync.job-timeout:30m}") Duration jobTimeout,
-                             AuditRecorder auditRecorder) {
-        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), metrics, jobTimeout, auditRecorder);
+                             ScimSyncMetrics metrics, ScimSyncProperties properties,
+                             AuditRecorder auditRecorder, Clock clock) {
+        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), metrics, properties.getJobTimeout(),
+                auditRecorder, clock);
     }
 
     @Bean
@@ -105,7 +114,7 @@ public class ScimUseCaseConfig {
 
     /**
      * 하루 아카이빙. 어긋남의 수는 게이지로 내고({@link ScimSyncMetrics}), 남은 회수는 SCIM 쓰기와 같은 길(락·리스·Check 기준선·이력)로 지운다
-     * ({@link IncrementalSyncUseCase#revokeLeftovers}, 설계 2026-10-20 §6.4).
+     * ({@link IncrementalSyncUseCase#revokeLeftovers}, 설계 2026-10-20 §6.4). 기한은 {@code sync.job-timeout} 이다(설계 2026-10-27 §9).
      */
     @Bean
     public SnapshotArchiveUseCase snapshotArchiveUseCase(DirectoryStateRepository state,
@@ -115,14 +124,18 @@ public class ScimUseCaseConfig {
                                                           MutationLock lock,
                                                           Clock clock,
                                                           ScimSyncMetrics metrics,
-                                                          IncrementalSyncUseCase incrementalSyncUseCase) {
+                                                          IncrementalSyncUseCase incrementalSyncUseCase,
+                                                          ScimSyncProperties properties) {
         return new SnapshotArchiveUseCase(state, checker, snapshots, runs, lock, clock,
-                metrics, incrementalSyncUseCase::revokeLeftovers);
+                metrics, incrementalSyncUseCase::revokeLeftovers, properties.getJobTimeout());
     }
 
-    /** 하루 1회 작업(아카이빙·만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). */
+    /**
+     * 하루 1회 작업(아카이빙·만료 스냅샷 정리)을 클러스터 전체에서 한 번만 돌린다(설계 2026-09-30 §5.1). 표지의 임대는 잡은 때 + {@code sync.job-timeout}
+     * + 5분이다(설계 2026-10-27 §9).
+     */
     @Bean
-    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock) {
-        return new DailyOnce(claims, clock);
+    public DailyOnce dailyOnce(DailyJobClaims claims, Clock clock, ScimSyncProperties properties) {
+        return new DailyOnce(claims, clock, properties.getJobTimeout());
     }
 }

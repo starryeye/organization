@@ -24,7 +24,7 @@ class FakeMutationLockTest {
         var lock = new FakeMutationLock();
 
         // when
-        var lease = lock.acquire(LockPurpose.WRITE).block();
+        var lease = lock.acquireOnce(LockPurpose.WRITE).block();
 
         // then
         assertThat(lease).isNotNull();
@@ -36,7 +36,7 @@ class FakeMutationLockTest {
 
         // then
         assertThat(lock.released).hasValue(1);
-        assertThat(lock.acquire(LockPurpose.WRITE).block()).isNotNull();
+        assertThat(lock.acquireOnce(LockPurpose.WRITE).block()).isNotNull();
     }
 
     @Test
@@ -44,10 +44,10 @@ class FakeMutationLockTest {
     void 쥐고_있으면_두_번째는_실패한다() {
         // given
         var lock = new FakeMutationLock();
-        lock.acquire(LockPurpose.WRITE).block();
+        lock.acquireOnce(LockPurpose.WRITE).block();
 
         // when, then
-        assertThatThrownBy(() -> lock.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> lock.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -56,16 +56,16 @@ class FakeMutationLockTest {
     void 쥔_쪽의_용도로_실패한다() {
         // given — 용도마다 락을 쥔다
         var 재적재가_쥔 = new FakeMutationLock();
-        재적재가_쥔.acquire(LockPurpose.REBUILD).block();
+        재적재가_쥔.acquireOnce(LockPurpose.REBUILD).block();
         var 동기화가_쥔 = new FakeMutationLock();
-        동기화가_쥔.acquire(LockPurpose.SYNC).block();
+        동기화가_쥔.acquireOnce(LockPurpose.SYNC).block();
         var 쓰기가_쥔 = new FakeMutationLock();
-        쓰기가_쥔.acquire(LockPurpose.WRITE).block();
+        쓰기가_쥔.acquireOnce(LockPurpose.WRITE).block();
 
         // when
-        var 재적재_때문에 = catchThrowable(() -> 재적재가_쥔.acquire(LockPurpose.WRITE).block());
-        var 동기화_때문에 = catchThrowable(() -> 동기화가_쥔.acquire(LockPurpose.WRITE).block());
-        var 쓰기_때문에 = catchThrowable(() -> 쓰기가_쥔.acquire(LockPurpose.WRITE).block());
+        var 재적재_때문에 = catchThrowable(() -> 재적재가_쥔.acquireOnce(LockPurpose.WRITE).block());
+        var 동기화_때문에 = catchThrowable(() -> 동기화가_쥔.acquireOnce(LockPurpose.WRITE).block());
+        var 쓰기_때문에 = catchThrowable(() -> 쓰기가_쥔.acquireOnce(LockPurpose.WRITE).block());
 
         // then
         assertThat(재적재_때문에).isInstanceOfSatisfying(LockUnavailableException.class,
@@ -84,7 +84,7 @@ class FakeMutationLockTest {
         lock.failAcquire = true;
 
         // when, then
-        assertThatThrownBy(() -> lock.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> lock.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -93,7 +93,7 @@ class FakeMutationLockTest {
     void 잃은_리스는_갱신되지_않는다() {
         // given
         var lock = new FakeMutationLock();
-        var lease = lock.acquire(LockPurpose.WRITE).block();
+        var lease = lock.acquireOnce(LockPurpose.WRITE).block();
         lock.release(lease).block();
 
         // when, then

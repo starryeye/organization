@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.actuate.health.HealthEndpointGroups;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.context.ActiveProfiles;
@@ -38,6 +39,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -133,6 +135,7 @@ class LdapSyncEndToEndTest {
     @Autowired SyncRunRepository runs;
     @Autowired OpenFgaProperties openFgaProperties;
     @Autowired MutationLock lock;
+    @Autowired HealthEndpointGroups healthGroups;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -347,7 +350,7 @@ class LdapSyncEndToEndTest {
     @DisplayName("다른 인스턴스가 작업 락을 쥐고 있으면 수동 동기화·재적재는 곧바로 409 다")
     void 다른_인스턴스가_락을_쥐면_409다() {
         // given — 다른 인스턴스의 정기 동기화가 락을 쥔 순간
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.SYNC).block(Duration.ofSeconds(10));
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.SYNC).block(Duration.ofSeconds(10));
 
         try {
             // when, then
@@ -383,7 +386,7 @@ class LdapSyncEndToEndTest {
         // when, then
         SyncJobClient.끝까지(client, "/admin/sync/rebuild?force=true")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.trigger").isEqualTo("REBUILD");
+                .jsonPath("$.trigger").isEqualTo("FORCED_REBUILD");
     }
 
     // ---------- 변경 이력 (설계 2026-10-10) ----------
@@ -419,6 +422,29 @@ class LdapSyncEndToEndTest {
                 .expectBody()
                 .jsonPath("$.items[0].cause.kind").isEqualTo("LEDGER_ALIGNMENT")
                 .jsonPath("$.items[0].revoked[0]").isEqualTo("user:ghost direct_member group:DEV001");
+    }
+
+    // ---------- 프로브 (설계 2026-10-27 §7) ----------
+
+    @Test
+    @Order(15)
+    @DisplayName("liveness·readiness 프로브는 외부 의존을 보지 않는다 — LDAP·OpenFGA·DynamoDB 장애가 재시작을 부르지 않는다")
+    void 프로브는_외부_의존을_보지_않는다() {
+        // given, when, then — 외부 의존의 상태는 /actuator/health 본 그룹에서 본다(순서 7).
+        // 프로브 그룹은 응답에 컴포넌트를 싣지 않는다(부트가 만든 그룹은 show-details 와 상관없이 늘 감춘다). 그래서 응답에 외부 의존이 "없다"는 단언은
+        // 저절로 통과한다 — 그룹의 구성원을 직접 본다
+        for (String 프로브 : List.of("liveness", "readiness")) {
+            client.get().uri("/actuator/health/" + 프로브).exchange()
+                    .expectStatus().isOk()
+                    .expectBody()
+                    .jsonPath("$.status").isEqualTo("UP");
+
+            var 그룹 = healthGroups.get(프로브);
+            assertThat(그룹.isMember(프로브 + "State")).as("%s 그룹의 구성원", 프로브).isTrue();
+            assertThat(List.of("openFga", "dynamoDb", "ldap"))
+                    .as("%s 그룹에 든 외부 의존", 프로브)
+                    .noneMatch(그룹::isMember);
+        }
     }
 
     private void 동기화한다() {

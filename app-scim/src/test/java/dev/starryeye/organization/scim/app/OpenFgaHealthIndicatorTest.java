@@ -12,6 +12,7 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Duration;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,9 +31,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 부르고, 결과가 DOWN 이면서 실제로 그 이름의 store 가 생기지 않았는지를 raw 클라이언트로
  * 확인한다.
  *
- * <p>app-ldap 의 {@code OpenFgaHealthIndicator} 는 아직 이 수정 전의 형태(직접
- * {@code resolveStore()} 호출)를 그대로 쓴다 — {@code docs/superpowers/plans/2026-08-15-follow-ups.md}
- * 에 추적 중이며 이 계획의 범위 밖이다.
+ * <p>해석을 마친 뒤 그 store 가 지워진 경우도 본다 — 캐시한 번호만 믿으면 지운 store 도 UP 으로 보인다(설계 2026-10-27 §7).
+ * 그래서 {@link StoreBootstrapper#findExistingStore()} 는 캐시한 번호가 있어도 {@code GetStore} 로 실제로 묻는다.
+ * 두 앱의 {@code OpenFgaHealthIndicator} 는 같은 코드이고, 이 시험은 app-scim 쪽에서 둘의 몫을 함께 본다.
  */
 @Testcontainers
 class OpenFgaHealthIndicatorTest {
@@ -62,11 +63,40 @@ class OpenFgaHealthIndicatorTest {
         // then — DOWN 을 보고하고
         assertThat(health).isNotNull();
         assertThat(health.getStatus().getCode()).isEqualTo("DOWN");
+        assertThat(health.getDetails()).containsEntry("reason", "store 가 없다(지워졌거나 아직 만들지 않았다)");
 
         // then — 실제로 이 이름의 store 를 만들지 않았다
         assertThat(countStoresNamed(apiUrl, storeName))
                 .as("헬스체크가 store 를 프로비저닝하면 안 된다")
                 .isZero();
+    }
+
+    @Test
+    @DisplayName("해석한 store 가 지워지면 헬스체크는 DOWN 이다 — 캐시한 번호만 보고 UP 을 말하지 않는다")
+    void 지운_store_는_DOWN_이다() throws Exception {
+        // given — 해석을 마쳐 번호를 캐시한 bootstrapper. 헬스는 아직 UP 이다
+        String apiUrl = "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080);
+        OpenFgaProperties properties = new OpenFgaProperties();
+        properties.setApiUrl(apiUrl);
+        properties.setStoreName("health-deleted-" + UUID.randomUUID());
+        properties.setCreateStore(true);
+        properties.setWriteBatchSize(100);
+        properties.setMaxRetries(3);
+        StoreBootstrapper bootstrapper = new StoreBootstrapper(properties);
+        OpenFgaHealthIndicator indicator = new OpenFgaHealthIndicator(bootstrapper, properties);
+        String storeId = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
+        assertThat(indicator.health().block(Duration.ofSeconds(10)).getStatus().getCode()).isEqualTo("UP");
+
+        // given — 누군가 그 store 를 지웠다(부트스트래퍼를 거치지 않는다)
+        new OpenFgaClient(new ClientConfiguration().apiUrl(apiUrl).storeId(storeId)).deleteStore().get();
+
+        // when
+        var health = indicator.health().block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(health).isNotNull();
+        assertThat(health.getStatus().getCode()).isEqualTo("DOWN");
+        assertThat(health.getDetails()).containsEntry("reason", "store 가 없다(지워졌거나 아직 만들지 않았다)");
     }
 
     private long countStoresNamed(String apiUrl, String name) {

@@ -13,3 +13,22 @@ logging:
       console: ecs
   level:
     dev.starryeye.organization: INFO
+
+# 운영 DynamoDB 테이블은 앱이 만들지 않는다(설계 2026-10-27 §3). 처음 설치라면 create-table-on-startup=true 로 한 번 띄우거나 미리 만든다.
+# require-protection 은 삭제 보호와 PITR 을 요구한다 — 하나라도 꺼져 있으면 기동을 멈춘다
+dynamodb:
+  create-table-on-startup: false
+  require-protection: true
+
+# 운영 OpenFGA store 도 앱이 만들지 않는다(설계 2026-10-27 §4). 처음 설치라면 create-store=true 로 한 번 띄운다.
+# 없으면 기동을 멈춘다 — 이름 오타가 빈 store 를 새로 만들어 쓰기가 엉뚱한 곳으로 가지 않는다
+openfga:
+  create-store: false
+
+# 바인드 비밀번호는 환경에서 받는다 — 기본값을 두지 않는다. 환경 변수가 없으면 부트는 자리표시자를 풀지 못하고 "${LDAP_BIND_PASSWORD}" 문자열을 그대로 넣으므로
+# LdapConfig 가 기동 때 그 값을 알아보고 멈춘다(설계 2026-10-27 §5).
+# require-tls 는 ldap.url 이 ldaps:// 가 아니면 기동을 멈춘다 — 평문 LDAP 으로 바인드 자격증명이 오가지 않는다. StartTLS 는 지원하지 않는다.
+# ldaps:// 는 JVM 트러스트스토어로 연다 — 사설 CA 는 -Djavax.net.ssl.trustStore 로 넘긴다
+ldap:
+  bind-password: ${LDAP_BIND_PASSWORD}
+  require-tls: true

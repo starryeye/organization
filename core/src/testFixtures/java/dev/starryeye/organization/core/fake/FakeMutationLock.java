@@ -2,11 +2,14 @@ package dev.starryeye.organization.core.fake;
 
 import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.usecase.LockAttemptTimeoutException;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.UUID;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -29,6 +32,27 @@ public class FakeMutationLock implements MutationLock {
 
     /** 켜면 획득이 항상 실패한다 — 락 저장소 오류로 503(10초)이 되는 경로를 재현하는 데 쓴다. 다른 쪽이 쥔 경합은 실제로 먼저 잡아 재현한다. */
     public boolean failAcquire = false;
+
+    /**
+     * 남은 "응답을 잃는" 시도 수 — 0 보다 크면 그 시도는 서버에서 하듯 락을 실제로 잡은 뒤(남이 쥐었으면 못 잡는다), 받은 시도 한도만큼 늦게
+     * {@link LockAttemptTimeoutException} 으로 끝나고 하나 준다. 한도가 null 이면 곧바로 끝난다. {@link Integer#MAX_VALUE} 면 늘 끊긴다.
+     */
+    public final AtomicInteger 응답을_잃는_시도 = new AtomicInteger();
+
+    /** 있으면 획득 시도가 이 오류로 끝난다 — SDK 재시도를 다 쓴 스로틀·5xx·네트워크 오류를 흉내 낸다. 락은 잡지 않는다. */
+    public volatile RuntimeException acquireError;
+
+    /** 획득 시도마다(구독할 때) 받은 토큰. */
+    public final List<String> 시도한_토큰 = new CopyOnWriteArrayList<>();
+
+    /** 획득 시도마다(구독할 때) 받은 시도 한도. 한도가 없으면 null 이다. */
+    public final List<Duration> 시도_한도 = new CopyOnWriteArrayList<>();
+
+    /** 획득 시도마다(구독할 때) 받은 용도 — 트리거가 달라도 락 용도가 그대로인지 본다. */
+    public final List<LockPurpose> 시도한_용도 = new CopyOnWriteArrayList<>();
+
+    /** 반납이 불릴 때마다(구독할 때) 받은 토큰 — 쥐고 있지 않은 토큰의 반납도 적는다. */
+    public final List<String> 반납한_토큰 = new CopyOnWriteArrayList<>();
 
     /** 켜면 갱신이 항상 실패한다 — 리스를 잃은 상황을 재현하는 데 쓴다. */
     public volatile boolean failRenew = false;
@@ -53,27 +77,49 @@ public class FakeMutationLock implements MutationLock {
         return heldToken.get() != null;
     }
 
+    /** 같은 토큰이면 이미 쥔 락도 다시 얻는다 — 실제 락의 획득 조건({@code #token = :token})과 같다. */
     @Override
-    public Mono<LockLease> acquire(LockPurpose purpose) {
+    public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
         return Mono.defer(() -> {
+            시도한_토큰.add(token);
+            시도한_용도.add(purpose);
+            시도_한도.add(attemptTimeout);
+            RuntimeException 오류 = acquireError;
+            if (오류 != null) {
+                return Mono.error(오류);
+            }
             if (failAcquire) {
                 // 락 저장소 오류를 흉내 낸다 — 쥔 쪽이 없으므로 기본 대기(10초)다
                 return Mono.error(new LockUnavailableException("락 획득 실패(테스트)"));
             }
-            String token = UUID.randomUUID().toString();
-            if (!heldToken.compareAndSet(null, token)) {
+            boolean 잡았다 = 잡는다(purpose, token);
+            if (응답을_잃는_시도.getAndUpdate(n -> n > 0 ? n - 1 : 0) > 0) {
+                // 서버에서는 끝났는데(잡았거나 막혔거나) 응답이 시도 한도 안에 오지 않았다
+                Mono<LockLease> 끊김 = Mono.error(new LockAttemptTimeoutException("획득 시도가 한도로 끊겼다(테스트)"));
+                return attemptTimeout == null ? 끊김 : Mono.delay(attemptTimeout).then(끊김);
+            }
+            if (!잡았다) {
                 // 실제 락과 같다 — 쥔 쪽의 용도로 기다릴 시간이 정해진다(재적재·동기화 60초, 쓰기 2초)
                 return Mono.error(LockUnavailableException.잡혀_있다(heldPurpose.get()));
             }
-            heldPurpose.set(purpose);
-            acquired.incrementAndGet();
             return Mono.just(new LockLease(token, Instant.now().plusSeconds(30)));
         });
+    }
+
+    /** 비었으면 잡고, 같은 토큰이 쥐고 있으면 그대로 다시 얻는다. 새로 잡을 때만 {@code acquired} 를 센다. */
+    private boolean 잡는다(LockPurpose purpose, String token) {
+        if (heldToken.compareAndSet(null, token)) {
+            heldPurpose.set(purpose);
+            acquired.incrementAndGet();
+            return true;
+        }
+        return token.equals(heldToken.get());
     }
 
     @Override
     public Mono<Void> release(LockLease lease) {
         return Mono.defer(() -> {
+            반납한_토큰.add(lease.token());
             if (failRelease) {
                 return Mono.error(new IllegalStateException("반납 실패(테스트)"));
             }

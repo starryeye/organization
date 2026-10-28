@@ -6,7 +6,7 @@ import org.springframework.beans.factory.InitializingBean;
 import reactor.core.publisher.Mono;
 
 /**
- * 앱 시작 시점에 store 를 미리 해석해 둔다.
+ * 앱 시작 시점에 store 를 미리 해석해 둔다(생성이 켜져 있으면 없는 store 를 이때 만든다).
  *
  * <p>이게 없으면 배포 직후 storeIdRef 를 처음 채우는 호출자가 누구든 될 수 있는데,
  * 그게 헬스체크(readiness probe)라면 상태를 관찰만 해야 할 모니터링 호출이 store 를
@@ -25,6 +25,10 @@ import reactor.core.publisher.Mono;
  * 의 실패는 캐시되지 않으므로 이후의 동기화나 헬스체크가 자연스럽게 재시도한다.
  * 그래서 여기서는 실패를 경고 로그로만 남기고 앱 시작을 막지 않는다 — 그 사이
  * {@link OpenFgaHealthIndicator} 는 DOWN 을 보고해 운영자가 알 수 있게 한다.
+ *
+ * <p><b>단 하나, {@link StoreNotFoundException} 은 막는다</b>(설계 2026-10-27 §4). OpenFGA 에 닿아 목록을 읽었는데 그 이름의 store 가
+ * 없고 {@code openfga.create-store} 도 꺼져 있다는 뜻이다 — 이름 오타이거나 처음 설치라, 기다려서 낫는 일시 장애가 아니라 사람이
+ * 설정을 고쳐야 한다. 닿지 못해서 확인하지 못한 경우는 위처럼 경고만 남기고 뜬다.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -35,11 +39,12 @@ public class OpenFgaStoreInitializer implements InitializingBean {
     @Override
     public void afterPropertiesSet() {
         bootstrapper.resolveStore()
-                .doOnError(error -> log.warn(
-                        "시작 시점에 OpenFGA store 를 준비하지 못했다. "
-                                + "앱은 계속 기동하며, 헬스체크가 DOWN 을 보고하는 동안 이후 호출이 재시도한다",
-                        error))
-                .onErrorResume(error -> Mono.empty())
+                // store 가 없다는 설정 오류만 그대로 던져 기동을 멈춘다. 그 밖의 오류(닿지 않음 등)는 경고만 남기고 넘어간다
+                .onErrorResume(error -> !(error instanceof StoreNotFoundException), error -> {
+                    log.warn("시작 시점에 OpenFGA store 를 준비하지 못했다. "
+                            + "앱은 계속 기동하며, 헬스체크가 DOWN 을 보고하는 동안 이후 호출이 재시도한다", error);
+                    return Mono.empty();
+                })
                 .block();
     }
 }

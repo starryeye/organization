@@ -29,7 +29,7 @@ public class SyncScheduler {
      * 작업 락은 {@code FullSyncUseCase#start} 가 잡는다(설계 2026-09-30 §3). 여러 대가 같은 초에 불러도 한 대만 돌고, 나머지는 락을 못 잡아 기록 없이
      * 건너뛴다 — 오류가 아니다.
      */
-    @Scheduled(cron = "${sync.cron}")
+    @Scheduled(cron = "#{@syncProperties.cron}")
     public void 전체동기화() {
         관측하며실행("sync.ldap.full",
                 Mono.defer(() -> fullSync.start(SyncTrigger.SCHEDULED, run -> {
@@ -45,14 +45,15 @@ public class SyncScheduler {
     }
 
     /**
-     * 스냅샷은 테이블 TTL 을 쓰지 않으므로(최신까지 지워지면 다음 회차가 빈 기준선으로 돌아 삭제를 하나도 안 한다) 이 정리가
-     * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(각 약 10만 아이템)이
-     * 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1).
+     * 스냅샷은 테이블 TTL 을 쓰지 않으므로(최신까지 지워지면 다음 회차가 기준선을 읽지 못해 FAILED 이고 재적재로만 풀린다) 이 정리가
+     * 보존 기간이 지난 스냅샷을 지우는 유일한 경로다(최신은 건너뛴다). 끄면(`sync.purge-cron: "-"`) 스냅샷(10만 명 규모에서 한 벌에 압축 묶음
+     * 열몇 개·약 6MB)이 끝없이 쌓인다. 하루 1회 표지를 잡은 인스턴스만 돈다(설계 2026-09-30 §5.1). 오류 없이 끝나면 성공이다 — 실패하면 표지를 풀어 하루 창 안의 다음
+     * 정각에 다시 돈다(설계 2026-10-27 §9).
      */
-    @Scheduled(cron = "${sync.purge-cron}")
+    @Scheduled(cron = "#{@syncProperties.purgeCron}")
     public void 만료스냅샷정리() {
         관측하며실행("sync.ldap.purge",
-                dailyOnce.run("ldap-purge", Mono.defer(snapshots::purgeExpired))
+                dailyOnce.run("ldap-purge", Mono.defer(snapshots::purgeExpired), count -> true)
                         .doOnNext(count -> log.info("만료 스냅샷 정리 완료: {}건", count))
                         .doOnError(error -> log.error("만료 스냅샷 정리에 실패했다", error)));
     }

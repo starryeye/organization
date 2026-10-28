@@ -19,6 +19,9 @@ spring:
 openfga:
   api-url: http://localhost:8080
   store-name: organization-scim
+  # 기동 때 store 가 없으면 만든다. 로컬만 true — 운영(application-prod.yml)은 false 라 이름 오타가 빈 store 를 새로 만들지 않고 기동을 멈춘다.
+  # 켜든 끄든 인가 모델은 최신과 내용이 다를 때만 쓴다
+  create-store: true
   write-batch-size: 100
   max-retries: 3
   request-concurrency: 4
@@ -27,17 +30,17 @@ dynamodb:
   endpoint: http://localhost:8000
   region: ap-northeast-2
   table-name: organization-scim
+  # 기동 때 테이블이 없으면 만든다. 로컬만 true — 운영(application-prod.yml)은 false 라 이름 오타가 빈 테이블을 새로 만들지 않고 기동을 멈춘다.
+  # 켜든 끄든 기동 때 테이블의 모양(GSI·TTL)은 늘 확인한다
   create-table-on-startup: true
+  # true 면 만들 때 삭제 보호와 PITR 을 켜고, 이미 있는 테이블은 둘이 켜져 있는지 확인한다. 로컬 DynamoDB 는 PITR 을 받지 않으므로 false
+  require-protection: false
   snapshot-retention-days: 7
   syncrun-retention-days: 30
   # 변경 이력 보관 일수. 늘리려면 syncrun-retention-days 와 함께 늘린다 — 이력의 원인 회차가 먼저 사라지면 거슬러 갈 곳이 없다
   audit-retention-days: 30
 
-sync:
-  archive-cron: "0 0 3 * * *"
-  purge-cron: "0 0 4 * * *"
-  # 재적재 한 번의 전체 기한. 넘으면 남은 일을 멈추고 FAILED("기한 초과 — 30분")로 기록한 뒤 락을 푼다
-  job-timeout: 30m
+# cron(sync.archive-cron·sync.purge-cron)과 기한(sync.job-timeout)의 기본값은 속성 클래스(ScimSyncProperties)에만 있다 — 덮어쓸 때만 여기에 적는다.
 
 management:
   endpoints:
@@ -50,6 +53,10 @@ management:
       # openfga.api-url, dynamodb.table-name, Health.down(error) 의 예외 메시지가
       # 그대로 공개된다.
       show-details: when-authorized
+      # liveness·readiness 그룹은 부트 기본 구성 그대로 둔다 — 외부 의존(OpenFGA·DynamoDB)을 넣지 않는다. 그 장애가 재시작을 부르면
+      # 안 되기 때문이다. 외부 의존은 /actuator/health 본 그룹에서 본다.
+      probes:
+        enabled: true
 
   tracing:
     sampling:

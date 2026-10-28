@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fake.FakeTupleChecker;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.TupleWriteResult;
 import dev.starryeye.organization.core.port.MutationLock.LockPurpose;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import dev.starryeye.organization.core.port.TupleWriteAbortedException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;

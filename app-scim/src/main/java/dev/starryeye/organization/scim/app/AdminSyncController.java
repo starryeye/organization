@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.admin.AdminApi;
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
@@ -27,6 +28,7 @@ import reactor.core.publisher.Mono;
  * "전체를 다시 달라"고 말할 상대가 없다. 그래서 재적재와 이력 조회만 제공한다.
  */
 @Slf4j
+@AdminApi
 @RestController
 @RequestMapping("/admin/sync")
 @RequiredArgsConstructor

@@ -3,11 +3,13 @@ package dev.starryeye.organization.ldap;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.tuple.TupleMapper;
+import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
 import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DitStrategyTest extends EmbeddedLdapSupport {
 
@@ -199,5 +201,73 @@ class DitStrategyTest extends EmbeddedLdapSupport {
                 RelationTuple.directMember("choi", "DEV002"),
                 RelationTuple.child("DEV002", "DEV001"),
                 RelationTuple.child("DEV001", "company"));
+    }
+
+    @Test
+    @DisplayName("직원 검색이 0건이면 사람 소속이 하나도 없는 그림이라 데이터 오류다 — 예전에는 직원이 없으면 검사가 꺼져 SUCCEEDED 였다")
+    void 사용자_검색이_0건이면_데이터_오류다() {
+        // given
+        var properties = 기본설정();
+        properties.getDit().setUserFilter("(objectClass=없는클래스)");
+        var strategy = new DitStrategy(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다")
+                .hasMessageContaining("사용자 0명")
+                .hasMessageContaining("조직 4개")
+                // 건너뛴 직원이 없으면 "엔트리 0건을 건너뛰었다" 같은 빈 요약을 싣지 않는다
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("건너뛰었다"));
+    }
+
+    @Test
+    @DisplayName("조직 검색이 0건이면 직원이 부모 조직을 찾지 못하므로 데이터 오류다")
+    void 조직_검색이_0건이면_데이터_오류다() {
+        // given
+        var properties = 기본설정();
+        properties.getDit().setOrgUnitFilter("(objectClass=없는클래스)");
+        var strategy = new DitStrategy(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다")
+                .hasMessageContaining("사용자 2명")
+                .hasMessageContaining("조직 0개");
+    }
+
+    @Test
+    @DisplayName("직원은 읽었지만 부모 조직을 찾은 직원이 하나도 없으면 데이터 오류다 — 메시지가 AD 의 CN=Users 를 짚는다(점검 S22)")
+    void 부모_조직을_찾은_직원이_없으면_데이터_오류다() {
+        // given — OU 필터가 OPS001 만 조직으로 읽어 두 직원의 부모(DEV001·DEV002)가 조직이 아니다
+        var properties = 기본설정();
+        properties.getDit().setOrgUnitFilter("(&(objectClass=organizationalUnit)(ou=OPS001))");
+        var strategy = new DitStrategy(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(ldapTemplate))
+                .isInstanceOf(DirectoryDataException.class)
+                .hasMessageContaining("사람 소속이 하나도 없다")
+                .hasMessageContaining("사용자 2명")
+                .hasMessageContaining("조직 1개")
+                .hasMessageContaining("CN=Users")
+                .hasMessageContaining("직원 검색에서 엔트리 2건을 건너뛰었다");
+    }
+
+    @Test
+    @DisplayName("일부 직원만 부모 조직을 찾아도 사람 소속이 있으므로 통과한다 — 찾지 못한 직원은 소속 없이 적재된다")
+    void 일부만_소속되면_통과한다() {
+        // given — OU 필터가 DEV001 만 조직으로 읽어 park 은 소속이 있고 choi(부모 DEV002)는 없다
+        var properties = 기본설정();
+        properties.getDit().setOrgUnitFilter("(&(objectClass=organizationalUnit)(ou=DEV001))");
+        var strategy = new DitStrategy(properties);
+
+        // when
+        var snapshot = strategy.read(ldapTemplate);
+
+        // then
+        assertThat(snapshot.users()).containsOnlyKeys("choi", "park");
+        assertThat(snapshot.groups().get("DEV001").members()).containsExactly(MemberRef.user("park"));
     }
 }

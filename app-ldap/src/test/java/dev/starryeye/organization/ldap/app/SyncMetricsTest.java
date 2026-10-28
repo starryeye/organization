@@ -82,6 +82,18 @@ class SyncMetricsTest {
     }
 
     @Test
+    @DisplayName("전부 보류로 끝난 회차(ABORTED)도 이미 쓴 튜플 수를 세고, 가드 발동도 센다")
+    void 전부_보류_회차의_쓴_수도_센다() {
+        // given — 장부 맞추기가 D 5줄을 쓴 뒤 가드가 지우기를 막았다
+        // when
+        metrics.record(실행(SyncStatus.ABORTED, 5, 0, 0));
+
+        // then
+        assertThat(registry.find("sync.tuples.written").tag("source", "LDAP").counter().count()).isEqualTo(5.0);
+        assertThat(registry.find("sync.guard.aborted").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
     @DisplayName("완료 시각이 없는 실행은 소요 시간을 기록하지 않는다")
     void 미완료_실행은_시간을_기록하지_않는다() {
         // given

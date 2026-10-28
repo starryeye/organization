@@ -25,16 +25,31 @@ class SyncPropertiesTest {
     }
 
     @Test
-    @DisplayName("application.yml 의 sync.cron 도 매시 정각이다 — 코드 기본값과 어긋나면 운영은 yml 을 따른다")
-    void 설정_파일의_주기도_매시_정각이다() {
+    @DisplayName("만료 스냅샷 정리는 하루 창(04~08시) 안에서 매시 시도한다 — 실패하면 표지를 풀어 다음 정각에 다시 돈다(설계 2026-10-27 §9)")
+    void 정리는_하루_창_안에서_매시_시도한다() {
+        // given, when
+        var cron = new SyncProperties().getPurgeCron();
+
+        // then
+        assertThat(cron).isEqualTo("0 0 4-8 * * *");
+        assertThat(CronExpression.parse(cron).next(LocalDateTime.of(2026, 10, 23, 4, 0, 0)))
+                .isEqualTo(LocalDateTime.of(2026, 10, 23, 5, 0, 0));
+        assertThat(CronExpression.parse(cron).next(LocalDateTime.of(2026, 10, 23, 8, 0, 0)))
+                .as("창의 끝 뒤에는 다음 날 창의 처음이다")
+                .isEqualTo(LocalDateTime.of(2026, 10, 24, 4, 0, 0));
+    }
+
+    @Test
+    @DisplayName("application.yml 에는 cron·기한 키가 없다 — 기본값은 속성 클래스에만 있어 yml 과 어긋날 수 없다")
+    void 설정_파일에는_cron_키가_없다() {
         // given
         var yaml = new YamlPropertiesFactoryBean();
         yaml.setResources(new ClassPathResource("application.yml"));
 
         // when
-        var cron = yaml.getObject().getProperty("sync.cron");
+        var 키들 = yaml.getObject().stringPropertyNames();
 
         // then
-        assertThat(cron).isEqualTo(new SyncProperties().getCron());
+        assertThat(키들).doesNotContain("sync.cron", "sync.purge-cron", "sync.job-timeout");
     }
 }

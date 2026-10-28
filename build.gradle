@@ -71,7 +71,7 @@ subprojects {
     }
 
     // 규모 테스트(@ScaleTest — core testFixtures)는 기본 test 에서 뺀다. 5,000명 조직도와
-    // Testcontainers 를 띄우는 클래스들이 전체 시간의 대부분(약 9분)을 차지한다.
+    // Testcontainers 를 띄우는 클래스들이 전체 시간의 대부분(약 16~19분)을 차지한다.
     // 태그 문자열 'scale' 은 @ScaleTest 의 @Tag 값과 같아야 한다.
     tasks.named('test') {
         useJUnitPlatform {

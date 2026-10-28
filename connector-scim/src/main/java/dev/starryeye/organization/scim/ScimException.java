@@ -11,7 +11,8 @@ import java.util.Set;
 /**
  * SCIM Error 응답(설계 §9.3)으로 번역되는 예외.
  *
- * <p>{@code scimType} 은 SCIM 이 규정한 오류 분류다. 404 와 500 에는 해당 분류가 없으므로 null 을 허용한다.
+ * <p>{@code scimType} 은 RFC 7644 §3.12 가 규정한 오류 분류다. 400 과 409({@code uniqueness})에만 있다 — 그 밖(403·404·405·500·501·503)에는
+ * 정한 분류가 없어 null 이다.
  */
 @Getter
 public class ScimException extends RuntimeException {

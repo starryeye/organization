@@ -1,11 +1,19 @@
 package dev.starryeye.organization.authz;
 
+import dev.openfga.sdk.api.model.Store;
+import dev.starryeye.organization.core.port.TemporaryFailureException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -22,6 +30,7 @@ class OpenFgaStoreInitializerTest extends OpenFgaTestSupport {
         OpenFgaProperties freshProperties = new OpenFgaProperties();
         freshProperties.setApiUrl(properties.getApiUrl());
         freshProperties.setStoreName("init-" + UUID.randomUUID());
+        freshProperties.setCreateStore(true);
         freshProperties.setWriteBatchSize(properties.getWriteBatchSize());
         freshProperties.setMaxRetries(properties.getMaxRetries());
         StoreBootstrapper freshBootstrapper = new StoreBootstrapper(freshProperties);
@@ -55,5 +64,48 @@ class OpenFgaStoreInitializerTest extends OpenFgaTestSupport {
         // 뜻이 아니다.
         assertThatThrownBy(unreachableBootstrapper::client)
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("store 가 없고 생성이 꺼져 있으면 기동을 멈춘다 — 이름 오타인 채로 뜨지 않는다")
+    void store_가_없고_생성이_꺼져_있으면_기동을_멈춘다() {
+        // given — 이 컨테이너에 없는 이름과 운영 기본값(생성 꺼짐)
+        OpenFgaProperties 속성 = 새_속성("init-off-");
+        속성.setCreateStore(false);
+        OpenFgaStoreInitializer 초기화 = new OpenFgaStoreInitializer(new StoreBootstrapper(속성));
+
+        // when, then — 경고만 남기고 넘어가는 오류가 아니다. 설정 오류라 사람이 고쳐야 한다
+        assertThatThrownBy(초기화::afterPropertiesSet).isInstanceOf(StoreNotFoundException.class);
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
+    }
+
+    @Test
+    @DisplayName("기동 때 OpenFGA 에 닿지 않았으면 뜨고, 닿은 뒤에도 생성이 꺼져 있으면 store 를 만들지 않고 일시 장애도 아닌 오류를 낸다")
+    void 기동_때_닿지_않았으면_뜨고_닿은_뒤에도_store_를_만들지_않는다() {
+        // given — 첫 목록 조회만 연결 오류로 끝나는 부트스트래퍼. 생성은 꺼져 있고 이름은 이 컨테이너에 없다
+        OpenFgaProperties 속성 = 새_속성("init-late-");
+        속성.setCreateStore(false);
+        AtomicInteger 목록_조회 = new AtomicInteger();
+        StoreBootstrapper 부트스트래퍼 = new StoreBootstrapper(속성) {
+            @Override
+            Mono<List<Store>> listStoresNamed() {
+                return 목록_조회.getAndIncrement() == 0
+                        ? Mono.error(new IOException("연결 거부"))
+                        : super.listStoresNamed();
+            }
+        };
+
+        // when — 시작 때는 닿지 않았다
+        // then — 경고만 남기고 뜬다
+        assertThatCode(() -> new OpenFgaStoreInitializer(부트스트래퍼).afterPropertiesSet())
+                .doesNotThrowAnyException();
+
+        // when — 이어 닿은 뒤 첫 해석에서 store 가 없다고 판명된다
+        // then — 설정 오류다. 일시 장애(503, 재시도)가 아니고, store 도 만들지 않는다
+        assertThatThrownBy(() -> 부트스트래퍼.resolveStore().block(Duration.ofSeconds(10)))
+                .isInstanceOf(StoreNotFoundException.class)
+                .isNotInstanceOf(TemporaryFailureException.class);
+        assertThat(목록_조회.get()).isEqualTo(2);
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
     }
 }

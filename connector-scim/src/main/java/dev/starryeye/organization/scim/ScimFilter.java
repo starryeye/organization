@@ -67,6 +67,8 @@ public record ScimFilter(List<Term> terms) {
     private static final class Parser {
 
         private static final Pattern ATTRIBUTE_NAME = Pattern.compile("[a-z][a-z0-9_-]*");
+        /** 오류 문구에 싣는 입력 조각 하나의 코드 포인트 수 상한({@link #앞부분}). */
+        private static final int 조각_한도 = 100;
 
         private final String text;
         private final ScimResourceType type;
@@ -112,7 +114,7 @@ public record ScimFilter(List<Term> terms) {
             String path = text.substring(start, position);
             String local = type.localName(path);
             if (local == null || !ATTRIBUTE_NAME.matcher(local).matches()) {
-                throw fail("지원하지 않는 속성 경로입니다: '" + path + "'");
+                throw fail("지원하지 않는 속성 경로입니다: '" + 앞부분(path) + "'");
             }
             return local;
         }
@@ -132,7 +134,7 @@ public record ScimFilter(List<Term> terms) {
             if ("false".equals(token)) {
                 return Boolean.FALSE;
             }
-            throw fail("지원하지 않는 값입니다: '" + token + "' — 문자열과 true/false 만 받습니다");
+            throw fail("지원하지 않는 값입니다: '" + 앞부분(token) + "' — 문자열과 true/false 만 받습니다");
         }
 
         /** JSON 문자열(RFC 8259 §7) — 따옴표 안의 이스케이프를 푼다. */
@@ -180,7 +182,19 @@ public record ScimFilter(List<Term> terms) {
         }
 
         private ScimException fail(String detail) {
-            return ScimException.invalidFilter(detail + " — filter: " + text);
+            return ScimException.invalidFilter(detail + " — filter: " + 앞부분(text));
+        }
+
+        /**
+         * 오류 문구에 싣는 입력 조각 — 코드 포인트 {@value #조각_한도}개를 넘으면 앞 {@value #조각_한도}개에 {@code …} 를 붙인다(설계 2026-10-27 §8).
+         * 조각은 셋이다: 원문, 받지 않는 속성 경로, 받지 않는 값 token. 원문만 자르면 token 이 필터의 대부분일 때 문구 길이에 상한이 없다.
+         * UTF-16 칸이 아니라 코드 포인트로 세어 서로게이트 쌍을 가르지 않는다.
+         */
+        static String 앞부분(String 값) {
+            if (값.codePointCount(0, 값.length()) <= 조각_한도) {
+                return 값;
+            }
+            return 값.substring(0, 값.offsetByCodePoints(0, 조각_한도)) + "…";
         }
     }
 }

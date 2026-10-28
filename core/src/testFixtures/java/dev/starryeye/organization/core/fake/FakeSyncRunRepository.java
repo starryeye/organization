@@ -79,6 +79,17 @@ public class FakeSyncRunRepository implements SyncRunRepository {
         return Flux.fromIterable(최신순).take(limit);
     }
 
+    /** 저장된 기록 가운데 RUNNING 인 것을 최신순으로 준다 — 실제 저장소의 두 달 파티션 Query 를 흉내 낸다(달 경계는 가짜가 따지지 않는다). */
+    @Override
+    public Flux<SyncRun> findRunning() {
+        List<SyncRun> 최신순;
+        synchronized (기록) {
+            최신순 = new ArrayList<>(기록.values());
+        }
+        Collections.reverse(최신순);
+        return Flux.fromIterable(최신순).filter(run -> run.status() == SyncStatus.RUNNING);
+    }
+
     @Override
     public Mono<SyncRun> findById(String runId) {
         return Mono.fromSupplier(() -> 기록.get(runId));

@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.ldap.fixture.ActiveDirectorySids;
 import dev.starryeye.organization.ldap.strategy.DirectoryDataException;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
+import dev.starryeye.organization.ldap.strategy.MemberMatchingFailedException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -160,5 +161,20 @@ class PrimaryGroupTest extends EmbeddedLdapSupport {
 
         // then
         assertThat(snapshot.groups()).containsOnlyKeys("DEV");
+    }
+
+    @Test
+    @DisplayName("기본 그룹(RID) 소속만 있고 member 의 DN 대조가 0건이면 DN 대조 가드가 멈춘다 — RID 소속은 대조 수에 넣지 않으므로 새 규칙만으로는 지나간다(점검 리뷰 H)")
+    void 기본_그룹_소속만_있고_DN_대조가_0건이면_가드가_멈춘다() throws Exception {
+        // given — kim·park 은 기본 그룹(RID 1105)으로 DEV 의 멤버지만, DEV 의 member 값은 모두 읽은 적 없는 DN 이다
+        server.modify("dn: cn=DEV,ou=groups," + BASE_DN, "changetype: modify",
+                "replace: member", "member: uid=ghost,ou=people," + BASE_DN);
+        var properties = 이름기반();
+        var strategy = new GroupOfNamesStrategy(properties);
+        var template = LdapConfig로_만든_템플릿(properties);
+
+        // when, then
+        assertThatThrownBy(() -> strategy.read(template))
+                .isInstanceOf(MemberMatchingFailedException.class);
     }
 }

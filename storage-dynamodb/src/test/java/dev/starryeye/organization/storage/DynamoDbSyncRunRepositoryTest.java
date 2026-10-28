@@ -205,4 +205,26 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         assertThat(found.deletedCount()).isEqualTo(3);
         assertThat(found.snapshotId()).isEqualTo("20260814T030000-LDAP");
     }
+
+    @Test
+    @DisplayName("두 달 파티션의 RUNNING 만 찾는다 — 지난달 1건과 이번 달 1건이고, 끝난 기록은 빠진다")
+    void 두_달_파티션의_RUNNING_만_찾는다() {
+        // given — 지난달(7월)에 하나 시작하고, 이번 달(8월)에 셋 시작해 둘을 끝낸다
+        var 지난달_저장소 = new DynamoDbSyncRunRepository(client, properties,
+                Clock.fixed(Instant.parse("2026-07-31T23:59:00Z"), ZoneOffset.UTC));
+        var 지난달_기록 = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var 이번달_첫째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var 이번달_둘째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var 이번달_셋째 = repository.start(SyncSource.SCIM, SyncTrigger.ARCHIVE).block();
+        repository.finish(이번달_첫째, SyncOutcome.noChange()).block();
+        repository.finish(이번달_둘째, SyncOutcome.failed("끝났다")).block();
+
+        // when
+        var 찾은것 = repository.findRunning().collectList().block();
+
+        // then — 이번 달 RUNNING 이 먼저(최신순), 그다음 지난달
+        assertThat(찾은것).extracting(run -> run.runId())
+                .containsExactly(이번달_셋째.runId(), 지난달_기록.runId());
+        assertThat(찾은것).allSatisfy(run -> assertThat(run.status()).isEqualTo(SyncStatus.RUNNING));
+    }
 }

@@ -22,7 +22,7 @@ import java.util.function.UnaryOperator;
  * @param 이동할팀 부모를 바꿔 볼 L5 팀
  * @param 이동목적지실 {@code 이동할팀} 을 옮겨 붙일 다른 L4 실
  * @param 삭제할실 통째로 지워 계층을 끊을 L4 실. 그 아래 팀들이 고아가 된다
- * @param 대형조직 직속 500명. BatchCheck 청크(50)를 여러 번 넘긴다
+ * @param 대형조직 직속 1,600명({@code OrgChartFixture} 의 {@code 대형조직직속}). AD 범위 검색의 한계선(1,000·1,500)을 넘기고, BatchCheck 청크(50)를 여러 번 넘긴다
  * @param 빈조직들 멤버가 없는 조직. 빈 델타 경로를 탄다
  */
 public record Landmarks(

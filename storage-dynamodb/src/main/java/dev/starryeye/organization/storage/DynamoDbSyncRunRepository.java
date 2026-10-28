@@ -134,6 +134,22 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     }
 
     /**
+     * 이번 달·지난달 파티션의 RUNNING 기록을 모두, 최신순으로 준다(설계 2026-10-27 §12). {@link #findRecent} 와 같은 두 파티션 Query 에
+     * {@code status = RUNNING} 거름식을 더했다 — Scan 이 아니다.
+     *
+     * <p><b>비용.</b> 거름식은 읽은 <b>뒤에</b> 걸러서 읽기 용량은 파티션 전체 크기만큼 든다. app-ldap 은 매시 회차마다 두 달치(약 1,500건)를 읽는다. 아이템이
+     * 작아 읽기 용량은 수십 단위다. 지난달도 항상 읽는다 — 달이 바뀌기 직전에 시작해 죽은 기록이 거기 있을 수 있다. 응답이 1MB 를 넘으면 {@link Paginator} 가
+     * 이어 읽는다(거름식 때문에 빈 쪽이 끼어도 마지막 키를 따라간다).
+     */
+    @Override
+    public Flux<SyncRun> findRunning() {
+        YearMonth thisMonth = YearMonth.from(clock.instant().atZone(ZoneOffset.UTC));
+
+        return queryMonth(thisMonth, true)
+                .concatWith(queryMonth(thisMonth.minusMonths(1), true));
+    }
+
+    /**
      * 이번 달과 지난달 파티션에서 번호로 찾는다. 기록은 보관 기간(기본 30일) 뒤 사라지므로 그보다 앞선 달에는 없다.
      *
      * <p>파티션 하나가 한 달치 기록이다 — 매시 동기화면 약 720건이지 수십 건이 아니다. 그래도 파티션 하나의 Query 라 통째로 읽고, runId 로 찾는 인덱스를 따로 두지 않는다.
@@ -150,15 +166,27 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     }
 
     private Flux<SyncRun> queryMonth(YearMonth month) {
-        QueryRequest request = QueryRequest.builder()
+        return queryMonth(month, false);
+    }
+
+    /** @param runningOnly true 면 {@code status = RUNNING} 인 기록만 거른다 — 거름식은 읽은 뒤에 걸러, 읽기 용량은 달리지 않는다 */
+    private Flux<SyncRun> queryMonth(YearMonth month, boolean runningOnly) {
+        QueryRequest.Builder request = QueryRequest.builder()
                 .tableName(properties.getTableName())
                 .keyConditionExpression("#pk = :pk")
-                .expressionAttributeNames(Map.of("#pk", Keys.PK))
-                .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.syncRunPk(month))))
-                .scanIndexForward(false)
-                .build();
+                .scanIndexForward(false);
+        if (runningOnly) {
+            request.filterExpression("#status = :running")
+                    .expressionAttributeNames(Map.of("#pk", Keys.PK, "#status", STATUS))
+                    .expressionAttributeValues(Map.of(
+                            ":pk", Attrs.s(Keys.syncRunPk(month)),
+                            ":running", Attrs.s(SyncStatus.RUNNING.name())));
+        } else {
+            request.expressionAttributeNames(Map.of("#pk", Keys.PK))
+                    .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.syncRunPk(month))));
+        }
 
-        return Paginator.queryAll(client, request).map(this::toRun);
+        return Paginator.queryAll(client, request.build()).map(this::toRun);
     }
 
     private SyncRun toRun(Map<String, AttributeValue> item) {

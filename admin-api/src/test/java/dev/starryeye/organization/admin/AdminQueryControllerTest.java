@@ -8,12 +8,14 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.query.UserSummary;
 import dev.starryeye.organization.core.usecase.AdminQueryUseCase;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Set;
@@ -32,14 +34,16 @@ class AdminQueryControllerTest {
     void 컨트롤러를_준비한다() {
         var useCase = new AdminQueryUseCase(state, search, checker);
         var metrics = new AdminQueryMetrics(registry);
-        client = WebTestClient.bindToController(new AdminQueryController(useCase, metrics)).build();
+        client = WebTestClient.bindToController(new AdminQueryController(useCase, metrics))
+                .controllerAdvice(new AdminExceptionHandler(TemporaryFailureClassifier.표지만()))
+                .build();
     }
 
     @Test
     @DisplayName("표시명으로 직원을 검색한다")
     void 표시명으로_검색한다() {
         // given
-        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true));
+        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true, "okta-00u1"));
 
         // when, then
         client.get().uri("/admin/employees?displayName=홍")
@@ -51,11 +55,33 @@ class AdminQueryControllerTest {
     }
 
     @Test
+    @DisplayName("직원 검색 줄과 직원 상세에 externalId 가 있다 — README 가 쓰라는 DN 을 관리 API 가 보여 준다")
+    void 직원_응답에_externalId_가_있다() {
+        // given
+        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true, "okta-00u1"));
+        state.saveUser(new DirectoryUser("kim", "okta-00u2", "kim", "김철수", null, true)).block();
+
+        // when, then — 검색은 $.items[0].externalId, 상세는 $.externalId
+        client.get().uri("/admin/employees?displayName=홍")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].externalId").isEqualTo("okta-00u1");
+        client.get().uri("/admin/employees/kim")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.externalId").isEqualTo("okta-00u2");
+    }
+
+    @Test
     @DisplayName("검색 파라미터가 없으면 400 이다")
     void 검색_파라미터가_없으면_400이다() {
         // when, then — 빈 접두사는 전체 열거가 되므로 입구에서 막는다
         client.get().uri("/admin/employees")
-                .exchange().expectStatus().isBadRequest();
+                .exchange().expectStatus().isBadRequest()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(400)
+                .jsonPath("$.detail").isEqualTo("userName·displayName·externalId 중 정확히 하나를 지정해야 한다");
     }
 
     @Test

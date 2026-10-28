@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim;
 
+import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.GroupGraphTooLargeException;
 import dev.starryeye.organization.core.usecase.ValueTooLongException;

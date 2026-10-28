@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
@@ -111,6 +112,7 @@ import java.util.stream.Collectors;
  *
  * <p>이 유스케이스는 회차 기록({@code SyncRun})을 남기지 않는다. SCIM 은 요청 단위라 요청마다 회차를 열면 동기화 이력이 폭증한다. 변경 이력은
  * 요청마다 남긴다 — 요청의 traceId 를 원인으로, 락을 반납한 뒤·응답 전에 쓴다({@link #withLock}, 설계 2026-10-10 §4.2·§4.4).
+ * 커밋된 회수는 이력에 더하는 자리와 같은 자리에서 {@link RevocationObserver} 로 센다(설계 2026-10-27 §8, {@link #센다}).
  *
  * <p><b>부분 실패(design §7.2).</b> OpenFGA 배치는 트랜잭션이므로 SCIM 단건 변경은 대개
  * 전부 성공이거나 전부 실패다. 대형 그룹 PUT 으로 배치가 쪼개질 때만 부분 성공이 가능한데,
@@ -142,7 +144,9 @@ public class IncrementalSyncUseCase {
     private final MutationLock lock;
     /**
      * 락 획득을 포기하기까지의 대기 한도(설계 §4.4, 2026-10-07 §3.1). 줄에 선 순간부터 잰다 — 서버 안 줄에서 기다린 시간과 다른 서버와
-     * 백오프로 겨룬 시간이 모두 든다. 한도는 시도와 시도 사이에서만 본다 — 날아가는 중인 획득은 끊지 않는다.
+     * 백오프로 겨룬 시간이 모두 든다. 날아가는 중인 획득도 이 한도를 넘기지 않는다 — 시도마다 {@code min(남은 한도, 1초)}(하한 200ms)의 시도 한도를 주어
+     * 저장소가 끊는다(설계 2026-10-27 §6, {@link AcquireBackoff}). 넘을 수 있는 것은 시도 한도의 하한(200ms)과, 결과를 모르는 시도를 남긴 채 포기할 때
+     * 보내는 토큰 반납(많아야 1초)뿐이다.
      */
     private final Duration acquireTimeout;
     /** 락을 쥔 동안 리스를 갱신하는 주기(설계 2026-10-02 §3.1). */
@@ -157,19 +161,24 @@ public class IncrementalSyncUseCase {
      * 유일 값 표지판을 넘겨받는 기준 — 락 TTL 이다(설계 2026-10-14 §4.1). 이보다 오래된 표지판은 주인이 그 값을 쥐지 않으면 넘겨받는다.
      */
     private final Duration lockTtl;
+    /**
+     * 커밋된 회수를 센다 — {@code scim.revocations{kind}}(설계 2026-10-27 §8). 상태 쓰기가 성공한 뒤 이력에 더하는 자리에서 부르고, 던지면 경고만 남긴다
+     * ({@link #센다}). 막지 않고 보이게만 한다(§17.4).
+     */
+    private final RevocationObserver revocationObserver;
     /** 서버 안의 SCIM 쓰기 줄(설계 2026-10-07 §3.1) — 이 유스케이스 하나, 곧 서버 하나에 하나다. */
     private final LocalWriteQueue 줄 = new LocalWriteQueue();
     /** 다른 서버가 쥔 락을 다시 시도하는 간격(§3.2). */
     private final AcquireBackoff 백오프 = AcquireBackoff.무작위로();
 
-    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
                                   LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
     }
 
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 11인자 생성자로 이력과 traceId 를 넘긴다. */
+    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 이력과 traceId 를 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver) {
@@ -177,13 +186,22 @@ public class IncrementalSyncUseCase {
                 AuditRecorder.NONE, TraceIds.NONE);
     }
 
-    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 11인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
+    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver,
                                   AuditRecorder audit, TraceIds traceIds) {
         this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
                 DEFAULT_LOCK_TTL);
+    }
+
+    /** 회수를 세지 않는다({@link RevocationObserver#NOOP}) — 회수 지표와 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 지표를 넘긴다. */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, Duration renewInterval,
+                                  DriftObserver driftObserver, LockObserver lockObserver,
+                                  AuditRecorder audit, TraceIds traceIds, Duration lockTtl) {
+        this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
+                lockTtl, RevocationObserver.NOOP);
     }
 
     /**
@@ -298,10 +316,15 @@ public class IncrementalSyncUseCase {
         });
     }
 
-    /** 직원 하나를 저장하고 이력에 더한다. 바뀐 것이 없으면 이력은 줄을 만들지 않는다({@link AuditChanges#entries}). */
+    /**
+     * 직원 하나를 저장하고 이력에 더한다. 바뀐 것이 없으면 이력은 줄을 만들지 않는다({@link AuditChanges#entries}).
+     * 활성이던 직원을 비활성으로 저장했으면 회수 {@code deactivate} 로 센다 — 삭제가 일부 실패해 비활성으로 남기는 경우도 여기를 지난다(설계 2026-10-27 §8).
+     */
     private Mono<Void> 직원을_저장한다(DirectoryUser 저장본, DirectoryUser 저장할것, AuditChanges 기록) {
+        boolean 비활성화한다 = 저장본 != null && 저장본.active() && !저장할것.active();
         return Mono.defer(() -> state.saveUser(저장본, 저장할것))
-                .then(남긴다(() -> 기록.user(저장본, 저장할것)));
+                .then(남긴다(() -> 기록.user(저장본, 저장할것)))
+                .then(센다(RevocationObserver.Kind.DEACTIVATE, 비활성화한다 ? 1 : 0));
     }
 
     /**
@@ -433,11 +456,13 @@ public class IncrementalSyncUseCase {
                         }
                         DirectoryGroup reconciled = reconcileGroupMembers(
                                 existingOrEmpty, group, beforeTuples, afterTuples, result);
+                        Set<MemberRef> 뺀것 = 차집합(existingOrEmpty.members(), reconciled.members());
                         return Mono.defer(() -> state.saveGroup(reconciled))
                                 .then(남긴다(() -> 기록.group(existing.map(IncrementalSyncUseCase::이름표).orElse(null),
                                         이름표(reconciled),
                                         차집합(reconciled.members(), existingOrEmpty.members()),
-                                        차집합(existingOrEmpty.members(), reconciled.members()))));
+                                        뺀것)))
+                                .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)));
                     };
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit);
@@ -508,7 +533,8 @@ public class IncrementalSyncUseCase {
                             Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
                             Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
                             return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것))
-                                    .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)));
+                                    .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)))
+                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)));
                         };
 
                         boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
@@ -615,8 +641,10 @@ public class IncrementalSyncUseCase {
                             // 레코드와 지우지 못한 소속은 남기고 직원은 비활성으로 — 회수 의도를 먼저 저장한다
                             return 직원을_저장한다(user, 비활성, 기록).then(saveGroups);
                         }
+                        // 이미 비활성이면 비활성으로 남길 때 deactivate 로 센 직원이다 — 직원 하나의 회수는 한 번만 센다(설계 2026-10-27 §8)
                         return saveGroups.then(Mono.defer(() -> state.deleteUser(userId)))
-                                .then(남긴다(() -> 기록.user(user, null)));
+                                .then(남긴다(() -> 기록.user(user, null)))
+                                .then(센다(RevocationObserver.Kind.DELETE_USER, user.active() ? 1 : 0));
                     };
 
                     return 표지판을_정리한다(
@@ -679,7 +707,8 @@ public class IncrementalSyncUseCase {
                     .then(남긴다(() -> {
                         기록.group(header, null, Set.of(), group.members());
                         parentIds.forEach(parent -> 기록.membership(parent, Set.of(), Set.of(이조직)));
-                    }));
+                    }))
+                    .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(group.members())));
         }
         Set<MemberRef> 지운멤버 = group.members().stream()
                 .filter(member -> result.deleted().contains(tupleFor(member, group.id())))
@@ -691,7 +720,8 @@ public class IncrementalSyncUseCase {
                         .then(남긴다(() -> 기록.membership(parent.id(), Set.of(), Set.of(이조직)))), LOAD_CONCURRENCY)
                 .then();
         return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)))
-                .then(남긴다(() -> 기록.membership(group.id(), Set.of(), 지운멤버)));
+                .then(남긴다(() -> 기록.membership(group.id(), Set.of(), 지운멤버)))
+                .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(지운멤버)));
     }
 
     /**
@@ -870,7 +900,7 @@ public class IncrementalSyncUseCase {
                         if (차례.밀렸다()) {
                             경합했다.set(true);
                         }
-                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 acquire 도 한 번이다
+                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 토큰도 하나다
                         return Mono.defer(() -> 잡는다(시작, 경합했다))
                                 .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
                                         .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
@@ -898,28 +928,56 @@ public class IncrementalSyncUseCase {
     /**
      * 차례를 받은 요청이 전역 락을 잡는다 — 다른 서버와는 백오프로 겨룬다(설계 2026-10-07 §3.2). 한도는 줄에 선 순간({@code 시작})부터 잰다.
      *
+     * <p><b>토큰은 여기서 하나 만든다</b>(설계 2026-10-27 §6). 시도마다 남은 한도로 시도 한도가 달라 {@code acquire} 를 시도마다 부르지만, 토큰은 줄 서기 한 번에
+     * 하나다 — 끊긴 시도가 서버에서 성공했어도 같은 토큰의 다시 시도가 그 획득을 그대로 다시 얻는다(점검 S14). 포기할 때 반납하려고 토큰을 여기서 쥔다.
+     *
+     * <p><b>결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다.</b> 조건 실패({@link LockUnavailableException})가 아닌 시도 — 시도 한도로
+     * 끊겼거나 그 밖의 오류로 끝난 것 — 는 응답만 잃었을 수 있다. 그대로 두면 서버에서 잡힌 락이 TTL(30초) 동안 모든 쓰기를 막는다. 반납은 토큰만
+     * 조건으로 보므로 남의 락을 풀지 않는다. 짧은 한도(1초)의 최선 노력이고, 실패하면 TTL 이 푼다. 조건 실패만 있었으면 보내지 않는다 — 우리 시도는 잡지 못했다.
+     *
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> 락 이외의 예외(DynamoDB 장애 등)도 {@link LockUnavailableException} 으로 감싼다.
      */
     private Mono<LockLease> 잡는다(long 시작, AtomicBoolean 경합했다) {
         Duration 남은_한도 = acquireTimeout.minusMillis(AcquireBackoff.지금() - 시작);
-        // acquire 를 한 번만 부르고 그 Mono 를 다시 구독해야 재시도도 같은 토큰이다(점검 S14)
-        Mono<LockLease> 획득;
-        try {
-            획득 = lock.acquire(MutationLock.LockPurpose.WRITE);
-        } catch (RuntimeException e) {
-            // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
-            획득 = Mono.error(e);
-        }
-        Mono<LockLease> 시도 = 획득
-                // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
-                .doOnError(LockUnavailableException.class, error -> 경합했다.set(true));
+        String token = UUID.randomUUID().toString();
+        AtomicBoolean 결과를_모른다 = new AtomicBoolean();
+        Function<Duration, Mono<LockLease>> 시도 = 한도 -> {
+            Mono<LockLease> 획득;
+            try {
+                획득 = lock.acquire(MutationLock.LockPurpose.WRITE, token, 한도);
+            } catch (RuntimeException e) {
+                // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
+                획득 = Mono.error(e);
+            }
+            return 획득
+                    // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
+                    .doOnError(LockUnavailableException.class, error -> 경합했다.set(true))
+                    // 조건 실패가 아니면 서버에서 잡혔는지 모른다 — 시간 초과도 그 밖의 오류도 같다
+                    .doOnError(error -> !(error instanceof LockUnavailableException), error -> 결과를_모른다.set(true));
+        };
         return 백오프.잡는다(시도, 남은_한도)
+                .onErrorResume(error -> 결과를_모른다.get()
+                        ? 토큰으로_반납한다(token).then(Mono.error(error))
+                        : Mono.error(error))
                 .onErrorMap(error -> !(error instanceof LockUnavailableException),
                         error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
                 // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도 LockUnavailableException 으로 옮기므로
                 // 예외 타입으로는 구별할 수 없고, 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
                 .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
                 .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()));
+    }
+
+    /**
+     * 획득을 포기하며 결과를 모르는 시도의 토큰으로 반납을 한 번 보낸다(설계 2026-10-27 §6). 반납은 토큰만 조건으로 보므로 만료 시각은 쓰지 않는다.
+     * 최선 노력이다 — 1초 안에 끝나지 않거나 실패하면 경고만 남기고 TTL 에 맡긴다. 원래 획득 실패(503)는 그대로다.
+     */
+    private Mono<Void> 토큰으로_반납한다(String token) {
+        return Mono.defer(() -> lock.release(new LockLease(token, Instant.EPOCH)))
+                .timeout(Duration.ofSeconds(1))
+                .onErrorResume(error -> {
+                    log.warn("결과를 모르는 획득 시도의 토큰으로 반납하지 못했다. 서버에서 잡혔다면 리스가 만료될 때까지 아무도 잡지 못한다", error);
+                    return Mono.empty();
+                });
     }
 
     /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */
@@ -1192,6 +1250,28 @@ public class IncrementalSyncUseCase {
     /** 커밋 자리가 이력의 변경 모음에 더하는 일 — 앞의 커밋이 성공한 뒤에만 돈다(설계 2026-10-10 §4.4). */
     private static Mono<Void> 남긴다(Runnable 더하기) {
         return Mono.fromRunnable(더하기);
+    }
+
+    /**
+     * 커밋된 회수를 센다(설계 2026-10-27 §8) — {@link #남긴다} 처럼 앞의 상태 쓰기가 성공한 뒤에만 돈다. 0 이면 부르지 않는다.
+     * 관찰자가 던지면 경고만 남기고 삼킨다 — 커밋은 이미 끝났고, 지표는 막지 않고 보이게만 한다(§17.4).
+     */
+    private Mono<Void> 센다(RevocationObserver.Kind kind, int count) {
+        return Mono.fromRunnable(() -> {
+            if (count == 0) {
+                return;
+            }
+            try {
+                revocationObserver.revoked(kind, count);
+            } catch (RuntimeException e) {
+                log.warn("회수 지표({} {}건)를 남기지 못했다 — 커밋은 그대로다", kind.tag(), count, e);
+            }
+        });
+    }
+
+    /** 멤버 가운데 직원 수 — 회수는 직원만 센다. 하위 조직 연결은 권한을 잃는 사람이 아니다. */
+    private static int 직원_수(Set<MemberRef> members) {
+        return (int) members.stream().filter(member -> member.type() == MemberType.USER).count();
     }
 
     /**

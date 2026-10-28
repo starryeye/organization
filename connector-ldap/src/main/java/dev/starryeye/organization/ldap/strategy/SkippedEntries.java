@@ -71,6 +71,11 @@ final class SkippedEntries {
         return 건수.getOrDefault(사유, 0);
     }
 
+    /** 사유가 무엇이든 건너뛴 것이 하나라도 있는가 — 없으면 {@link #요약()} 은 "0건을 건너뛰었다" 뿐이라 메시지에 싣지 않는다 */
+    boolean 건너뛴_것이_있는가() {
+        return !건수.isEmpty();
+    }
+
     String 요약() {
         int 합계 = 건수.values().stream().mapToInt(Integer::intValue).sum();
         String 내용 = 건수.entrySet().stream()

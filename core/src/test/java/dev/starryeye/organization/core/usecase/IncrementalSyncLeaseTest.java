@@ -182,8 +182,9 @@ class IncrementalSyncLeaseTest {
         // given — 저장소에서는 이미 잡혔는데 응답이 200ms 늦게 온다
         lock = new FakeMutationLock() {
             @Override
-            public reactor.core.publisher.Mono<dev.starryeye.organization.core.port.LockLease> acquire(LockPurpose purpose) {
-                return super.acquire(purpose).delayElement(Duration.ofMillis(200));
+            public reactor.core.publisher.Mono<dev.starryeye.organization.core.port.LockLease> acquire(
+                    LockPurpose purpose, String token, Duration attemptTimeout) {
+                return super.acquire(purpose, token, attemptTimeout).delayElement(Duration.ofMillis(200));
             }
         };
 

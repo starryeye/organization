@@ -7,7 +7,6 @@ import dev.starryeye.organization.core.audit.RunAudit;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
-import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SyncRunRepository;
@@ -16,6 +15,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -45,7 +45,11 @@ import java.util.function.UnaryOperator;
  * <ol>
  *   <li>실행 기록을 연 뒤에만 일을 시작한다. 기록을 열지 못하면 반납하고 그 오류로 끝난다.</li>
  *   <li>일을 시작하기 전에, 같은 앱의 락 작업 기록 중 RUNNING 으로 남은 것을 "비정상 종료로 중단"으로 닫는다 — 락을 쥐었으니 그것들은
- *       죽은 작업이다(강제 종료·정전·다른 인스턴스의 비정상 종료). 락을 잡지 않는 아카이빙({@code ARCHIVE}) 기록과 자기 기록은 건드리지 않는다.</li>
+ *       죽은 작업이다(강제 종료·정전·다른 인스턴스의 비정상 종료). 살펴보는 범위는 두 달 파티션의 RUNNING 전부다(최근 N건이 아니다). 락을 잡지 않는
+ *       아카이빙({@code ARCHIVE}) 기록과 자기 기록은 이 규칙으로 닫지 않는다.</li>
+ *   <li>같은 때, 시작한 지 {@code timeout} + 10분이 지난 RUNNING 은 종류·source 와 상관없이 "비정상 종료로 중단(기한 + 10분 경과)"으로 닫는다 —
+ *       작업은 기한을 넘기면 스스로 끝나므로 그 뒤에도 RUNNING 이면 죽은 것이다. 락을 잡지 않는 아카이빙의 죽은 기록은 이 규칙으로 닫힌다({@link StaleRuns}).
+ *       잘못 닫혀도 늦은 {@code finish} 가 조건 없이 덮어쓴다.</li>
  *   <li>일은 서버 종료·기한({@code timeout})·리스 상실과 경주한다. 먼저 온 쪽이 이기고 진 쪽은 취소된다. 종료가 이미 시작됐으면 일을
  *       시작하지도 않는다.</li>
  *   <li>어떻게 끝나든 <b>먼저 반납하고 그다음 기록한다.</b> 기록에서 "끝남"을 본 운영자가 곧바로 다시 걸면 받아져야 한다.</li>
@@ -65,15 +69,13 @@ public class SyncJobs {
     /** 종료 때 작업이 반납·기록을 마치기를 기다리는 한도. 그 뒤에는 DynamoDB 클라이언트가 닫힌다. */
     private static final Duration 종료_대기 = Duration.ofSeconds(10);
 
-    /** 끝나지 못한 기록을 찾을 때 볼 최근 기록 수. 죽은 작업의 기록은 가장 최근 것들 사이에 있다. */
-    private static final int 살펴볼_기록 = 100;
-
     private final SyncRunRepository runs;
     private final MutationLock lock;
     private final LeaseKeeper keeper;
     private final LockObserver lockObserver;
     private final Duration timeout;
     private final AuditRecorder audit;
+    private final Clock clock;
     private final Sinks.Empty<Void> 종료 = Sinks.empty();
     private final Set<Mono<Void>> 도는_작업 = ConcurrentHashMap.newKeySet();
 
@@ -86,12 +88,19 @@ public class SyncJobs {
     /** @param audit 회차의 변경 모음을 남긴다(설계 2026-10-15 §3) — 종류({@link AuditKind})를 받는 {@code startLockedThen} 으로 연 회차만 */
     public SyncJobs(SyncRunRepository runs, MutationLock lock, Duration renewInterval,
                     LockObserver lockObserver, Duration timeout, AuditRecorder audit) {
+        this(runs, lock, renewInterval, lockObserver, timeout, audit, Clock.systemUTC());
+    }
+
+    /** @param clock 죽은 기록의 나이를 잴 시계 — 운영 결선은 앱의 {@code Clock} 빈을 넘긴다 */
+    public SyncJobs(SyncRunRepository runs, MutationLock lock, Duration renewInterval,
+                    LockObserver lockObserver, Duration timeout, AuditRecorder audit, Clock clock) {
         this.runs = runs;
         this.lock = lock;
         this.keeper = new LeaseKeeper(lock, renewInterval, lockObserver);
         this.lockObserver = lockObserver;
         this.timeout = timeout;
         this.audit = Objects.requireNonNull(audit, "audit");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
@@ -142,7 +151,7 @@ public class SyncJobs {
                                         Consumer<SyncRun> onFinished) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
-            return lock.acquire(purpose)
+            return lock.acquireOnce(purpose)
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
                     .flatMap(lease -> 띄운다(source, trigger, kind, work,
@@ -297,37 +306,26 @@ public class SyncJobs {
     }
 
     /**
-     * 같은 앱의 락 작업 기록 중 RUNNING 으로 남은 것을 닫는다(설계 2026-09-30 §3.3). 락을 쥐었으니 그것들은 죽은 작업이다. 락을 잡지 않는
-     * 아카이빙과 방금 연 자기 기록은 건드리지 않는다. 찾거나 닫다 실패해도 작업은 계속한다 — 기록 정리는 부가 일이다.
-     *
-     * <p>{@link SyncRunRepository#abandon} 은 저장된 기록이 <b>아직 RUNNING 일 때만</b> 닫는다. 앞 작업이 락을 반납한 뒤·자기
-     * 기록을 쓰기 전의 틈에 여기까지 왔으면, 방금 SUCCEEDED 로 끝난 기록이 이 목록에는 아직 RUNNING 으로 보일 수 있다(읽기는 최종
-     * 일관성) — 조건이 없으면 그 결과·집계값을 지울 뻔한다. {@code abandon} 이 빈 Mono 를 주면 이미 끝나 있었다는 뜻이니 경고할 일이
-     * 아니다.
+     * 시작할 때 RUNNING 으로 남은 죽은 기록을 닫는다(설계 2026-09-30 §3.3, 2026-10-27 §12). 두 달 파티션의 RUNNING 을 모두 보고({@link SyncRunRepository#findRunning}),
+     * 사유가 정해진 것만 닫는다. 방금 연 자기 기록은 건드리지 않고, 찾거나 닫다 실패해도 작업은 계속한다 — 기록 정리는 부가 일이다({@link StaleRuns#닫는다}).
      */
     private Mono<Void> 남은_기록을_닫는다(SyncSource source, String 지금_기록) {
-        return runs.findRecent(살펴볼_기록)
-                .filter(run -> run.source() == source
-                        && run.status() == SyncStatus.RUNNING
-                        && run.trigger() != SyncTrigger.ARCHIVE
-                        && !run.runId().equals(지금_기록))
-                .concatMap(run -> runs.abandon(run, 비정상_종료_사유)
-                        .doOnSuccess(closed -> {
-                            if (closed != null) {
-                                log.warn("[{}] 끝나지 못한 채 남은 실행 기록을 닫았다: {}", closed.runId(), 비정상_종료_사유);
-                            } else {
-                                log.debug("[{}] 닫으려 했으나 이미 끝나 있었다 — 반납과 기록 사이의 틈", run.runId());
-                            }
-                        })
-                        .onErrorResume(error -> {
-                            log.warn("[{}] 끝나지 못한 실행 기록을 닫지 못했다", run.runId(), error);
-                            return Mono.empty();
-                        }))
-                .then()
-                .onErrorResume(error -> {
-                    log.warn("끝나지 못한 실행 기록을 찾지 못했다 — 작업은 계속한다", error);
-                    return Mono.empty();
-                });
+        return StaleRuns.닫는다(runs, 지금_기록, run -> 닫을_사유(source, run));
+    }
+
+    /**
+     * 닫을 사유. 닫지 않으면 null 이다.
+     * <ol>
+     *   <li>같은 source 이고 아카이빙({@code ARCHIVE})이 아니면 {@link #비정상_종료_사유} — 락을 쥐었으니 나이와 상관없이 죽은 작업이다. 락을 잡지 않는
+     *       아카이빙은 도는 중일 수 있어 이 규칙으로는 닫지 않는다.</li>
+     *   <li>아니고 시작한 지 {@code timeout} + 10분이 지났으면 {@link StaleRuns#기한_경과_사유} — 종류와 source 를 따지지 않는다.</li>
+     * </ol>
+     */
+    private String 닫을_사유(SyncSource source, SyncRun run) {
+        if (run.source() == source && run.trigger() != SyncTrigger.ARCHIVE) {
+            return 비정상_종료_사유;
+        }
+        return StaleRuns.오래됐다(run, clock.instant(), timeout) ? StaleRuns.기한_경과_사유 : null;
     }
 
     /** 반납 실패는 작업을 실패시키지 않는다 — 일은 이미 끝났다. 남기기만 한다. */
@@ -343,7 +341,8 @@ public class SyncJobs {
         return Duration.ofNanos(System.nanoTime() - 시작나노);
     }
 
-    private static String 사람말로(Duration duration) {
+    /** 기한 초과 메시지의 기한 — 아카이빙({@link SnapshotArchiveUseCase})도 같은 문구를 쓴다. */
+    static String 사람말로(Duration duration) {
         return duration.toMinutes() > 0 ? duration.toMinutes() + "분" : duration.toMillis() + "ms";
     }
 }

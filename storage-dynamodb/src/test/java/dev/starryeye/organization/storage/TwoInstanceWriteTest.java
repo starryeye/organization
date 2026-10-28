@@ -140,7 +140,7 @@ class TwoInstanceWriteTest extends DynamoDbTestSupport {
         // given — 인스턴스1 이 재적재로 락을 쥔다. 쓰는 쪽의 한도는 운영 기본값 3초다
         Clock clock = Clock.systemUTC();
         DynamoDbMutationLock 인스턴스1의_락 = new DynamoDbMutationLock(client, properties, clock, "instance-1");
-        var 재적재_리스 = 인스턴스1의_락.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
+        var 재적재_리스 = 인스턴스1의_락.acquireOnce(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
         IncrementalSyncUseCase 운영_한도_인스턴스 = new IncrementalSyncUseCase(
                 new DynamoDbDirectoryStateRepository(client, properties, clock), new FakeTupleWriter(), new FakeTupleChecker(),
                 new DynamoDbMutationLock(client, properties, clock, "instance-2"),

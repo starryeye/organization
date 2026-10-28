@@ -27,9 +27,9 @@ class FakeSearchRepositoryTest {
     @DisplayName("접두사가 맞지 않으면 항목이 제외된다")
     void 접두사_필터링() {
         // given
-        repository.users.add(new UserSummary("id1", "alice", "Alice", true));
-        repository.users.add(new UserSummary("id2", "bob", "Bob", true));
-        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true));
+        repository.users.add(new UserSummary("id1", "alice", "Alice", true, null));
+        repository.users.add(new UserSummary("id2", "bob", "Bob", true, null));
+        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true, null));
 
         // when
         Page<UserSummary> result = repository.searchUsersByUserName("al", null, 10).block();
@@ -43,9 +43,9 @@ class FakeSearchRepositoryTest {
     @DisplayName("결과는 정렬되어 있다")
     void 결과_정렬() {
         // given
-        repository.users.add(new UserSummary("id1", "charlie", "Charlie", true));
-        repository.users.add(new UserSummary("id2", "alice", "Alice", true));
-        repository.users.add(new UserSummary("id3", "bob", "Bob", true));
+        repository.users.add(new UserSummary("id1", "charlie", "Charlie", true, null));
+        repository.users.add(new UserSummary("id2", "alice", "Alice", true, null));
+        repository.users.add(new UserSummary("id3", "bob", "Bob", true, null));
 
         // when
         Page<UserSummary> result = repository.searchUsersByUserName("", null, 10).block();
@@ -60,11 +60,11 @@ class FakeSearchRepositoryTest {
     @DisplayName("페이징은 2씩 5개를 모두 반환하고 커서가 종료된다")
     void 페이징_전체_순회() {
         // given
-        repository.users.add(new UserSummary("id1", "alice", "Alice", true));
-        repository.users.add(new UserSummary("id2", "bob", "Bob", true));
-        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true));
-        repository.users.add(new UserSummary("id4", "david", "David", true));
-        repository.users.add(new UserSummary("id5", "eve", "Eve", true));
+        repository.users.add(new UserSummary("id1", "alice", "Alice", true, null));
+        repository.users.add(new UserSummary("id2", "bob", "Bob", true, null));
+        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true, null));
+        repository.users.add(new UserSummary("id4", "david", "David", true, null));
+        repository.users.add(new UserSummary("id5", "eve", "Eve", true, null));
 
         // when
         Page<UserSummary> page1 = repository.searchUsersByUserName("", null, 2).block();
@@ -141,9 +141,9 @@ class FakeSearchRepositoryTest {
     @DisplayName("displayName 이 null 인 직원은 displayName 검색에서 제외된다")
     void displayName_null_제외() {
         // given
-        repository.users.add(new UserSummary("id1", "alice", "Alice", true));
-        repository.users.add(new UserSummary("id2", "bob", null, true));  // displayName이 null
-        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true));
+        repository.users.add(new UserSummary("id1", "alice", "Alice", true, null));
+        repository.users.add(new UserSummary("id2", "bob", null, true, null));  // displayName이 null
+        repository.users.add(new UserSummary("id3", "charlie", "Charlie", true, null));
 
         // when
         Page<UserSummary> result = repository.searchUsersByDisplayName("", null, 10).block();

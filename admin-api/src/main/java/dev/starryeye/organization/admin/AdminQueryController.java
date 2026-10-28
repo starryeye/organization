@@ -23,6 +23,7 @@ import java.util.Arrays;
  * 관리자 조회. 기존 {@code /admin/sync} 와 같은 표면이 되도록 {@code @RestController} 와
  * {@link ResponseStatusException} 을 쓴다.
  */
+@AdminApi
 @RestController
 @RequestMapping("/admin")
 @RequiredArgsConstructor

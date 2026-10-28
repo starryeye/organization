@@ -22,9 +22,9 @@ public class LdapProperties {
      * 대기만 약 2~6분(10·20·40·80·120초에 지터 ±50% 가 붙어 140~345초 사이, 평균 약 4분)이라 도메인 컨트롤러 재부팅을 버틴다. 예전 3번·200ms 는 몇 초라, 재부팅 하나에 그 회차를 잃고
      * 다음 기회(기본 주기)까지 퇴사 회수가 밀렸다. 시도마다 응답 대기({@link #readTimeout})가 더해져도 작업 기한({@code sync.job-timeout} 30분) 안이다.
      *
-     * <p>재시도가 걸리는 것은 <b>예외</b>뿐이다. LDAP 이 성공적으로 잘못된 답을 주는 경우
-     * (필터 오류로 0건을 반환하는 것 같은)는 정상 응답이라 여기 걸리지 않는다 — 그건
-     * 삭제 가드가 잡을 일이고, 이 재시도가 그 경계를 흐리지 않는다.
+     * <p>재시도가 걸리는 것은 일시 장애로 보는 <b>예외</b>뿐이다. LDAP 이 성공적으로 잘못된 답을 주는 경우는 정상 응답이라 여기 걸리지 않는다 —
+     * 사람 소속이 하나도 없는 그림(필터 오류로 0건 등)은 전략이 데이터 오류로 멈추고(재시도 없음, 설계 2026-10-27 §13), 일부가 크게 빠진 그림은
+     * 삭제 가드가 잡는다. 이 재시도가 그 경계를 흐리지 않는다.
      */
     private int maxRetries = 5;
 
@@ -53,8 +53,14 @@ public class LdapProperties {
      */
     private Duration readTimeout = Duration.ofSeconds(150);
 
-    /** group-of-names | dit */
+    /** group-of-names | dit. 대소문자는 가리지 않는다. 그 밖의 값은 기동을 멈춘다({@code LdapConfig#설정을_검사한다}) */
     private String strategy = "group-of-names";
+
+    /**
+     * 켜면 {@link #url} 이 {@code ldaps://} 가 아닐 때 기동을 멈춘다 — 평문 LDAP 으로 바인드 자격증명과 디렉터리 전체가 오가지 않게 한다(운영은 켠다).
+     * {@code ldaps://} 는 JNDI 가 JVM 트러스트스토어로 연다 — 사설 CA 는 {@code -Djavax.net.ssl.trustStore} 로 넘긴다. StartTLS 는 지원하지 않는다.
+     */
+    private boolean requireTls = false;
 
     private GroupOfNames groupOfNames = new GroupOfNames();
     private Dit dit = new Dit();

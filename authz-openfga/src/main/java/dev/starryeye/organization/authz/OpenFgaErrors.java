@@ -1,5 +1,6 @@
 package dev.starryeye.organization.authz;
 
+import dev.openfga.sdk.errors.FgaApiNotFoundError;
 import dev.openfga.sdk.errors.FgaApiValidationError;
 import reactor.util.retry.Retry;
 
@@ -18,9 +19,20 @@ final class OpenFgaErrors {
      * OpenFGA 가 요청 내용을 거절했다(400 — 없는 타입, 너무 긴 아이디 등). SDK 가 CompletionException 등으로 감싸 주므로 원인 사슬을 따라가며 본다.
      */
     static boolean 거절인가(Throwable error) {
+        return 원인_사슬에_있는가(error, FgaApiValidationError.class);
+    }
+
+    /**
+     * 물은 store 가 없다(404 — 지워졌거나 그 번호를 만든 적 없다). 일시 오류도, 요청 거절도 아니다. 원인 사슬을 따라가며 본다.
+     */
+    static boolean 없는_store_인가(Throwable error) {
+        return 원인_사슬에_있는가(error, FgaApiNotFoundError.class);
+    }
+
+    private static boolean 원인_사슬에_있는가(Throwable error, Class<? extends Throwable> 종류) {
         Throwable cause = error;
         while (cause != null) {
-            if (cause instanceof FgaApiValidationError) {
+            if (종류.isInstance(cause)) {
                 return true;
             }
             if (cause.getCause() == cause) {

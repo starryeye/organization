@@ -30,13 +30,16 @@ import java.util.function.Consumer;
  *   <li>쓰기 전에 "기록 중" 표시를 남긴다 — 이 청소가 중간에 멈춰도 다음 회차가 다시 맞춘다.</li>
  *   <li>장부를 D 에 맞추되, 지우기 전에 삭제 가드를 본다({@code force} 면 건너뛴다). 기준 수는 훑은 줄 수다.
  *     <ul>
- *       <li>전부 보류면 지우지 않고 ABORTED — 스냅샷을 남기지 않으므로 표시가 남아 다음 회차도 다시 확인한다.</li>
+ *       <li>전부 보류면 지우지 않고 ABORTED — 스냅샷을 남기지 않으므로 표시가 남아 다음 회차도 다시 확인한다. D 는 이미 썼으므로 쓴 수는 실행 기록에
+ *           남긴다({@link SyncOutcome#held}, 설계 2026-10-27 §12).</li>
  *       <li>가드가 걸렸지만 디렉터리가 막았다고 명시한 회수는 가드 안이면(설계 2026-10-20 §5.4) 그것만 지운다. 스냅샷을 남겨 표시를 지우고 —
- *           보류한 후보는 장부에 그대로 있으니 기준선(B)에 든다 — 다음 회차는 비교 경로에서 같은 판정을 다시 받는다. 현재상태는 바꾸지 않는다.
- *           이 길은 가드를 보기 전에 D 를 이미 다 썼으므로 보류할 쓰기는 없다.</li>
+ *           보류한 후보는 장부에 그대로 있으니 기준선(B)에 든다 — 다음 회차는 비교 경로로 간다. 그 회차는 같은 판정을 받지 않는다: 지운 회수가 B 에서
+ *           빠졌으므로 남은 지우기를 줄어든 기준 수에 대어 가드를 다시 보고, 그사이 새로 막힌 계정이 없으면 비활성 부분이 비어 대개 전부 보류다(남은 비율이
+ *           임계 아래로 내려가면 그대로 반영된다). 현재상태는 바꾸지 않는다. 이 길은 가드를 보기 전에 D 를 이미 다 썼으므로 보류할 쓰기는 없다.</li>
  *     </ul>
  *   </li>
- *   <li>끝나면 스냅샷(표시가 사라진다)과 현재상태를 남긴다.</li>
+ *   <li>끝나면 스냅샷(표시가 사라진다)과 현재상태를 남긴다. 지우기가 차단기로 멈췄어도 일부만 반영한 회차가 아니면 현재상태는 바뀌므로, 그 회차의 메시지
+ *       끝에 {@link FullSyncUseCase#현재상태_교체} 를 적는다.</li>
  *   <li>지운 줄과 현재상태가 바뀐 것은 끝나는 즉시 회차의 변경 모음에 더한다(설계 2026-10-15 §5) — 스냅샷 저장·현재상태 교체가 실패해도 남는다. 쓴 줄은
  *       중복 무시로 써 이미 있던 줄과 가를 수 없어 보통 남기지 않는다(설계 2026-10-10 §3.5). 다만 기준선 없는 첫 회차는 첫 적재의 부여 이력을 잃으면 안
  *       되므로({@code 쓴_줄도_남긴다}) 쓴 줄도 묶음마다 더한다(설계 2026-10-20 §4). 이력은 {@link SyncJobs} 가 남긴다.</li>
@@ -90,7 +93,7 @@ final class LedgerAlignment {
                 .then(TupleReconciler.reconcile(writer, scanner, desired, TupleReconciler.DesiredRevision.NONE, check,
                         기록::revoked, 쓴_묶음마다))
                 .flatMap(reconciliation -> reconciliation.heldEntirely()
-                        ? Mono.just(Mono.just(SyncOutcome.aborted(reconciliation.heldReason())))
+                        ? Mono.just(Mono.just(SyncOutcome.held(reconciliation.result(), reconciliation.heldReason())))
                         : commit(directory, reconciliation, 기록));
     }
 
@@ -128,6 +131,17 @@ final class LedgerAlignment {
                 : Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())).then();
         return snapshots.save(snapshot)
                 .then(현재상태)
-                .thenReturn(Mono.just(reconciliation.outcome(snapshot.id())));
+                .thenReturn(Mono.just(결론(reconciliation, snapshot.id())));
+    }
+
+    /**
+     * 실행 기록의 결론. 지우기가 차단기로 멈췄지만 현재상태는 실제로 교체한 회차({@code !revokedOnly()})는 메시지 끝에 그 사실을 적는다(설계
+     * 2026-10-27 §12). 일부만 반영한 회차는 현재상태를 바꾸지 않았으므로 적지 않는다.
+     */
+    private static SyncOutcome 결론(TupleReconciler.Reconciliation reconciliation, String snapshotId) {
+        SyncOutcome outcome = reconciliation.outcome(snapshotId);
+        return !reconciliation.revokedOnly() && reconciliation.stopReason() != null
+                ? outcome.withSuffix(FullSyncUseCase.현재상태_교체)
+                : outcome;
     }
 }

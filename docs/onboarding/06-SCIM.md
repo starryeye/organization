@@ -1,6 +1,6 @@
 # SCIM
 
-> 기준 커밋: 46169ab (main, 2026-10-25). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)(식별자·표지판·책갈피·키 한도)
 
 app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 받아 [장부](02-용어집.md#장부)와 [현재상태](02-용어집.md#현재상태)에 반영한다. 이 문서는 그 모든 동작을 다룬다. 엔드포인트, 리소스 모양, 조회와 필터, PATCH 해석, 쓰기 한 건의 흐름, 오류 응답, 예시, IdP 별 메모 순이다.
@@ -29,12 +29,12 @@ app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 �
 | `StateMemberTypeResolver` | connector-scim | `type` 이 없는 멤버가 직원인지 하위 조직인지 현재상태로 판정 |
 | `ScimRfcAttributes`·`IgnoredAttributeObserver` | connector-scim | RFC 가 정의했지만 저장하지 않는 직원 속성을 가르고, 버린 것을 지표로 알린다 |
 | `ScimDiscovery` | connector-scim | `/ResourceTypes`·`/Schemas` |
-| `TemporaryFailureClassifier` | connector-scim | 예외가 [일시 장애](02-용어집.md#일시-장애)(503)인지 원인 사슬을 따라 가른다 |
+| `TemporaryFailureClassifier` | core `port` | 예외가 [일시 장애](02-용어집.md#일시-장애)(503)인지 원인 사슬을 따라 가른다. 관리 API 예외 처리기도 같은 분류기를 쓴다 |
 | `IncrementalSyncUseCase` | core `usecase` | [SCIM 쓰기](02-용어집.md#scim-쓰기) 여섯 — `createUser`·`changeUser`·`removeUser`·`createGroup`·`changeGroup`·`removeGroup` |
 | `UniqueMarkers`·`OrgGraph` | core `usecase` | [표지판](02-용어집.md#표지판) 판단, 순환 검사와 [보류 목록](02-용어집.md#보류-목록) |
 | `KeyValueLimits`·`GroupChange` | core `model` | [키 한도](02-용어집.md#키-한도), 저장소를 읽기 전에 정리한 조직 변경 |
 | `ScimConfig` | connector-scim | 위 핸들러와 라우트를 빈으로 만든다. `IncrementalSyncUseCase` 빈은 app-scim 의 `ScimUseCaseConfig` 가 만든다 |
-| `ScimSyncMetrics` | app-scim | `scim.drift.detected`, `scim.patch.ignored`, `scim.lock.*` 지표. `ArchiveDriftObserver` 도 구현해 아카이빙의 게이지 `scim.archive.drift{kind}`·`scim.archive.drift.observed` 도 낸다([07 — 드리프트 게이지](07-재적재-초기화-아카이빙.md#드리프트-게이지)) |
+| `ScimSyncMetrics` | app-scim | `scim.drift.detected`, `scim.patch.ignored`, `scim.lock.*`, `scim.revocations{kind}` 지표. `ArchiveDriftObserver` 도 구현해 아카이빙의 게이지 `scim.archive.drift{kind}`·`scim.archive.drift.observed` 도 낸다([07 — 드리프트 게이지](07-재적재-초기화-아카이빙.md#드리프트-게이지)) |
 
 ### 1.2 읽기와 쓰기는 길이 다르다
 
@@ -316,7 +316,7 @@ compValue = JSON 문자열 / true / false
 - `eq`·`and` 키워드는 대소문자를 가리지 않는다. 속성 이름도 가리지 않는다. 값의 `true`·`false` 는 소문자여야 한다.
 - 문자열 값은 RFC 8259 JSON 문자열이다. 큰따옴표만 구분자이고 이스케이프(`\"`, `\\`, `\n`, `\uXXXX` 등)를 푼다. 작은따옴표로 감싼 값은 400 이다.
 - 빈 필터(`filter=`)는 400 `invalidFilter` "필터가 비어 있습니다".
-- 문법 오류의 문구 끝에는 받은 필터 전체가 붙는다(예: "지원하지 않는 값입니다: '5' — 문자열과 true/false 만 받습니다 — filter: userName eq 5").
+- 문법 오류의 문구에는 받은 입력이 붙는다(예: "지원하지 않는 값입니다: '5' — 문자열과 true/false 만 받습니다 — filter: userName eq 5"). 입력 조각은 셋이다 — 끝의 필터 원문, 받지 않는 속성 경로, 받지 않는 값 token. **각각 앞 100자(코드 포인트)까지만** 싣고, 넘으면 `…` 를 붙인다(`ScimFilter.Parser.앞부분`). 원문만 자르면 token 이 필터의 대부분일 때 문구 길이에 상한이 없기 때문이다 — 인증 없는 엔드포인트가 본문 한도(256KB)까지 메아리치지 않게 한다.
 
 **리소스별로 받는 속성.** 필터에는 인덱스로 찾을 수 있는 조건이 적어도 하나 있어야 한다. 그 조건 하나로 후보를 찾고(찾는 조건), `and` 로 붙은 나머지 조건은 후보 위에서 메모리로 확인한다. 전원을 훑는 필터는 받지 않는다.
 
@@ -579,7 +579,7 @@ flowchart TD
 순서대로 풀면 이렇다.
 
 1. **락 밖.** 핸들러가 `attributes`·`excludedAttributes` 를 검사하고, 본문을 읽어 도메인 값으로 바꾼다(`ScimMapper`, `ScimPatchApplier`). 조직이면 `type` 없는 멤버를 현재상태로 판정한다. 여기서 틀리면 아무것도 잡지 않고 4xx 다.
-2. **락.** `IncrementalSyncUseCase.withLock` 이 서버 안 줄에 서고, 차례가 오면 변경 락을 용도 `WRITE` 로 잡는다. 다른 서버와는 백오프로 겨룬다. 줄과 겨룸을 합쳐 `dynamodb.lock-acquire-timeout`(기본 3초) 안에 못 잡으면 503 이다. 잡으면 `LeaseKeeper` 가 `dynamodb.lock-renew-interval`(기본 10초)마다 [리스](02-용어집.md#리스)를 [갱신](02-용어집.md#갱신)한다. 세부는 [08](08-동시성과-작업.md).
+2. **락.** `IncrementalSyncUseCase.withLock` 이 서버 안 줄에 서고, 차례가 오면 변경 락을 용도 `WRITE` 로 잡는다. 다른 서버와는 백오프로 겨룬다. 줄과 겨룸을 합쳐 `dynamodb.lock-acquire-timeout`(기본 3초) 안에 못 잡으면 503 이다. 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊고, 끊긴 시도는 같은 토큰으로 곧바로 다시 시도한다([시도 한도](02-용어집.md#시도-한도)). 잡으면 `LeaseKeeper` 가 `dynamodb.lock-renew-interval`(기본 10초)마다 [리스](02-용어집.md#리스)를 [갱신](02-용어집.md#갱신)한다. 세부는 [08](08-동시성과-작업.md).
 3. **대상 읽기.** 락을 잡은 **뒤** 직원·조직을 강한 일관성으로 읽는다. 없으면 빈 결과이고 핸들러가 404 로 바꾼다. 존재 확인도 락 안이다.
 4. **키 한도**([§6.3](#63-키-한도)). 넘으면 400 `invalidValue`. 표지판·OpenFGA·DynamoDB 어디에도 쓰지 않았다.
 5. **표지판**([§6.4](#64-표지판--username-과-조직-externalid)). 생성이거나 값이 바뀔 때만 차지한다.
@@ -873,15 +873,15 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 | 다른 SCIM 쓰기가 변경 락을 쥐었다 — 서버 안 줄이나 백오프에서 3초를 넘김 | 2초 | `LockUnavailableException.쓰기_경합_대기` |
 | 다른 쓰기가 같은 `userName`·`externalId` 표지판을 차지하고 아직 저장하지 않았다 | 2초 | `UniqueMarkers.쓰는_중_대기` |
 | 재적재가 변경 락을 쥐었다 — 다시 시도하지 않고 바로([07 재적재 동안의 SCIM 쓰기](07-재적재-초기화-아카이빙.md#5-재적재-동안의-scim-쓰기)) | 60초 | `LockUnavailableException.긴_작업_대기` |
-| 락 저장소 오류, 리스 상실(작업 도중·쓰기 직전·커밋 직전), 차단기(`TupleWriteAbortedException`), 부분 실패, OpenFGA·DynamoDB 일시 장애, I/O 실패·시간 초과 | 10초 | `TemporaryFailureException.기본_대기` |
+| 락 저장소 오류, 락 획득 시도가 시도 한도로 끊긴 채 획득 한도에 닿음(쥔 쪽을 모른다), 리스 상실(작업 도중·쓰기 직전·커밋 직전), 차단기(`TupleWriteAbortedException`), 부분 실패, OpenFGA·DynamoDB 일시 장애(SDK 시간 한도 포함), I/O 실패·시간 초과 | 10초 | `TemporaryFailureException.기본_대기` |
 
-일시 장애를 가르는 법(`TemporaryFailureClassifier.재시도_대기`) — 원인 사슬을 따라가며 처음 맞는 것을 쓴다.
+일시 장애를 가르는 법(`TemporaryFailureClassifier.재시도_대기`, core `port`) — 원인 사슬을 따라가며 처음 맞는 것을 쓴다. 관리 API 예외 처리기도 같은 분류기를 쓴다([09 — 오류](09-관리-API.md#오류)).
 
-1. core 의 일시 장애 예외 `TemporaryFailureException`(하위 `LockUnavailableException`, `TupleWriteAbortedException`) — 그 대기.
+1. core 의 일시 장애 예외 `TemporaryFailureException`(하위 `LockUnavailableException`, `LockAttemptTimeoutException`, `TupleWriteAbortedException`) — 그 대기.
 2. 어댑터 인식기. `DynamoDbTemporaryFailures`: `SdkClientException`, 스로틀링, 5xx, SDK 가 재시도 가능하다고 표시한 것. `OpenFgaTemporaryFailures`: `FgaError.isRetryable()`(429, 501 을 뺀 5xx).
 3. `IOException`(Jackson 의 `JacksonException` 은 뺀다 — 다시 보내도 같다)이나 `TimeoutException` — 10초.
 
-어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·인증 오류·store 없음·응답 해석 실패는 다시 보내도 같다.
+어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·인증 오류·store 없음(`StoreNotFoundException` — 생성이 꺼진 배포에서 이름의 store 가 없다)·응답 해석 실패는 다시 보내도 같다.
 
 503 의 `detail` 은 우리가 쓴 문구뿐이다. 예외 메시지에는 OpenFGA 서버 메시지, 라이브러리 예외 문자열, 락을 쥔 쪽의 용도가 들어 있고 이 엔드포인트는 인증이 없다. 원인은 서버 로그(WARN "SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After N초")에만 남는다. 부분 실패의 503 만 우리가 만든 `ScimException` 이라 문구에 id 가 있다.
 
@@ -1038,7 +1038,7 @@ Check 자체가 실패해도(OpenFGA 가 닿지 않음) 결과는 같다. `오�
 |---|---|
 | IdP 가 같은 PATCH 를 다시 보낸다 | 전·후 모두 비활성이지만 후보는 활성 여부를 보지 않아 두 줄이 Check 된다. 남아 있으면 `extra` 드리프트로 세고 지운다 → 200 |
 | 이 직원을 건드리는 다음 쓰기 | 직원 PUT·DELETE, 저장하는 속성에 닿는 직원 PATCH, 이 직원을 넣거나 빼는 조직 PATCH·PUT 이 같은 Check 기준선으로 지운다(PATCH 는 이미 멤버인 직원을 다시 넣어도 된다) |
-| 하루 아카이빙(`sync.archive-cron`, 기본 03:00) | 현재상태 전체에서 나올 수 있는 튜플을 BatchCheck 해, 현재상태가 요구하지 않는데 남은 직원 줄을 찾는다. 그 직원마다 `IncrementalSyncUseCase.revokeLeftovers` 로 락 안에서 **지우기만** 한다. 실행 기록 메시지 "어긋난 직원 1명 다시 맞춤(실패 0명)", 게이지 `scim.archive.drift{kind=extra}` |
+| 하루 아카이빙(`sync.archive-cron`, 기본 03~08시의 [하루 창](02-용어집.md#하루-창) — 그날 성공할 때까지 매시) | 현재상태 전체에서 나올 수 있는 튜플을 BatchCheck 해, 현재상태가 요구하지 않는데 남은 직원 줄을 찾는다. 그 직원마다 `IncrementalSyncUseCase.revokeLeftovers` 로 락 안에서 **지우기만** 한다. 실행 기록 메시지 "어긋난 직원 1명 다시 맞춤(실패 0명)", 게이지 `scim.archive.drift{kind=extra}` |
 | 재적재 `mode=tuples` | 현재상태의 있어야 할 줄을 쓰고 장부를 훑어 나머지를 지운다 |
 
 IdP 가 다시 보내지 않을 수도 있다. 대상을 다시 읽어 차이만 보내는 IdP 는 이미 비활성인 것을 보고 멈춘다(Entra 가 그렇다고 루트 README.md 가 적지만 확인하지 않았다). 그래서 하루 아카이빙이 IdP 재시도를 대신한다. **IdP 재시도 없이 회수가 끝나기까지 최대 하루**다. 아카이빙의 세부는 [07 아카이빙](07-재적재-초기화-아카이빙.md#6-아카이빙).
@@ -1123,13 +1123,14 @@ PUT /scim/v2/Groups/G-backend?excludedAttributes=members
 |---|---|---|
 | `server.port` | 8082 | SCIM·관리 API·actuator 가 같은 포트다 |
 | `spring.codec.max-in-memory-size` | 256KB(app-scim 설정 파일에 없다 — 스프링 기본) | 요청 본문 한도. 넘으면 413. 413 문구도 이 값을 읽는다 |
-| `dynamodb.lock-acquire-timeout` | 3s | SCIM 쓰기의 락 대기 한도(서버 안 줄 + 백오프). 넘으면 503 |
+| `dynamodb.lock-acquire-timeout` | 3s | SCIM 쓰기의 락 대기 한도(서버 안 줄 + 백오프). 넘으면 503. 시도 하나는 `min(남은 한도, 1초)`(하한 200ms) |
+| `dynamodb.api-call-attempt-timeout`, `dynamodb.api-call-timeout` | 10s, 60s | 모든 DynamoDB 호출의 시도·호출 한도 |
 | `dynamodb.lock-ttl` | 30s | 리스 길이. 표지판 넘겨받기 기준이기도 하다 |
 | `dynamodb.lock-renew-interval` | 10s | 리스 갱신 주기 |
 | `openfga.write-batch-size` | 100 | 쓰기 배치 한도(쓰기 + 지우기) |
 | `openfga.request-concurrency` | 4 | BatchCheck 요청(50건씩)과 같은 단계의 쓰기 배치를 동시에 보내는 수 |
 | `openfga.max-retries` | 3 | 배치마다 일시 오류 재시도 |
-| `dynamodb.table-name`, `openfga.store-name` | `organization-scim` | app-ldap 과 늘 다르게 둔다([개요](01-개요.md)) |
+| `dynamodb.table-name`, `openfga.store-name` | yml `organization-scim`(클래스 기본값은 없다 — 비면 기동을 멈춘다) | app-ldap 과 늘 다르게 둔다([개요](01-개요.md)) |
 
 SCIM 쓰기 경로의 지표(`ScimSyncMetrics`):
 
@@ -1140,6 +1141,7 @@ SCIM 쓰기 경로의 지표(`ScimSyncMetrics`):
 | `scim.lock.wait` | Timer | 락을 잡거나 포기하기까지 기다린 시간(서버 안 줄 포함) |
 | `scim.lock.contended` | Counter | 한 번이라도 밀린 획득 |
 | `scim.lock.lease_lost` | Counter | 리스 상실 — 쓰기 도중 갱신 실패, 쓰기 직전·커밋 직전 재확인 실패, 반납 실패 |
+| `scim.revocations{kind}` | Counter | **커밋된** 회수. `deactivate`(`active` 가 true → false 로 저장됨, 삭제가 일부 실패해 비활성으로 남긴 경우 포함 — 1), `delete_user`(직원 레코드를 지움, 그때 활성이던 직원만 — 1), `remove_member`(조직에서 뺀 직원 멤버 수 — PATCH remove, PUT·replace 로 빠짐), `delete_group`(조직 삭제 때 지운 직원 멤버 수). 상태 쓰기가 성공한 뒤 이력에 더하는 자리에서 센다(`IncrementalSyncUseCase.센다`) — 그래서 장애 중 IdP 재시도는 남은 것만 센다. 막지 않고 보이게만 한다. 계열 넷은 기동 때 0 으로 만든다. 경보 예는 [11](11-운영.md#36-경보-예) |
 | `audit.write.failures` | Counter | 쓰지 못한 감사 이력 줄 |
 
 하루 아카이빙의 `scim.archive.drift`·`scim.archive.drift.observed` 는 [07](07-재적재-초기화-아카이빙.md)·[11](11-운영.md).
@@ -1164,3 +1166,4 @@ SCIM 쓰기 경로의 지표(`ScimSyncMetrics`):
 - 표지판: `docs/superpowers/specs/2026-10-14-unique-markers-design.md`
 - 키 한도, 발견 엔드포인트, 405: `docs/superpowers/specs/2026-10-17-scim-standard-rest-design.md`
 - 요청한 `active` 저장, 삭제 실패 시 비활성, 아카이빙의 남은 회수: `docs/superpowers/specs/2026-10-20-revocation-convergence-design.md` §6
+- 필터 오류 문구의 100자, 회수 카운터, 분류기를 core 로 옮긴 것, 락 획득 시도 한도: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §6·§8·§10

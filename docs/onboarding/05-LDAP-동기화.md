@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: 46169ab (main, 2026-10-25). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -21,13 +21,13 @@
 | 회차 걸기 | `SyncScheduler`, `AdminSyncController` | app-ldap |
 | 회차의 몸통, 길 고르기, 비교 경로 | `FullSyncUseCase` | core (`usecase`) |
 | 장부 맞추기 | `LedgerAlignment`, `TupleReconciler` | core (`usecase`) |
-| 디렉터리 읽기 | `LdapDirectorySnapshotSource`, `GroupOfNamesStrategy`, `DitStrategy`, `PagedLdapSearch`, `RangedAttributeReader`, `AccountStatus`, `LdapIdentifiers`, `ActiveDirectoryPrimaryGroup`, `SkippedEntries`, `UnmatchedMemberGuard`, `LdapDns` | connector-ldap (`ldap`, `ldap.strategy`) |
+| 디렉터리 읽기 | `LdapDirectorySnapshotSource`, `GroupOfNamesStrategy`, `DitStrategy`, `PagedLdapSearch`, `RangedAttributeReader`, `AccountStatus`, `LdapIdentifiers`, `ActiveDirectoryPrimaryGroup`, `SkippedEntries`, `UnmatchedMemberGuard`, `EmptyMembershipGuard`, `LdapDns` | connector-ldap (`ldap`, `ldap.strategy`) |
 | 튜플 변환·비교 | `TupleMapper`, `TupleDiff` | core (`tuple`) |
 | 삭제 가드 | `DeletionGuard`, `DeletionGuardPolicy`, `GuardDecision` | core (`guard`) |
 | OpenFGA 쓰기·장부 훑기 | `OpenFgaRelationTupleWriter`, `OpenFgaRelationTupleScanner` | authz-openfga |
 | 스냅샷 | `DynamoDbTupleSnapshotRepository` | storage-dynamodb |
 | 현재상태 교체 | `DynamoDbDirectoryStateRepository.replaceWith` | storage-dynamodb |
-| 설정 | `SyncProperties`(app-ldap), `LdapProperties`(connector-ldap), `OpenFgaProperties`(authz-openfga) | |
+| 설정 | `SyncProperties`(app-ldap), `LdapProperties`·`LdapConfig`(connector-ldap — 기동 때 검사), `OpenFgaProperties`(authz-openfga) | |
 
 ---
 
@@ -52,7 +52,7 @@ flowchart TD
 ```
 
 1. 트리거가 `FullSyncUseCase.start` 를 부른다. [변경 락](02-용어집.md#변경-락)을 [용도](02-용어집.md#용도) `SYNC` 로 잡고 [실행 기록](02-용어집.md#실행-기록)을 `RUNNING` 으로 연다. 요청에는 이 기록을 곧바로 준다([2절](#2-회차를-거는-것)).
-2. LDAP 을 끝까지 읽어 [디렉터리 그림](02-용어집.md#디렉터리-그림)을 만든다([3절](#3-디렉터리-읽기)). 읽기가 실패하면 장부에 아무것도 하지 않고 `FAILED` 다.
+2. LDAP 을 끝까지 읽어 [디렉터리 그림](02-용어집.md#디렉터리-그림)을 만든다([3절](#3-디렉터리-읽기)). 읽기가 실패하거나, 그림에 사람 소속이 하나도 없으면([빈 소속 규칙](#빈-소속-규칙)) 장부에 아무것도 하지 않고 `FAILED` 다.
 3. 그림을 [있어야 할 줄](02-용어집.md#있어야-할-줄) D 로 바꾼다([4절](#4-디렉터리-그림과-있어야-할-줄)).
 4. [스냅샷 포인터](02-용어집.md#스냅샷-포인터)를 읽어 [기준선 상태](02-용어집.md#기준선-상태)로 길을 고른다([5절](#5-길-고르기--기준선-상태)).
 5. 고른 길을 탄다 — [비교 경로](#6-비교-경로) 또는 [장부 맞추기](#7-장부-맞추기). 두 길 모두 OpenFGA 에 쓰고([8절](#8-openfga-쓰기)), [튜플 스냅샷](02-용어집.md#튜플-스냅샷)을 남기고([9절](#9-스냅샷-저장)), [현재상태](02-용어집.md#현재상태)를 교체한다([10절](#10-현재상태-교체)).
@@ -66,15 +66,15 @@ flowchart TD
 
 | [트리거](02-용어집.md#트리거) | 무엇이 거나 | 삭제 가드 | 락을 못 잡으면 |
 |---|---|---|---|
-| `SCHEDULED` | `sync.cron`(`application.yml` 의 값 `0 0 * * * *`, 매시 정각. 코드 기본값은 없어 키가 없으면 앱이 기동하지 못한다 — [13 — 7.1](13-한계와-알려진-문제.md#71-synccron-에-기본값이-없다)) → `SyncScheduler.전체동기화` | 본다 | 기록 없이 건너뛴다. 로그 "다른 인스턴스가 동기화·재적재 중이라 이번 스케줄을 건너뛴다" |
+| `SCHEDULED` | `sync.cron`(기본 `0 0 * * * *`, 매시 정각. 기본값은 `SyncProperties` 에만 있고 `@Scheduled(cron = "#{@syncProperties.cron}")` 가 속성 빈을 읽는다 — yml 에 키가 없어도 뜬다) → `SyncScheduler.전체동기화` | 본다 | 기록 없이 건너뛴다. 로그 "다른 인스턴스가 동기화·재적재 중이라 이번 스케줄을 건너뛴다" |
 | `MANUAL` | `POST /admin/sync/full` → `AdminSyncController.full` | 본다 | 409, 사유 "다른 동기화·재적재가 진행 중입니다"(아래 각주) |
 | `FORCED` | `POST /admin/sync/full?force=true` | **건너뛴다** — 비교 경로와 장부 맞추기 모두 | 409 |
 
-- 409 의 사유는 `ResponseStatusException` 의 reason 이다. 두 앱 모두 `server.error.include-message` 를 설정하지 않아 스프링 부트 기본값(싣지 않음)이면 응답 본문에는 나오지 않는다 — 실제 응답으로는 확인하지 못했다([09 — 오류](09-관리-API.md#오류)).
+- 오류 응답은 RFC 9457 problem details 이고, 409 의 사유는 `detail` 칸에 실린다. 락을 잡거나 실행 기록을 여는 중의 일시 장애는 409 가 아니라 503 + `Retry-After` 다 — 회차는 시작하지 않았다([09 — 오류](09-관리-API.md#오류)).
 - `sync.cron` 은 스프링 cron(초 칸이 있다)이다. `-` 를 주면 정기 동기화가 꺼진다.
 - 여러 대를 띄우면 정각에 모든 인스턴스의 스케줄러가 깨지만, 락을 잡은 한 대만 돈다. 나머지는 오류가 아니라 건너뜀이다.
 - 같은 락을 재적재(용도 `REBUILD`)도 쓴다. 재적재가 도는 동안 동기화는 걸리지 않는다. 락의 구조는 [08](08-동시성과-작업.md).
-- `force=true` 는 "사람이 보고 승인했다" 는 통로다. 삭제 가드만 건너뛴다. 그 밖의 검사(LDAP [데이터 오류](02-용어집.md#데이터-오류), 기준선 무결성 등)는 그대로다.
+- `force=true` 는 "사람이 보고 승인했다" 는 통로다. 삭제 가드만 건너뛴다. 그 밖의 검사(LDAP [데이터 오류](02-용어집.md#데이터-오류) — 사람 소속이 하나도 없는 그림 포함 —, 기준선 무결성 등)는 그대로다.
 - 스케줄러는 관측(`Observation`) `sync.ldap.full` 을 만들어 Reactor Context 에 싣는다. 회차의 로그가 traceId 하나로 묶인다(`SyncScheduler.관측하며실행`).
 
 수동으로 걸면 202 와 방금 연 기록을 받는다(`SyncRunResponse`). 결과는 `GET /admin/sync/runs/{runId}` 로 본다([09](09-관리-API.md)).
@@ -106,7 +106,7 @@ POST /admin/sync/full
 - `Mono.fromCallable(() -> strategy.read(template))` 를 `Schedulers.boundedElastic()` 에서 돌린다. Spring LDAP(JNDI)은 블로킹이라 이벤트 루프에서 부르면 앱이 멈춘다.
 - 재시도(`retryWhen`)를 `subscribeOn` 뒤에 둔다. 재시도도 `boundedElastic` 에서 돌고, **시도마다 처음부터 다시 읽는다** — 앞 시도의 부분 결과가 섞이지 않는다([3.13](#313-재시도와-타임아웃)).
 - 다 읽으면 "LDAP 에서 직원 N명, 조직 M개를 읽었다" 를 남긴다.
-- 전략은 기동할 때 `ldap.strategy` 로 정한다(`LdapConfig.ldapMappingStrategy`). 값이 `dit`(대소문자 무시)면 `DitStrategy`, **그 밖의 값은 모두** `GroupOfNamesStrategy` 다. 기본값은 `group-of-names` 다. 오타를 내도 오류 없이 groupOfNames 로 읽는다.
+- 전략은 기동할 때 `ldap.strategy` 로 정한다(`LdapConfig.ldapMappingStrategy`). `group-of-names` 면 `GroupOfNamesStrategy`, `dit` 면 `DitStrategy` 다(대소문자 무시). **그 밖의 값은 오타까지 기동을 멈춘다**(`LdapConfig.설정을_검사한다` — `ldap.strategy 는 group-of-names 또는 dit 다(받은 값: …)`). 기본값은 `group-of-names` 다. DIT 디렉터리를 groupOfNames 로 잘못 읽어 조직 없는 조직도가 되는 일을 막는다.
 - 계정 만료를 판정할 "지금" 은 읽기 한 번에 한 번 잡는다(`clock.instant()`). 그 회차의 모든 직원이 같은 시각으로 판정된다. 재시도하면 새 시각을 잡는다.
 
 ### 3.2 두 매핑 전략
@@ -124,7 +124,8 @@ POST /admin/sync/full
    - 어느 쪽과도 맞지 않는 값(컴퓨터·연락처, 건너뛴 엔트리를 가리키는 값)은 세기만 하고 버린다.
    - 파싱할 수 없는 `member` 값은 데이터 오류다("조직 '…'(dn=…) 의 member '…' 를 해석하지 못했습니다").
 6. [AD 기본 그룹](02-용어집.md#ad-기본-그룹) 소속을 더한다([3.9](#39-ad-기본-그룹)).
-7. 사람으로 대조된 멤버가 하나도 없으면 멈춘다([3.12](#312-사람으로-대조된-멤버가-없으면-멈춘다)).
+7. 사람으로 대조된 멤버가 하나도 없으면 멈춘다([DN 대조 가드](#dn-대조-가드)).
+8. 그림 전체에 사람 소속이 하나도 없으면 멈춘다([빈 소속 규칙](#빈-소속-규칙)) — 직원 0명, 조직 0개, `member` 값이 하나도 없는 그림처럼 7번이 보지 않는 모양이다.
 
 **DIT**(`DitStrategy.read`) — OU 트리가 조직 계층이고, 직원 엔트리의 부모 OU 가 소속이다.
 
@@ -133,7 +134,7 @@ POST /admin/sync/full
 3. OU 를 조직으로 만든다. 식별 속성이 없거나 id 가 겹치는 OU 는 건너뛴다. 서로 다른 부모 아래 같은 이름의 OU(`ou=support,ou=DEV` 와 `ou=support,ou=OPS`)가 이름 기반 id 로 한 id 가 되면, 둘을 한 조직으로 뭉쳐 양쪽 부모에 연결하는 대신 뒤의 것을 뺀다 — 조용히 권한이 넓어지는 것을 막는다. 뺀 OU 의 DN 은 색인에 넣지 않으므로 그 아래 엔트리는 부모를 찾지 못한다. 하위 OU 는 상위 연결 없는 조직으로, 직원은 소속 없는 직원으로 남는다.
 4. OU 마다 부모 DN 을 [대조 키](02-용어집.md#대조-키)로 되짚어, 부모가 읽은 OU 면 그 부모의 하위 조직으로 넣는다.
 5. 직원마다 부모 DN 의 OU 가 소속 조직이다. 부모를 찾지 못한 직원은 **직원으로는 적재하되 소속이 없다**(사유 "부모 조직을 찾지 못해 소속 없이 적재").
-6. 직원이 있는데 부모 조직을 찾은 직원이 0명이면 데이터 오류로 멈춘다("DIT 직원 N명 중 부모 조직을 찾은 직원이 없다 — root-dn 과 org-unit-filter 가 직원이 있는 곳을 조직으로 읽는지 확인하라(AD 의 CN=Users 는 OU 가 아니다, 점검 S22) — …"). AD 의 `CN=Users` 는 OU 가 아니라 컨테이너라서 생기는 일이다.
+6. 그림 전체에 사람 소속이 하나도 없으면 데이터 오류로 멈춘다([빈 소속 규칙](#빈-소속-규칙)) — 직원 0명, 조직 0개, 부모 조직을 찾은 직원 0명이 모두 여기다. 메시지의 세부에 "부모 조직을 찾은 직원 0명 — root-dn 과 org-unit-filter 가 직원이 있는 곳을 조직으로 읽는지 확인하라(AD 의 CN=Users 는 OU 가 아니다, 점검 S22)" 가 실리고, 건너뛴 직원이 있으면 그 요약이 뒤에 붙는다. AD 의 `CN=Users` 는 OU 가 아니라 컨테이너라서 생기는 일이다.
 
 | | groupOfNames | DIT |
 |---|---|---|
@@ -144,7 +145,7 @@ POST /admin/sync/full
 | 순환 | 생길 수 있다([4.3](#43-순환을-버린다)) | 트리라 생기지 않는다 |
 | AD 범위 검색 | 한다(`member`) | 해당 없음 |
 | AD 기본 그룹 | 더한다 | 없다 |
-| "소속이 하나도 안 잡힘" 검사 | `UnmatchedMemberGuard` | 부모를 찾은 직원 0명이면 실패 |
+| "소속이 하나도 안 잡힘" 검사 | `UnmatchedMemberGuard`(DN 대조) 다음에 빈 소속 규칙 | 빈 소속 규칙 |
 
 ### 3.3 속성 매핑과 기본값
 
@@ -177,7 +178,7 @@ POST /admin/sync/full
 - **[externalId](02-용어집.md#externalid)** — 두 전략 모두 서버가 준 DN(컨텍스트 베이스에 상대적)에 `ldap.base-dn` 을 붙여 `LdapName` 으로 다시 쓴 절대 DN 이다(`LdapDns.절대로`). 예 `uid=gd.hong,ou=people,dc=example,dc=com`.
 - **active** — [3.10](#310-계정-상태).
 
-접속 설정은 `ldap.url`(기본 `ldap://localhost:1389`), `ldap.base-dn`(기본 `dc=example,dc=com`), `ldap.bind-dn`, `ldap.bind-password` 다.
+접속 설정은 `ldap.url`(기본 `ldap://localhost:1389`), `ldap.base-dn`(기본 `dc=example,dc=com`), `ldap.bind-dn`, `ldap.bind-password` 다. 운영(`prod`)은 `ldaps://` 를 요구하고(`ldap.require-tls`) 비밀번호를 환경 변수 `LDAP_BIND_PASSWORD` 로 받는다. 바인드 DN 이 있는데 비밀번호가 비었거나 풀리지 않은 자리표시자면 기동을 멈춘다([11 — app-ldap 설정](11-운영.md#14-app-ldap--ldap)).
 
 ### 3.4 불변 id — entryUUID 와 objectGUID
 
@@ -259,7 +260,7 @@ AD 는 사용자의 기본 그룹(대개 Domain Users) 소속을 그 그룹의 `
 - 직원과 그룹은 한 도메인 안에서 검색해야 한다. RID 는 도메인 안에서만 유일하고 이 코드는 도메인 SID 를 보지 않는다. 글로벌 카탈로그(포트 3268)는 여러 도메인을 함께 주므로 쓰지 않는다.
 - 기본 그룹이 그룹 검색 범위 안에 있으면 그 그룹을 기본 그룹으로 가진 직원 전원이 그 조직의 멤버가 된다.
 - 데이터 오류: `primaryGroupID` 가 정수가 아님, `objectSid` 가 이진이 아니거나 SID 형식이 아님(개정 1, 길이 = 8 + 4 × 하위 권한 수), 같은 RID 의 그룹이 둘("속성 'objectSid' 의 RID N 를 가진 그룹이 둘입니다 — 한 도메인에서 RID 는 유일해야 합니다. 그룹 검색 베이스가 여러 도메인을 걸치는지(글로벌 카탈로그 등) 확인하세요: …").
-- RID 로 더한 멤버는 [3.12](#312-사람으로-대조된-멤버가-없으면-멈춘다)의 대조 집계에 들지 않는다.
+- RID 로 더한 멤버는 [3.12](#dn-대조-가드)의 대조 집계에 들지 않는다.
 
 ### 3.10 계정 상태
 
@@ -298,7 +299,11 @@ member 값 12건을 건너뛰었다 — 읽은 직원도 조직도 아님(컴퓨
 
 일부만 빠지는 경우는 막지 않는다. 이미 적재된 장부가 있으면 큰 빠짐은 삭제 가드가 막고, 첫 적재에서는 경고 한 줄이 유일한 신호다.
 
-### 3.12 사람으로 대조된 멤버가 없으면 멈춘다
+### 3.12 사람 소속이 없는 그림은 멈춘다
+
+두 검사가 읽기 끝에서 그림을 본다. 둘 다 [데이터 오류](02-용어집.md#데이터-오류)라 다시 읽지 않고, 회차는 `FAILED` 이며, `force` 로도 넘기지 못한다. 동기화와 재적재가 같은 `fetchAll` 을 타므로 둘 다 같다.
+
+#### DN 대조 가드
 
 groupOfNames 에서 조직이 하나라도 있고 `member` 값이 하나라도 있는데, **사람으로 대조된 값이 0개**면 `UnmatchedMemberGuard.확인한다` 가 `MemberMatchingFailedException`(데이터 오류의 하위)을 던진다.
 
@@ -307,8 +312,25 @@ groupOfNames 에서 조직이 하나라도 있고 `member` 값이 하나라도 �
 ```
 
 - 하위 조직으로 대조된 값은 세지 않는다. 그룹은 검색 베이스 바로 아래 평평하게 있고 사용자만 조직 OU 아래 깊이 있는 트리에서, 하위 조직만 맞고 사람은 전부 어긋나도 통과하면 "모든 조직이 사람 없이 적재되고 성공" 이 되기 때문이다.
-- 첫 적재라면 지울 것이 없어 삭제 가드도 걸리지 않는다. 이 검사가 없으면 아무도 권한을 받지 못한 채 `SUCCEEDED` 가 된다.
+- [AD 기본 그룹](#39-ad-기본-그룹)(RID) 소속도 이 셈에서 뺀다. RID 소속이 하나라도 있어도 DN 대조가 전부 어긋나면 잡는다 — 아래 빈 소속 규칙만으로는 RID 소속 하나에 통과해 버린다.
 - 부분 불일치(컴퓨터·연락처가 섞인 그룹)는 막지 않는다 — [3.11](#311-건너뛰는-엔트리)의 요약으로만 남는다.
+
+#### 빈 소속 규칙
+
+두 전략이 그림을 만든 직후 같은 한 곳(`EmptyMembershipGuard.확인한다`)에서 본다.
+
+> 디렉터리 그림에 **사람 소속**(조직의 멤버 가운데 직원이고, 그 id 가 그림의 직원에 있는 것 — 활성 여부와 상관없이)이 하나도 없으면 `DirectoryDataException` 이다.
+
+```
+디렉터리 그림에 사람 소속이 하나도 없다(사용자 0명, 조직 40개, member 값 0개) — 비어 있는 검색의 베이스·필터를 확인하라
+```
+
+- 괄호의 세 번째 자리는 전략마다 다르다. groupOfNames 는 `member` 값 수, DIT 는 부모 조직을 찾지 못했다는 힌트다([3.2](#32-두-매핑-전략)). 사용자 수·조직 수로 어느 검색이 비었는지 본다.
+- 덮는 모양: 직원 0명(직원 검색만 0건이면 groupOfNames 는 DN 대조 가드가 먼저 잡는다), 조직 0개, `member` 값이 하나도 없는 그림, DIT 에서 부모 조직을 찾은 직원이 0명인 그림.
+- **왜 데이터 오류인가.** RFC 4511 에서 엔트리를 하나도 못 찾은 검색은 오류가 아니라 성공이다 — 검색 베이스·필터가 틀려도, 서비스 계정이 읽을 권한이 없어 엔트리가 보이지 않아도 서버는 0건과 성공 코드를 준다. 그 그림을 받아들이면 장부의 모든 사람이 "디렉터리에서 사라진" 것이 되어, 삭제 가드가 전부 보류로 멈춘 뒤 `force` 로 넘기면 장부가 통째로 지워진다. 그래서 표준 신호가 아니라 이쪽의 한 규칙으로 판정한다 — SCIM `mode=tuples` 의 [빈 조직도 규칙](02-용어집.md#빈-조직도-규칙)과 같은 모양이다.
+- 첫 적재든, 기준 수가 `min-baseline` 미만이든, 가드를 끈 배포든 같다. 빈 그림이 장부 맞추기(장부 훑기)까지 가지 않는다.
+- 활성 여부를 보지 않는 까닭: 시계 오류로 전원이 비활성으로 읽히는 경우는 소속을 지우지 않고 권한 줄만 없앤다 — 그것은 삭제 가드가 본다([6.4](#64-삭제-가드)).
+- 첫 소속을 찾는 즉시 멈추므로 비용은 소속 수가 아니라 첫 소속까지의 거리다.
 
 ### 3.13 재시도와 타임아웃
 
@@ -340,7 +362,7 @@ groupOfNames 에서 조직이 하나라도 있고 `member` 값이 하나라도 �
 
 그 밖은 — 모르는 종류까지 — 일시 장애로 보고 재시도한다. 연결 끊김, 서버 busy·unavailable, 응답 시간 초과, `IncompleteAttributeReadException` 이 여기 든다.
 
-재시도가 걸리는 것은 **예외**뿐이다. LDAP 이 잘못된 답을 정상으로 주는 경우(필터 실수로 0명)는 여기 걸리지 않는다. 그것은 [삭제 가드](#64-삭제-가드)의 몫이다.
+재시도가 걸리는 것은 **예외**뿐이다. LDAP 이 잘못된 답을 정상으로 주는 경우(필터 실수로 0명)는 여기 걸리지 않는다. 사람 소속이 하나도 없는 그림은 [빈 소속 규칙](#빈-소속-규칙)이 데이터 오류로 멈추고(재시도 없음), 일부가 크게 빠진 그림은 [삭제 가드](#64-삭제-가드)가 잡는다.
 
 ---
 
@@ -646,7 +668,7 @@ B_new = ((B − R.지운 줄) ∪ R.쓴 줄) − U_new
 
 순서가 스냅샷 → 현재상태인 까닭: 스냅샷은 "장부에 반영된 것" 이라 쓰기 직후에 남겨야 기록 중 표시를 지울 수 있다. 현재상태 교체가 실패해도 스냅샷은 이미 맞다. 다음 회차는 비교 경로로 가고, 튜플이 그대로면 변경 없음 길에서 현재상태 교체만 다시 한다.
 
-쓰기가 차단기로 멈추면(`TupleWriteAbortedException`) 그때까지의 결과(`partial()`)로 같은 식을 써 스냅샷을 남기고 현재상태도 교체한 뒤 `FAILED` 로 끝낸다. 이미 나간 쓰기를 모른 척하면 기준선이 장부와 어긋나기 때문이다.
+쓰기가 차단기로 멈추면(`TupleWriteAbortedException`) 그때까지의 결과(`partial()`)로 같은 식을 써 스냅샷을 남기고 현재상태도 교체한 뒤 `FAILED` 로 끝낸다. 이미 나간 쓰기를 모른 척하면 기준선이 장부와 어긋나기 때문이다. 실행 상태만 보면 현재상태도 못 바꾼 것처럼 읽히므로, 메시지 끝에 ` — 현재상태는 디렉터리대로 교체했다` 를 붙인다(`FullSyncUseCase.현재상태_교체`). 권한은 틀리지 않는다 — 현재상태는 판단에 쓰이지 않고(관리 API 의 `shouldHaveAccess` 와 감사 이력만 읽는다), B 는 실제로 나간 줄이고 U 는 모르는 줄이라 다음 회차가 수렴한다.
 
 ---
 
@@ -698,7 +720,7 @@ LDAP 의 장부 맞추기는 지우기 전에 D 를 다시 정하지 않는다(`
 
 ### 7.2 지울 후보와 삭제 가드
 
-트리거가 `FORCED` 가 아니면 같은 `DeletionGuard.evaluate` 를 본다. 다른 것은 기준이다.
+`force` 가 아니면 같은 `DeletionGuard.evaluate` 를 본다 — 동기화는 트리거 `FORCED`, 재적재는 `force=true`(트리거 `FORCED_REBUILD`)가 `force` 다. 다른 것은 기준이다.
 
 - 지울 줄 = 지울 후보 전체(D 밖의 모든 장부 줄 — 이 서버가 쓰지 않은 찌꺼기까지).
 - 기준 수 = 훑으며 읽은 줄 수, 기준 이름 = "훑은 장부".
@@ -708,11 +730,11 @@ LDAP 의 장부 맞추기는 지우기 전에 D 를 다시 정하지 않는다(`
 |---|---|---|
 | 진행 | 후보를 다 지운다 | 실패 유무로 `SUCCEEDED`·`PARTIAL` |
 | 비활성 회수만 반영 | 떼어 낸 것만 지운다. 보류한 후보는 장부에 그대로 있으니 새 스냅샷의 B 에 든다. 현재상태는 바꾸지 않는다 | `ABORTED`, 메시지 `삭제 가드 발동 — 비활성 회수 N건만 반영하고 나머지 지우기 M건·쓰기 0건은 보류 / 삭제 대상 …(훑은 장부 …)` |
-| 전부 보류 | 하나도 지우지 않는다. **스냅샷을 남기지 않는다** — 기록 중 표시가 남는다 | `ABORTED`, 메시지는 가드 문구 |
+| 전부 보류 | 하나도 지우지 않는다. **스냅샷을 남기지 않는다** — 기록 중 표시가 남는다 | `ABORTED`, 메시지는 가드 문구. 건수는 아래 |
 
 - 이 길은 가드를 보기 전에 D 를 이미 다 썼으므로 보류할 쓰기가 없다(문구의 "쓰기 0건"). 그래서 가드가 걸린 장부 맞추기에서는 조직을 옮기는 직원이 옛 소속과 새 소속을 함께 가질 수 있다.
 - 전부 보류에서는 기록 중 표시가 남아 다음 회차도 `WRITING` 으로 같은 장부 맞추기를 탄다. `NONE` 회차가 전부 보류로 끝나도 기록 중 표시가 남았으니 다음 회차는 `WRITING` 길이다(이력 종류도 `LEDGER_ALIGNMENT` 로 바뀐다). 사람이 `force=true` 로 넘기기 전까지 **매 회차 D 전체를 다시 쓰고 장부를 처음부터 훑는다**(10만 명이면 쓰기 배치 약 1,100개와 Read 약 1,100번).
-- 전부 보류의 실행 기록 건수는 0 이다(`SyncOutcome.aborted`). D 를 이미 썼어도 `writtenCount` 에 세지 않는다.
+- 전부 보류의 실행 기록은 이미 쓴 D 의 수를 남긴다(`SyncOutcome.held`) — `writtenCount`·`failureCount` 는 D 쓰기의 결과대로, `deletedCount` 는 0, 스냅샷은 없다. 그래서 `sync.tuples.written` 도 그만큼 센다. 보류했지만 D 는 이미 장부에 있다는 뜻이다.
 - 빈 장부의 첫 설치는 읽은 줄 = D, 지울 후보 = ∅ 라 가드가 걸리지 않는다. 읽은 줄 수가 `min-baseline`(10)보다 작으면 가드를 보지 않는다.
 
 ### 7.3 새 스냅샷의 B 와 U
@@ -744,7 +766,7 @@ B = (present ∪ (지울 후보 − 지운 줄)) − U
 
 결론(`Reconciliation.outcome`):
 
-- 지우기가 차단기로 멈췄으면 `FAILED` — 스냅샷은 남긴다. 현재상태도 교체한다(비활성 회수만 반영 중이었으면 하지 않는다).
+- 지우기가 차단기로 멈췄으면 `FAILED` — 스냅샷은 남긴다. 현재상태도 교체하고 메시지 끝에 ` — 현재상태는 디렉터리대로 교체했다` 를 붙인다(`LedgerAlignment`). 비활성 회수만 반영 중이었으면 교체하지 않고 그 한마디도 붙이지 않는다.
 - 일부만 지웠으면(비활성 회수만) `ABORTED`.
 - 아니면 실패 유무로 `SUCCEEDED`·`PARTIAL`.
 - 어느 쪽이든 결론의 메시지 앞에 길의 사정(`기준선_없음`·`기준선_의심`)과 " / " 가 붙는다(`SyncOutcome.withNote`). 성공이면 사정 한 줄만 남는다.
@@ -985,11 +1007,13 @@ GSI 는 최종 일관성이다. LDAP 앱에는 회차와 동시에 직원·조�
 | 가드 — 비활성 회수만(비교 경로) | `ABORTED` | `삭제 가드 발동 — 비활성 회수 N건만 반영하고 나머지 지우기 M건·쓰기 K건은 보류 / 삭제 대상 …` | 떼어 낸 지우기만 | 남김 | 지워짐 | **그대로** | 비교 경로. 남은 지우기로 대개 전부 보류 |
 | 가드 — 비활성 회수만(장부 맞추기) | `ABORTED` | `<사정> / 삭제 가드 발동 — … 쓰기 0건은 보류 / 삭제 대상 …(훑은 장부 …)` | D 쓰기 + 떼어 낸 지우기 | 남김(보류한 후보는 B) | 지워짐 | **그대로** | 비교 경로 |
 | 가드 — 전부 보류(비교 경로) | `ABORTED` | `삭제 대상 N건(기준 스냅샷 M건의 X%)이 임계치 30.0%를 초과했습니다. …` | 없음 | 없음 | 붙이지 않음 | 그대로 | 비교 경로, 같은 델타면 같은 판정 |
-| 가드 — 전부 보류(장부 맞추기) | `ABORTED`(건수 0) | `<사정> / 삭제 대상 N건(훑은 장부 M건의 X%)…` | D 쓰기만 | 없음 | **남음** | 그대로 | `WRITING` — 장부 맞추기를 다시 |
-| 차단기 — 비교 경로 | `FAILED` | `OpenFGA 쓰기 배치가 3번 연달아 실패해 남은 N개 배치를 보내지 않고 멈췄다 — 마지막 오류: …` | 멈추기 전까지 나간 것 | 남김(그때까지의 R 로) | 지워짐 | 교체 | 비교 경로 |
+| 가드 — 전부 보류(장부 맞추기) | `ABORTED`(쓴 수·실패 수는 D 쓰기대로, 지운 수 0) | `<사정> / 삭제 대상 N건(훑은 장부 M건의 X%)…` | D 쓰기만 | 없음 | **남음** | 그대로 | `WRITING` — 장부 맞추기를 다시 |
+| 차단기 — 비교 경로 | `FAILED` | `OpenFGA 쓰기 배치가 3번 연달아 실패해 남은 N개 배치를 보내지 않고 멈췄다 — 마지막 오류: … — 현재상태는 디렉터리대로 교체했다` | 멈추기 전까지 나간 것 | 남김(그때까지의 R 로) | 지워짐 | 교체 | 비교 경로 |
 | 차단기 — 비활성 회수만 반영 중 | `FAILED` | `<비활성 회수만 결론> / <차단기 문구>` | 나간 지우기 | 남김 | 지워짐 | 그대로 | 비교 경로 |
 | 차단기 — 장부 맞추기의 D 쓰기 중 | `FAILED` | `<사정> / <차단기 문구>` | 나간 D 쓰기 | 없음 | **남음** | 그대로 | `WRITING` |
-| 차단기 — 장부 맞추기의 지우기 중 | `FAILED` | `<사정> / [<보류 사유> / ]<차단기 문구>` | D 쓰기 + 나간 지우기 | 남김 | 지워짐 | 교체(비활성 회수만이었으면 그대로) | 비교 경로 |
+| 차단기 — 장부 맞추기의 지우기 중 | `FAILED` | `<사정> / <차단기 문구> — 현재상태는 디렉터리대로 교체했다`. 비활성 회수만이었으면 `<사정> / <보류 사유> / <차단기 문구>` | D 쓰기 + 나간 지우기 | 남김 | 지워짐 | 교체(비활성 회수만이었으면 그대로) | 비교 경로 |
+
+끝의 ` — 현재상태는 디렉터리대로 교체했다` 는 차단기로 멈췄지만 현재상태를 실제로 교체한 두 길(비교 경로, 비활성 회수만이 아닌 장부 맞추기의 지우기)에만 붙는다. 교체하지 않은 차단기 길(비활성 회수만 반영 중, 장부 맞추기의 D 쓰기 중)에는 붙지 않는다.
 
 `<사정>` 은 `기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤` 또는 `기준선 의심(지난 회차가 기록 전에 멈춤) — 장부를 훑어 맞춤` 이다.
 
@@ -1000,7 +1024,7 @@ GSI 는 최종 일관성이다. LDAP 앱에는 회차와 동시에 직원·조�
 | 끝 | 메시지 | 남는 것 | 기록 중 표시 | 다음 회차 |
 |---|---|---|---|---|
 | LDAP 읽기 실패(일시 장애, 재시도를 다 씀) | 마지막 예외의 메시지 | 없음 | 그대로 | 같은 길. 디렉터리가 돌아오면 정상 |
-| 데이터 오류(`DirectoryDataException`) | [3절](#3-디렉터리-읽기)의 각 문구 | 없음 | 그대로 | 고칠 때까지 매 회차 같은 실패 |
+| 데이터 오류(`DirectoryDataException` — 빈 소속 규칙 포함) | [3절](#3-디렉터리-읽기)의 각 문구 | 없음 | 그대로 | 고칠 때까지 매 회차 같은 실패. `force` 로도 넘기지 못한다 |
 | 기준선 무결성 오류(`SnapshotIntegrityException`) | `… — POST /admin/sync/rebuild 로 복구하세요` | 없음 | 그대로(PRESENT) | 재적재 전까지 매 회차 같은 실패 |
 | 기록 중 표시 실패 | DynamoDB 오류 | 없음 | 붙지 않음 | 같은 길 |
 | 장부 해석 실패, 차단기가 아닌 쓰기 오류 | 그 오류 | 나간 쓰기 | 남음 | `WRITING` |
@@ -1138,6 +1162,7 @@ OpenFGA 가 통째로 죽었다면 한 줄도 못 살린 쓰기 배치가 3개 �
 | `audit.write.failures` | 카운터 | 감사 이력 줄을 쓰지 못했을 때 |
 
 - `SyncMetrics.record` 는 스케줄러와 관리 컨트롤러가 회차가 닫힐 때 부른다. 실행 기록을 닫지 못하면 부르지 않는다.
+- 장부 맞추기가 전부 보류로 끝나도 이미 쓴 D 의 수가 `sync.tuples.written` 에 든다. `sync.duration` 의 `trigger` 태그에는 재적재의 `REBUILD`·`FORCED_REBUILD` 도 온다.
 - app-ldap 은 락 지표를 내지 않는다(`LockObserver.NOOP`).
 - 스케줄러가 만드는 관측 `sync.ldap.full` 은 traceId 를 위한 것이다.
 
@@ -1152,8 +1177,9 @@ OpenFGA 가 통째로 죽었다면 한 줄도 못 살린 쓰기 배치가 3개 �
 | `sync.cron` | `0 0 * * * *` | [2절](#2-회차를-거는-것) |
 | `sync.job-timeout` | `30m` | [08](08-동시성과-작업.md) |
 | `sync.deletion-guard.enabled` / `threshold-ratio` / `min-baseline` | `true` / `0.3` / `10` | [6.4](#64-삭제-가드) |
-| `ldap.url`, `ldap.base-dn`, `ldap.bind-dn`, `ldap.bind-password` | `ldap://localhost:1389`, `dc=example,dc=com`, —, — | [3.3](#33-속성-매핑과-기본값) |
-| `ldap.strategy` | `group-of-names` | [3.1](#31-읽기-한-번의-모양) |
+| `ldap.url`, `ldap.base-dn`, `ldap.bind-dn`, `ldap.bind-password` | `ldap://localhost:1389`, `dc=example,dc=com`, —, —(`prod` 는 `${LDAP_BIND_PASSWORD}`) | [3.3](#33-속성-매핑과-기본값) |
+| `ldap.require-tls` | `false`(`prod` 는 `true`) | [11](11-운영.md#14-app-ldap--ldap) |
+| `ldap.strategy` | `group-of-names` — `group-of-names`·`dit` 밖의 값은 기동을 멈춘다 | [3.1](#31-읽기-한-번의-모양) |
 | `ldap.page-size` | `500` | [3.6](#36-페이징) |
 | `ldap.connect-timeout` / `read-timeout` | `10s` / `150s` | [3.13](#313-재시도와-타임아웃) |
 | `ldap.max-retries` / `retry-min-backoff` / `retry-max-backoff` | `5` / `10s` / `2m` | [3.13](#313-재시도와-타임아웃) |
@@ -1171,5 +1197,6 @@ OpenFGA 가 통째로 죽었다면 한 줄도 못 살린 쓰기 배치가 3개 �
 - 쓰기 단계, AD 기본 그룹, referral, 건너뛰는 엔트리, 재시도 분류: `docs/superpowers/specs/2026-10-05-ldap-read-design.md`
 - 불변 id, 이름 폴백, 요청 속성: `docs/superpowers/specs/2026-10-04-immutable-identifiers-design.md`
 - 실제 DN 대조와 사람 대조 검사: `docs/superpowers/specs/2026-09-24-real-dn-matching-design.md`
+- 빈 소속 규칙, `FORCED_REBUILD`, 전부 보류의 건수, 차단기 메시지, 설정 검사: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §5·§12·§13
 - 계정 상태: `docs/superpowers/specs/2026-09-25-ldap-disabled-account-design.md`
 - 스냅샷 묶음과 현재상태의 바뀐 것만 쓰기: `docs/superpowers/specs/2026-10-09-bulk-paths-design.md`

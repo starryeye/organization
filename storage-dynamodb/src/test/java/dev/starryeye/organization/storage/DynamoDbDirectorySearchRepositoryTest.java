@@ -49,10 +49,55 @@ class DynamoDbDirectorySearchRepositoryTest extends DynamoDbTestSupport {
         // when
         var page = search.searchUsersByDisplayName("홍", null, 20).block();
 
-        // then — INCLUDE 프로젝션이 userName·active 까지 실어 오는지 네 필드 전부를 확인한다
+        // then — INCLUDE 프로젝션이 userName·active·externalId 까지 실어 오는지 다섯 필드 전부를 확인한다
         assertThat(page.items()).containsExactly(
-                new UserSummary("gd.hong", "gd.hong", "홍길동", true));
+                new UserSummary("gd.hong", "gd.hong", "홍길동", true, "e1"));
         assertThat(page.hasNext()).isFalse();
+    }
+
+    @Test
+    @DisplayName("userName 검색은 직원의 externalId 를 싣는다 — GSI1 은 ALL 프로젝션이다")
+    void userName_검색은_externalId_를_싣는다() {
+        // given — LDAP 직원의 externalId 는 서버가 준 절대 DN 이다
+        String dn = "uid=gd.hong,ou=people,dc=example,dc=com";
+        state.saveUser(new DirectoryUser("gd.hong", dn, "gd.hong", "홍길동", null, true)).block();
+
+        // when
+        var page = search.searchUsersByUserName("gd", null, 20).block();
+
+        // then
+        assertThat(page.items()).extracting(UserSummary::externalId).containsExactly(dn);
+    }
+
+    @Test
+    @DisplayName("표시명 검색은 직원의 externalId 를 싣는다 — GSI2 프로젝션으로 온다")
+    void 표시명_검색은_externalId_를_싣는다() {
+        // given
+        String dn = "uid=gd.hong,ou=people,dc=example,dc=com";
+        state.saveUser(new DirectoryUser("gd.hong", dn, "gd.hong", "홍길동", null, true)).block();
+
+        // when
+        var page = search.searchUsersByDisplayName("홍", null, 20).block();
+
+        // then — 본 테이블을 다시 읽지 않고 인덱스 항목에서 바로 읽는다
+        assertThat(page.items()).extracting(UserSummary::externalId).containsExactly(dn);
+    }
+
+    @Test
+    @DisplayName("externalId 가 없는 직원은 두 검색 모두 externalId 가 빈 값(null)이다")
+    void externalId_가_없는_직원은_빈_값이다() {
+        // given — SCIM 직원은 externalId 없이 만들 수 있다
+        state.saveUser(new DirectoryUser("kim", null, "kim", "김철수", null, true)).block();
+
+        // when
+        var 계정명 = search.searchUsersByUserName("kim", null, 20).block();
+        var 표시명 = search.searchUsersByDisplayName("김", null, 20).block();
+
+        // then
+        assertThat(계정명.items()).extracting(UserSummary::employeeId).containsExactly("kim");
+        assertThat(계정명.items()).extracting(UserSummary::externalId).containsOnlyNulls();
+        assertThat(표시명.items()).extracting(UserSummary::employeeId).containsExactly("kim");
+        assertThat(표시명.items()).extracting(UserSummary::externalId).containsOnlyNulls();
     }
 
     @Test

@@ -51,7 +51,7 @@ class LeaseKeeperTest {
     @DisplayName("일이 갱신 주기보다 오래 걸리면 주기마다 리스를 갱신하고, 일이 끝나면 갱신도 멈춘다")
     void 주기마다_갱신하고_끝나면_멈춘다() throws InterruptedException {
         // given
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofMillis(50), observer);
 
         // when — 일의 길이는 갱신 주기(50ms)의 배수가 아니게 둔다. 300ms 면 여섯 번째 tick 이 일이 끝나는 순간과 겹친다
@@ -72,7 +72,7 @@ class LeaseKeeperTest {
     @DisplayName("갱신이 실패하면 하던 일을 취소하고 '리스를 잃었다'로 끝난다")
     void 갱신이_실패하면_멈춘다() {
         // given
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         lock.failRenew = true;
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofMillis(50), observer);
@@ -97,7 +97,7 @@ class LeaseKeeperTest {
                 return Mono.never();
             }
         };
-        LockLease lease = 답없는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = 답없는_락.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(답없는_락, Duration.ofSeconds(10), observer);
 
@@ -120,7 +120,7 @@ class LeaseKeeperTest {
     @DisplayName("빈 결과로 끝나는 일은 그대로 빈 결과다")
     void 빈_결과는_그대로다() {
         // given
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
 
         // when, then
@@ -131,7 +131,7 @@ class LeaseKeeperTest {
     @DisplayName("갱신이 일시 오류로 실패하면 쉬며 다시 시도하고, 성공하면 일은 계속된다")
     void 일시_오류는_다시_시도한다() {
         // given — 10초의 첫 갱신이 두 번 실패한 뒤 성공한다(10초, 10.2초 실패, 10.6초 성공). 20초 갱신은 곧바로 성공한다
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         lock.transientRenewFailures.set(2);
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
 
@@ -151,7 +151,7 @@ class LeaseKeeperTest {
     @DisplayName("일시 오류가 이어져 마지막 성공에서 갱신 주기 두 번이 지나면 멈춘다 — 그 전에는 멈추지 않는다")
     void 일시_오류가_한도를_넘으면_멈춘다() {
         // given — 갱신이 늘 일시 오류다
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         lock.transientRenewFailures.set(Integer.MAX_VALUE);
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
@@ -187,7 +187,7 @@ class LeaseKeeperTest {
                 return Mono.error(new IllegalStateException("갱신 일시 오류(테스트) — 스로틀 흉내"));
             }
         };
-        LockLease lease = 느리게_성공하는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = 느리게_성공하는_락.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(느리게_성공하는_락, Duration.ofSeconds(10), observer);
 
@@ -234,7 +234,7 @@ class LeaseKeeperTest {
                 return Mono.error(new IllegalStateException("갱신 일시 오류(테스트) — 스로틀 흉내"));
             }
         };
-        LockLease lease = 끊긴_뒤에_답하는_락.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = 끊긴_뒤에_답하는_락.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(끊긴_뒤에_답하는_락, Duration.ofSeconds(10), observer);
 
@@ -276,7 +276,7 @@ class LeaseKeeperTest {
     @DisplayName("벽시계가 뒤로 가도 한도는 늘지 않는다 — 일시 오류가 이어지면 그대로 주기 두 번에 멈춘다")
     void 벽시계가_뒤로_가도_한도는_늘지_않는다() {
         // given — 갱신이 늘 일시 오류다. 5초에 NTP 가 시계를 한 시간 뒤로 옮긴다
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         lock.transientRenewFailures.set(Integer.MAX_VALUE);
         AtomicBoolean 취소됨 = new AtomicBoolean();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
@@ -303,7 +303,7 @@ class LeaseKeeperTest {
     @DisplayName("벽시계가 앞으로 가도 리스를 잃었다고 보지 않는다 — 갱신이 성공하면 일은 계속된다")
     void 벽시계가_앞으로_가도_잃지_않는다() {
         // given — 갱신은 늘 성공한다. 5초에 NTP 가 시계를 한 시간 앞으로 옮긴다
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
         벽시계가_뛰는_가상시간 시간 = new 벽시계가_뛰는_가상시간();
 
@@ -325,7 +325,7 @@ class LeaseKeeperTest {
     @DisplayName("갱신이 조건 실패(남이 가져감)로 끝나면 다시 시도하지 않고 곧바로 멈춘다")
     void 조건_실패는_다시_시도하지_않는다() {
         // given
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
         lock.failRenew = true;
         LeaseKeeper keeper = new LeaseKeeper(lock, Duration.ofSeconds(10), observer);
 

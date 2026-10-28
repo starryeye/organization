@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSyncRunRepository;
 import dev.starryeye.organization.core.model.SyncOutcome;
@@ -16,8 +17,10 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.util.context.Context;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -44,7 +47,9 @@ class SyncJobsTest {
     void 준비한다() {
         lock = new FakeMutationLock();
         runs = new FakeSyncRunRepository(지금);
-        jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
+        // 시계를 고정한다 — 시스템 시계면 심은 기록이 모두 "오래됐다" 가 돼 나이 규칙이 종류와 상관없이 닫아 버린다
+        jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
+                AuditRecorder.NONE, Clock.fixed(지금, ZoneOffset.UTC));
         반납 = new AtomicInteger();
         반납수단 = () -> Mono.fromRunnable(반납::incrementAndGet);
     }
@@ -401,11 +406,11 @@ class SyncJobsTest {
     @Test
     @DisplayName("남은 기록 정리가 오래 걸려도 그동안 리스를 갱신한다")
     void 남은_기록_정리가_오래_걸려도_리스를_갱신한다() {
-        // given — findRecent(남은 기록 정리가 쓰는 조회)가 느린 저장소. 하트비트가 work 에만 걸리면 이 구간은 갱신 없이 지나간다
+        // given — findRunning(남은 기록 정리가 쓰는 조회)이 느린 저장소. 하트비트가 work 에만 걸리면 이 구간은 갱신 없이 지나간다
         FakeSyncRunRepository 느린_정리_저장소 = new FakeSyncRunRepository(지금) {
             @Override
-            public Flux<SyncRun> findRecent(int limit) {
-                return super.findRecent(limit).delaySubscription(Duration.ofMillis(300));
+            public Flux<SyncRun> findRunning() {
+                return super.findRunning().delaySubscription(Duration.ofMillis(300));
             }
         };
         jobs = new SyncJobs(느린_정리_저장소, lock, Duration.ofMillis(50), LockObserver.NOOP, Duration.ofMinutes(1));
@@ -443,14 +448,73 @@ class SyncJobsTest {
     }
 
     @Test
+    @DisplayName("최근 100건 밖에 밀려난 RUNNING 기록도 닫는다 — 죽은 기록 뒤로 끝난 기록이 100건 넘게 쌓여도")
+    void 최근_100건_밖의_RUNNING_도_닫는다() {
+        // given — 죽은 SCIM 재적재 RUNNING 을 먼저 심고, 그 뒤로 끝난 기록 100건을 쌓는다
+        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300)));
+        for (int i = 0; i < 100; i++) {
+            runs.seed(SyncRun.started("끝난-" + i, SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(200 - i))
+                    .finished(SyncOutcome.noChange(), 지금.minusSeconds(100)));
+        }
+
+        // when
+        runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then — 최근 100건만 보면 이 기록은 보이지 않는다
+        SyncRun 죽은것 = runs.findById("죽은-재적재").block();
+        assertThat(죽은것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(죽은것.message()).isEqualTo("비정상 종료로 중단");
+    }
+
+    @Test
+    @DisplayName("시작한 지 기한 + 10분이 지난 아카이빙 기록은 닫고 최근 것은 둔다 — 락을 잡지 않는 종류라도 나이로 닫는다")
+    void 오래된_아카이빙_기록은_닫고_최근_것은_둔다() {
+        // given — 기한 1분, 닫는 나이는 11분. 오래된 아카이빙(12분 전)과 최근 아카이빙(5분 전)
+        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(12))));
+        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(5))));
+
+        // when
+        runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then
+        SyncRun 오래된것 = runs.findById("오래된-아카이빙").block();
+        assertThat(오래된것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(오래된것.message()).isEqualTo(StaleRuns.기한_경과_사유);
+        assertThat(runs.findById("최근-아카이빙").block().status()).isEqualTo(SyncStatus.RUNNING);
+    }
+
+    @Test
+    @DisplayName("오래된 다른 앱의 기록도 나이로 닫는다 — 같은 source 가 아니어도 기한 + 10분이 지났으면 죽은 것이다")
+    void 오래된_다른_앱의_기록도_나이로_닫는다() {
+        // given — LDAP 기록이 12분 전(닫는 나이 11분), 최근 LDAP 기록은 5분 전
+        runs.seed(SyncRun.started("오래된-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(12))));
+        runs.seed(SyncRun.started("최근-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(5))));
+
+        // when
+        runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
+                MutationLock.LockPurpose.REBUILD, Mono.just(SyncOutcome.noChange()), run -> {
+                }).block().runId());
+
+        // then
+        SyncRun 오래된것 = runs.findById("오래된-다른-앱").block();
+        assertThat(오래된것.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(오래된것.message()).isEqualTo(StaleRuns.기한_경과_사유);
+        assertThat(runs.findById("최근-다른-앱").block().status()).isEqualTo(SyncStatus.RUNNING);
+    }
+
+    @Test
     @DisplayName("막 끝난 기록이 오래된 목록에 RUNNING 으로 보여도 덮어쓰지 않는다 — 반납과 기록 사이의 틈")
     void 막_끝난_기록은_덮어쓰지_않는다() {
-        // given — 저장된 기록은 이미 SUCCEEDED 인데, findRecent 가(최종 일관성 때문에) 그 앞에 낡은 RUNNING 사본을 얹어 준다
+        // given — 저장된 기록은 이미 SUCCEEDED 인데, findRunning 이(최종 일관성 때문에) 그 앞에 낡은 RUNNING 사본을 얹어 준다
         SyncRun 앞_작업_RUNNING = SyncRun.started("앞-작업", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(60));
         FakeSyncRunRepository 낡은_목록_저장소 = new FakeSyncRunRepository(지금) {
             @Override
-            public Flux<SyncRun> findRecent(int limit) {
-                return Flux.concat(Mono.just(앞_작업_RUNNING), super.findRecent(limit));
+            public Flux<SyncRun> findRunning() {
+                return Flux.concat(Mono.just(앞_작업_RUNNING), super.findRunning());
             }
         };
         낡은_목록_저장소.seed(앞_작업_RUNNING);

@@ -63,12 +63,14 @@ public class AdminQueryUseCase {
     /**
      * {@code externalId} 로 직원을 정확히 찾는다(설계 2026-10-04 §5) — 권한을 묻는 앱이 IdP 의 사용자 id 로 우리 id 를 얻는 길이다.
      * GSI3 는 최종 일관성이라 후보일 뿐이다. 후보를 본 테이블에서 다시 읽어 {@code externalId} 가 아직 같은 것만 남긴다. 한 페이지다.
+     * 각 줄의 {@code externalId} 는 이렇게 다시 읽은 값이다(D9, 설계 2026-10-27 §11).
      */
     public Mono<Page<UserSummary>> findEmployeesByExternalId(String externalId) {
         return state.findUserIdsByExternalId(externalId)
                 .concatMap(state::findUser)
                 .filter(user -> externalId.equals(user.externalId()))
-                .map(user -> new UserSummary(user.id(), user.userName(), user.displayName(), user.active()))
+                .map(user -> new UserSummary(user.id(), user.userName(), user.displayName(), user.active(),
+                        user.externalId()))
                 .collectList()
                 .map(items -> new Page<>(items, null));
     }
@@ -258,7 +260,7 @@ public class AdminQueryUseCase {
                         CHECK_CONCURRENCY)
                 .collectList()
                 .map(paths -> new EmployeeDetail(user.id(), user.userName(), user.displayName(), user.name(),
-                        user.email(), user.active(), paths, reached.truncated));
+                        user.email(), user.active(), user.externalId(), paths, reached.truncated));
     }
 
     // ---------- 조직 상세 ----------

@@ -92,11 +92,11 @@ public final class Keys {
     public static final String PAGE_PREFIX = "PAGE#";
 
     /**
-     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피·동기화 실행 이력·쓰기 락·변경 이력 넷이
+     * 테이블의 <b>단 하나뿐인</b> TTL 속성(epoch 초). 책갈피·동기화 실행 이력·쓰기 락·변경 이력·하루 1회 표지 다섯이
      * 이 한 속성을 공유한다 — 테이블 TTL 이 이 속성 하나만 보고 지운다. 튜플 스냅샷은 TTL 을
      * 쓰지 않는다(보관 기한은 메타의 {@code retainUntil}, 정리 작업 {@code purgeExpired} 가 지운다).
-     * 이름을 바꾸면 넷 다 조용히 만료가 멈춘다({@link TableInitializer#createTable} 이 TTL 을
-     * 이 상수로 켜므로).
+     * {@link TableInitializer} 가 새 테이블의 TTL 을 이 상수로 켜고, 있는 테이블의 TTL 도 이 상수로 검사한다 — 이름을 바꾸면
+     * 옛 테이블은 기동 때 모양이 다르다며 멈춘다(다시 만들어야 한다).
      */
     public static final String EXPIRES_AT = "expiresAt";
 

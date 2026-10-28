@@ -30,6 +30,7 @@ public abstract class OpenFgaTestSupport {
         properties = new OpenFgaProperties();
         properties.setApiUrl("http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
         properties.setStoreName("test-" + UUID.randomUUID());
+        properties.setCreateStore(true);
         properties.setWriteBatchSize(100);
         properties.setMaxRetries(3);
 
@@ -37,11 +38,15 @@ public abstract class OpenFgaTestSupport {
         bootstrapper.resolveStore().block();
     }
 
-    /** 이 테스트만의 새 store 이름을 가진 설정. 부트스트래퍼끼리의 경주나 store 가 없는 상태를 볼 때 쓴다. */
+    /**
+     * 이 테스트만의 새 store 이름을 가진 설정. 부트스트래퍼끼리의 경주나 store 가 없는 상태를 볼 때 쓴다. store 를 만들 수 있게
+     * 켜 둔다 — 생성이 꺼진 쪽을 볼 때는 {@code setCreateStore(false)} 로 끈다.
+     */
     protected OpenFgaProperties 새_속성(String 접두사) {
         OpenFgaProperties fresh = new OpenFgaProperties();
         fresh.setApiUrl(properties.getApiUrl());
         fresh.setStoreName(접두사 + UUID.randomUUID());
+        fresh.setCreateStore(true);
         fresh.setWriteBatchSize(properties.getWriteBatchSize());
         fresh.setMaxRetries(properties.getMaxRetries());
         return fresh;
@@ -53,6 +58,16 @@ public abstract class OpenFgaTestSupport {
             return client.createStore(new CreateStoreRequest().name(name)).get().getId();
         } catch (Exception e) {
             throw new IllegalStateException("테스트용 store 생성 실패", e);
+        }
+    }
+
+    /** store 에 쓰인 인가 모델의 수. 부트스트래퍼를 거치지 않고 raw 클라이언트로 센다 — 모델은 한 번 쓰면 지워지지 않는다. */
+    protected int 모델_수(String storeId) {
+        try {
+            OpenFgaClient client = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(storeId));
+            return client.readAuthorizationModels().get().getAuthorizationModels().size();
+        } catch (Exception e) {
+            throw new IllegalStateException("테스트용 모델 목록 조회 실패", e);
         }
     }
 

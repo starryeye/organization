@@ -18,6 +18,7 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -231,6 +232,26 @@ class RebuildUseCaseTest {
     }
 
     @Test
+    @DisplayName("장부 맞추기의 지우기가 차단기로 멈추면 현재상태를 디렉터리대로 교체했으므로 메시지 끝에 그렇게 적는다")
+    void 장부_맞추기의_지우기가_차단기로_멈추면_교체했다고_적는다() {
+        // given — 찌꺼기 지우기가 실패한 채 멈춘다. 스냅샷을 남기고 현재상태는 LDAP 대로 바뀐다
+        source.willReturn(조직도("kim", "DEV002"));
+        writer.stored.add(찌꺼기);
+        writer.failFor(찌꺼기::equals);
+        writer.abortWhen(delta -> !delta.toDelete().isEmpty());
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(state.users).as("현재상태를 실제로 교체했다").containsOnlyKeys("kim");
+        assertThat(run.message())
+                .contains("연속 실패로 멈췄다")
+                .endsWith(" — 현재상태는 디렉터리대로 교체했다");
+    }
+
+    @Test
     @DisplayName("쓰기가 연속 실패 차단기로 멈추면 장부를 훑지 않고 스냅샷도 만들지 않은 채 FAILED 다 — 지울 줄을 모른다")
     void 쓰기가_차단기로_멈추면_훑지_않는다() {
         // given
@@ -243,7 +264,7 @@ class RebuildUseCaseTest {
 
         // then — 쓰기 단계에서 멈췄으니 3단계(훑어서 지우기)로 가지 않는다
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
-        assertThat(run.message()).contains("연속 실패로 멈췄다");
+        assertThat(run.message()).contains("연속 실패로 멈췄다").doesNotContain("현재상태는 디렉터리대로 교체했다");
         assertThat(scanner.scanCount).hasValue(0);
         assertThat(snapshots.saved).isEmpty();
         assertThat(state.users).isEmpty();
@@ -321,5 +342,56 @@ class RebuildUseCaseTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(writer.stored).isEmpty();
+    }
+
+    @Test
+    @DisplayName("재적재가 전부 보류로 끝나도 D 를 이미 쓴 만큼 쓴 수를 남긴다 — 지운 수는 0, 스냅샷은 없다")
+    void 전부_보류한_재적재도_쓴_수를_남긴다() {
+        // given — 장부에 20줄이 있는데 LDAP 은 kim 한 명만 돌려준다. kim 은 쓰고, 나머지 20줄을 지우려다 가드가 막는다
+        writer.stored.addAll(IntStream.range(0, 20)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet()));
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.writtenCount()).as("쓴 D 의 줄 수").isEqualTo(1);
+        assertThat(run.deletedCount()).isZero();
+        assertThat(run.failureCount()).isZero();
+        assertThat(run.snapshotId()).isNull();
+        assertThat(writer.stored).as("지우지 않았다").hasSize(21);
+    }
+
+    @Test
+    @DisplayName("force=true 재적재는 트리거 FORCED_REBUILD 로 남는다 — 락 용도는 REBUILD 그대로다")
+    void force_재적재는_FORCED_REBUILD_로_남는다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        SyncRun started = useCase.start(true, run -> {
+        }).block();
+        SyncRun finished = runs.awaitFinished(started.runId());
+
+        // then — 시작할 때 연 기록부터 FORCED_REBUILD 다
+        assertThat(started.trigger()).isEqualTo(SyncTrigger.FORCED_REBUILD);
+        assertThat(finished.trigger()).isEqualTo(SyncTrigger.FORCED_REBUILD);
+        assertThat(lock.시도한_용도).containsOnly(MutationLock.LockPurpose.REBUILD);
+    }
+
+    @Test
+    @DisplayName("force 없는 재적재는 트리거 REBUILD 다")
+    void force_없는_재적재는_REBUILD_다() {
+        // given
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        SyncRun run = 재적재한다(false);
+
+        // then
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
     }
 }

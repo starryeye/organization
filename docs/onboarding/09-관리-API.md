@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: 46169ab (main, 2026-10-25). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -23,11 +23,13 @@
 | `GET /admin/organizations/{orgCode}` | 둘 다 | 조직 상세([4.2](#42-상세)) | 200 | 404 |
 | `GET /admin/organizations/{orgCode}/members` | 둘 다 | 조직의 직속 직원 멤버 목록([4.3](#43-멤버-목록)) | 200 한 쪽 | 400, 404 |
 | `GET /admin/organizations/{orgCode}/history` | 둘 다 | 조직의 감사 이력 | 200 한 쪽 | 400 |
-| `POST /admin/sync/full[?force=true]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)) | 202 실행 기록 | 409 |
+| `POST /admin/sync/full[?force=true]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)) | 202 실행 기록 | 400, 409 |
 | `POST /admin/sync/rebuild[?force=true]` | app-ldap | 재적재를 건다 | 202 실행 기록 | 400, 409 |
 | `POST /admin/sync/rebuild?mode=tuples\|wipe[&confirm=<테이블명>]` | app-scim | 재적재 또는 [초기화](02-용어집.md#초기화)를 건다([9.3](#93-app-scim)) | 202 실행 기록 | 400, 409 |
 | `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)) | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
 | `GET /admin/sync/runs/{runId}` | 둘 다 | 실행 기록 하나 | 200 | 404 |
+
+모든 경로가 저장소의 일시 장애에는 503 + `Retry-After`, 그 밖의 예기치 않은 실패에는 500 으로 답한다([오류](#오류)). 표의 "실패" 칸은 그 둘을 빼고 적었다.
 
 없는 것이 있다.
 
@@ -53,16 +55,40 @@
 
 ### 오류
 
-컨트롤러는 `ResponseStatusException` 으로 상태를 정한다. 오류만 다루는 별도 처리(`@ControllerAdvice` 등)는 없다.
+관리 API 의 오류는 **RFC 9457 problem details**(`application/problem+json`)다. 예외 처리기 `AdminExceptionHandler`(admin-api, `@RestControllerAdvice`)가 표지 애너테이션 `@AdminApi` 를 단 네 컨트롤러 — `AdminQueryController`, `AuditHistoryController`, 두 앱의 `AdminSyncController` — 에만 걸린다. SCIM 라우터와 actuator 는 건드리지 않는다. 새 관리 컨트롤러를 더하면 `@AdminApi` 를 달아야 같은 오류 응답을 낸다.
+
+본문의 칸은 `type`(`about:blank`), `title`(상태 문구, 예 `Conflict`), `status`, `detail`, `instance`(요청 경로 — 스프링이 채운다)다.
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "다른 동기화·재적재가 진행 중입니다",
+  "instance": "/admin/sync/full"
+}
+```
+
+판정은 아래 표의 **위에서부터**다. 처리기는 예외의 원인 사슬을 따라가며 본다(같은 예외를 두 번 보지 않는다).
+
+| 상태 | 언제 | `detail` |
+|---|---|---|
+| 컨트롤러가 정한 상태(400·404·409) | 원인 사슬에 `ResponseStatusException` 이 있다 — 컨트롤러가 정한 오류(아래)와, 스프링의 입력 오류(`ServerWebInputException` — 형식이 틀린 파라미터). 두 앱의 `AdminSyncController` 는 락 경합을 409 로 감싸 여기로 온다 | 그 사유. 없으면 상태 문구 |
+| 409 | 감싸지 않은 채 원인 사슬에 `LockUnavailableException` 이 있다 — 남이 [변경 락](02-용어집.md#변경-락)을 쥐었다 | 그 예외의 메시지 |
+| 503 + `Retry-After`(초) | 분류기(`TemporaryFailureClassifier`, core `port`)가 [일시 장애](02-용어집.md#일시-장애)로 본다 — SCIM 과 같은 분류기다. DynamoDB 의 스로틀·5xx·클라이언트 오류(시간 한도 포함), OpenFGA 의 재시도 가능한 오류, I/O 실패 | `일시 장애 — 잠시 뒤 다시 시도한다`. 예외 문구는 WARN 로그로만 간다 |
+| 500 | 그 밖 | `내부 오류` — 예외 문구는 ERROR 로그로만 간다(인증이 없는 엔드포인트다) |
+
+- **409 의 사유.** app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등)다.
+- **락 경합을 분류기보다 먼저 본다.** `LockUnavailableException` 은 일시 장애의 하위 타입이라 분류기가 503 으로 읽는다. 게다가 두 앱의 `AdminSyncController` 는 락 경합을 원인으로 품은 `ResponseStatusException(409)` 로 감싼다. 그래서 `ResponseStatusException` 이 자기 상태로 먼저 답하고, 감싸지 않은 락 경합도 분류기 앞에서 409 로 거른다.
+- **`Retry-After`** 는 정수 초다. 1초보다 짧은 대기도 1 로 올린다. 대개 10초(`TemporaryFailureException.기본_대기`)다.
+- **걸기 요청이 503 이나 500 이면 작업은 시작하지 않았다.** 락을 잡는 중의 DynamoDB 오류, 실행 기록을 열지 못한 경우(오류는 분류대로 503·500, 빈 응답은 `IllegalStateException` 이라 500)가 여기다 — 다시 걸어도 된다. 일시 장애로 분류되지 않는 락 저장소 오류도 500 이지만 마찬가지로 시작 전이다.
+
+컨트롤러가 정한 400·404 는 이렇다.
 
 | 상태 | 언제 |
 |---|---|
-| 400 | 검색 파라미터가 정확히 하나가 아니다. `limit` 이 범위 밖이거나 숫자가 아니다. 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언이 아니다. app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
+| 400 | 검색 파라미터가 정확히 하나가 아니다. `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언이 아니다. app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
 | 404 | 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
-| 409 | [변경 락](02-용어집.md#변경-락)을 못 잡았다. 다른 동기화·재적재가 도는 중이다 |
-| 500 | 그 밖의 모든 실패 — DynamoDB 오류 등. 관리 API 는 [일시 장애](02-용어집.md#일시-장애)를 503 으로 옮기지 않는다(SCIM 엔드포인트와 다르다) |
-
-오류 응답의 본문은 스프링 부트의 기본 오류 JSON(`timestamp`, `path`, `status`, `error`, `requestId`)이다. `server.error.include-message` 를 켜지 않았으므로 코드에 적은 사유 문구는 본문에 실리지 않는다고 보아야 한다 — 부트 기본값에 따른 서술이며 실행해 확인하지는 않았다. 사유는 위 표로 안다.
 
 ### 일관성
 
@@ -109,14 +135,15 @@ GET /admin/employees?userName=gd.&limit=1
       "employeeId": "3f6c1d52-8a0e-4b7d-9c21-5e0f7a4d2b18",
       "userName": "gd.hong",
       "displayName": "홍길동",
-      "active": true
+      "active": true,
+      "externalId": "uid=gd.hong,ou=people,dc=example,dc=com"
     }
   ],
   "nextCursor": "UjFOSk1TOVZVMFZTWDBsT1JFVll8VUVzOlZWTkZVaU16Wmpaak1XUTFNaTA0WVRCbExUUmlOMlF0T1dNeU1TMDFaVEJtTjJFMFpESmlNVGd8VTBzOlRVVlVRUXxSMU5KTVZCTDpWVk5GVWw5SlRrUkZXQXxSMU5KTVZOTDpaMlF1YUc5dVp3"
 }
 ```
 
-한 줄(`UserSummary`)은 `employeeId`, `userName`, `displayName`, `active` 넷이다. 소속은 담지 않는다 — 상세의 일이다. 이메일·`externalId` 도 담지 않는다.
+한 줄(`UserSummary`)은 `employeeId`, `userName`, `displayName`, `active`, `externalId` 다섯이다. 소속과 이메일은 담지 않는다 — 상세의 일이다. [externalId](02-용어집.md#externalid)는 LDAP 이면 서버가 준 절대 DN 이고, SCIM 이면 IdP 가 보낸 값이라 없을 수 있다(`null`). 검색마다 추가 읽기 없이 싣는다 — `userName` 검색은 GSI1 이 모든 속성을 싣고(`ALL`), `displayName` 검색은 GSI2 프로젝션에 `externalId` 가 들었고, `externalId` 검색은 본 테이블을 다시 읽은 값이다.
 
 | 검색 | 읽는 인덱스 | 정렬 |
 |---|---|---|
@@ -144,6 +171,7 @@ GET /admin/employees?userName=gd.&limit=1
   },
   "email": "gd.hong@example.com",
   "active": true,
+  "externalId": "uid=gd.hong,ou=people,dc=example,dc=com",
   "paths": [
     { "orgCode": "8e4a2c6f-3d1b-4a9e-b7c5-0f2d6e8a4b13", "displayName": "백엔드팀",
       "via": "direct", "shouldHaveAccess": true, "openFgaCheck": true, "cycle": false },
@@ -157,6 +185,7 @@ GET /admin/employees?userName=gd.&limit=1
 | 칸 | 뜻 |
 |---|---|
 | `employeeId`, `userName`, `displayName`, `email`, `active` | 현재상태의 값 그대로 |
+| `externalId` | 이미 읽은 직원 META 의 값(추가 읽기 없음). LDAP 은 절대 DN, SCIM 은 IdP 가 보낸 값이고 없으면 `null` |
 | `name` | 이름 여섯 칸(RFC 7643 `name`). 없는 칸은 `null`. LDAP 은 `givenName`·`sn` 등에서 읽는다 |
 | `paths` | 소속 조직과 그 상위 조직 전부. 어느 조직에도 안 속하면 빈 배열(200 이다) |
 | `paths[].via` | `direct` — 직원이 그 조직의 멤버로 직접 올라 있다. `rollup` — 하위 조직을 따라 올라온 상위 조직 |
@@ -374,7 +403,7 @@ flowchart TD
 |---|---|---|---|
 | IdP 의 사용자 id (SCIM 배포) | `GET /admin/employees?externalId=<값>` | 정확히 일치 | SCIM 은 IdP 가 보낸 `externalId`(Okta 의 사용자 id 등). 토큰의 `sub`·`oid` 와 맞출 수 있다 |
 | 계정명 | `GET /admin/employees?userName=<값>` | **접두사**, 대소문자 무시 | 더 긴 계정명도 함께 온다. 앱이 `userName` 이 같은 줄을 골라야 한다 |
-| 절대 DN (LDAP 배포) | `GET /admin/employees?externalId=<DN>` | 정확히 일치 | 서버가 `LdapName` 으로 다시 쓴 문자열과 같아야 한다. 공백·이스케이프·대소문자가 다르면 안 나온다 |
+| 절대 DN (LDAP 배포) | `GET /admin/employees?externalId=<DN>` | 정확히 일치 | 서버가 `LdapName` 으로 다시 쓴 문자열과 같아야 한다. 공백·이스케이프·대소문자가 다르면 안 나온다. 그 문자열은 직원 검색·상세의 `externalId` 칸에 있다 |
 
 ```
 curl -G 'http://localhost:8082/admin/employees' --data-urlencode 'externalId=00u1abcd2EFGH3ijk4l5'
@@ -396,7 +425,7 @@ curl -G 'http://localhost:8081/admin/employees' --data-urlencode 'userName=gd.ho
 
 ### LDAP 에서 `externalId` 를 쓸 때
 
-직원의 `externalId`(DN)는 관리 API 응답 어디에도 나오지 않는다. 직원 검색·상세는 `externalId` 를 돌려주지 않는다. 조직 상세만 `externalId` 를 준다. 그래서 앱은 DN 을 디렉터리에서 직접 알아야 하고, 이 서버가 저장한 표기와 정확히 맞아야 한다. 이 경로는 대개 `userName` 보다 번거롭다.
+직원의 `externalId`(DN)는 직원 검색·상세의 `externalId` 칸에 나온다 — 이 서버가 `LdapName` 으로 다시 쓴 표기 그대로다. 앱이 DN 을 디렉터리에서 따로 알아 넣으면 그 표기와 정확히 맞아야 한다(공백·이스케이프·대소문자). 그래서 한 번 `userName` 등으로 찾아 응답의 `externalId` 를 저장해 두고, 그 뒤로는 그 값으로 찾는 편이 안전하다.
 
 ### 아직 없는 것
 
@@ -429,10 +458,10 @@ sequenceDiagram
 ```
 
 - 락을 못 잡으면 곧바로 409 다. 기다리지 않는다. 락은 클러스터 전체에서 하나(앱마다 따로)라, 다른 인스턴스가 동기화·재적재를 하고 있어도 409 다. 운영자가 잠시 뒤 다시 건다.
-- 락 저장소(DynamoDB)가 응답하지 않는 경우는 409 로 옮기지 않는다 — 500 이다. 409 는 "락 조건이 깨졌다" 에만 쓴다.
+- 락 저장소(DynamoDB)의 오류는 409 로 옮기지 않는다. 409 는 "락 조건이 깨졌다" 에만 쓴다. 일시 장애로 분류되면 503 + `Retry-After`, 아니면 500 이다([오류](#오류)). 락을 잡은 뒤 실행 기록을 열지 못해도 같다(락은 반납한다). 어느 쪽이든 작업은 시작하지 않았다.
 - 202 의 본문은 실행 기록이 막 열린 모습이다: `status: "RUNNING"`, `finishedAt: null`, 세 집계는 0, `snapshotId`·`message` 는 `null`.
 - 완료 시각은 알 수 없다. 호출하는 쪽은 `status` 가 `RUNNING` 이 아니게 될 때까지 다시 읽는다. 작업에는 [기한](02-용어집.md#기한)(`sync.job-timeout`, 기본 30분)이 있어 넘기면 `FAILED` 로 닫힌다.
-- 강제 종료된 회차는 기록이 `RUNNING` 으로 남았다가 다음에 락을 잡는 회차가 [죽은 기록 닫기](02-용어집.md#죽은-기록-닫기)로 닫는다. app-scim 은 다음 재적재를 걸 때까지, 아카이빙 기록은 TTL(30일)까지 `RUNNING` 이다([08 동시성과 작업](08-동시성과-작업.md#56-죽은-기록-닫기)).
+- 강제 종료된 회차는 기록이 `RUNNING` 으로 남았다가 [죽은 기록 닫기](02-용어집.md#죽은-기록-닫기)가 닫는다 — 다음에 락을 잡는 회차가 나이와 상관없이, 또는 동기화·재적재·아카이빙 어느 시작이든 시작한 지 기한 + 10분이 지난 것을. app-scim 은 다음 재적재나 다음 하루 창의 아카이빙이 닫는다([08 동시성과 작업](08-동시성과-작업.md#56-죽은-기록-닫기)).
 
 ### 9.2 app-ldap
 
@@ -441,9 +470,9 @@ sequenceDiagram
 | `POST /admin/sync/full` | LDAP 을 읽어 동기화한다([05 LDAP 동기화](05-LDAP-동기화.md)) | `MANUAL` | `SYNC` |
 | `POST /admin/sync/full?force=true` | 같되 [삭제 가드](02-용어집.md#삭제-가드)를 건너뛴다. `ABORTED` 뒤 사람이 확인하고 넘기는 통로다 | `FORCED` | `SYNC` |
 | `POST /admin/sync/rebuild` | 재적재 — LDAP 을 다시 읽어 장부를 맞추고 현재상태를 교체한다 | `REBUILD` | `REBUILD` |
-| `POST /admin/sync/rebuild?force=true` | 같되 삭제 가드를 건너뛴다 | `REBUILD` | `REBUILD` |
+| `POST /admin/sync/rebuild?force=true` | 같되 삭제 가드를 건너뛴다 | `FORCED_REBUILD` | `REBUILD` |
 
-- `force` 는 `true`/`false` 다. 그 밖의 값은 400 이다.
+- `force` 는 `true`/`false` 다. 그 밖의 값은 400 이다. `force` 는 삭제 가드만 넘는다 — 사람 소속이 하나도 없는 디렉터리 그림은 가드보다 먼저 데이터 오류(`FAILED`)로 멈추고 `force` 로도 넘기지 못한다([05 LDAP 동기화](05-LDAP-동기화.md)).
 - 재적재는 모드가 하나다. `mode` 파라미터가 오면(빈 값이어도) 400 이다 — 옛 `mode=snapshot`·`mode=store` 를 합쳤다는 안내가 담긴다.
 - 정기 동기화(`sync.cron`)도 같은 `FullSyncUseCase.start` 를 건다. 트리거만 `SCHEDULED` 다.
 - `full`·`rebuild` 의 완료는 `sync.*` 지표로도 남는다([11 운영](11-운영.md#3-지표)).
@@ -509,12 +538,12 @@ curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organiz
 |---|---|
 | `runId` | UUID. 감사 이력의 `cause.id` 가 이 값이다 |
 | `source` | `LDAP` 또는 `SCIM` |
-| `trigger` | [트리거](02-용어집.md#트리거): `SCHEDULED`, `MANUAL`, `FORCED`, `REBUILD`, `ARCHIVE`, `RESET` |
+| `trigger` | [트리거](02-용어집.md#트리거): `SCHEDULED`, `MANUAL`, `FORCED`, `REBUILD`, `FORCED_REBUILD`, `ARCHIVE`, `RESET` |
 | `startedAt`, `finishedAt` | 시작·끝 시각. `RUNNING` 이면 `finishedAt` 은 `null` |
 | `status` | [실행 상태](02-용어집.md#실행-상태): `RUNNING`, `SUCCEEDED`, `PARTIAL`, `ABORTED`, `FAILED` |
-| `writtenCount`, `deletedCount`, `failureCount` | 쓴·지운·실패한 튜플 수 |
+| `writtenCount`, `deletedCount`, `failureCount` | 쓴·지운·실패한 튜플 수. 전부 보류로 끝난 장부 맞추기도 이미 쓴 D 의 수를 남긴다. 아카이빙은 뜻이 다르다 — `writtenCount` 는 스냅샷에 담은 줄 수, `deletedCount`·`failureCount` 는 남은 회수 지우기가 지운·지우지 못한 줄 수다([07](07-재적재-초기화-아카이빙.md#실행-기록)) |
 | `snapshotId` | 남긴 튜플 스냅샷 id. 없을 수 있다 |
-| `message` | 사유·메모. 변경이 없으면 "변경 없음". 가드가 걸렸거나 실패했으면 그 사유. 감사 이력을 못 쓴 줄이 있으면 앞에 "감사 기록 N건 실패" 가 붙는다 |
+| `message` | 사유·메모. 변경이 없으면 "변경 없음". 가드가 걸렸거나 실패했으면 그 사유. 차단기로 멈췄지만 현재상태를 디렉터리대로 교체한 회차는 끝에 ` — 현재상태는 디렉터리대로 교체했다` 가 붙는다. 감사 이력을 못 쓴 줄이 있으면 앞에 "감사 기록 N건 실패" 가 붙는다 |
 
 완료된 기록의 예:
 
@@ -552,4 +581,5 @@ curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organiz
 - 표시명 검색(GSI2)과 커서 검증: `docs/superpowers/specs/2026-10-08-audit-finish-design.md`
 - 감사 이력 조회: `docs/superpowers/specs/2026-10-10-audit-log-design.md` §5
 - 요청과 떼어 돌리기(202), 409: `docs/superpowers/specs/2026-09-29-rebuild-jobs-fixed-store-design.md` §4, `2026-09-30-cluster-jobs-baseline-design.md` §3
+- 오류 응답(problem details·503·500), 직원 응답의 `externalId`: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §10·§11
 - 인증 슬라이드로 미룬 것: `docs/superpowers/specs/2026-10-20-revocation-convergence-design.md` §14, 외부 리뷰 N10: `docs/superpowers/specs/2026-10-19-outsider-review/0-종합.md`
