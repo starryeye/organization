@@ -48,6 +48,9 @@ public class FakeMutationLock implements MutationLock {
     /** 획득 시도마다(구독할 때) 받은 시도 한도. 한도가 없으면 null 이다. */
     public final List<Duration> 시도_한도 = new CopyOnWriteArrayList<>();
 
+    /** 획득 시도마다(구독할 때) 받은 용도 — 트리거가 달라도 락 용도가 그대로인지 본다. */
+    public final List<LockPurpose> 시도한_용도 = new CopyOnWriteArrayList<>();
+
     /** 반납이 불릴 때마다(구독할 때) 받은 토큰 — 쥐고 있지 않은 토큰의 반납도 적는다. */
     public final List<String> 반납한_토큰 = new CopyOnWriteArrayList<>();
 
@@ -79,6 +82,7 @@ public class FakeMutationLock implements MutationLock {
     public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
         return Mono.defer(() -> {
             시도한_토큰.add(token);
+            시도한_용도.add(purpose);
             시도_한도.add(attemptTimeout);
             RuntimeException 오류 = acquireError;
             if (오류 != null) {

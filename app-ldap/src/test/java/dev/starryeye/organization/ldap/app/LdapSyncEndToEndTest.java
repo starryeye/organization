@@ -386,7 +386,7 @@ class LdapSyncEndToEndTest {
         // when, then
         SyncJobClient.끝까지(client, "/admin/sync/rebuild?force=true")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.trigger").isEqualTo("REBUILD");
+                .jsonPath("$.trigger").isEqualTo("FORCED_REBUILD");
     }
 
     // ---------- 변경 이력 (설계 2026-10-10) ----------

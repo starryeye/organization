@@ -9,6 +9,8 @@ public enum SyncTrigger {
     FORCED,
     /** 전체 재적재 */
     REBUILD,
+    /** LDAP 재적재 + 삭제 가드 우회 (SCIM 재적재에는 force 가 없다) */
+    FORCED_REBUILD,
     /** SCIM 인스턴스의 일 1회 스냅샷 아카이빙 */
     ARCHIVE,
     /** 조직도까지 전부 비우는 초기화. 되돌릴 수 없고 IdP 재푸시가 뒤따라야 한다 */

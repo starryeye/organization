@@ -70,6 +70,12 @@ public class FullSyncUseCase {
     static final String 기준선_의심 = "기준선 의심(지난 회차가 기록 전에 멈춤) — 장부를 훑어 맞춤";
     static final String 기준선_없음 = "기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤";
 
+    /**
+     * 차단기로 멈췄지만 현재상태는 디렉터리대로 실제로 교체한 회차의 메시지 끝에 붙인다(설계 2026-10-27 §12). 권한은 틀리지 않는데 FAILED 만 보면
+     * 현재상태도 못 바꿨다고 읽히기 때문이다. 교체하지 않은 차단기 경로(비활성 회수만 반영, 장부 맞추기의 일부 반영, 쓰기 단계)에는 붙이지 않는다.
+     */
+    static final String 현재상태_교체 = " — 현재상태는 디렉터리대로 교체했다";
+
     private final DirectorySnapshotSource source;
     private final TupleSnapshotRepository snapshots;
     private final DirectoryStateRepository state;
@@ -182,8 +188,8 @@ public class FullSyncUseCase {
                     .flatMap(result -> commit(directory, baseline, result, 기록))
                     .onErrorResume(TupleWriteAbortedException.class, stopped ->
                             saveSnapshotAndState(directory, baseline, stopped.partial(), 기록)
-                                    .map(snapshotId -> Mono.just(
-                                            SyncOutcome.stopped(stopped.partial(), snapshotId, stopped.getMessage()))));
+                                    .map(snapshotId -> Mono.just(SyncOutcome.stopped(stopped.partial(), snapshotId,
+                                            stopped.getMessage() + 현재상태_교체))));
         });
     }
 

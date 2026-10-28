@@ -53,11 +53,13 @@ public class RebuildUseCase {
     /**
      * 작업 락(REBUILD)을 잡고 실행 기록(RUNNING)을 연 뒤 재적재를 요청과 떼어 띄운다. 못 잡으면 {@link LockUnavailableException}.
      *
-     * @param force      true 면 삭제 가드를 건너뛴다 — ABORTED 뒤 사람이 확인하고 넘기는 통로다
+     * @param force      true 면 삭제 가드를 건너뛴다 — ABORTED 뒤 사람이 확인하고 넘기는 통로다. 실행 기록의 트리거는
+     *                   {@link SyncTrigger#FORCED_REBUILD} 로 남는다(동기화의 {@code FORCED} 와 같다). 락 용도는 REBUILD 그대로다
      * @param onFinished 끝난 기록으로 불린다(지표)
      */
     public Mono<SyncRun> start(boolean force, Consumer<SyncRun> onFinished) {
-        return jobs.startLockedThen(SyncSource.LDAP, SyncTrigger.REBUILD, MutationLock.LockPurpose.REBUILD,
+        SyncTrigger trigger = force ? SyncTrigger.FORCED_REBUILD : SyncTrigger.REBUILD;
+        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.REBUILD,
                 AuditKind.REBUILD, (run, 기록) -> Mono.defer(() -> rebuild(force, 기록.changes())), onFinished);
     }
 
