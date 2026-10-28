@@ -127,9 +127,9 @@ public class DynamoDbMutationLock implements MutationLock {
     }
 
     /**
-     * 조건이 깨지면 <b>실패시키지 않는다.</b> 이미 만료돼 남이 가져갔다는 뜻인데, 그때 우리가
-     * 할 일은 없다 — 작업은 이미 끝났고 응답은 나가야 한다. 대신 경고를 남긴다: TTL 이
-     * 작업 시간보다 짧다는 신호다.
+     * 조건이 깨지면 <b>실패시키지 않는다.</b> 이 토큰의 락 줄이 없다는 뜻이다 — 리스가 만료돼 이미 잃었거나(TTL 이 작업 시간보다 짧을 수 있다),
+     * 획득을 포기하며 그 토큰으로 보낸 반납인데 포기한 획득이 서버에 닿지 않았다. 어느 쪽이든 우리가 할 일은 없다 — 작업은 이미 끝났고 응답은
+     * 나가야 한다. 원인을 단정하지 않는 경고만 남긴다.
      */
     @Override
     public Mono<Void> release(LockLease lease) {
@@ -142,7 +142,7 @@ public class DynamoDbMutationLock implements MutationLock {
                         .build()))
                 .then()
                 .onErrorResume(ConditionalCheckFailedException.class, error -> {
-                    log.warn("변경 락 반납 실패 — 이미 리스를 잃은 상태다. TTL({})이 작업 시간보다 짧다는 신호다",
+                    log.warn("변경 락 반납 실패 — 이 토큰의 락 줄이 없다. 리스를 이미 잃었거나(TTL {} 이 작업 시간보다 짧을 수 있다) 포기한 획득이 서버에 닿지 않았다",
                             properties.getLockTtl());
                     return Mono.empty();
                 });

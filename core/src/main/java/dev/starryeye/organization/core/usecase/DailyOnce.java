@@ -19,7 +19,7 @@ import java.util.function.Predicate;
  * 일을 한다. 날짜는 앱 시계의 UTC 날짜다.
  *
  * <p><b>표지는 일이 성공해야 DONE 이다.</b> 예전에는 잡기만 하고 끝내지 않아, 아래 세 경우 모두 그날의 표지를 써 버리고 일은 다음 날까지 돌지 않았다. 이제는 셋
- * 다 같은 날 cron 창(매시 시도) 안의 다음 시도가 다시 잡는다.
+ * 다 cron 창(매시 시도) 안의 다음 시도가 다시 잡는다 — 창의 마지막 시도였으면 다음 날의 시도다.
  * <ul>
  *   <li>일이 실패한 경우(오류·빈 끝·취소) — 표지를 푼다.</li>
  *   <li>값이 성공이 아닌 경우 — 성공 판정은 부르는 쪽이 넘긴다. 아카이빙은 SUCCEEDED 만 성공이라 FAILED·ABORTED(재적재 중)면 표지를 푼다.</li>
@@ -101,7 +101,7 @@ public class DailyOnce {
 
     private Mono<Void> 푼다(쥔_표지 표지, String 까닭) {
         return Mono.defer(() -> {
-                    log.info("{}({}) 이 {} — 표지를 풀어 창 안의 다음 시도가 다시 잡는다", 표지.job(), 표지.day(), 까닭);
+                    log.info("{}({}) 이 {} — 표지를 풀어 다음 시도(창이 끝났으면 다음 날)가 다시 잡는다", 표지.job(), 표지.day(), 까닭);
                     return claims.release(표지.job(), 표지.day(), 표지.owner());
                 })
                 .onErrorResume(error -> {
