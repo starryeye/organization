@@ -153,14 +153,23 @@ class ScimSyncMetricsTest {
     }
 
     @Test
-    @DisplayName("커밋된 회수는 kind 태그 넷으로 센 수만큼 오르고, 0 은 올리지 않는다(설계 2026-10-27 §8)")
-    void 회수를_종류별로_센다() {
+    @DisplayName("회수 카운터 넷은 회수 전부터 0 으로 있다 — 기동 직후의 첫 대량 회수도 1시간 증가량에 잡힌다")
+    void 회수_카운터_넷은_회수_전부터_0_으로_있다() {
+        // given — 회수가 한 번도 없었다
+
         // when — 0 은 회수가 없었다는 뜻이다
         metrics.revoked(RevocationObserver.Kind.DELETE_GROUP, 0);
 
-        // then — 카운터를 만들지도 않는다
-        assertThat(registry.find("scim.revocations").counters()).isEmpty();
+        // then — 넷 모두 있고 0 이다. 처음 회수가 생길 때 계열을 만들면 Prometheus increase() 가 그 첫 값을 증가로 세지 않는다
+        assertThat(registry.find("scim.revocations").counters()).hasSize(4);
+        for (RevocationObserver.Kind kind : RevocationObserver.Kind.values()) {
+            assertThat(registry.get("scim.revocations").tag("kind", kind.tag()).counter().count()).isZero();
+        }
+    }
 
+    @Test
+    @DisplayName("커밋된 회수는 kind 태그 넷으로 센 수만큼 오르고, 0 은 올리지 않는다(설계 2026-10-27 §8)")
+    void 회수를_종류별로_센다() {
         // when
         metrics.revoked(RevocationObserver.Kind.DEACTIVATE, 1);
         metrics.revoked(RevocationObserver.Kind.DELETE_USER, 1);

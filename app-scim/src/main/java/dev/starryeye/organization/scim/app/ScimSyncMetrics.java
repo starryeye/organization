@@ -47,7 +47,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@link LockObserver})는 응답에 흔적이 없거나(반납 실패) 503 뿐이다. 이 카운터가 없으면 로그를 사람이 읽을 때까지 아무도 모른다.
  *
  * <p><b>회수.</b> SCIM 쓰기가 커밋한 회수를 종류별로 센다({@link RevocationObserver}, 설계 2026-10-27 §8). 대량 회수를 막지 않고 보이게만 한다(§17.4) —
- * 1시간 증가량이 평소보다 크게 늘면 경보를 울린다.
+ * 1시간 증가량이 평소보다 크게 늘면 경보를 울린다. 카운터 넷은 기동 때 0 으로 만들어 둔다 — Prometheus {@code increase()} 는 새 계열의 첫 값을 증가로
+ * 세지 않으므로, 첫 회수 때 만들면 기동 직후의 첫 대량 회수가 증가량 0 으로 보인다.
  */
 @Slf4j
 public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, LockObserver, IgnoredAttributeObserver,
@@ -82,6 +83,11 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
         })
                 .description("이 인스턴스가 아카이빙을 마지막으로 관찰한 시각(epoch 초). 관찰한 적이 없으면 값이 없다 — scim.archive.drift 가 낡았는지 가르는 데 쓴다")
                 .register(registry);
+        // 회수 카운터 넷은 기동 때 0 으로 만든다 — 첫 회수 때 계열을 만들면 Prometheus increase() 가 그 첫 값을 증가로 세지 않아,
+        // 기동 직후의 첫 대량 회수에 경보 식이 조용하다
+        for (Kind kind : Kind.values()) {
+            registry.counter("scim.revocations", "kind", kind.tag());
+        }
     }
 
     /** 쓰기 요청이 본 어긋남 — 카운터에 쌓는다. 아래 {@code long} 짝({@link ArchiveDriftObserver})과 다르다. */
@@ -123,7 +129,7 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
         names.forEach(name -> registry.counter("scim.patch.ignored", "attribute", name).increment());
     }
 
-    /** 커밋된 회수 — 태그 값은 {@link Kind#tag()} 넷뿐이다. 0 은 올리지 않는다(카운터도 만들지 않는다). */
+    /** 커밋된 회수 — 태그 값은 {@link Kind#tag()} 넷뿐이고 카운터 넷은 생성자가 0 으로 만들어 두었다. 0 은 올리지 않는다. */
     @Override
     public void revoked(Kind kind, int count) {
         if (count > 0) {
