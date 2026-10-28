@@ -212,7 +212,7 @@ public class TableInitializer implements InitializingBean {
      * 결과의 그 칸이 조용히 비게 된다. 그래서 {@link #GSI2_PROJECTION} 하나를 생성과 모양 검사가 함께 쓴다 —
      * 목록이 바뀌면 옛 테이블은 기동 때 멈춘다. 여기 적힌 이름은 다른 두 곳과 반드시 같아야 한다 —
      * {@code DynamoDbDirectoryStateRepository} 의 {@code USER_NAME}/{@code DISPLAY_NAME}/
-     * {@code ACTIVE} 상수(쓰는 쪽)와 {@code DynamoDbDirectorySearchRepository.toUserSummary}
+     * {@code ACTIVE}/{@code EXTERNAL_ID} 상수(쓰는 쪽)와 {@code DynamoDbDirectorySearchRepository.toUserSummary}
      * (읽는 쪽). 셋 중 하나만 바꾸면 컴파일은 통과하고 검색만 망가진다.
      */
     private static GlobalSecondaryIndex userDisplayNameIndex() {

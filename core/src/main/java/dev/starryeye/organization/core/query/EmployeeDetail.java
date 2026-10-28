@@ -11,11 +11,12 @@ import java.util.List;
  * @param name         이름 여섯 칸. 없는 칸은 null
  * @param email        직원 이메일 주소
  * @param active       현재 활성 상태인지
+ * @param externalId   LDAP 은 서버가 준 절대 DN, SCIM 은 IdP 가 보낸 값. SCIM 직원은 없을 수 있어 null
  * @param paths        소속 조직과 그 상위 계층 전부. 어디에도 안 속하면 빈 목록
  * @param truncated    경로가 상한을 넘어 잘렸는지
  */
 public record EmployeeDetail(String employeeId, String userName, String displayName,
-                             PersonName name, String email, boolean active,
+                             PersonName name, String email, boolean active, String externalId,
                              List<AccessPath> paths, boolean truncated) {
 
     public EmployeeDetail {

@@ -225,7 +225,8 @@ public class DynamoDbDirectorySearchRepository implements DirectorySearchReposit
                 Keys.parseUserPk(Attrs.str(item, Keys.PK)),
                 Attrs.str(item, "userName"),
                 Attrs.str(item, "displayName"),
-                Attrs.flag(item, "active"));
+                Attrs.flag(item, "active"),
+                Attrs.str(item, "externalId"));
     }
 
     private static GroupSummary toGroupSummary(Map<String, AttributeValue> item) {

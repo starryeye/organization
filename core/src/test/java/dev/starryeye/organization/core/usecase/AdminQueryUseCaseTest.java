@@ -620,7 +620,7 @@ class AdminQueryUseCaseTest {
     void 검색은_그대로_위임한다() {
         // given
         search.users.add(new dev.starryeye.organization.core.query.UserSummary(
-                "gd.hong", "gd.hong", "홍길동", true));
+                "gd.hong", "gd.hong", "홍길동", true, "okta-00u1"));
 
         // when
         var byName = useCase.searchEmployeesByDisplayName("홍", null, 20).block();
@@ -644,6 +644,36 @@ class AdminQueryUseCaseTest {
         // then
         assertThat(page.items()).extracting(UserSummary::employeeId).containsExactly("u-1");
         assertThat(page.nextCursor()).isNull();
+    }
+
+    @Test
+    @DisplayName("externalId 검색 결과의 각 줄에 본 테이블에서 다시 읽은 externalId 가 있다")
+    void externalId_검색_결과에_externalId_가_있다() {
+        // given
+        state.users.put("u-1", new DirectoryUser("u-1", "okta-00u1", "kim", "김", null, true));
+        state.users.put("u-2", new DirectoryUser("u-2", "okta-00u2", "lee", "이", null, true));
+
+        // when
+        var page = useCase.findEmployeesByExternalId("okta-00u1").block();
+
+        // then
+        assertThat(page.items()).containsExactly(new UserSummary("u-1", "kim", "김", true, "okta-00u1"));
+    }
+
+    @Test
+    @DisplayName("직원 상세에 읽은 직원의 externalId 가 있다")
+    void 직원_상세에_externalId_가_있다() {
+        // given — 직원("kim", true) 의 externalId 는 "emp-kim" 이다
+        state.saveUser(직원("kim", true)).block();
+        state.saveUser(new DirectoryUser("nobody-id", null, "nobody", "없음", null, true)).block();
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+        var 없는_값 = useCase.employeeDetail("nobody-id").block();
+
+        // then — externalId 가 없는 직원은 null 이다
+        assertThat(detail.externalId()).isEqualTo("emp-kim");
+        assertThat(없는_값.externalId()).isNull();
     }
 
     @Test

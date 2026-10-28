@@ -43,7 +43,7 @@ class AdminQueryControllerTest {
     @DisplayName("표시명으로 직원을 검색한다")
     void 표시명으로_검색한다() {
         // given
-        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true));
+        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true, "okta-00u1"));
 
         // when, then
         client.get().uri("/admin/employees?displayName=홍")
@@ -52,6 +52,24 @@ class AdminQueryControllerTest {
                 .jsonPath("$.items[0].employeeId").isEqualTo("gd.hong")
                 .jsonPath("$.items[0].displayName").isEqualTo("홍길동")
                 .jsonPath("$.nextCursor").doesNotExist();
+    }
+
+    @Test
+    @DisplayName("직원 검색 줄과 직원 상세에 externalId 가 있다 — README 가 쓰라는 DN 을 관리 API 가 보여 준다")
+    void 직원_응답에_externalId_가_있다() {
+        // given
+        search.users.add(new UserSummary("gd.hong", "gd.hong", "홍길동", true, "okta-00u1"));
+        state.saveUser(new DirectoryUser("kim", "okta-00u2", "kim", "김철수", null, true)).block();
+
+        // when, then — 검색은 $.items[0].externalId, 상세는 $.externalId
+        client.get().uri("/admin/employees?displayName=홍")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.items[0].externalId").isEqualTo("okta-00u1");
+        client.get().uri("/admin/employees/kim")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.externalId").isEqualTo("okta-00u2");
     }
 
     @Test
