@@ -40,7 +40,7 @@ class IncrementalSyncLockRetryAfterTest {
     private static MutationLock 잡히지_않는_락(AtomicInteger 시도, IntFunction<LockUnavailableException> 실패) {
         return new MutationLock() {
             @Override
-            public Mono<LockLease> acquire(LockPurpose purpose) {
+            public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
                 return Mono.defer(() -> Mono.error(실패.apply(시도.getAndIncrement())));
             }
 

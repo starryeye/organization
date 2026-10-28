@@ -347,7 +347,7 @@ class LdapSyncEndToEndTest {
     @DisplayName("다른 인스턴스가 작업 락을 쥐고 있으면 수동 동기화·재적재는 곧바로 409 다")
     void 다른_인스턴스가_락을_쥐면_409다() {
         // given — 다른 인스턴스의 정기 동기화가 락을 쥔 순간
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.SYNC).block(Duration.ofSeconds(10));
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.SYNC).block(Duration.ofSeconds(10));
 
         try {
             // when, then

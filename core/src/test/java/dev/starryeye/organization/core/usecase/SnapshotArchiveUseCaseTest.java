@@ -178,7 +178,7 @@ class SnapshotArchiveUseCaseTest {
     @DisplayName("재적재가 락을 쥐고 있으면 오늘 아카이빙을 건너뛰고 ABORTED 로 남긴다 — 잠깐 어긋난 장부를 '실제'로 찍지 않게")
     void 재적재_중이면_건너뛴다() {
         // given
-        lock.acquire(MutationLock.LockPurpose.REBUILD).block();
+        lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block();
 
         // when
         var run = useCase.execute().block();
@@ -193,7 +193,7 @@ class SnapshotArchiveUseCaseTest {
     @DisplayName("SCIM 쓰기가 잠깐 쥔 락은 건너뛸 이유가 아니다")
     void 쓰기_락은_건너뛰지_않는다() {
         // given
-        lock.acquire(MutationLock.LockPurpose.WRITE).block();
+        lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
 
         // when
         var run = useCase.execute().block();

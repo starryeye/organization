@@ -183,7 +183,7 @@ class ScimRebuildEndToEndTest {
     @DisplayName("다른 작업이 락을 쥐고 있으면 재적재는 곧바로 409 이고 기록을 남기지 않는다")
     void 다른_작업이_락을_쥐면_409다() {
         // given — 다른 인스턴스의 SCIM 쓰기가 락을 쥔 순간
-        LockLease lease = lock.acquire(MutationLock.LockPurpose.WRITE).block(Duration.ofSeconds(10));
+        LockLease lease = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block(Duration.ofSeconds(10));
 
         try {
             // when, then

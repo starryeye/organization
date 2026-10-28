@@ -20,7 +20,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -105,10 +104,10 @@ class IncrementalSyncLockObservabilityTest {
         AtomicInteger 시도 = new AtomicInteger();
         MutationLock 한번_밀리는_락 = new MutationLock() {
             @Override
-            public Mono<LockLease> acquire(LockPurpose purpose) {
+            public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
                 return Mono.defer(() -> 시도.getAndIncrement() == 0
                         ? Mono.error(new LockUnavailableException("남이 쥐고 있다(테스트)"))
-                        : Mono.just(new LockLease(UUID.randomUUID().toString(), Instant.now().plusSeconds(30))));
+                        : Mono.just(new LockLease(token, Instant.now().plusSeconds(30))));
             }
 
             @Override
@@ -144,7 +143,7 @@ class IncrementalSyncLockObservabilityTest {
         RuntimeException 저장소장애 = new RuntimeException("DynamoDB 가 응답하지 않는다(테스트)");
         MutationLock 고장난_락 = new MutationLock() {
             @Override
-            public Mono<LockLease> acquire(LockPurpose purpose) {
+            public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
                 return Mono.error(저장소장애);
             }
 

@@ -2,6 +2,7 @@ package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.port.LockLease;
 import dev.starryeye.organization.core.port.MutationLock.LockPurpose;
+import dev.starryeye.organization.core.usecase.LockAttemptTimeoutException;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -15,6 +16,7 @@ import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * 분산 락의 계약 (설계 §4.3).
@@ -53,10 +55,10 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("한쪽이 쥐고 있으면 다른 인스턴스는 획득하지 못한다")
     void 쥐고_있으면_다른_쪽은_못_잡는다() {
         // given
-        인스턴스1.acquire(LockPurpose.WRITE).block();
+        인스턴스1.acquireOnce(LockPurpose.WRITE).block();
 
         // when, then
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -64,41 +66,41 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("반납하면 다른 인스턴스가 곧바로 획득한다")
     void 반납하면_다른_쪽이_잡는다() {
         // given
-        var lease = 인스턴스1.acquire(LockPurpose.WRITE).block();
+        var lease = 인스턴스1.acquireOnce(LockPurpose.WRITE).block();
 
         // when
         인스턴스1.release(lease).block();
 
         // then
-        assertThat(인스턴스2.acquire(LockPurpose.WRITE).block()).isNotNull();
+        assertThat(인스턴스2.acquireOnce(LockPurpose.WRITE).block()).isNotNull();
     }
 
     @Test
     @DisplayName("리스가 만료되면 반납하지 않았어도 다른 인스턴스가 가져간다")
     void 만료되면_다른_쪽이_가져간다() {
         // given — 쥔 인스턴스가 죽어 반납하지 못한 상황이다
-        인스턴스1.acquire(LockPurpose.WRITE).block();
+        인스턴스1.acquireOnce(LockPurpose.WRITE).block();
 
         // when
         clock.앞으로(Duration.ofSeconds(31));
 
         // then
-        assertThat(인스턴스2.acquire(LockPurpose.WRITE).block()).isNotNull();
+        assertThat(인스턴스2.acquireOnce(LockPurpose.WRITE).block()).isNotNull();
     }
 
     @Test
     @DisplayName("남의 토큰으로 반납하면 남의 락이 풀리지 않는다")
     void 남의_락은_풀지_못한다() {
         // given — 1이 만료돼 2가 가져갔다. 1은 그 사실을 모른 채 반납하러 온다.
-        var 낡은리스 = 인스턴스1.acquire(LockPurpose.WRITE).block();
+        var 낡은리스 = 인스턴스1.acquireOnce(LockPurpose.WRITE).block();
         clock.앞으로(Duration.ofSeconds(31));
-        인스턴스2.acquire(LockPurpose.WRITE).block();
+        인스턴스2.acquireOnce(LockPurpose.WRITE).block();
 
         // when — 1이 자기 토큰으로 반납을 시도한다
         인스턴스1.release(낡은리스).block();
 
         // then — 2의 락은 그대로여야 한다. 풀렸다면 세 번째가 들어와 동시에 쓴다.
-        assertThatThrownBy(() -> 인스턴스1.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스1.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -106,7 +108,7 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("갱신하면 만료가 미뤄져 다른 인스턴스가 가져가지 못한다")
     void 갱신하면_만료가_미뤄진다() {
         // given
-        var lease = 인스턴스1.acquire(LockPurpose.WRITE).block();
+        var lease = 인스턴스1.acquireOnce(LockPurpose.WRITE).block();
 
         // when — 만료 직전에 갱신한다
         clock.앞으로(Duration.ofSeconds(25));
@@ -115,7 +117,7 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
 
         // then — 원래 만료(30초)는 지났지만 갱신했으므로 아직 유효하다
         assertThat(갱신됨).isNotNull();
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -123,9 +125,9 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("리스를 잃은 뒤 갱신하려 하면 실패한다 — 재적재가 이걸 보고 멈춘다")
     void 잃은_리스는_갱신되지_않는다() {
         // given
-        var 낡은리스 = 인스턴스1.acquire(LockPurpose.WRITE).block();
+        var 낡은리스 = 인스턴스1.acquireOnce(LockPurpose.WRITE).block();
         clock.앞으로(Duration.ofSeconds(31));
-        인스턴스2.acquire(LockPurpose.WRITE).block();
+        인스턴스2.acquireOnce(LockPurpose.WRITE).block();
 
         // when, then
         assertThatThrownBy(() -> 인스턴스1.renew(낡은리스).block())
@@ -143,14 +145,14 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("쥔 목적을 들여다본다 — 들여다보기는 락을 잡지 않는다")
     void 쥔_목적을_들여다본다() {
         // given
-        var lease = 인스턴스1.acquire(LockPurpose.REBUILD).block();
+        var lease = 인스턴스1.acquireOnce(LockPurpose.REBUILD).block();
 
         // when
         var 쥔_목적 = 인스턴스2.peek().block();
 
         // then — 들여다본 쪽은 여전히 잡을 수 없고, 반납하면 빈 값이다
         assertThat(쥔_목적).isEqualTo(LockPurpose.REBUILD);
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOf(LockUnavailableException.class);
         인스턴스1.release(lease).block();
         assertThat(인스턴스2.peek().blockOptional()).isEmpty();
@@ -160,7 +162,7 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("만료된 락은 쥔 것으로 보지 않는다 — 죽은 인스턴스가 남긴 줄 때문에 아카이빙이 영영 건너뛰어지지 않게")
     void 만료된_락은_쥔_것이_아니다() {
         // given
-        인스턴스1.acquire(LockPurpose.REBUILD).block();
+        인스턴스1.acquireOnce(LockPurpose.REBUILD).block();
 
         // when — TTL(30초)을 넘긴다
         clock.앞으로(Duration.ofSeconds(31));
@@ -173,7 +175,7 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("app-ldap 동기화 목적(SYNC)으로도 잡는다")
     void 동기화_목적으로_잡는다() {
         // when
-        인스턴스1.acquire(LockPurpose.SYNC).block();
+        인스턴스1.acquireOnce(LockPurpose.SYNC).block();
 
         // then
         assertThat(인스턴스2.peek().block()).isEqualTo(LockPurpose.SYNC);
@@ -183,10 +185,10 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("같은 토큰으로 다시 잡으면 성공한다 — 서버에선 성공했는데 응답을 잃어 SDK 가 같은 요청을 다시 보낸 경우(점검 S14)")
     void 같은_토큰이면_다시_잡힌다() {
         // given — 첫 PutItem 은 서버에서 성공했다
-        인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰").block();
+        인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰", null).block();
 
         // when — SDK 가 같은 요청(같은 토큰)을 다시 보낸다
-        var lease = 인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰").block();
+        var lease = 인스턴스1.acquire(LockPurpose.WRITE, "같은-토큰", null).block();
 
         // then — 자기 락에 막히지 않고, 반납도 된다
         assertThat(lease.token()).isEqualTo("같은-토큰");
@@ -198,10 +200,10 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("다른 토큰은 여전히 막힌다")
     void 다른_토큰은_막힌다() {
         // given
-        인스턴스1.acquire(LockPurpose.WRITE, "가").block();
+        인스턴스1.acquire(LockPurpose.WRITE, "가", null).block();
 
         // when, then
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE, "나").block())
+        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE, "나", null).block())
                 .isInstanceOf(LockUnavailableException.class);
     }
 
@@ -209,10 +211,10 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("재적재가 락을 쥐고 있으면 획득 실패의 기다릴 시간이 60초다 — DynamoDB 가 돌려준 기존 락 항목의 용도로 정한다(설계 2026-10-05 §3.2)")
     void 재적재가_쥔_락은_60초다() {
         // given
-        인스턴스1.acquire(LockPurpose.REBUILD).block();
+        인스턴스1.acquireOnce(LockPurpose.REBUILD).block();
 
         // when, then
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOfSatisfying(LockUnavailableException.class,
                         error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(60)));
     }
@@ -221,11 +223,48 @@ class DynamoDbMutationLockTest extends DynamoDbTestSupport {
     @DisplayName("다른 SCIM 쓰기가 락을 쥐고 있으면 2초다")
     void 쓰기가_쥔_락은_2초다() {
         // given
-        인스턴스1.acquire(LockPurpose.WRITE).block();
+        인스턴스1.acquireOnce(LockPurpose.WRITE).block();
 
         // when, then
-        assertThatThrownBy(() -> 인스턴스2.acquire(LockPurpose.WRITE).block())
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
                 .isInstanceOfSatisfying(LockUnavailableException.class,
                         error -> assertThat(error.retryAfter()).isEqualTo(Duration.ofSeconds(2)));
+    }
+
+    @Test
+    @DisplayName("시도 한도로 끊긴 획득은 결과를 모르는 예외다 — 서버에서 성공했을 수 있어 조건 실패(남이 쥠)와 가른다(설계 2026-10-27 §6)")
+    void 시도_한도로_끊긴_획득은_결과를_모르는_예외다() {
+        // when, then — 1ms 안에는 DynamoDB Local 의 응답이 오지 않는다
+        assertThatThrownBy(() -> 인스턴스1.acquire(LockPurpose.WRITE, "토큰", Duration.ofMillis(1)).block())
+                .isInstanceOf(LockAttemptTimeoutException.class)
+                .isNotInstanceOf(LockUnavailableException.class);
+    }
+
+    @Test
+    @DisplayName("끊긴 뒤 같은 토큰으로 다시 시도하면 잡고, 남의 토큰은 막힌다 — 끊긴 시도가 서버에서 성공했어도 자기 락에 막히지 않는다")
+    void 끊긴_뒤_같은_토큰은_잡고_남의_토큰은_막힌다() {
+        // given — 응답을 기다리지 못하고 끊긴 시도. 서버에서는 성공했을 수도, 아닐 수도 있다
+        catchThrowable(() -> 인스턴스1.acquire(LockPurpose.WRITE, "토큰", Duration.ofMillis(1)).block());
+
+        // when
+        var lease = 인스턴스1.acquire(LockPurpose.WRITE, "토큰", null).block();
+
+        // then
+        assertThat(lease.token()).isEqualTo("토큰");
+        assertThatThrownBy(() -> 인스턴스2.acquireOnce(LockPurpose.WRITE).block())
+                .isInstanceOf(LockUnavailableException.class);
+    }
+
+    @Test
+    @DisplayName("토큰만으로 반납해도 풀린다 — 포기한 쪽은 만료 시각을 모른 채 토큰으로 반납한다")
+    void 토큰만으로_반납하면_풀린다() {
+        // given
+        인스턴스1.acquire(LockPurpose.WRITE, "토큰", null).block();
+
+        // when
+        인스턴스1.release(new LockLease("토큰", Instant.EPOCH)).block();
+
+        // then
+        assertThat(인스턴스2.acquireOnce(LockPurpose.WRITE).block()).isNotNull();
     }
 }

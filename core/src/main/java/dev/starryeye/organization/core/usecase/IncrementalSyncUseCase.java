@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
@@ -142,7 +143,9 @@ public class IncrementalSyncUseCase {
     private final MutationLock lock;
     /**
      * 락 획득을 포기하기까지의 대기 한도(설계 §4.4, 2026-10-07 §3.1). 줄에 선 순간부터 잰다 — 서버 안 줄에서 기다린 시간과 다른 서버와
-     * 백오프로 겨룬 시간이 모두 든다. 한도는 시도와 시도 사이에서만 본다 — 날아가는 중인 획득은 끊지 않는다.
+     * 백오프로 겨룬 시간이 모두 든다. 날아가는 중인 획득도 이 한도를 넘기지 않는다 — 시도마다 {@code min(남은 한도, 1초)}(하한 200ms)의 시도 한도를 주어
+     * 저장소가 끊는다(설계 2026-10-27 §6, {@link AcquireBackoff}). 넘을 수 있는 것은 시도 한도의 하한(200ms)과, 결과를 모르는 시도를 남긴 채 포기할 때
+     * 보내는 토큰 반납(많아야 1초)뿐이다.
      */
     private final Duration acquireTimeout;
     /** 락을 쥔 동안 리스를 갱신하는 주기(설계 2026-10-02 §3.1). */
@@ -870,7 +873,7 @@ public class IncrementalSyncUseCase {
                         if (차례.밀렸다()) {
                             경합했다.set(true);
                         }
-                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 acquire 도 한 번이다
+                        // defer 로 감싼다 — 잡는다가 조립 중에 던져도 오류 신호가 되어 아래 doOnNext·doFinally 에 닿는다. 안쪽 구독은 한 번이라 토큰도 하나다
                         return Mono.defer(() -> 잡는다(시작, 경합했다))
                                 .flatMap(lease -> new LeaseKeeper(lock, renewInterval, lockObserver)
                                         .keep(lease, Mono.defer(() -> work.apply(lease)), "쓰기 도중 리스 상실")
@@ -898,28 +901,56 @@ public class IncrementalSyncUseCase {
     /**
      * 차례를 받은 요청이 전역 락을 잡는다 — 다른 서버와는 백오프로 겨룬다(설계 2026-10-07 §3.2). 한도는 줄에 선 순간({@code 시작})부터 잰다.
      *
+     * <p><b>토큰은 여기서 하나 만든다</b>(설계 2026-10-27 §6). 시도마다 남은 한도로 시도 한도가 달라 {@code acquire} 를 시도마다 부르지만, 토큰은 줄 서기 한 번에
+     * 하나다 — 끊긴 시도가 서버에서 성공했어도 같은 토큰의 다시 시도가 그 획득을 그대로 다시 얻는다(점검 S14). 포기할 때 반납하려고 토큰을 여기서 쥔다.
+     *
+     * <p><b>결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다.</b> 조건 실패({@link LockUnavailableException})가 아닌 시도 — 시도 한도로
+     * 끊겼거나 그 밖의 오류로 끝난 것 — 는 응답만 잃었을 수 있다. 그대로 두면 서버에서 잡힌 락이 TTL(30초) 동안 모든 쓰기를 막는다. 반납은 토큰만
+     * 조건으로 보므로 남의 락을 풀지 않는다. 짧은 한도(1초)의 최선 노력이고, 실패하면 TTL 이 푼다. 조건 실패만 있었으면 보내지 않는다 — 우리 시도는 잡지 못했다.
+     *
      * <p><b>획득이 예외로 끝나면 그것도 503 이다 (설계 §6 두 번째 행).</b> 락 이외의 예외(DynamoDB 장애 등)도 {@link LockUnavailableException} 으로 감싼다.
      */
     private Mono<LockLease> 잡는다(long 시작, AtomicBoolean 경합했다) {
         Duration 남은_한도 = acquireTimeout.minusMillis(AcquireBackoff.지금() - 시작);
-        // acquire 를 한 번만 부르고 그 Mono 를 다시 구독해야 재시도도 같은 토큰이다(점검 S14)
-        Mono<LockLease> 획득;
-        try {
-            획득 = lock.acquire(MutationLock.LockPurpose.WRITE);
-        } catch (RuntimeException e) {
-            // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
-            획득 = Mono.error(e);
-        }
-        Mono<LockLease> 시도 = 획득
-                // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
-                .doOnError(LockUnavailableException.class, error -> 경합했다.set(true));
+        String token = UUID.randomUUID().toString();
+        AtomicBoolean 결과를_모른다 = new AtomicBoolean();
+        Function<Duration, Mono<LockLease>> 시도 = 한도 -> {
+            Mono<LockLease> 획득;
+            try {
+                획득 = lock.acquire(MutationLock.LockPurpose.WRITE, token, 한도);
+            } catch (RuntimeException e) {
+                // 포트 계약은 Mono 지만, 던지면 차례가 쥔 채로 남아 줄이 멈춘다 — 오류 신호로 바꿔 아래 onErrorMap 이 503 으로 감싸게 한다
+                획득 = Mono.error(e);
+            }
+            return 획득
+                    // 백오프 위에 둬야 시도마다 불린다 — 아래에 두면 마지막 실패만 본다.
+                    .doOnError(LockUnavailableException.class, error -> 경합했다.set(true))
+                    // 조건 실패가 아니면 서버에서 잡혔는지 모른다 — 시간 초과도 그 밖의 오류도 같다
+                    .doOnError(error -> !(error instanceof LockUnavailableException), error -> 결과를_모른다.set(true));
+        };
         return 백오프.잡는다(시도, 남은_한도)
+                .onErrorResume(error -> 결과를_모른다.get()
+                        ? 토큰으로_반납한다(token).then(Mono.error(error))
+                        : Mono.error(error))
                 .onErrorMap(error -> !(error instanceof LockUnavailableException),
                         error -> new LockUnavailableException("변경 락을 얻는 중 오류가 발생했습니다", error))
                 // 실패했다고 다 경합은 아니다. 위 onErrorMap 이 DynamoDB 장애도 LockUnavailableException 으로 옮기므로
                 // 예외 타입으로는 구별할 수 없고, 실제로 밀렸을 때만 켜지는 이 플래그로 봐야 한다.
                 .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), 경합했다.get()))
                 .doOnError(error -> lockObserver.acquireFinished(경과(시작), 경합했다.get()));
+    }
+
+    /**
+     * 획득을 포기하며 결과를 모르는 시도의 토큰으로 반납을 한 번 보낸다(설계 2026-10-27 §6). 반납은 토큰만 조건으로 보므로 만료 시각은 쓰지 않는다.
+     * 최선 노력이다 — 1초 안에 끝나지 않거나 실패하면 경고만 남기고 TTL 에 맡긴다. 원래 획득 실패(503)는 그대로다.
+     */
+    private Mono<Void> 토큰으로_반납한다(String token) {
+        return Mono.defer(() -> lock.release(new LockLease(token, Instant.EPOCH)))
+                .timeout(Duration.ofSeconds(1))
+                .onErrorResume(error -> {
+                    log.warn("결과를 모르는 획득 시도의 토큰으로 반납하지 못했다. 서버에서 잡혔다면 리스가 만료될 때까지 아무도 잡지 못한다", error);
+                    return Mono.empty();
+                });
     }
 
     /** 반납 실패는 요청을 실패시키지 않는다 — 일은 이미 끝났다. 리스가 만료될 때까지 아무도 잡지 못하므로 지표로 남긴다. */

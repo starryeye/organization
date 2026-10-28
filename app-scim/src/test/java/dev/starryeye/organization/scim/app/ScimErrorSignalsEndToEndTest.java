@@ -87,7 +87,7 @@ class ScimErrorSignalsEndToEndTest {
         // (락을 쥐기 전에 만든다 — 만드는 데 실패해도 리스가 새지 않는다)
         var 느긋한 = client.mutate().responseTimeout(Duration.ofSeconds(30)).build();
         // 재적재 용도로 락을 쥔다
-        var lease = lock.acquire(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
+        var lease = lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
 
         try {
             // when, then — 쓰기는 첫 시도에서 바로 503 이다. 첫 실패가 쥔 쪽의 용도(재적재)를 알려 주므로 쓰기 경합의 2초가 아니라 60초다

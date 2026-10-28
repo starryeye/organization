@@ -32,7 +32,7 @@ import static org.assertj.core.api.SoftAssertions.assertSoftly;
 /**
  * 서버 안 줄과 백오프를 붙인 결선(설계 2026-10-07 §3). 줄·백오프 각각의 규칙은 {@link LocalWriteQueueTest}·{@link AcquireBackoffTest} 가 본다 —
  * 여기서는 차례가 반납 뒤에(실패해도, 획득이 동기로 던져도) 결과를 내기 전에 넘어가는지, 줄에서 한도를 넘기면 DynamoDB 를 부르지 않고 503 인지,
- * 한도를 줄에 선 순간부터 재는지, 재시도가 같은 Mono 를 다시 구독하는지 본다.
+ * 한도를 줄에 선 순간부터 재는지, 재시도가 같은 토큰인지 본다.
  */
 class IncrementalSyncLocalQueueTest {
 
@@ -62,18 +62,16 @@ class IncrementalSyncLocalQueueTest {
     }
 
     /**
-     * acquire 를 부른 수(Mono 를 만든 수 — 토큰이 정해지는 때)와 구독한 수(DynamoDB 에 보낸 수)를 따로 센다. {@link #막히면_반납할} 에 리스를
-     * 두면 시도가 처음 막힌 직후 그 리스를 반납한다 — 남이 놓는 순간을 재시도 대기와 상관없이 첫 시도와 둘째 시도 사이에 둔다.
+     * 구독한 수(DynamoDB 에 보낸 수)를 센다. {@link #막히면_반납할} 에 리스를 두면 시도가 처음 막힌 직후 그 리스를 반납한다 — 남이 놓는 순간을
+     * 재시도 대기와 상관없이 첫 시도와 둘째 시도 사이에 둔다.
      */
     private static final class 세는_락 extends FakeMutationLock {
-        final AtomicInteger 만든_수 = new AtomicInteger();
         final AtomicInteger 보낸_수 = new AtomicInteger();
         final AtomicReference<LockLease> 막히면_반납할 = new AtomicReference<>();
 
         @Override
-        public Mono<LockLease> acquire(LockPurpose purpose) {
-            만든_수.incrementAndGet();
-            Mono<LockLease> 실제 = super.acquire(purpose);
+        public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
+            Mono<LockLease> 실제 = super.acquire(purpose, token, attemptTimeout);
             return Mono.defer(() -> {
                 보낸_수.incrementAndGet();
                 return 실제.doOnError(막힘 -> {
@@ -91,8 +89,8 @@ class IncrementalSyncLocalQueueTest {
         private final AtomicInteger 보낸_수 = new AtomicInteger();
 
         @Override
-        public Mono<LockLease> acquire(LockPurpose purpose) {
-            Mono<LockLease> 실제 = super.acquire(purpose);
+        public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
+            Mono<LockLease> 실제 = super.acquire(purpose, token, attemptTimeout);
             return Mono.defer(() -> 보낸_수.incrementAndGet() == 1
                     ? 실제
                     : Mono.error(LockUnavailableException.잡혀_있다(LockPurpose.WRITE)));
@@ -104,11 +102,11 @@ class IncrementalSyncLocalQueueTest {
         private final AtomicBoolean 던졌다 = new AtomicBoolean();
 
         @Override
-        public Mono<LockLease> acquire(LockPurpose purpose) {
+        public Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout) {
             if (던졌다.compareAndSet(false, true)) {
                 throw new IllegalStateException("획득이 동기로 던졌다(테스트)");
             }
-            return super.acquire(purpose);
+            return super.acquire(purpose, token, attemptTimeout);
         }
     }
 
@@ -228,13 +226,13 @@ class IncrementalSyncLocalQueueTest {
     }
 
     @Test
-    @DisplayName("재시도는 acquire 가 만든 같은 Mono 를 다시 구독한다 — 실제 락에서는 같은 토큰이다(점검 S14)")
-    void 재시도는_같은_Mono_다() {
+    @DisplayName("재시도는 줄 서기 한 번에 만든 같은 토큰으로 다시 보낸다 — 응답만 잃은 획득이 자기 락에 막히지 않는다(점검 S14, 설계 2026-10-27 §6)")
+    void 재시도는_같은_토큰이다() {
         // given — 다른 SCIM 쓰기가 쥐고 있다가 첫 시도가 막힌 직후 반납한다. 구독한 뒤 테스트 본문에서 반납하면 안 된다 — full jitter 의
         // 첫 대기는 0ms 일 수 있고(난수 < 0.1) 가상 시간 스케줄러는 0ms 예약을 그 자리에서 돌려, 반납 전에 둘째 시도가 나가 또 막힌다
         VirtualTimeScheduler 시간 = VirtualTimeScheduler.getOrSet();
-        LockLease 남의_리스 = lock.acquire(MutationLock.LockPurpose.WRITE).block();
-        lock.만든_수.set(0);
+        LockLease 남의_리스 = lock.acquireOnce(MutationLock.LockPurpose.WRITE).block();
+        lock.시도한_토큰.clear();
         lock.보낸_수.set(0);
         lock.막히면_반납할.set(남의_리스);
         AtomicReference<IncrementalSyncResult> 결과 = new AtomicReference<>();
@@ -245,8 +243,8 @@ class IncrementalSyncLocalQueueTest {
 
         // then
         assertThat(결과.get()).isNotNull();
-        assertThat(lock.만든_수).as("acquire 는 한 번 불렀다 — 토큰은 그때 정해진다").hasValue(1);
-        assertThat(lock.보낸_수).as("처음 한 번 + 다시 구독 한 번").hasValue(2);
+        assertThat(lock.보낸_수).as("처음 한 번 + 다시 시도 한 번").hasValue(2);
+        assertThat(lock.시도한_토큰).as("두 시도가 같은 토큰이다").hasSize(2).containsOnly(lock.시도한_토큰.get(0));
     }
 
     @Test

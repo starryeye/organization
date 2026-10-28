@@ -142,7 +142,7 @@ public class SyncJobs {
                                         Consumer<SyncRun> onFinished) {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
-            return lock.acquire(purpose)
+            return lock.acquireOnce(purpose)
                     .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
                     .flatMap(lease -> 띄운다(source, trigger, kind, work,

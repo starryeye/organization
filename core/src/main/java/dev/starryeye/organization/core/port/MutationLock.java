@@ -2,6 +2,9 @@ package dev.starryeye.organization.core.port;
 
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
+import java.util.UUID;
+
 /**
  * 인스턴스 전체에서 한 번에 하나만 하게 하는 전역 리스 락 (설계 §4, 2026-09-30 §3).
  *
@@ -17,10 +20,20 @@ import reactor.core.publisher.Mono;
 public interface MutationLock {
 
     /**
-     * 못 잡으면 {@link dev.starryeye.organization.core.usecase.LockUnavailableException}. 다른 쪽이 쥐고 있으면
-     * {@code LockUnavailableException.잡혀_있다(쥔 용도)} 로 실패한다 — 쥔 용도가 기다릴 시간(재적재·동기화 60초, 쓰기 2초)을 정한다.
+     * {@code token} 으로 잡는다. 다른 쪽이 쥐고 있으면 {@code LockUnavailableException.잡혀_있다(쥔 용도)} 로 실패한다 — 쥔 용도가 기다릴 시간
+     * (재적재·동기화 60초, 쓰기 2초)을 정한다.
+     *
+     * <p>{@code attemptTimeout} 이 null 이면 클라이언트 전체 한도만 받는다. 있으면 이 시도 하나를 그 안에 끊고, 끊기면
+     * {@link dev.starryeye.organization.core.usecase.LockAttemptTimeoutException} 이다 — 서버에서 성공했을 수 있어 결과를 모른다.
+     * 같은 토큰의 다시 시도는 이미 성공한 획득을 그대로 다시 얻는다(설계 2026-10-27 §6, 점검 S14). 그래서 끊긴 시도는 같은 토큰으로 다시 시도하고,
+     * 포기할 때는 그 토큰으로 반납한다({@link #release} 는 토큰만 본다).
      */
-    Mono<LockLease> acquire(LockPurpose purpose);
+    Mono<LockLease> acquire(LockPurpose purpose, String token, Duration attemptTimeout);
+
+    /** 한 번만 시도하는 쪽(관리 API full·rebuild, 동기화) — 토큰을 새로 만들고 한도는 없다(클라이언트 전체 한도만 받는다). */
+    default Mono<LockLease> acquireOnce(LockPurpose purpose) {
+        return acquire(purpose, UUID.randomUUID().toString(), null);
+    }
 
     /** 내 토큰일 때만 푼다. 아니면 경고만 남기고 조용히 끝낸다 — 일은 이미 끝났다. */
     Mono<Void> release(LockLease lease);
