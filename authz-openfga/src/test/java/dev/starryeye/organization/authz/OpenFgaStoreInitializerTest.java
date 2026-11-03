@@ -1,6 +1,7 @@
 package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.model.Store;
+import dev.openfga.sdk.errors.FgaApiAuthenticationError;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,7 @@ class OpenFgaStoreInitializerTest extends OpenFgaTestSupport {
         // given — resolveStore() 를 아직 호출하지 않은 새 bootstrapper
         OpenFgaProperties freshProperties = new OpenFgaProperties();
         freshProperties.setApiUrl(properties.getApiUrl());
+        freshProperties.setApiToken(properties.getApiToken());
         freshProperties.setStoreName("init-" + UUID.randomUUID());
         freshProperties.setCreateStore(true);
         freshProperties.setWriteBatchSize(properties.getWriteBatchSize());
@@ -76,6 +78,21 @@ class OpenFgaStoreInitializerTest extends OpenFgaTestSupport {
 
         // when, then — 경고만 남기고 넘어가는 오류가 아니다. 설정 오류라 사람이 고쳐야 한다
         assertThatThrownBy(초기화::afterPropertiesSet).isInstanceOf(StoreNotFoundException.class);
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
+    }
+
+    @Test
+    @Timeout(10)
+    @DisplayName("기동 때 OpenFGA 가 키를 거절하면(401) 기동을 멈춘다 — 키 실수는 기다려서 낫는 일시 장애가 아니다")
+    void 기동_때_401_이면_멈춘다() {
+        // given — 이 OpenFGA 는 test-openfga-key 만 받는다. 다른 키를 단 부트스트래퍼
+        OpenFgaProperties 속성 = 새_속성("init-401-");
+        속성.setApiToken("wrong-openfga-key");
+        OpenFgaStoreInitializer 초기화 = new OpenFgaStoreInitializer(new StoreBootstrapper(속성));
+
+        // when, then — 닿지 않을 때처럼 경고만 남기고 넘어가지 않는다. 설정 실수라 사람이 고쳐야 한다
+        assertThatThrownBy(초기화::afterPropertiesSet)
+                .satisfies(실패 -> assertThat(원인_사슬(실패)).anyMatch(FgaApiAuthenticationError.class::isInstance));
         assertThat(countStoresNamed(속성.getStoreName())).isZero();
     }
 

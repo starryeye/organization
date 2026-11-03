@@ -1,5 +1,6 @@
 package dev.starryeye.organization.authz;
 
+import dev.openfga.sdk.errors.FgaApiAuthenticationError;
 import dev.openfga.sdk.errors.FgaApiNotFoundError;
 import dev.openfga.sdk.errors.FgaApiValidationError;
 import reactor.util.retry.Retry;
@@ -27,6 +28,13 @@ final class OpenFgaErrors {
      */
     static boolean 없는_store_인가(Throwable error) {
         return 원인_사슬에_있는가(error, FgaApiNotFoundError.class);
+    }
+
+    /**
+     * OpenFGA 가 키를 거절했다(401 — 키가 틀렸거나, 서버가 키를 요구하는데 싣지 않았다). 일시 오류가 아니라 설정 실수다. 원인 사슬을 따라가며 본다.
+     */
+    static boolean 인증_거절인가(Throwable error) {
+        return 원인_사슬에_있는가(error, FgaApiAuthenticationError.class);
     }
 
     private static boolean 원인_사슬에_있는가(Throwable error, Class<? extends Throwable> 종류) {

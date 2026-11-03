@@ -36,6 +36,7 @@ class OpenFgaCheckCacheTest {
     void 캐시를_켠_OpenFGA를_준비한다() {
         OpenFgaProperties properties = new OpenFgaProperties();
         properties.setApiUrl("http://" + CACHED_OPENFGA.getHost() + ":" + CACHED_OPENFGA.getMappedPort(8080));
+        properties.setApiToken(Containers.OPENFGA_KEY);
         properties.setStoreName("cache-test-" + UUID.randomUUID());
         properties.setCreateStore(true);
         properties.setWriteBatchSize(100);

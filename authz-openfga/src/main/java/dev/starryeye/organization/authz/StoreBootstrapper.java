@@ -4,8 +4,10 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.openfga.sdk.api.client.OpenFgaClient;
+import dev.openfga.sdk.api.configuration.ApiToken;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
+import dev.openfga.sdk.api.configuration.Credentials;
 import dev.openfga.sdk.api.model.AuthorizationModel;
 import dev.openfga.sdk.api.model.CreateStoreRequest;
 import dev.openfga.sdk.api.model.RelationReference;
@@ -104,12 +106,16 @@ public class StoreBootstrapper {
      */
     private final AtomicReference<Mono<String>> resolutionRef = new AtomicReference<>();
 
-    /** @throws IllegalStateException {@code openfga.store-name} 이 비어 있을 때 — 이름 기본값이 없다 */
+    /**
+     * @throws IllegalStateException {@code openfga.store-name} 이 비어 있을 때 — 이름 기본값이 없다. 키·TLS 를 요구하는데 어긋날 때도 그렇다
+     *                               ({@link OpenFgaSettingsCheck})
+     */
     public StoreBootstrapper(OpenFgaProperties properties) {
         String name = properties.getStoreName();
         if (name == null || name.isBlank()) {
             throw new IllegalStateException("openfga.store-name 이 비어 있다 — 설정에 store 이름을 적는다");
         }
+        OpenFgaSettingsCheck.검사한다(properties);
         this.properties = properties;
     }
 
@@ -428,9 +434,17 @@ public class StoreBootstrapper {
         return storelessClientRef.compareAndSet(null, created) ? created : storelessClientRef.get();
     }
 
+    /**
+     * 모든 클라이언트가 여기서 만들어진다 — 사전 공유 키(있으면)를 한 곳에서 싣는다(설계 2026-10-28 §7). 키가 없으면 익명으로 부른다(키 없는 로컬
+     * OpenFGA). 키가 틀리거나 서버가 키를 요구하는데 없으면 OpenFGA 가 401 을 돌려준다.
+     */
     private OpenFgaClient newClient(String storeId) {
         try {
             ClientConfiguration configuration = new ClientConfiguration().apiUrl(properties.getApiUrl());
+            String apiToken = properties.getApiToken();
+            if (apiToken != null && !apiToken.isBlank()) {
+                configuration.credentials(new Credentials(new ApiToken(apiToken)));
+            }
             if (storeId != null) {
                 configuration.storeId(storeId);
             }

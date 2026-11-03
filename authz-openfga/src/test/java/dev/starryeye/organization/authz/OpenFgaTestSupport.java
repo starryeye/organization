@@ -2,7 +2,9 @@ package dev.starryeye.organization.authz;
 
 import dev.openfga.sdk.api.client.OpenFgaClient;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
+import dev.openfga.sdk.api.configuration.ApiToken;
 import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
+import dev.openfga.sdk.api.configuration.Credentials;
 import dev.openfga.sdk.api.model.CreateStoreRequest;
 import dev.starryeye.organization.core.fixture.Containers;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,6 +12,8 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -29,6 +33,7 @@ public abstract class OpenFgaTestSupport {
     void OpenFGA를_준비한다() {
         properties = new OpenFgaProperties();
         properties.setApiUrl("http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
+        properties.setApiToken(Containers.OPENFGA_KEY);
         properties.setStoreName("test-" + UUID.randomUUID());
         properties.setCreateStore(true);
         properties.setWriteBatchSize(100);
@@ -45,6 +50,7 @@ public abstract class OpenFgaTestSupport {
     protected OpenFgaProperties 새_속성(String 접두사) {
         OpenFgaProperties fresh = new OpenFgaProperties();
         fresh.setApiUrl(properties.getApiUrl());
+        fresh.setApiToken(properties.getApiToken());
         fresh.setStoreName(접두사 + UUID.randomUUID());
         fresh.setCreateStore(true);
         fresh.setWriteBatchSize(properties.getWriteBatchSize());
@@ -64,7 +70,7 @@ public abstract class OpenFgaTestSupport {
     /** store 에 쓰인 인가 모델의 수. 부트스트래퍼를 거치지 않고 raw 클라이언트로 센다 — 모델은 한 번 쓰면 지워지지 않는다. */
     protected int 모델_수(String storeId) {
         try {
-            OpenFgaClient client = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(storeId));
+            OpenFgaClient client = 키를_단_클라이언트(properties.getApiUrl(), storeId);
             return client.readAuthorizationModels().get().getAuthorizationModels().size();
         } catch (Exception e) {
             throw new IllegalStateException("테스트용 모델 목록 조회 실패", e);
@@ -77,7 +83,7 @@ public abstract class OpenFgaTestSupport {
      */
     protected long countStoresNamed(String name) {
         try {
-            OpenFgaClient client = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()));
+            OpenFgaClient client = 키를_단_클라이언트(properties.getApiUrl(), null);
             long count = 0;
             String continuationToken = null;
             do {
@@ -93,5 +99,36 @@ public abstract class OpenFgaTestSupport {
         } catch (Exception e) {
             throw new IllegalStateException("store 목록 조회 실패", e);
         }
+    }
+
+    /**
+     * 부트스트래퍼를 거치지 않는 raw 클라이언트의 설정. 시험 OpenFGA 가 사전 공유 키를 요구하므로 키를 단다 — 키 없는 raw 클라이언트는 401 이다.
+     * {@code storeId} 가 {@code null} 이면 store 에 묶지 않는다.
+     */
+    protected static ClientConfiguration 키를_단_설정(String apiUrl, String storeId) {
+        ClientConfiguration configuration = new ClientConfiguration()
+                .apiUrl(apiUrl)
+                .credentials(new Credentials(new ApiToken(Containers.OPENFGA_KEY)));
+        if (storeId != null) {
+            configuration.storeId(storeId);
+        }
+        return configuration;
+    }
+
+    protected static OpenFgaClient 키를_단_클라이언트(String apiUrl, String storeId) {
+        try {
+            return new OpenFgaClient(키를_단_설정(apiUrl, storeId));
+        } catch (Exception e) {
+            throw new IllegalStateException("테스트용 OpenFGA 클라이언트 생성 실패", e);
+        }
+    }
+
+    /** 오류와 그 원인들. 리액터·SDK 가 감싼 겹을 벗겨 가며 본다. */
+    protected static List<Throwable> 원인_사슬(Throwable 오류) {
+        List<Throwable> 사슬 = new ArrayList<>();
+        for (Throwable 원인 = 오류; 원인 != null && !사슬.contains(원인); 원인 = 원인.getCause()) {
+            사슬.add(원인);
+        }
+        return 사슬;
     }
 }
