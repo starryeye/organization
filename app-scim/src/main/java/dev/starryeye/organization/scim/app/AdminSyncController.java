@@ -6,10 +6,13 @@ import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.ScimRebuildMode;
 import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
+import dev.starryeye.organization.security.Callers;
+import dev.starryeye.organization.security.Scopes;
 import dev.starryeye.organization.storage.DynamoDbProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -45,13 +48,15 @@ public class AdminSyncController {
      * 재적재를 건다. 락을 잡았으면 곧바로 202 와 실행 기록(RUNNING)을 준다 — 재적재는 요청과 떼어 돌고(설계 2026-09-29 §4),
      * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다.
      *
-     * @param mode    {@code tuples}(기본) 또는 {@code wipe}
+     * @param mode    {@code tuples}(기본) 또는 {@code wipe}. {@code wipe} 는 {@code admin.sync} 에 더해 {@code admin.destructive} 가 있어야 한다
      * @param confirm {@code wipe} 일 때만 필요하다. DynamoDB 테이블명을 그대로 적어야 한다
+     * @param caller  토큰의 호출자. 보안 필터가 {@code admin.sync} 를 본 뒤에 오며, {@code wipe} 의 추가 범위는 여기서 본다
      */
     @PostMapping("/rebuild")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Mono<SyncRunResponse> rebuild(@RequestParam(defaultValue = "tuples") String mode,
-                                         @RequestParam(required = false) String confirm) {
+                                         @RequestParam(required = false) String confirm,
+                                         Authentication caller) {
         ScimRebuildMode rebuildMode;
         try {
             rebuildMode = ScimRebuildMode.from(mode);
@@ -60,6 +65,9 @@ public class AdminSyncController {
         }
 
         if (rebuildMode == ScimRebuildMode.WIPE) {
+            // 조직도의 유일한 사본을 지우는 요청이다(설계 2026-10-28 §4.3, A4) — 확인값을 보기도, 재적재를 열기도 전에 범위부터 본다.
+            // 문자열 mode 가 아니라 해석한 모드로 판정하므로 WIPE·Wipe 도 같은 길이다
+            Callers.요구한다(caller, Scopes.ADMIN_DESTRUCTIVE, "mode=wipe");
             requireConfirmation(confirm);
             log.warn("SCIM 조직도 전체 초기화 요청. 실행 뒤 IdP 재프로비저닝이 필요하다");
         } else {

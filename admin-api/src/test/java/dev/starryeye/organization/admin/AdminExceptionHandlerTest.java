@@ -8,6 +8,7 @@ import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -140,6 +141,37 @@ class AdminExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("상태 예외가 머리를 들고 있으면 응답에 그대로 옮긴다 — 범위 부족 403 의 WWW-Authenticate 가 그 예")
+    void 상태_예외의_헤더를_옮긴다() {
+        // when, then
+        client.get().uri("/with-header").exchange()
+                .expectStatus().isForbidden()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(403)
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+    }
+
+    @Test
+    @DisplayName("머리를 든 상태 예외를 다른 예외가 감싸도 매치된 상태 예외의 머리를 옮긴다")
+    void 감싼_상태_예외의_헤더도_옮긴다() {
+        // when, then
+        client.get().uri("/wrapped-with-header").exchange()
+                .expectStatus().isForbidden()
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"");
+    }
+
+    @Test
+    @DisplayName("머리가 없는 상태 예외의 응답에는 덧붙는 머리가 없다")
+    void 머리가_없는_상태_예외는_머리를_더하지_않는다() {
+        // when, then
+        client.get().uri("/bare-404").exchange()
+                .expectStatus().isNotFound()
+                .expectHeader().doesNotExist(HttpHeaders.WWW_AUTHENTICATE);
+    }
+
+    @Test
     @DisplayName("그 밖의 예외는 500 이고 예외 문구를 싣지 않는다 — 인증 없는 엔드포인트라 내부 사정이 나가면 안 된다")
     void 그_밖은_500_이고_예외_문구를_싣지_않는다() {
         // when
@@ -202,9 +234,34 @@ class AdminExceptionHandlerTest {
             return Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND));
         }
 
+        @GetMapping("/with-header")
+        Mono<String> 머리를_든_상태_예외() {
+            return Mono.error(범위_부족_403());
+        }
+
+        @GetMapping("/wrapped-with-header")
+        Mono<String> 머리를_든_상태_예외를_감쌌다() {
+            return Mono.error(new IllegalStateException("감쌈", 범위_부족_403()));
+        }
+
         @GetMapping("/bug")
         Mono<String> 버그() {
             return Mono.error(new NullPointerException("비밀"));
+        }
+
+        /**
+         * 컨트롤러가 범위 부족으로 던지는 모양 그대로 — 사유와 {@code WWW-Authenticate} 를 든 403. 실제 예외는 web-security 에 있고 이 모듈은 그것에 기대지
+         * 않으므로, 머리를 {@code getHeaders()} 로 내놓는 상태 예외를 같은 모양으로 만든다.
+         */
+        private static ResponseStatusException 범위_부족_403() {
+            return new ResponseStatusException(HttpStatus.FORBIDDEN, "force=true은 admin.destructive 범위가 필요하다") {
+                @Override
+                public HttpHeaders getHeaders() {
+                    HttpHeaders 머리 = new HttpHeaders();
+                    머리.set(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"");
+                    return 머리;
+                }
+            };
         }
 
         /** 두 앱의 AdminSyncController 가 락 경합을 감싸는 모양 그대로 */

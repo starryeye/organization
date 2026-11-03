@@ -10,14 +10,22 @@ import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.security.Scopes;
 import dev.starryeye.organization.storage.DynamoDbTemporaryFailures;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.JwtMutator;
+import org.springframework.security.web.server.context.SecurityContextServerWebExchangeWebFilter;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -25,12 +33,15 @@ import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
 import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.mockJwt;
+import static org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.springSecurity;
 
 class AdminSyncControllerTest {
 
@@ -50,7 +61,23 @@ class AdminSyncControllerTest {
                         new AdminSyncController(fullSync, rebuild, runs, new SyncMetrics(new SimpleMeterRegistry())))
                 .controllerAdvice(new AdminExceptionHandler(
                         new TemporaryFailureClassifier(List.of(new DynamoDbTemporaryFailures()))))
+                // 운영에서는 보안 체인의 이 필터가 보안 컨텍스트의 인증을 exchange 의 principal 로 내놓아 컨트롤러의 Authentication 인자가 채워진다.
+                // 슬라이스 시험에는 체인이 없고 mockJwt 는 Reactor Context 에만 싣으므로, 이 필터로 같은 길을 잇는다
+                .webFilter(new SecurityContextServerWebExchangeWebFilter())
+                // mutateWith(mockJwt()) 가 싣는 호출자를 받는 쪽 — 이것이 없으면 mutateWith 는 아무것도 하지 않는다
+                .apply(springSecurity())
                 .build();
+    }
+
+    /**
+     * 컨트롤러가 받는 호출자 — 슬라이스 시험은 보안 필터체인이 없으므로 운영과 같은 모양({@code JwtAuthenticationToken}, 권한 {@code SCOPE_<범위>})을
+     * 직접 싣는다. 컨트롤러는 이 값을 {@code Authentication} 인자로 받는다.
+     */
+    private static JwtMutator 호출자(String... 범위) {
+        List<GrantedAuthority> 권한 = Arrays.stream(범위)
+                .<GrantedAuthority>map(이름 -> new SimpleGrantedAuthority(Scopes.권한(이름)))
+                .toList();
+        return mockJwt().jwt(jwt -> jwt.subject("ops")).authorities(권한);
     }
 
     private static SyncRun 도는실행(SyncTrigger trigger) {
@@ -112,7 +139,8 @@ class AdminSyncControllerTest {
                 .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
 
         // when, then
-        client.post().uri("/admin/sync/full?force=true").exchange()
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/full?force=true").exchange()
                 .expectStatus().isAccepted()
                 .expectBody()
                 .jsonPath("$.trigger").isEqualTo("FORCED");
@@ -264,7 +292,8 @@ class AdminSyncControllerTest {
         Mockito.when(rebuild.start(eq(true), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
 
         // when, then
-        client.post().uri("/admin/sync/rebuild?force=true").exchange().expectStatus().isAccepted();
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/rebuild?force=true").exchange().expectStatus().isAccepted();
         Mockito.verify(rebuild).start(eq(true), any());
     }
 
@@ -276,5 +305,132 @@ class AdminSyncControllerTest {
                 .expectStatus().isBadRequest();
 
         Mockito.verifyNoInteractions(rebuild);
+    }
+
+    @Test
+    @DisplayName("force=true 는 admin.destructive 가 없으면 403 이고 회차를 열지 않는다 — admin.sync 만으로는 안 된다")
+    void force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다() {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/full?force=true").exchange()
+                .expectStatus().isForbidden()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(403)
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    @ParameterizedTest(name = "force={0}")
+    @ValueSource(strings = {"yes", "1", "on"})
+    @DisplayName("force=yes·1·on 도 스프링이 true 로 바꾸므로 같은 판정으로 막는다 — 쿼리 문자열을 따로 읽는 우회가 없다")
+    void force_yes_도_true_로_보고_막는다(String 값) {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/full?force=" + 값).exchange()
+                .expectStatus().isForbidden()
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    @Test
+    @DisplayName("admin.destructive 가 있으면 force=true 는 202 다")
+    void admin_destructive_가_있으면_force_는_202_다() {
+        // given
+        Mockito.when(fullSync.start(eq(SyncTrigger.FORCED), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/full?force=yes").exchange()
+                .expectStatus().isAccepted()
+                .expectBody()
+                .jsonPath("$.trigger").isEqualTo("FORCED");
+    }
+
+    @ParameterizedTest(name = "force={0}")
+    @ValueSource(strings = {"false", "no", "0"})
+    @DisplayName("force 가 꺼져 있으면 admin.sync 만으로 202 다 — MANUAL 로 건다")
+    void force_가_꺼져_있으면_admin_sync_만으로_202_다(String 값) {
+        // given
+        Mockito.when(fullSync.start(eq(SyncTrigger.MANUAL), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.MANUAL)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/full?force=" + 값).exchange()
+                .expectStatus().isAccepted()
+                .expectBody()
+                .jsonPath("$.trigger").isEqualTo("MANUAL");
+    }
+
+    @Test
+    @DisplayName("호출자가 없으면 force=true 는 403 이다 — 판정을 건너뛰지 않는다")
+    void 호출자가_없으면_force_는_403_이다() {
+        // when, then
+        client.post().uri("/admin/sync/full?force=true").exchange()
+                .expectStatus().isForbidden()
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    @Test
+    @DisplayName("재적재 force=true 도 admin.destructive 가 없으면 403 이고 재적재를 열지 않는다")
+    void 재적재_force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다() {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/rebuild?force=true").exchange()
+                .expectStatus().isForbidden()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(403)
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+        Mockito.verifyNoInteractions(rebuild);
+    }
+
+    @ParameterizedTest(name = "force={0}")
+    @ValueSource(strings = {"yes", "1", "on"})
+    @DisplayName("재적재도 force=yes·1·on 을 true 로 보고 막는다")
+    void 재적재_force_yes_도_true_로_보고_막는다(String 값) {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/rebuild?force=" + 값).exchange()
+                .expectStatus().isForbidden()
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("force=true은 admin.destructive 범위가 필요하다");
+        Mockito.verifyNoInteractions(rebuild);
+    }
+
+    @Test
+    @DisplayName("재적재도 admin.destructive 가 있으면 force=true 는 202 다")
+    void 재적재_admin_destructive_가_있으면_force_는_202_다() {
+        // given
+        Mockito.when(rebuild.start(eq(true), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/rebuild?force=1").exchange()
+                .expectStatus().isAccepted()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("RUNNING");
+        Mockito.verify(rebuild).start(eq(true), any());
+    }
+
+    @Test
+    @DisplayName("재적재는 force 가 없으면 admin.sync 만으로 202 다")
+    void 재적재는_force_가_없으면_admin_sync_만으로_202_다() {
+        // given
+        Mockito.when(rebuild.start(eq(false), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/rebuild").exchange()
+                .expectStatus().isAccepted();
+        Mockito.verify(rebuild).start(eq(false), any());
     }
 }
