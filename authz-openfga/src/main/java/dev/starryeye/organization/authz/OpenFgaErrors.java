@@ -31,7 +31,8 @@ final class OpenFgaErrors {
     }
 
     /**
-     * OpenFGA 가 키를 거절했다(401 — 키가 틀렸거나, 서버가 키를 요구하는데 싣지 않았다). 일시 오류가 아니라 설정 실수다. 원인 사슬을 따라가며 본다.
+     * OpenFGA 가 키를 거절했다(401·403 — SDK 는 둘을 같은 {@code FgaApiAuthenticationError} 로 만든다. 키가 틀렸거나, 서버가 키를 요구하는데 싣지 않았다).
+     * 일시 오류가 아니라 설정 실수다 — 다시 보내도 같아 {@link #일시_오류만_다시} 도 다시 시도하지 않는다. 원인 사슬을 따라가며 본다.
      */
     static boolean 인증_거절인가(Throwable error) {
         return 원인_사슬에_있는가(error, FgaApiAuthenticationError.class);
@@ -57,7 +58,7 @@ final class OpenFgaErrors {
      */
     static Retry 일시_오류만_다시(int maxRetries) {
         return Retry.backoff(maxRetries, Duration.ofMillis(200))
-                .filter(error -> !거절인가(error))
+                .filter(error -> !거절인가(error) && !인증_거절인가(error))
                 .onRetryExhaustedThrow((spec, signal) -> signal.failure());
     }
 }

@@ -48,9 +48,10 @@ class OpenFgaStoreInitializerTest extends OpenFgaTestSupport {
     @Timeout(10)
     @DisplayName("OpenFGA 에 닿지 않아도 경고만 남기고 앱 시작을 막지 않는다")
     void 도달_불가능해도_시작을_막지_않는다() {
-        // given — 아무도 응답하지 않는 주소를 가리키는 bootstrapper
+        // given — 아무도 응답하지 않는 주소를 가리키는 bootstrapper. 운영 모양대로 키는 달려 있다(키가 있어도 닿지 않는 것은 경고만)
         OpenFgaProperties unreachableProperties = new OpenFgaProperties();
         unreachableProperties.setApiUrl("http://127.0.0.1:1");
+        unreachableProperties.setApiToken(properties.getApiToken());
         unreachableProperties.setStoreName("unreachable-" + UUID.randomUUID());
         unreachableProperties.setWriteBatchSize(100);
         unreachableProperties.setMaxRetries(1);

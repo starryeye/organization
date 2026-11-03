@@ -23,7 +23,7 @@ class OpenFgaSettingsCheckTest {
         var properties = new OpenFgaProperties();
         properties.setStoreName("organization");
         properties.setApiUrl("https://openfga.example.com");
-        properties.setApiToken("실제-키-값");
+        properties.setApiToken("real-key-value");
         return properties;
     }
 
@@ -56,6 +56,39 @@ class OpenFgaSettingsCheckTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(키_문구)
                 .message().doesNotContain("${OPENFGA_API_TOKEN}");
+    }
+
+    // 이름에 값을 싣지 않는다 — 시험 보고서에 키가(제어문자까지) 찍히지 않게
+    @ParameterizedTest(name = "[{index}] 눈에 보이는 ASCII 밖의 글자가 든 키")
+    @ValueSource(strings = {"s3cret-value\n", "s3cret-value\r\n", " s3cret-value", "s3cret value", "s3cret\tvalue",
+            "s3cret\u0000value", "비밀-키-값"})
+    @DisplayName("키에 눈에 보이는 ASCII 말고 다른 글자(줄바꿈·공백·제어문자·한글)가 있으면 멈추고, 오류 문구에 값을 싣지 않는다")
+    void 키에_눈에_보이는_ASCII_말고_다른_글자가_있으면_멈추고_값을_싣지_않는다(String 키) {
+        // given — 비밀 파일을 $(cat key) 로 읽으면 끝에 줄바꿈이 붙는다. JDK HTTP 클라이언트는 이런 헤더 값을 거절하며
+        // "invalid header value: \"Bearer <키>\"" 로 키를 오류 문구에 싣는다 — 요청이 나가기 전에 여기서 막는다
+        var 요구함 = 설정();
+        요구함.setRequireApiToken(true);
+        요구함.setApiToken(키);
+        var 요구하지_않음 = 설정();
+        요구하지_않음.setApiToken(키);
+
+        // when, then — 키를 요구하든 않든 키가 있으면 모양을 본다
+        for (var properties : new OpenFgaProperties[]{요구함, 요구하지_않음}) {
+            assertThatThrownBy(() -> OpenFgaSettingsCheck.검사한다(properties))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("openfga.api-token 에 공백·제어문자·ASCII 밖 글자가 있다 — 키 끝에 줄바꿈이 붙지 않았는지 본다");
+        }
+    }
+
+    @Test
+    @DisplayName("빈칸뿐인 키는 익명이라 모양을 보지 않는다 — 키를 요구하지 않는 로컬")
+    void 빈칸뿐인_키는_요구하지_않으면_통과한다() {
+        // given — 클라이언트에는 키로 실리지 않는다(StoreBootstrapper.newClient)
+        var properties = 설정();
+        properties.setApiToken("   ");
+
+        // when, then
+        assertThatCode(() -> OpenFgaSettingsCheck.검사한다(properties)).doesNotThrowAnyException();
     }
 
     @Test

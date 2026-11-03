@@ -1,5 +1,6 @@
 package dev.starryeye.organization.authz;
 
+import dev.openfga.sdk.errors.FgaApiAuthenticationError;
 import dev.openfga.sdk.errors.FgaApiValidationError;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,11 @@ class OpenFgaErrorsTest {
     private static FgaApiValidationError 거절() {
         return new FgaApiValidationError("type 'nosuchtype' not found", 400,
                 HttpHeaders.of(Map.of(), (name, value) -> true), "{\"code\":\"validation_error\"}");
+    }
+
+    private static FgaApiAuthenticationError 인증_거절(int 상태) {
+        return new FgaApiAuthenticationError("unauthenticated", 상태,
+                HttpHeaders.of(Map.of(), (name, value) -> true), "{\"code\":\"unauthenticated\"}");
     }
 
     @Test
@@ -46,6 +52,33 @@ class OpenFgaErrorsTest {
         // reactor.core.Exceptions$ReactiveException 으로 감싼다. 원인을 본다
         assertThatThrownBy(() -> 보내기.retryWhen(OpenFgaErrors.일시_오류만_다시(2)).block())
                 .hasCauseInstanceOf(FgaApiValidationError.class);
+        assertThat(시도).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("인증 거절(401·403)은 감싸져 와도 알아본다 — 그 밖은 인증 거절이 아니다")
+    void 인증_거절을_알아본다() {
+        // when, then — SDK 는 401 과 403 을 같은 FgaApiAuthenticationError 로 만든다
+        assertThat(OpenFgaErrors.인증_거절인가(인증_거절(401))).isTrue();
+        assertThat(OpenFgaErrors.인증_거절인가(인증_거절(403))).isTrue();
+        assertThat(OpenFgaErrors.인증_거절인가(new CompletionException(new IllegalStateException("감쌈", 인증_거절(401))))).isTrue();
+        assertThat(OpenFgaErrors.인증_거절인가(거절())).isFalse();
+        assertThat(OpenFgaErrors.인증_거절인가(new IllegalStateException("연결 거부"))).isFalse();
+    }
+
+    @Test
+    @DisplayName("인증 거절은 다시 시도하지 않는다 — 틀린 키는 다시 보내도 같다")
+    void 인증_거절은_다시_시도하지_않는다() {
+        // given
+        AtomicInteger 시도 = new AtomicInteger();
+        Mono<Void> 보내기 = Mono.defer(() -> {
+            시도.incrementAndGet();
+            return Mono.error(인증_거절(401));
+        });
+
+        // when, then — 감싸진 모양은 거절 시험과 같다
+        assertThatThrownBy(() -> 보내기.retryWhen(OpenFgaErrors.일시_오류만_다시(2)).block())
+                .hasCauseInstanceOf(FgaApiAuthenticationError.class);
         assertThat(시도).hasValue(1);
     }
 

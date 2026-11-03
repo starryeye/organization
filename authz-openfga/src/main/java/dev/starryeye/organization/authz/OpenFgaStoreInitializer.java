@@ -26,10 +26,11 @@ import reactor.core.publisher.Mono;
  * 그래서 여기서는 실패를 경고 로그로만 남기고 앱 시작을 막지 않는다 — 그 사이
  * {@link OpenFgaHealthIndicator} 는 DOWN 을 보고해 운영자가 알 수 있게 한다.
  *
- * <p><b>단 둘, {@link StoreNotFoundException} 과 키 거절(401)은 막는다</b>(설계 2026-10-27 §4, 2026-10-28 §7). 앞의 것은 OpenFGA 에 닿아
+ * <p><b>단 둘, {@link StoreNotFoundException} 과 키 거절(401/403)은 막는다</b>(설계 2026-10-27 §4, 2026-10-28 §7). 앞의 것은 OpenFGA 에 닿아
  * 목록을 읽었는데 그 이름의 store 가 없고 {@code openfga.create-store} 도 꺼져 있다는 뜻이다 — 이름 오타이거나 처음 설치다. 뒤의 것은 OpenFGA 에
- * 닿았는데 {@code openfga.api-token} 을 받아 주지 않는다는 뜻이다(원인 사슬에 {@code FgaApiAuthenticationError}) — 키 실수다. 둘 다 기다려서
- * 낫는 일시 장애가 아니라 사람이 설정을 고쳐야 한다. 닿지 못해서 확인하지 못한 경우는 위처럼 경고만 남기고 뜬다.
+ * 닿았는데 {@code openfga.api-token} 을 받아 주지 않는다는 뜻이다(원인 사슬에 {@code FgaApiAuthenticationError} — SDK 가 401 과 403 을 같은 클래스로
+ * 만든다) — 키 실수다. 둘 다 기다려서 낫는 일시 장애가 아니라 사람이 설정을 고쳐야 한다. 닿지 못해서 확인하지 못한 경우는 위처럼 경고만
+ * 남기고 뜬다.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -41,8 +42,8 @@ public class OpenFgaStoreInitializer implements InitializingBean {
     public void afterPropertiesSet() {
         bootstrapper.resolveStore()
                 .doOnError(OpenFgaErrors::인증_거절인가, error -> log.error(
-                        "OpenFGA 가 키를 거절했다(401) — openfga.api-token 이 서버의 키와 맞는지 본다"))
-                // store 가 없다는 설정 오류와 키 거절(401)만 그대로 던져 기동을 멈춘다. 그 밖의 오류(닿지 않음 등)는 경고만 남기고 넘어간다
+                        "OpenFGA 가 키를 거절했다(401/403) — openfga.api-token 이 서버의 키와 맞는지 본다"))
+                // store 가 없다는 설정 오류와 키 거절(401/403)만 그대로 던져 기동을 멈춘다. 그 밖의 오류(닿지 않음 등)는 경고만 남기고 넘어간다
                 .onErrorResume(error -> !(error instanceof StoreNotFoundException) && !OpenFgaErrors.인증_거절인가(error), error -> {
                     log.warn("시작 시점에 OpenFGA store 를 준비하지 못했다. "
                             + "앱은 계속 기동하며, 헬스체크가 DOWN 을 보고하는 동안 이후 호출이 재시도한다", error);
