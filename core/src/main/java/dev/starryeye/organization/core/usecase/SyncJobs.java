@@ -54,7 +54,8 @@ import java.util.function.UnaryOperator;
  *   <li>일은 서버 종료·기한({@code timeout})·리스 상실과 경주한다. 먼저 온 쪽이 이기고 진 쪽은 취소된다. 종료가 이미 시작됐으면 일을
  *       시작하지도 않는다.</li>
  *   <li>어떻게 끝나든 <b>먼저 반납하고 그다음 기록한다.</b> 기록에서 "끝남"을 본 운영자가 곧바로 다시 걸면 받아져야 한다.</li>
- *   <li>요청의 Reactor Context 를 이어받는다 — 작업 로그가 요청과 같은 traceId 로 묶인다.</li>
+ *   <li>요청의 Reactor Context 를 이어받는다 — 작업 로그가 요청과 같은 traceId 로 묶인다. 행위자({@link Actor#KEY})도 이 Context 에서 한 번 읽어 회차의
+ *       요청자와 이력의 원인에 남긴다(설계 2026-10-28 인증 §5.2).</li>
  *   <li>이력을 남기는 회차는 변경 모음을 연다. 어떻게 끝나든 락 안의 일이 끝난 때를 시각으로 잡고, 반납하고, 결론을 정한 뒤 모음을 결론과 함께 남기고 기록한다(설계 2026-10-15 §3).</li>
  * </ol>
  *
@@ -197,10 +198,11 @@ public class SyncJobs {
             Sinks.Empty<Void> 끝남 = Sinks.empty();
             Mono<Void> 끝남신호 = 끝남.asMono();
             도는_작업.add(끝남신호);
+            // 행위자는 요청 Context 에서 한 번 읽는다 — 회차의 요청자와 이력의 원인이 같은 값이다(설계 2026-10-28 인증 §5.2)
+            String 행위자 = Actor.from(context);
 
             // 여는 호출이 곧바로 던지거나 빈 응답이어도 반납하고 오류로 알린다 — 아니면 요청이 매달리고 락·가드가 풀리지 않는다
-            // TODO(인증 과제 2): 임시 Actor.UNKNOWN — 요청 Context 의 Actor.KEY 에서 읽는다
-            Mono.defer(() -> runs.start(source, trigger, Actor.UNKNOWN))
+            Mono.defer(() -> runs.start(source, trigger, 행위자))
                     .switchIfEmpty(Mono.error(() -> new IllegalStateException("실행 기록을 열지 못했다 — 빈 응답")))
                     .onErrorResume(error -> {
                         log.error("실행 기록을 열지 못했다: source={} trigger={}", source, trigger, error);
@@ -211,7 +213,7 @@ public class SyncJobs {
                     .flatMap(run -> {
                         log.info("[{}] 작업 시작: source={} trigger={}", run.runId(), source, trigger);
                         열림.tryEmitValue(run);
-                        return 끝까지_돌린다(run, kind, work, 먼저, 지키기, release);
+                        return 끝까지_돌린다(run, 행위자, kind, work, 먼저, 지키기, release);
                     })
                     .doOnNext(onFinished)
                     .doFinally(signal -> {
@@ -252,7 +254,7 @@ public class SyncJobs {
      * 종료 신호를 <b>먼저</b> 구독한다. 종료가 이미 시작됐으면 그 자리에서 이겨 {@code work} 를 구독하지도 않는다. 종료·기한은
      * 락을 쥔 구간({@code 지키기} 가 감싼 부분)만 경주 상대로 삼는다 — 반납 뒤 할 일은 그 경주 밖에서 돈다(설계 2026-10-02 §5).
      */
-    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, AuditKind kind,
+    private Mono<SyncRun> 끝까지_돌린다(SyncRun run, String 행위자, AuditKind kind,
                                     BiFunction<SyncRun, RunAudit, Mono<Mono<SyncOutcome>>> work,
                                     Function<SyncRun, Mono<Void>> 먼저,
                                     UnaryOperator<Mono<Mono<SyncOutcome>>> 지키기, Supplier<Mono<Void>> release) {
@@ -272,7 +274,7 @@ public class SyncJobs {
                         .switchIfEmpty(Mono.error(() -> new IllegalStateException("반납 뒤 할 일이 결과 없이 끝났다")))
                         .onErrorResume(error -> Mono.just(실패로(run, error))))
                 // 결론이 정해진 뒤 모은 것을 그 결론과 함께 남긴다(설계 2026-10-15 §3)
-                .flatMap(outcome -> 남긴다(run, 기록, 끝난_때.get(), outcome))
+                .flatMap(outcome -> 남긴다(run, 행위자, 기록, 끝난_때.get(), outcome))
                 .flatMap(outcome -> runs.finish(run, outcome))
                 .doOnNext(finished -> log.info("[{}] 작업 끝: status={} written={} deleted={} failed={}",
                         finished.runId(), finished.status(), finished.writtenCount(),
@@ -287,12 +289,11 @@ public class SyncJobs {
      * 회차의 모음을 결론과 함께 남긴다. 이력이 없는 작업이면 결론 그대로다. 빈 모음은 {@link AuditRecorder} 가 쓰지 않는다. 이력 단계는 회차를 실패시키지
      * 않는다 — 쓰기 실패는 결론의 메시지에 붙고, 그 밖의 뜻밖의 오류는 로그만 남긴다.
      */
-    private Mono<SyncOutcome> 남긴다(SyncRun run, RunAudit 기록, Instant at, SyncOutcome outcome) {
+    private Mono<SyncOutcome> 남긴다(SyncRun run, String 행위자, RunAudit 기록, Instant at, SyncOutcome outcome) {
         if (기록 == null) {
             return Mono.just(outcome);
         }
-        // TODO(인증 과제 2): 임시 Actor.UNKNOWN — 회차가 기록한 요청자(run.requestedBy())를 쓴다
-        return Mono.defer(() -> audit.recordRun(AuditCause.run(run.source(), 기록.kind(), run.runId(), Actor.UNKNOWN), at,
+        return Mono.defer(() -> audit.recordRun(AuditCause.run(run.source(), 기록.kind(), run.runId(), 행위자), at,
                         기록.changes().entries(), outcome))
                 .defaultIfEmpty(outcome)
                 .onErrorResume(error -> {

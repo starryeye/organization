@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.fake.FakeMutationLock;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.fake.FakeStateRepository;
@@ -27,6 +28,7 @@ import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
+import reactor.util.context.Context;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -165,6 +167,31 @@ class SnapshotArchiveUseCaseTest {
         assertThat(run.trigger()).isEqualTo(SyncTrigger.ARCHIVE);
         assertThat(run.source()).isEqualTo(SyncSource.SCIM);
         assertThat(runs.finished).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("아카이빙 회차의 요청자는 Context 의 행위자다 — 예약 작업이 싣는 system:archive 가 열린 기록과 끝난 기록에 남는다")
+    void 아카이빙_회차의_요청자는_Context_의_행위자다() {
+        // given, when
+        var run = useCase.execute().contextWrite(Context.of(Actor.KEY, Actor.ARCHIVE)).block();
+
+        // then
+        assertThat(run.requestedBy()).isEqualTo("system:archive");
+        assertThat(runs.findById(run.runId()).block().requestedBy()).isEqualTo("system:archive");
+    }
+
+    @Test
+    @DisplayName("재적재 중이라 건너뛴 회차의 요청자도 Context 의 행위자다")
+    void 건너뛴_회차의_요청자도_Context_의_행위자다() {
+        // given
+        lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block();
+
+        // when
+        var run = useCase.execute().contextWrite(Context.of(Actor.KEY, Actor.ARCHIVE)).block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.requestedBy()).isEqualTo("system:archive");
     }
 
     @Test
