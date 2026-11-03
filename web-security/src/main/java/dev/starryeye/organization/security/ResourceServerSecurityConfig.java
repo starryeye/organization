@@ -1,12 +1,15 @@
 package dev.starryeye.organization.security;
 
+import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.security.oauth2.resource.OAuth2ResourceServerProperties;
+import org.springframework.boot.autoconfigure.security.oauth2.resource.reactive.JwkSetUriReactiveJwtDecoderBuilderCustomizer;
 import org.springframework.boot.autoconfigure.security.oauth2.resource.reactive.ReactiveOAuth2ResourceServerAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
@@ -15,7 +18,11 @@ import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.security.web.server.context.NoOpServerSecurityContextRepository;
 import org.springframework.security.web.server.savedrequest.NoOpServerRequestCache;
+import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
+import reactor.netty.http.client.HttpClient;
+
+import java.time.Duration;
 
 import static dev.starryeye.organization.security.Scopes.권한;
 
@@ -47,6 +54,11 @@ import static dev.starryeye.organization.security.Scopes.권한;
 @EnableWebFluxSecurity
 @EnableConfigurationProperties({ResourceServerSettings.class, OAuth2ResourceServerProperties.class})
 public class ResourceServerSecurityConfig {
+
+    /** 키 목록 주소에 연결하는 한도 */
+    static final Duration 키_목록_연결_한도 = Duration.ofSeconds(2);
+    /** 키 목록 응답을 기다리는 한도 */
+    static final Duration 키_목록_응답_한도 = Duration.ofSeconds(5);
 
     @Bean
     SecurityWebFilterChain 리소스_서버_체인(ServerHttpSecurity http, OAuth2ResourceServerProperties 리소스_서버,
@@ -84,13 +96,28 @@ public class ResourceServerSecurityConfig {
     }
 
     /**
+     * 키 목록을 받는 클라이언트의 시간 한도 — 연결 {@link #키_목록_연결_한도}, 응답 {@link #키_목록_응답_한도}. 부트가 {@code jwk-set-uri} 로 만드는 디코더에
+     * 붙는다(시험 디코더는 키 목록을 받지 않으므로 무관). 리액터 네티 기본값은 연결 30초·응답 무한이라, 키 목록 주소가 블랙홀이거나 멈춘 인가 서버면 토큰이 온 요청마다
+     * 그만큼 붙잡힌다. 한도를 넘기면 키 목록을 받지 못한 것과 같이 503 이다.
+     */
+    @Bean
+    JwkSetUriReactiveJwtDecoderBuilderCustomizer 키_목록_시간_한도() {
+        HttpClient 연결 = HttpClient.create()
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) 키_목록_연결_한도.toMillis())
+                .responseTimeout(키_목록_응답_한도);
+        WebClient 클라이언트 = WebClient.builder().clientConnector(new ReactorClientHttpConnector(연결)).build();
+        return 빌더 -> 빌더.webClient(클라이언트);
+    }
+
+    /**
      * 디코더가 토큰 탓이 아닌 오류로 끝나면 {@link JwtException} 으로 바꾼다. 키 목록을 받지 못한 것이 대표다 — Nimbus 디코더는 이를
      * {@code IllegalStateException("Could not obtain the keys")} 로 내는데, 그대로 두면 인증 필터가 다루지 않는 예외라 500 이 된다. {@link JwtException}
      * (토큰이 잘못됐다는 {@code BadJwtException} 이 아닌 것)은 인증 관리자가 {@code AuthenticationServiceException} 으로 바꿔 실패 처리기
-     * ({@link AuthFailureResponses#토큰을_받지_않는다})로 보낸다 — 401 과 WARN 한 줄. 토큰이 잘못된 것({@code BadJwtException})은 그대로다.
+     * ({@link AuthFailureResponses#토큰을_받지_않는다})로 보낸다 — 503 과 WARN 한 줄. 토큰이 잘못된 것({@code BadJwtException})은 그대로 401 이다.
+     * 바꾼 예외의 문구는 원래 오류의 종류와 문구다 — WARN 에 그대로 나간다(토큰은 싣지 않는다).
      */
     private static ReactiveJwtDecoder 검증하지_못한_것을_알린다(ReactiveJwtDecoder 디코더) {
         return 토큰 -> Mono.defer(() -> 디코더.decode(토큰))
-                .onErrorMap(오류 -> !(오류 instanceof JwtException), 오류 -> new JwtException("토큰을 검증하지 못했다: " + 오류.getMessage(), 오류));
+                .onErrorMap(오류 -> !(오류 instanceof JwtException), 오류 -> new JwtException(오류.toString(), 오류));
     }
 }

@@ -23,15 +23,17 @@ import java.net.ServerSocket;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 인가 서버가 닿지 않을 때(설계 2026-10-28 A2·A5). 시험 디코더를 끄고({@code test.auth.fixed-key=false}) 부트가 {@code jwk-set-uri} 로 만드는 운영과 같은
- * 디코더를 쓰되, 그 주소는 닫힌 포트다. 기동은 인가 서버에 묻지 않으므로 뜨고, 토큰이 온 요청은 키 목록을 받지 못해 검증하지 못한다 — 서버 오류(500)가
- * 아니라 그 표면의 401 로 답한다.
+ * 인가 서버가 닿지 않을 때(설계 2026-10-28 A2·A5, 컨트롤러 판정 — 503). 시험 디코더를 끄고({@code test.auth.fixed-key=false}) 부트가
+ * {@code jwk-set-uri} 로 만드는 운영과 같은 디코더를 쓰되, 그 주소는 닫힌 포트다. 기동은 인가 서버에 묻지 않으므로 뜨고, 토큰이 온 요청은 키 목록을 받지
+ * 못해 검증하지 못한다 — 서버 오류(500)도, 좋은 토큰을 버리라는 401 {@code invalid_token} 도 아니라 일시 장애 503 + {@code Retry-After} 다.
  */
 @ActiveProfiles("test")
 @SpringBootTest(classes = MockRoutesApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = "test.auth.fixed-key=false")
 @ExtendWith(OutputCaptureExtension.class)
 class KeySetUnreachableTest {
+
+    private static final String 일시_장애 = "일시 장애 — 잠시 뒤 다시 시도한다";
 
     @DynamicPropertySource
     static void 닫힌_키_목록(DynamicPropertyRegistry registry) {
@@ -51,9 +53,9 @@ class KeySetUnreachableTest {
     WebTestClient client;
 
     @Test
-    @DisplayName("키 목록을 받지 못하면 토큰이 온 SCIM 요청은 500 이 아니라 SCIM Error 401 이고 invalid_token 이다. 기동과 프로브는 인가 서버와 무관하다."
-            + " 원인은 WARN 한 줄로 남고 토큰은 남지 않는다")
-    void 키_목록을_받지_못하면_401_이다(CapturedOutput 출력) {
+    @DisplayName("키 목록을 받지 못하면 토큰이 온 요청은 503 + Retry-After 10 이고 WWW-Authenticate 를 달지 않는다 — 본문은 그 표면의 것."
+            + " 기동과 프로브는 인가 서버와 무관하다. 원인은 WARN 한 줄로 남고 토큰은 남지 않는다")
+    void 키_목록을_받지_못하면_503_이다(CapturedOutput 출력) {
         // given — 시험 키로 서명한 정상 토큰. 이 앱은 그 키를 키 목록에서 찾아야 한다
         String 토큰 = TestTokens.발급한다("test-client", TestTokens.ALL_SCOPES);
 
@@ -61,16 +63,46 @@ class KeySetUnreachableTest {
         client.get().uri("/actuator/health").exchange()
                 .expectStatus().isOk();
         client.get().uri("/scim/v2/Users").header(HttpHeaders.AUTHORIZATION, "Bearer " + 토큰).exchange()
-                .expectStatus().isUnauthorized()
-                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\"")
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "10")
+                .expectHeader().doesNotExist(HttpHeaders.WWW_AUTHENTICATE)
                 .expectHeader().contentType(MediaType.parseMediaType("application/scim+json"))
                 .expectBody()
-                .jsonPath("$.status").isEqualTo("401")
-                .jsonPath("$.detail").isEqualTo("인증이 필요하다");
+                .jsonPath("$.length()").isEqualTo(3)
+                .jsonPath("$.schemas[0]").isEqualTo("urn:ietf:params:scim:api:messages:2.0:Error")
+                .jsonPath("$.status").isEqualTo("503")
+                .jsonPath("$.detail").isEqualTo(일시_장애);
+        client.get().uri("/admin/employees").header(HttpHeaders.AUTHORIZATION, "Bearer " + 토큰).exchange()
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "10")
+                .expectHeader().doesNotExist(HttpHeaders.WWW_AUTHENTICATE)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.length()").isEqualTo(4)
+                .jsonPath("$.type").isEqualTo("about:blank")
+                .jsonPath("$.title").isEqualTo("Service Unavailable")
+                .jsonPath("$.status").isEqualTo(503)
+                .jsonPath("$.detail").isEqualTo(일시_장애);
+        client.get().uri("/actuator/prometheus").header(HttpHeaders.AUTHORIZATION, "Bearer " + 토큰).exchange()
+                .expectStatus().isEqualTo(503)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "10")
+                .expectHeader().doesNotExist(HttpHeaders.WWW_AUTHENTICATE)
+                .expectBody().isEmpty();
         assertThat(출력.getOut())
                 .contains("WARN")
-                .contains("토큰을 검증하지 못해 401 로 답한다")
+                .contains("토큰을 검증하지 못해 503 으로 답한다")
                 .contains("Could not obtain the keys")
                 .doesNotContain(토큰);
+    }
+
+    @Test
+    @DisplayName("키 목록이 없어도 JWT 꼴이 아닌 토큰은 그대로 401 invalid_token 이다 — 키 없이도 잘못됐다고 아는 토큰")
+    void 꼴이_잘못된_토큰은_그대로_401_이다() {
+        // when, then
+        client.get().uri("/scim/v2/Users").header(HttpHeaders.AUTHORIZATION, "Bearer not-a-jwt").exchange()
+                .expectStatus().isUnauthorized()
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\"")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("401");
     }
 }

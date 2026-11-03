@@ -1,12 +1,18 @@
 package dev.starryeye.organization.security;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.security.fixture.TestTokens;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.security.web.server.SecurityWebFilterChain;
@@ -178,6 +184,46 @@ class ResourceServerSecurityConfigTest {
                 .expectStatus().isOk();
     }
 
+    @ParameterizedTest(name = "[{index}] {0} → {1} {2} = {3}")
+    @CsvSource({
+            // 범위,            메서드, 경로,                          상태
+            "admin.read,        GET,  /admin/employees,              200",
+            "admin.read,        GET,  /admin/employees/lookup,       200",
+            "admin.read,        POST, /admin/sync/full,              403",
+            "admin.read,        GET,  /scim/v2/Users,                403",
+            "admin.read,        GET,  /actuator/prometheus,          403",
+            "admin.sync,        POST, /admin/sync/full,              202",
+            "admin.sync,        GET,  /admin/employees,              403",
+            "admin.sync,        GET,  /admin/employees/lookup,       403",
+            "admin.sync,        GET,  /scim/v2/Users,                403",
+            "admin.sync,        GET,  /actuator/prometheus,          403",
+            "admin.destructive, POST, /admin/sync/full,              403",
+            "admin.destructive, GET,  /admin/employees,              403",
+            "scim,              GET,  /scim/v2/Users,                200",
+            "scim,              GET,  /admin/employees,              403",
+            "scim,              GET,  /admin/employees/lookup,       403",
+            "scim,              POST, /admin/sync/full,              403",
+            "scim,              GET,  /actuator/prometheus,          403",
+            "actuator,          GET,  /actuator/prometheus,          200",
+            "actuator,          GET,  /admin/employees,              403",
+            "actuator,          POST, /admin/sync/full,              403",
+            "actuator,          GET,  /scim/v2/Users,                403",
+            "directory.lookup,  GET,  /admin/employees/lookup,       200",
+            "directory.lookup,  GET,  /admin/organizations/lookup,   200",
+            "directory.lookup,  GET,  /admin/employees,              403",
+            "directory.lookup,  POST, /admin/sync/full,              403",
+            "directory.lookup,  GET,  /scim/v2/Users,                403",
+            "directory.lookup,  GET,  /actuator/prometheus,          403"})
+    @DisplayName("범위 하나짜리 토큰 × 경로 — 범위는 자기 경로만 연다. 한 범위가 다른 범위를 품지 않는다(설계 §4.2)")
+    void 범위는_자기_경로만_연다(String 범위, String 메서드, String 경로, int 상태) {
+        // given
+        String 토큰 = bearer(TestTokens.발급한다("matrix", 범위));
+
+        // when, then
+        client.method(HttpMethod.valueOf(메서드)).uri(경로).header(HttpHeaders.AUTHORIZATION, 토큰).exchange()
+                .expectStatus().isEqualTo(상태);
+    }
+
     @Test
     @DisplayName("프로브 셋(health·liveness·readiness)은 토큰 없이 열린다. 헬스의 다른 하위 경로(컴포넌트 세부)는 열리지 않는다")
     void 프로브는_토큰_없이_열린다() {
@@ -233,6 +279,20 @@ class ResourceServerSecurityConfigTest {
         client.get().uri("/admin/employees").exchange()
                 .expectStatus().isOk()
                 .expectBody(String.class).isEqualTo("client:test-client");
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "   "})
+    @DisplayName("토큰에 sub 가 없거나 비었으면 행위자를 싣지 않는다 — client:null 이 아니라 core 가 system:unknown 으로 남긴다(설계 §5.1)")
+    void sub_가_없으면_행위자를_싣지_않는다(String sub) {
+        // given
+        String 토큰 = bearer(TestTokens.발급한다(sub, Scopes.ADMIN_READ));
+
+        // when, then
+        client.get().uri("/admin/employees").header(HttpHeaders.AUTHORIZATION, 토큰).exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class).isEqualTo(Actor.UNKNOWN);
     }
 
     @Test
