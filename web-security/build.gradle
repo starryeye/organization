@@ -1,0 +1,14 @@
+apply plugin: 'java-test-fixtures'
+
+// 두 앱(app-ldap·app-scim)이 함께 쓰는 리소스 서버 보안(설계 2026-10-28 §4·§5.2) — 경로별 범위, 표면에 맞춘 401·403, 행위자 웹 필터.
+// connector-scim·admin-api 에 기대지 않는다: SCIM Error 와 problem details 본문은 같은 모양으로 직접 쓴다.
+dependencies {
+    api project(':core')
+    api 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+    api 'org.springframework.boot:spring-boot-starter-webflux'
+
+    // 앱 시험이 testFixtures(project(':web-security')) 로 쓰는 시험 토큰(TestTokens)과 시험 디코더·기본 머리(TestAuthAutoConfiguration).
+    // 머리를 싣는 WebTestClientBuilderCustomizer 는 spring-boot-test 에, WebTestClient 는 spring-test 에 있다
+    testFixturesImplementation 'org.springframework.boot:spring-boot-test'
+    testFixturesImplementation 'org.springframework:spring-test'
+}
