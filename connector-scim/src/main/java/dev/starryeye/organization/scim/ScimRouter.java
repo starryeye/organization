@@ -239,7 +239,8 @@ public final class ScimRouter {
     /**
      * 지원하는 기능을 정직하게 선언한다. 필터는 {@code eq}·{@code and} 만 받고 나머지는 {@code invalidFilter}
      * 다 — RFC 7644 는 필터 지원 여부만 선언하게 하고 부분 지원을 400 으로 알리게 한다(S-1 설계 §4.1).
-     * 정렬은 인덱스 키({@code userName}/{@code displayName})로만 한다.
+     * 정렬은 인덱스 키({@code userName}/{@code displayName})로만 한다. 인증 방식은 {@code oauthbearertoken} 하나다(RFC 7643 §5, 설계 2026-10-28 §4.6) —
+     * 토큰을 요구하는 것은 이 라우터가 아니라 앞의 보안 필터체인(web-security)이다.
      */
     private static Mono<ServerResponse> serviceProviderConfig() {
         Map<String, Object> config = Map.of(
@@ -250,7 +251,12 @@ public final class ScimRouter {
                 "changePassword", Map.of("supported", false),
                 "sort", Map.of("supported", true),
                 "etag", Map.of("supported", false),
-                "authenticationSchemes", List.of());
+                "authenticationSchemes", List.of(Map.of(
+                        "type", "oauthbearertoken",
+                        "name", "OAuth Bearer Token",
+                        "description", "OAuth 2.0 client credentials 로 받은 bearer 토큰(RFC 6750)",
+                        "specUri", "https://www.rfc-editor.org/info/rfc6750",
+                        "primary", true)));
         return ServerResponse.ok().contentType(SCIM_JSON).bodyValue(config);
     }
 }
