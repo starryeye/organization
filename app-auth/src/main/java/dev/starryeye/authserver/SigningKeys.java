@@ -24,6 +24,7 @@ import java.util.Base64;
  *
  * <ul>
  *   <li><b>키가 주어지면</b>({@code auth.signing-key}, 운영은 환경 변수 {@code AUTH_SIGNING_KEY}) PKCS#8 PEM RSA 개인 키로 읽고 공개 키를 계산한다.
+ *       2048비트보다 짧으면 멈춘다.
  *       {@code kid} 는 공개 키의 지문(RFC 7638, Nimbus {@link RSAKey#computeThumbprint()} 와 같은 SHA-256)이라 같은 키로 뜬 여러 대가 같은
  *       {@code kid} 를 낸다 — 발급 기록도 남기지 않으니({@link NoRetentionAuthorizationService}) app-auth 는 상태가 없다.
  *   <li><b>없으면</b> RSA 2048 을 새로 만든다(로컬·시험). 재시작하면 그 전 토큰은 모두 무효다.
@@ -36,6 +37,9 @@ import java.util.Base64;
 @Slf4j
 @Configuration(proxyBeanMethods = false)
 class SigningKeys {
+
+    /** RSA 서명 키의 최소 크기(RFC 7518 §3.3 — Nimbus 서명기가 이보다 짧은 키를 거절한다). 로컬에서 만드는 키도 이 크기다. */
+    private static final int 최소_비트 = 2048;
 
     private static final String 읽지_못함 = "auth.signing-key 를 PKCS#8 PEM RSA 개인 키(-----BEGIN PRIVATE KEY-----)로 읽지 못했다"
             + " — PKCS#1(-----BEGIN RSA PRIVATE KEY-----)이면 openssl pkcs8 -topk8 -nocrypt 로 바꾼다";
@@ -71,6 +75,12 @@ class SigningKeys {
             if (!(공장.generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(본문))) instanceof RSAPrivateCrtKey 개인_키)) {
                 throw new IllegalStateException(읽지_못함);
             }
+            // 짧은 키로도 기동은 되지만 서명기(Nimbus RSASSASigner)가 서명을 거절해 모든 발급이 실패한다 — 기동 때 멈춘다. 비트 수는 비밀이 아니다
+            int 비트 = 개인_키.getModulus().bitLength();
+            if (비트 < 최소_비트) {
+                throw new IllegalStateException("auth.signing-key 의 RSA 키가 " + 비트 + "비트다 — " + 최소_비트
+                        + "비트 이상이어야 한다(그보다 짧은 키로는 서명하지 않는다)");
+            }
             var 공개_키 = (RSAPublicKey) 공장.generatePublic(new RSAPublicKeySpec(개인_키.getModulus(), 개인_키.getPublicExponent()));
             return 지문을_kid_로(공개_키, 개인_키);
         } catch (GeneralSecurityException | IllegalArgumentException e) {
@@ -82,7 +92,7 @@ class SigningKeys {
     private static RSAKey 만든다() {
         try {
             var generator = KeyPairGenerator.getInstance("RSA");
-            generator.initialize(2048);
+            generator.initialize(최소_비트);
             var 키_쌍 = generator.generateKeyPair();
             return 지문을_kid_로((RSAPublicKey) 키_쌍.getPublic(), (RSAPrivateCrtKey) 키_쌍.getPrivate());
         } catch (GeneralSecurityException e) {

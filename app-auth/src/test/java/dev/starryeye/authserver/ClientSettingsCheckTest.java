@@ -8,6 +8,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.security.oauth2.server.servlet.OAuth2AuthorizationServerProperties;
+import org.springframework.boot.logging.LoggingSystemProperty;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.time.Duration;
@@ -109,6 +110,9 @@ class ClientSettingsCheckTest {
         String 클라이언트 = "--spring.security.oauth2.authorizationserver.client.ops.";
         var 인자 = new ArrayList<>(List.of(
                 "--spring.profiles.active=prod",
+                // 일부러 멈추는 기동이다 — 실패 보고(스택 수백 줄)와 배너를 찍지 않는다. 멈춘 까닭은 시험이 예외로 본다
+                "--logging.level.root=OFF",
+                "--spring.main.banner-mode=off",
                 "--server.port=0",
                 "--server.address=127.0.0.1",
                 클라이언트 + "registration.client-id=ops",
@@ -125,12 +129,30 @@ class ClientSettingsCheckTest {
         return 인자;
     }
 
+    /**
+     * 운영 프로필로 띄우고 그 실패를 돌려준다. 운영 설정의 ECS 로그 형식은 부트가 JVM 시스템 속성({@code CONSOLE_LOG_STRUCTURED_FORMAT})으로 남겨 같은
+     * JVM 의 뒤따르는 시험 로그까지 JSON 으로 바꾸므로, 띄운 뒤 그 속성을 되돌린다.
+     */
+    private static Throwable 운영으로_띄운다(List<String> 인자) {
+        String 형식_속성 = LoggingSystemProperty.CONSOLE_STRUCTURED_FORMAT.getEnvironmentVariableName();
+        String 이전_형식 = System.getProperty(형식_속성);
+        try {
+            return catchThrowable(() -> AuthServerApplication.애플리케이션().run(인자.toArray(String[]::new)).close());
+        } finally {
+            if (이전_형식 == null) {
+                System.clearProperty(형식_속성);
+            } else {
+                System.setProperty(형식_속성, 이전_형식);
+            }
+        }
+    }
+
     @ParameterizedTest(name = "[{index}] {0} 이 빠짐")
     @MethodSource("운영에_빠진_것")
     @DisplayName("운영 프로필은 서명 키·bcrypt 비밀·https 발급자를 요구한다 — 하나라도 빠지면 기동을 멈춘다")
     void 운영_프로필은_서명_키와_bcrypt_비밀과_https_발급자를_요구한다(String 빠진_것, List<String> 인자, String 문구) {
         // when — 뜨면 바로 닫는다
-        Throwable 실패 = catchThrowable(() -> AuthServerApplication.애플리케이션().run(인자.toArray(String[]::new)).close());
+        Throwable 실패 = 운영으로_띄운다(인자);
 
         // then
         assertThat(실패).as(빠진_것).isNotNull()

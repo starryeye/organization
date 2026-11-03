@@ -97,6 +97,19 @@ class SigningKeysTest {
     }
 
     @Test
+    @DisplayName("2048비트보다 짧은 RSA 키는 멈춘다 — 뜨더라도 서명기가 그런 키로는 서명하지 않아 모든 발급이 실패한다")
+    void RSA_키가_2048비트보다_짧으면_멈춘다() {
+        // given
+        var properties = new AuthServerProperties();
+        properties.setSigningKey(TestKeys.PKCS8_PEM(TestKeys.키_쌍("RSA", 1024).getPrivate()));
+
+        // when, then
+        assertThatThrownBy(() -> SigningKeys.서명_키(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("auth.signing-key 의 RSA 키가 1024비트다 — 2048비트 이상이어야 한다(그보다 짧은 키로는 서명하지 않는다)");
+    }
+
+    @Test
     @DisplayName("PKCS#8 PEM RSA 개인 키가 아니면 무엇을 줘야 하는지 말하며 멈춘다")
     void PKCS8_PEM_RSA_개인_키가_아니면_멈춘다() {
         // given — EC 키(PKCS#8 이지만 RSA 가 아님)와 PEM 이 아닌 값

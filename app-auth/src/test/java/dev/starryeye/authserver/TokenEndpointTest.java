@@ -1,12 +1,23 @@
 package dev.starryeye.authserver;
 
 import com.nimbusds.jwt.SignedJWT;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.Ordered;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -19,7 +30,9 @@ import org.springframework.security.oauth2.server.authorization.OAuth2Authorizat
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.web.filter.OncePerRequestFilter;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +45,34 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "spring.config.name=auth-server")
+@ExtendWith(OutputCaptureExtension.class)
 class TokenEndpointTest {
+
+    /** 시험이 서버 오류를 일으키는 머리. 이 머리가 있는 요청은 보안 필터를 지난 뒤 그 값의 상태로 {@code sendError} 한다(오류 디스패치를 탄다). */
+    private static final String 오류_머리 = "X-Test-Send-Error";
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class 오류를_일으키는_필터 {
+
+        @Bean
+        FilterRegistrationBean<OncePerRequestFilter> 오류를_일으키는_필터_등록() {
+            var 필터 = new OncePerRequestFilter() {
+                @Override
+                protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+                        throws IOException, ServletException {
+                    String 상태 = request.getHeader(오류_머리);
+                    if (상태 != null) {
+                        response.sendError(Integer.parseInt(상태));
+                        return;
+                    }
+                    chain.doFilter(request, response);
+                }
+            };
+            var 등록 = new FilterRegistrationBean<OncePerRequestFilter>(필터);
+            등록.setOrder(Ordered.LOWEST_PRECEDENCE); // 보안 필터 뒤
+            return 등록;
+        }
+    }
 
     private static final ParameterizedTypeReference<Map<String, Object>> JSON = new ParameterizedTypeReference<>() {
     };
@@ -133,15 +173,73 @@ class TokenEndpointTest {
     }
 
     @Test
+    @DisplayName("메타데이터는 쓸 수 있는 것만 알린다 — client credentials 와 비밀 인증 방식, 토큰·키 목록. 조회·폐기·디바이스 끝점과 다른 grant 는 없다")
+    void 메타데이터는_쓸_수_있는_것만_알린다() {
+        // when
+        var 메타데이터 = rest.exchange("/.well-known/oauth-authorization-server", HttpMethod.GET, null, JSON).getBody();
+
+        // then — authorization_endpoint·response_types_supported 는 Spring Authorization Server 의 메타데이터 빌더가 반드시 요구해 남는다
+        assertThat(메타데이터).containsOnlyKeys("issuer", "token_endpoint", "jwks_uri", "grant_types_supported",
+                "token_endpoint_auth_methods_supported", "authorization_endpoint", "response_types_supported");
+        assertThat(메타데이터)
+                .containsEntry("jwks_uri", "https://auth.test/oauth2/jwks")
+                .containsEntry("grant_types_supported", List.of("client_credentials"))
+                .containsEntry("token_endpoint_auth_methods_supported", List.of("client_secret_basic", "client_secret_post"));
+    }
+
+    @Test
     @DisplayName("프로브는 인증 없이 열리고, 그 밖의 경로(actuator 나머지·로그인 화면·아무 경로)는 거절한다")
     void 프로브는_인증_없이_열리고_그_밖은_거절한다() {
         // when, then
         for (String 프로브 : List.of("/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness")) {
             assertThat(rest.getForEntity(프로브, String.class).getStatusCode()).as(프로브).isEqualTo(HttpStatus.OK);
         }
-        for (String 경로 : List.of("/actuator", "/actuator/env", "/login", "/oauth2/authorize", "/anything")) {
+        for (String 경로 : List.of("/actuator", "/actuator/env", "/login", "/error", "/anything")) {
             assertThat(rest.getForEntity(경로, String.class).getStatusCode().value()).as(경로).isIn(401, 403);
         }
+    }
+
+    @Test
+    @DisplayName("쓰지 않는 인가 끝점(인가 코드·디바이스)은 인가 서버에 닿기 전에 403 으로 거절하고, 서버 오류 로그를 남기지 않는다")
+    void 쓰지_않는_인가_끝점은_인가_서버에_닿기_전에_거절한다(CapturedOutput 출력) {
+        // given — 클라이언트 아이디는 비밀이 아니다. 인가 서버에 닿으면 리다이렉트 URI 가 없는 클라이언트라 NoSuchElementException 이 나고
+        // 요청마다 Servlet.service() 오류 로그가 백 줄 넘게 찍혔다
+        var 클라이언트_인증 = new HttpHeaders();
+        클라이언트_인증.setBasicAuth("ops", "ops-secret");
+        클라이언트_인증.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+        var 디바이스_요청 = new LinkedMultiValueMap<String, String>();
+        디바이스_요청.add("client_id", "ops");
+        디바이스_요청.add("scope", "admin.read");
+
+        // when
+        var 인가 = rest.getForEntity("/oauth2/authorize?response_type=code&client_id=ops&scope=admin.read", String.class);
+        var 인가_POST = rest.postForEntity("/oauth2/authorize?response_type=code&client_id=scim-idp", null, String.class);
+        var 디바이스_인가 = rest.exchange("/oauth2/device_authorization", HttpMethod.POST,
+                new HttpEntity<>(디바이스_요청, 클라이언트_인증), String.class);
+        var 디바이스_확인 = rest.getForEntity("/oauth2/device_verification?user_code=ABCD-EFGH", String.class);
+
+        // then
+        assertThat(출력.getAll()).doesNotContain("Servlet.service()").doesNotContain("ERROR");
+        assertThat(List.of(인가, 인가_POST, 디바이스_인가, 디바이스_확인))
+                .extracting(ResponseEntity::getStatusCode)
+                .containsOnly(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("서버 오류는 403 으로 바뀌지 않는다 — 오류 디스패치(/error)는 열고, /error 를 직접 부르는 것은 거절한다")
+    void 서버_오류는_403_으로_바뀌지_않는다() {
+        // given
+        var headers = new HttpHeaders();
+        headers.set(오류_머리, "503");
+
+        // when
+        var 오류 = rest.exchange("/actuator/health/liveness", HttpMethod.GET, new HttpEntity<>(headers), JSON);
+        var 직접 = rest.getForEntity("/error", String.class);
+
+        // then — IdP 는 403 을 권한 문제로 읽는다
+        assertThat(오류.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(오류.getBody()).containsEntry("status", 503);
+        assertThat(직접.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
