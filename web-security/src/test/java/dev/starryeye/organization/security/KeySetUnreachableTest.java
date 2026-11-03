@@ -90,9 +90,22 @@ class KeySetUnreachableTest {
                 .expectBody().isEmpty();
         assertThat(출력.getOut())
                 .contains("WARN")
-                .contains("토큰을 검증하지 못해 503 으로 답한다")
-                .contains("Could not obtain the keys")
+                .contains("키 목록을 받지 못해 503 으로 답한다")
+                .contains("Connection refused")
                 .doesNotContain(토큰);
+    }
+
+    @Test
+    @DisplayName("JWE 꼴(다섯 조각) 토큰은 키 목록에 닿기 전에 거절되는 잘못된 토큰이다 — 키 목록이 없어도 503 이 아니라 401 invalid_token, WARN 없음")
+    void JWE_꼴의_토큰은_401_이다(CapturedOutput 출력) {
+        // when, then
+        client.get().uri("/scim/v2/Users").header(HttpHeaders.AUTHORIZATION, "Bearer " + TokenShapes.JWE_꼴()).exchange()
+                .expectStatus().isUnauthorized()
+                .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\"")
+                .expectHeader().doesNotExist(HttpHeaders.RETRY_AFTER)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("401");
+        assertThat(출력.getOut()).doesNotContain("503 으로 답한다");
     }
 
     @Test
