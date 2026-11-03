@@ -1,0 +1,11 @@
+apply plugin: 'org.springframework.boot'
+
+// 인가 서버(설계 2026-10-28 §3). Spring Authorization Server 는 서블릿 기반이라 이 앱만 Spring MVC 다 — 나머지 앱은 WebFlux.
+// 다른 모듈에 기대지 않는다.
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-authorization-server'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    testImplementation 'org.springframework.security:spring-security-test'
+}

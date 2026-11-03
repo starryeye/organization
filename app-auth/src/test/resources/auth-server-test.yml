@@ -1,0 +1,14 @@
+# 시험 프로필(@ActiveProfiles("test")). 설정 파일 이름이 auth-server 라 application-test.yml 이 아니라 이 파일을 읽는다(AuthServerApplication).
+# 클라이언트는 auth-server.yml 의 !prod 문서(개발 클라이언트)를 그대로 쓴다.
+
+# 시험 서버는 127.0.0.1 에만 연다(app-scim 의 application-test.yml 과 같은 까닭 — 모든 주소로 열면 같은 번호를 127.0.0.1 에 연 다른 프로그램으로
+# 시험 요청이 샐 수 있다).
+server:
+  address: 127.0.0.1
+
+spring:
+  security:
+    oauth2:
+      authorizationserver:
+        # 시험 발급자. 요청을 받는 주소(127.0.0.1:무작위 포트)와 달라도 된다 — 발급자를 정해 두면 토큰의 iss·메타데이터는 이 값을 쓴다
+        issuer: https://auth.test

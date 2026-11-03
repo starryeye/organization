@@ -1,0 +1,78 @@
+# 인가 서버 설정(설계 2026-10-28 §3). 파일 이름이 application.yml 이 아니라 auth-server.yml 이다 — AuthServerApplication 이
+# spring.config.name=auth-server 를 기본값으로 둔다(다른 앱의 시험 클래스패스에 올라갈 때 그 앱의 application.yml 과 겹치지 않게).
+server:
+  port: 9000
+
+spring:
+  application:
+    name: organization-auth
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # 헬스(프로브 포함)만. 인증 없이 열리는 것도 헬스뿐이다(AuthServerSecurityConfig)
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+---
+# 개발 클라이언트 — 운영(prod 프로필)에는 없다. 운영 클라이언트는 운영 설정이 {bcrypt} 비밀로 준다(auth-server-prod.yml).
+# 비밀은 {noop}<id>-secret. 범위를 보내지 않고 요청하면 등록된 범위를 모두 받는다(RFC 6749 §3.3, DefaultScopes).
+# 토큰 수명은 10분, IdP(Entra 의 client credentials)용 scim-idp 는 60분. 365일을 넘는 수명은 기동을 멈춘다(ClientSettingsCheck).
+spring:
+  config:
+    activate:
+      on-profile: "!prod"
+  security:
+    oauth2:
+      authorizationserver:
+        issuer: http://localhost:9000
+        client:
+          scim-idp:
+            registration:
+              client-id: scim-idp
+              client-secret: "{noop}scim-idp-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: scim
+            token:
+              access-token-time-to-live: 60m
+          ops:
+            registration:
+              client-id: ops
+              client-secret: "{noop}ops-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: admin.read, admin.sync
+            token:
+              access-token-time-to-live: 10m
+          ops-break-glass:
+            registration:
+              client-id: ops-break-glass
+              client-secret: "{noop}ops-break-glass-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: admin.read, admin.sync, admin.destructive
+            token:
+              access-token-time-to-live: 10m
+          asking-app:
+            registration:
+              client-id: asking-app
+              client-secret: "{noop}asking-app-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: directory.lookup
+            token:
+              access-token-time-to-live: 10m
+          prometheus:
+            registration:
+              client-id: prometheus
+              client-secret: "{noop}prometheus-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: actuator
+            token:
+              access-token-time-to-live: 10m
