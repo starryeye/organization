@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExcee
 import java.time.Instant;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -53,7 +54,7 @@ class AdminSyncControllerTest {
     }
 
     private static SyncRun 도는실행(SyncTrigger trigger) {
-        return SyncRun.started("run-1", SyncSource.LDAP, trigger, 지금);
+        return SyncRun.started("run-1", SyncSource.LDAP, trigger, 지금, "client:ops");
     }
 
     private static SyncRun 완료된실행(SyncTrigger trigger, SyncStatus status) {
@@ -84,7 +85,23 @@ class AdminSyncControllerTest {
                 .expectBody()
                 .jsonPath("$.runId").isEqualTo("run-1")
                 .jsonPath("$.status").isEqualTo("RUNNING")
-                .jsonPath("$.trigger").isEqualTo("MANUAL");
+                .jsonPath("$.trigger").isEqualTo("MANUAL")
+                .jsonPath("$.requestedBy").isEqualTo("client:ops");
+    }
+
+    @Test
+    @DisplayName("요청자를 모르는 기록은 requestedBy 칸이 없다 — 속성이 없는 옛 기록")
+    void 요청자를_모르면_칸이_없다() {
+        // given
+        Mockito.when(runs.findById("run-1"))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.SCHEDULED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/run-1").exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                // jsonPath 의 doesNotExist 는 null 값도 통과시킨다 — 칸 자체가 없는지는 본문 글자로 본다
+                .value(body -> assertThat(body).contains("\"runId\":\"run-1\"").doesNotContain("requestedBy"));
     }
 
     @Test

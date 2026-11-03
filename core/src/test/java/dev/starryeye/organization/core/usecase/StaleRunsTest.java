@@ -20,7 +20,7 @@ class StaleRunsTest {
     private static final Duration 기한 = Duration.ofMinutes(30);
 
     private static SyncRun 분_전에_시작한(long 분) {
-        return SyncRun.started("r", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minus(Duration.ofMinutes(분)));
+        return SyncRun.started("r", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minus(Duration.ofMinutes(분)), null);
     }
 
     @Test

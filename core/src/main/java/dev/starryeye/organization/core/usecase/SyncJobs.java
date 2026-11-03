@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.audit.AuditRecorder;
@@ -198,7 +199,8 @@ public class SyncJobs {
             도는_작업.add(끝남신호);
 
             // 여는 호출이 곧바로 던지거나 빈 응답이어도 반납하고 오류로 알린다 — 아니면 요청이 매달리고 락·가드가 풀리지 않는다
-            Mono.defer(() -> runs.start(source, trigger))
+            // TODO(인증 과제 2): 임시 Actor.UNKNOWN — 요청 Context 의 Actor.KEY 에서 읽는다
+            Mono.defer(() -> runs.start(source, trigger, Actor.UNKNOWN))
                     .switchIfEmpty(Mono.error(() -> new IllegalStateException("실행 기록을 열지 못했다 — 빈 응답")))
                     .onErrorResume(error -> {
                         log.error("실행 기록을 열지 못했다: source={} trigger={}", source, trigger, error);
@@ -289,7 +291,8 @@ public class SyncJobs {
         if (기록 == null) {
             return Mono.just(outcome);
         }
-        return Mono.defer(() -> audit.recordRun(AuditCause.run(run.source(), 기록.kind(), run.runId()), at,
+        // TODO(인증 과제 2): 임시 Actor.UNKNOWN — 회차가 기록한 요청자(run.requestedBy())를 쓴다
+        return Mono.defer(() -> audit.recordRun(AuditCause.run(run.source(), 기록.kind(), run.runId(), Actor.UNKNOWN), at,
                         기록.changes().entries(), outcome))
                 .defaultIfEmpty(outcome)
                 .onErrorResume(error -> {

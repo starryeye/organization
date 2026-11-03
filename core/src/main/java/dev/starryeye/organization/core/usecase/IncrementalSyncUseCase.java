@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditRecorder;
@@ -853,7 +854,8 @@ public class IncrementalSyncUseCase {
      */
     private Mono<IncrementalSyncResult> withLock(BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
-            AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context));
+            // TODO(인증 과제 2): 임시 Actor.UNKNOWN — Actor.from(context) 로 읽는다
+            AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context), Actor.UNKNOWN);
             AuditChanges 기록 = new AuditChanges();
             // 락 안의 일이 끝난 때 — 값·오류·취소(리스 상실) 무엇이든 반납 전이다. 이력의 시각이다(설계 2026-10-15 §6)
             AtomicReference<Instant> 끝난_시각 = new AtomicReference<>();

@@ -9,7 +9,8 @@ import reactor.core.publisher.Mono;
 
 public interface SyncRunRepository {
 
-    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger);
+    /** {@code requestedBy} 는 이 회차를 건 행위자다(설계 2026-10-28 인증 §5). 기록에 남고 관리 API 가 보여 준다. */
+    Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, String requestedBy);
 
     /** 완료된 SyncRun 을 반환한다. 관리 API 가 이 값을 응답으로 쓴다. */
     Mono<SyncRun> finish(SyncRun run, SyncOutcome outcome);

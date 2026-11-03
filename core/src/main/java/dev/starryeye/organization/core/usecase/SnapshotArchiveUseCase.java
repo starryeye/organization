@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.SyncOutcome;
@@ -113,7 +114,8 @@ public class SnapshotArchiveUseCase {
 
     private Mono<SyncRun> 건너뛴다() {
         log.warn("재적재 중이라 오늘 아카이빙을 건너뛴다");
-        return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
+        // TODO(인증 과제 2): 임시 Actor.UNKNOWN — Actor.ARCHIVE
+        return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE, Actor.UNKNOWN)
                 .flatMap(run -> 오래된_기록을_닫는다(run).then(Mono.just(run)))
                 .flatMap(run -> runs.finish(run, SyncOutcome.aborted(재적재_중)));
     }
@@ -128,7 +130,8 @@ public class SnapshotArchiveUseCase {
     }
 
     private Mono<SyncRun> 아카이빙한다() {
-        return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE)
+        // TODO(인증 과제 2): 임시 Actor.UNKNOWN — Actor.ARCHIVE
+        return runs.start(SyncSource.SCIM, SyncTrigger.ARCHIVE, Actor.UNKNOWN)
                 .doOnNext(run -> log.info("[{}] 스냅샷 아카이빙 시작", run.runId()))
                 .flatMap(run -> 오래된_기록을_닫는다(run).then(Mono.just(run)))
                 .flatMap(run -> Mono.defer(this::archive)

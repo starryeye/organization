@@ -39,9 +39,9 @@ class AuditHistoryControllerTest {
     @DisplayName("직원 이력을 최신순으로 돌려준다 — 원인, 바뀐 속성, 소속, 권한. 직원 줄에는 멤버 칸이 없다")
     void 직원_이력() {
         // given
-        쓴다(T1, AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1"),
+        쓴다(T1, AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1", "system:scheduler"),
                 new AuditEntry(MemberRef.user("kim"), true, false, null, null, null, null, null, null, null));
-        쓴다(T2, AuditCause.scimRequest("trace-2"), new AuditEntry(MemberRef.user("kim"), false, false,
+        쓴다(T2, AuditCause.scimRequest("trace-2", "client:ops"), new AuditEntry(MemberRef.user("kim"), false, false,
                 List.of(new AttributeChange("displayName", "김", "김철수")), List.of("DEV"), null, null, null,
                 List.of(RelationTuple.directMember("kim", "DEV")), null));
 
@@ -54,6 +54,7 @@ class AuditHistoryControllerTest {
                 .jsonPath("$.items[0].cause.source").isEqualTo("SCIM")
                 .jsonPath("$.items[0].cause.kind").isEqualTo("SCIM_REQUEST")
                 .jsonPath("$.items[0].cause.id").isEqualTo("trace-2")
+                .jsonPath("$.items[0].cause.actor").isEqualTo("client:ops")
                 .jsonPath("$.items[0].attributes[0].name").isEqualTo("displayName")
                 .jsonPath("$.items[0].attributes[0].before").isEqualTo("김")
                 .jsonPath("$.items[0].attributes[0].after").isEqualTo("김철수")
@@ -62,6 +63,7 @@ class AuditHistoryControllerTest {
                 .jsonPath("$.items[0].membersAdded").doesNotExist()
                 .jsonPath("$.items[1].created").isEqualTo(true)
                 .jsonPath("$.items[1].cause.id").isEqualTo("run-1")
+                .jsonPath("$.items[1].cause.actor").isEqualTo("system:scheduler")
                 .jsonPath("$.nextCursor").doesNotExist();
     }
 
@@ -69,8 +71,9 @@ class AuditHistoryControllerTest {
     @DisplayName("조직 이력은 멤버 들어옴·나감의 수와 목록을 싣는다")
     void 조직_이력() {
         // given
-        쓴다(T1, AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1"), new AuditEntry(MemberRef.group("DEV"), true,
-                false, null, null, null, List.of(MemberRef.user("kim"), MemberRef.user("lee")), null, null, null));
+        쓴다(T1, AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1", "system:scheduler"),
+                new AuditEntry(MemberRef.group("DEV"), true, false, null, null, null,
+                        List.of(MemberRef.user("kim"), MemberRef.user("lee")), null, null, null));
 
         // when, then
         client.get().uri("/admin/organizations/DEV/history").exchange()

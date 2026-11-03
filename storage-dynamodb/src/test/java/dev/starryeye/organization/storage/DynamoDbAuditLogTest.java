@@ -16,8 +16,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.lang.reflect.InvocationTargetException;
@@ -52,7 +54,7 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
     }
 
     private static AuditCause 회차(String runId) {
-        return AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, runId);
+        return AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, runId, "client:ops");
     }
 
     private static AuditEntry 표시명_변경(MemberRef subject, String 전, String 후) {
@@ -86,6 +88,17 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
                 .join().count();
     }
 
+    /** 파티션의 원시 아이템 — 조각까지. 저장된 속성을 그대로 본다. */
+    private List<Map<String, AttributeValue>> 원시_아이템들(MemberRef subject) {
+        return client.query(QueryRequest.builder()
+                        .tableName(properties.getTableName())
+                        .keyConditionExpression("#pk = :pk")
+                        .expressionAttributeNames(Map.of("#pk", Keys.PK))
+                        .expressionAttributeValues(Map.of(":pk", Attrs.s(Keys.auditPk(subject))))
+                        .build())
+                .join().items();
+    }
+
     private void 조각을_지운다(MemberRef subject, Instant at, String causeId, int part) {
         client.deleteItem(DeleteItemRequest.builder()
                 .tableName(properties.getTableName())
@@ -98,7 +111,7 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
     void 최신순으로_읽는다() {
         // given
         쓴다(auditLog, T1, 회차("run-1"), 표시명_변경(김, "김", "김철수"));
-        쓴다(auditLog, T2, AuditCause.scimRequest("trace-2"), new AuditEntry(김, false, false, null,
+        쓴다(auditLog, T2, AuditCause.scimRequest("trace-2", "client:ops"), new AuditEntry(김, false, false, null,
                 List.of("DEV"), null, null, null, List.of(RelationTuple.directMember("kim", "DEV")), null));
 
         // when
@@ -108,7 +121,7 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
         assertThat(page.items()).hasSize(2);
         AuditRecord 최근 = page.items().get(0);
         assertThat(최근.at()).isEqualTo(T2);
-        assertThat(최근.cause()).isEqualTo(AuditCause.scimRequest("trace-2"));
+        assertThat(최근.cause()).isEqualTo(AuditCause.scimRequest("trace-2", "client:ops"));
         assertThat(최근.entry().joined()).containsExactly("DEV");
         assertThat(최근.entry().granted()).containsExactly(RelationTuple.directMember("kim", "DEV"));
         AuditRecord 처음 = page.items().get(1);
@@ -269,6 +282,50 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
         assertThat(page.items()).singleElement().satisfies(record -> {
             assertThat(record.cause().id()).isEqualTo("run-1");
             assertThat(record.entry().membersAdded()).hasSize(30);
+        });
+    }
+
+    @Test
+    @DisplayName("행위자를 조각마다 싣고, 이력의 모든 줄에서 읽는다")
+    void 행위자를_조각마다_싣고_읽는다() {
+        // given — 한도 200 이면 멤버 30명이 조각 3개(14·14·2)다
+        DynamoDbAuditLog 작은_조각 = new DynamoDbAuditLog(client, properties, 200);
+        쓴다(작은_조각, T1, AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1", "client:ops"), 멤버_추가(30));
+        쓴다(작은_조각, T2, AuditCause.scimRequest("trace-2", "client:ops"), 멤버_추가(30));
+
+        // when
+        Page<AuditRecord> page = 읽는다(작은_조각, 개발, null, 20);
+
+        // then
+        assertThat(아이템_수(개발)).isEqualTo(6);
+        assertThat(원시_아이템들(개발)).allSatisfy(item -> assertThat(Attrs.str(item, "actor")).isEqualTo("client:ops"));
+        assertThat(page.items()).hasSize(2)
+                .allSatisfy(record -> assertThat(record.cause().actor()).isEqualTo("client:ops"));
+    }
+
+    @Test
+    @DisplayName("행위자 속성이 없는 옛 줄은 system:unknown 으로 읽는다 — 이관하지 않는다")
+    void 행위자_속성이_없는_옛_줄은_unknown_이다() {
+        // given — 행위자를 싣기 전의 모양 그대로 원시 PutItem 으로 넣는다
+        client.putItem(PutItemRequest.builder().tableName(properties.getTableName()).item(Map.of(
+                Keys.PK, Attrs.s(Keys.auditPk(김)),
+                Keys.SK, Attrs.s(Keys.auditSk(T1, "run-1", 0)),
+                "at", Attrs.s(T1.toString()),
+                "source", Attrs.s("LDAP"),
+                "kind", Attrs.s("SYNC"),
+                "causeId", Attrs.s("run-1"),
+                "part", Attrs.n(0),
+                "parts", Attrs.n(1),
+                "created", Attrs.bool(true),
+                Keys.EXPIRES_AT, Attrs.n(T1.plus(Duration.ofDays(30)).getEpochSecond()))).build()).join();
+
+        // when
+        Page<AuditRecord> page = 읽는다(auditLog, 김, null, 20);
+
+        // then
+        assertThat(page.items()).singleElement().satisfies(record -> {
+            assertThat(record.cause().id()).isEqualTo("run-1");
+            assertThat(record.cause().actor()).isEqualTo("system:unknown");
         });
     }
 

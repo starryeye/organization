@@ -97,7 +97,7 @@ class SyncMetricsTest {
     @DisplayName("완료 시각이 없는 실행은 소요 시간을 기록하지 않는다")
     void 미완료_실행은_시간을_기록하지_않는다() {
         // given
-        var running = SyncRun.started("run-2", SyncSource.LDAP, SyncTrigger.MANUAL, 시작);
+        var running = SyncRun.started("run-2", SyncSource.LDAP, SyncTrigger.MANUAL, 시작, null);
 
         // when
         metrics.record(running);

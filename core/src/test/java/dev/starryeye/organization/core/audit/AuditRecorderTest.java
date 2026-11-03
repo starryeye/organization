@@ -22,7 +22,7 @@ class AuditRecorderTest {
     private static final Instant 지금 = Instant.parse("2026-10-10T03:00:00Z");
     /** 부르는 쪽이 락 안에서 커밋한 직후 잡은 시각 — 시계의 지금과 일부러 다르게 둔다. */
     private static final Instant 커밋시각 = Instant.parse("2026-10-10T02:59:00Z");
-    private static final AuditCause 원인 = AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1");
+    private static final AuditCause 원인 = AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1", "client:ops");
 
     private final FakeAuditLog auditLog = new FakeAuditLog();
     private final AtomicInteger 빠진_줄_지표 = new AtomicInteger();
@@ -134,11 +134,11 @@ class AuditRecorderTest {
     @DisplayName("SCIM 요청의 원인은 traceId 이고, 모르면 임의 값을 쓴다")
     void SCIM_원인() {
         // given, when
-        AuditCause 아는 = AuditCause.scimRequest("trace-1");
-        AuditCause 모르는 = AuditCause.scimRequest(null);
+        AuditCause 아는 = AuditCause.scimRequest("trace-1", "client:ops");
+        AuditCause 모르는 = AuditCause.scimRequest(null, "client:ops");
 
         // then
-        assertThat(아는).isEqualTo(new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, "trace-1"));
+        assertThat(아는).isEqualTo(new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, "trace-1", "client:ops"));
         assertThat(모르는.id()).isNotBlank();
         assertThat(모르는.kind()).isEqualTo(AuditKind.SCIM_REQUEST);
     }

@@ -531,8 +531,8 @@ class SnapshotArchiveUseCaseTest {
     @DisplayName("아카이빙을 시작할 때 시작한 지 기한 + 10분이 지난 RUNNING 기록을 닫는다 — 최근 것은 둔다")
     void 아카이빙을_시작할_때_오래된_기록을_닫는다() {
         // given — 기한 30분, 닫는 나이는 40분. 41분 전의 아카이빙과 5분 전의 아카이빙
-        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(41))));
-        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(5))));
+        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(41)), null));
+        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 고정시각.minus(Duration.ofMinutes(5)), null));
 
         // when
         var run = useCase.execute().block();
@@ -550,7 +550,7 @@ class SnapshotArchiveUseCaseTest {
     void 건너뛰는_날에도_오래된_기록을_닫는다() {
         // given
         lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block();
-        runs.seed(SyncRun.started("오래된-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 고정시각.minus(Duration.ofMinutes(41))));
+        runs.seed(SyncRun.started("오래된-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 고정시각.minus(Duration.ofMinutes(41)), null));
 
         // when
         var run = useCase.execute().block();

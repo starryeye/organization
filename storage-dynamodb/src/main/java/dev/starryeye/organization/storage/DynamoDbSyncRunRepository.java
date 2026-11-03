@@ -43,14 +43,15 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     private static final String FAILURE_COUNT = "failureCount";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String MESSAGE = "message";
+    private static final String REQUESTED_BY = "requestedBy";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
     private final Clock clock;
 
     @Override
-    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
-        SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, clock.instant());
+    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, String requestedBy) {
+        SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, clock.instant(), requestedBy);
         return save(run).thenReturn(run);
     }
 
@@ -102,6 +103,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         }
         Attrs.putIfPresent(item, SNAPSHOT_ID, run.snapshotId());
         Attrs.putIfPresent(item, MESSAGE, run.message());
+        Attrs.putIfPresent(item, REQUESTED_BY, run.requestedBy());
 
         PutItemRequest.Builder request = PutItemRequest.builder()
                 .tableName(properties.getTableName())
@@ -202,6 +204,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
                 .failureCount(Attrs.integer(item, FAILURE_COUNT))
                 .snapshotId(Attrs.str(item, SNAPSHOT_ID))
                 .message(Attrs.str(item, MESSAGE))
+                .requestedBy(Attrs.str(item, REQUESTED_BY))
                 .build();
     }
 }

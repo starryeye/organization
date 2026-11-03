@@ -47,12 +47,12 @@ public class FakeSyncRunRepository implements SyncRunRepository {
     }
 
     @Override
-    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
+    public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, String requestedBy) {
         return Mono.defer(() -> {
             if (startFailure != null) {
                 return Mono.error(startFailure);
             }
-            SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, now);
+            SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, now, requestedBy);
             기록.put(run.runId(), run);
             return Mono.just(run);
         });

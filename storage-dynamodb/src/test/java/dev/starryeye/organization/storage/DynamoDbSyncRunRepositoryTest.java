@@ -17,6 +17,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
 
     private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
+    private static final String 요청자 = "client:ops";
 
     private DynamoDbSyncRunRepository repository;
 
@@ -29,7 +30,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("시작한 실행은 RUNNING 상태로 기록되고 고유한 아이디를 받는다")
     void 시작하면_RUNNING으로_기록된다() {
         // given, when
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.RUNNING);
@@ -40,10 +41,52 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("요청자를 싣고 읽는다")
+    void 요청자를_싣고_읽는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, "client:ops").block();
+
+        // when
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(run.requestedBy()).isEqualTo("client:ops");
+        assertThat(found.requestedBy()).isEqualTo("client:ops");
+    }
+
+    @Test
+    @DisplayName("끝낸 기록에도 요청자가 남는다 — 최근 목록과 번호 조회 둘 다")
+    void 끝낸_기록에도_요청자가_남는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, "client:ops").block();
+
+        // when
+        repository.finish(run, SyncOutcome.noChange()).block();
+
+        // then
+        assertThat(repository.findById(run.runId()).block().requestedBy()).isEqualTo("client:ops");
+        assertThat(repository.findRecent(10).collectList().block())
+                .singleElement().satisfies(found -> assertThat(found.requestedBy()).isEqualTo("client:ops"));
+    }
+
+    @Test
+    @DisplayName("요청자를 모르는 기록은 속성을 싣지 않고 null 로 읽는다 — 속성이 없는 옛 기록도 같다")
+    void 요청자를_모르는_기록은_null_이다() {
+        // given — null 은 속성을 싣지 않는 것으로 저장된다(DynamoDB 는 null 속성을 받지 않는다)
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, null).block();
+
+        // when
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(found.requestedBy()).isNull();
+    }
+
+    @Test
     @DisplayName("완료 처리하면 상태와 집계값이 반영된 실행 이력이 조회된다")
     void 완료하면_집계값이_반영된다() {
         // given
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
         var outcome = new SyncOutcome(SyncStatus.SUCCEEDED, 12, 3, 0, "20260814T030000-LDAP", null);
 
         // when
@@ -70,7 +113,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("가드가 발동해 중단된 실행은 ABORTED 상태와 사유가 함께 남는다")
     void 중단된_실행은_사유가_남는다() {
         // given
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
         var 사유 = "삭제 대상 412건(기준 스냅샷 606건의 68.0%)이 임계치 30.0%를 초과했습니다";
 
         // when
@@ -89,7 +132,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         for (int i = 0; i < 3; i++) {
             var repo = new DynamoDbSyncRunRepository(client, properties,
                     Clock.fixed(지금.plusSeconds(i * 60L), ZoneOffset.UTC));
-            var run = repo.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+            var run = repo.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
             repo.finish(run, SyncOutcome.noChange()).block();
         }
 
@@ -115,7 +158,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("시작한 기록을 번호로 찾으면 RUNNING 이다")
     void 시작한_기록을_번호로_찾는다() {
         // given
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
 
         // when
         var found = repository.findById(run.runId()).block();
@@ -131,7 +174,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("끝낸 기록을 번호로 찾으면 끝난 상태와 사유가 보인다")
     void 끝낸_기록을_번호로_찾는다() {
         // given
-        var run = repository.start(SyncSource.SCIM, SyncTrigger.REBUILD).block();
+        var run = repository.start(SyncSource.SCIM, SyncTrigger.REBUILD, 요청자).block();
         repository.finish(run, SyncOutcome.failed("기한 초과 — 30분")).block();
 
         // when
@@ -149,7 +192,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         // given — 7월 31일 밤에 시작한 기록
         var 지난달_저장소 = new DynamoDbSyncRunRepository(client, properties,
                 Clock.fixed(Instant.parse("2026-07-31T23:59:00Z"), ZoneOffset.UTC));
-        var run = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.REBUILD).block();
+        var run = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.REBUILD, 요청자).block();
 
         // when — 8월 14일에 찾는다
         var found = repository.findById(run.runId()).block();
@@ -163,7 +206,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("없는 번호는 빈 결과다")
     void 없는_번호는_빈_결과다() {
         // given
-        repository.start(SyncSource.LDAP, SyncTrigger.MANUAL).block();
+        repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
 
         // when, then
         assertThat(repository.findById("없는-번호").blockOptional()).isEmpty();
@@ -173,7 +216,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("아직 RUNNING 인 기록은 abandon 으로 사유와 함께 FAILED 로 닫힌다")
     void 아직_RUNNING인_기록은_abandon으로_닫힌다() {
         // given
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
 
         // when
         var closed = repository.abandon(run, "비정상 종료로 중단").block();
@@ -190,7 +233,7 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @DisplayName("이미 끝난 기록은 abandon 이 손대지 않는다 — 조건이 깨져 빈 결과이고 저장된 결과는 그대로다")
     void 이미_끝난_기록은_abandon이_손대지_않는다() {
         // given — 앞 작업이 이미 SUCCEEDED 로 끝냈다
-        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
         var outcome = new SyncOutcome(SyncStatus.SUCCEEDED, 12, 3, 0, "20260814T030000-LDAP", null);
         repository.finish(run, outcome).block();
 
@@ -212,10 +255,10 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         // given — 지난달(7월)에 하나 시작하고, 이번 달(8월)에 셋 시작해 둘을 끝낸다
         var 지난달_저장소 = new DynamoDbSyncRunRepository(client, properties,
                 Clock.fixed(Instant.parse("2026-07-31T23:59:00Z"), ZoneOffset.UTC));
-        var 지난달_기록 = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
-        var 이번달_첫째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
-        var 이번달_둘째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED).block();
-        var 이번달_셋째 = repository.start(SyncSource.SCIM, SyncTrigger.ARCHIVE).block();
+        var 지난달_기록 = 지난달_저장소.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
+        var 이번달_첫째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
+        var 이번달_둘째 = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
+        var 이번달_셋째 = repository.start(SyncSource.SCIM, SyncTrigger.ARCHIVE, 요청자).block();
         repository.finish(이번달_첫째, SyncOutcome.noChange()).block();
         repository.finish(이번달_둘째, SyncOutcome.failed("끝났다")).block();
 
