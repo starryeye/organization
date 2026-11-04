@@ -415,9 +415,14 @@ public class StoreBootstrapper {
         return 견주는_칸.stream().allMatch(칸 -> Objects.equals(최신_트리.get(칸), 우리_트리.get(칸)));
     }
 
-    /** 등록할 인가 모델. 패키지 전용 — 모델 등록이 실패하는 경로를 테스트가 흉내 낸다. */
+    /**
+     * 등록할 인가 모델. 패키지 전용 — 모델 등록이 실패하는 경로를 테스트가 흉내 낸다.
+     *
+     * <p>이 클래스의 로더로 찾는다. 로더를 주지 않으면 부르는 스레드의 문맥 클래스 로더를 쓰는데, 부트 fat jar({@code java -jar})에서 이것을 부르는
+     * ForkJoinPool 스레드의 문맥 로더는 안쪽 jar 를 보지 못해 자원이 없다고 한다. {@code (경로, Class)} 꼴은 패키지 기준 상대 경로라 쓰지 않는다.
+     */
     WriteAuthorizationModelRequest authorizationModel() {
-        try (InputStream in = new ClassPathResource(MODEL_RESOURCE).getInputStream()) {
+        try (InputStream in = new ClassPathResource(MODEL_RESOURCE, StoreBootstrapper.class.getClassLoader()).getInputStream()) {
             return new ObjectMapper().readValue(in, WriteAuthorizationModelRequest.class);
         } catch (Exception e) {
             throw new IllegalStateException(MODEL_RESOURCE + " 를 읽을 수 없다", e);
@@ -436,7 +441,7 @@ public class StoreBootstrapper {
 
     /**
      * 모든 클라이언트가 여기서 만들어진다 — 사전 공유 키(있으면)를 한 곳에서 싣는다(설계 2026-10-28 §7). 키가 없으면 익명으로 부른다(키 없는 로컬
-     * OpenFGA). 키가 틀리거나 서버가 키를 요구하는데 없으면 OpenFGA 가 401 을 돌려준다.
+     * OpenFGA). 키가 틀리거나 서버가 키를 요구하는데 없으면 OpenFGA 가 401/403 을 돌려준다.
      */
     private OpenFgaClient newClient(String storeId) {
         try {
