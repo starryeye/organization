@@ -75,6 +75,33 @@ class KeysTest {
     }
 
     @Test
+    @DisplayName("지정 하위 정렬키는 MEMBER# 도 BELONGS_TO# 도 아니라 멤버·소속 읽기에 섞이지 않고, 왕복 변환해도 조직코드가 그대로다")
+    void 지정_하위_정렬키는_멤버와_소속과_구분된다() {
+        // given, when
+        String assignedChild = Keys.assignedChildSk("C");
+
+        // then
+        assertThat(assignedChild).isEqualTo("ASSIGNED_CHILD#C");
+        assertThat(Keys.isAssignedChildSk(assignedChild)).isTrue();
+        assertThat(Keys.parseAssignedChildSk(assignedChild)).isEqualTo("C");
+        assertThat(Keys.isMemberSk(assignedChild)).isFalse();
+        assertThat(Keys.isBelongsToSk(assignedChild)).isFalse();
+        assertThat(Keys.isAssignedChildSk(Keys.ASSIGNED_PARENT)).as("정본의 정렬키는 역색인 접두를 갖지 않는다").isFalse();
+        assertThat(Keys.ASSIGNED_PARENT).isEqualTo("ASSIGNED_PARENT");
+        assertThat(Keys.ASSIGNED_CHILD_PREFIX).isEqualTo("ASSIGNED_CHILD#");
+    }
+
+    @Test
+    @DisplayName("지정 하위 정렬키가 아닌 값을 되돌리려 하면 조용히 자르지 않고 거부한다")
+    void 잘못된_지정_하위_정렬키는_거부한다() {
+        // given, when, then
+        assertThatThrownBy(() -> Keys.parseAssignedChildSk(Keys.ASSIGNED_PARENT))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Keys.parseAssignedChildSk(null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("멤버의 파티션키는 직원이면 USER#, 하위 조직이면 GROUP# 이다")
     void 멤버의_파티션키() {
         // given, when, then

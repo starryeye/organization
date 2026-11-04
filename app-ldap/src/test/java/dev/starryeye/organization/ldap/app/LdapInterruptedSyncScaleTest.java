@@ -219,6 +219,14 @@ class LdapInterruptedSyncScaleTest {
             return 실제.findMembers(groupId, candidates);
         }
         @Override public Flux<MemberRef> findMemberRefs(String groupId) { return 실제.findMemberRefs(groupId); }
+        @Override public Mono<String> findAssignedParent(String orgCode) { return 실제.findAssignedParent(orgCode); }
+        @Override public Flux<String> findAssignedChildren(String orgCode) { return 실제.findAssignedChildren(orgCode); }
+        @Override public Mono<Void> saveAssignedParent(String orgCode, String parentOrgCode, String previousParentOrgCode) {
+            return 실제.saveAssignedParent(orgCode, parentOrgCode, previousParentOrgCode);
+        }
+        @Override public Mono<Void> deleteAssignedParent(String orgCode, String parentOrgCode) {
+            return 실제.deleteAssignedParent(orgCode, parentOrgCode);
+        }
         @Override public Mono<Void> saveGroupChange(GroupHeader before, GroupHeader after, Set<MemberRef> added, Set<MemberRef> removed) {
             return 실제.saveGroupChange(before, after, added, removed);
         }
