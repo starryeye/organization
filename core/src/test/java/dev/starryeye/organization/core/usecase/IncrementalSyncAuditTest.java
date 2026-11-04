@@ -1,6 +1,7 @@
 package dev.starryeye.organization.core.usecase;
 
 import dev.starryeye.organization.core.audit.AttributeChange;
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditKind;
@@ -78,7 +79,7 @@ class IncrementalSyncAuditTest {
 
         // then
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, "trace-1")));
+                .isEqualTo(new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, "trace-1", Actor.UNKNOWN)));
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.created()).isTrue();
         assertThat(김의_줄.attributes()).contains(new AttributeChange("userName", null, "kim"));
@@ -254,7 +255,7 @@ class IncrementalSyncAuditTest {
 
         // then — 삭제는 없고, 나간 조직·잃은 권한·멤버 나감이 남는다
         assertThat(auditLog.events).singleElement().satisfies(event ->
-                assertThat(event.cause()).isEqualTo(AuditCause.scimRequest("trace-1")));
+                assertThat(event.cause()).isEqualTo(AuditCause.scimRequest("trace-1", Actor.UNKNOWN)));
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.deleted()).isFalse();
         assertThat(김의_줄.left()).containsExactly("DEV");

@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AttributeChange;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditEntry;
@@ -67,6 +68,7 @@ public class DynamoDbAuditLog implements AuditLog {
     private static final String SOURCE = "source";
     private static final String KIND = "kind";
     private static final String CAUSE_ID = "causeId";
+    private static final String ACTOR = "actor";
     private static final String PART = "part";
     private static final String PARTS = "parts";
     private static final String CREATED = "created";
@@ -152,6 +154,7 @@ public class DynamoDbAuditLog implements AuditLog {
             item.put(SOURCE, Attrs.s(event.cause().source().name()));
             item.put(KIND, Attrs.s(event.cause().kind().name()));
             item.put(CAUSE_ID, Attrs.s(event.cause().id()));
+            item.put(ACTOR, Attrs.s(event.cause().actor()));
             item.put(PART, Attrs.n(part));
             item.put(PARTS, Attrs.n(조각들.size()));
             item.put(Keys.EXPIRES_AT, Attrs.n(expiresAt));
@@ -226,8 +229,11 @@ public class DynamoDbAuditLog implements AuditLog {
         }
         Collections.reverse(이줄);
 
+        // 행위자 속성이 없는 옛 줄은 UNKNOWN 이다 — 운영 배포 전이라 이관하지 않는다
+        String actor = Attrs.str(첫조각, ACTOR);
         AuditCause cause = new AuditCause(SyncSource.valueOf(Attrs.str(첫조각, SOURCE)),
-                AuditKind.valueOf(Attrs.str(첫조각, KIND)), Attrs.str(첫조각, CAUSE_ID));
+                AuditKind.valueOf(Attrs.str(첫조각, KIND)), Attrs.str(첫조각, CAUSE_ID),
+                actor == null ? Actor.UNKNOWN : actor);
         AuditEntry entry = new AuditEntry(subject,
                 Attrs.flag(첫조각, CREATED),
                 Attrs.flag(첫조각, DELETED),

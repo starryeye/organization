@@ -3,6 +3,8 @@ package dev.starryeye.organization.scim.app;
 import dev.starryeye.organization.core.fixture.Containers;
 import dev.openfga.sdk.api.client.model.ClientTupleKeyWithoutCondition;
 import dev.starryeye.organization.authz.StoreBootstrapper;
+import dev.starryeye.organization.security.Scopes;
+import dev.starryeye.organization.security.fixture.TestTokens;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -160,5 +163,50 @@ class AdminQueryEndToEndTest {
                 .jsonPath("$.items[0].employeeId").isEqualTo(이순신)
                 .jsonPath("$.items[0].userName").isEqualTo("ss.lee")
                 .jsonPath("$.nextCursor").doesNotExist();
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("정확 조회는 directory.lookup 만으로 된다 — 같은 토큰으로 검색·상세는 403 이다")
+    void 정확_조회는_directory_lookup_만으로_된다() {
+        // given — 권한을 묻는 앱의 토큰: directory.lookup 하나뿐이다. 직원과 조직은 SCIM 으로 만든다
+        String 묻는앱 = "Bearer " + TestTokens.발급한다("asking-app", Scopes.DIRECTORY_LOOKUP);
+        String 박문수 = 만든_아이디(client.post().uri("/scim/v2/Users").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                         "externalId":"00u2lookupEXT","userName":"ms.park","displayName":"박문수","active":true}""")
+                .exchange());
+        String 인프라팀 = 만든_아이디(client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                         "externalId":"INFRA001","displayName":"인프라팀","members":[]}""")
+                .exchange());
+
+        // when, then — userName(대소문자 무시)·externalId 로 직원 하나, externalId 로 조직 하나
+        client.get().uri("/admin/employees/lookup?userName=MS.PARK").header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.employeeId").isEqualTo(박문수)
+                .jsonPath("$.active").isEqualTo(true)
+                .jsonPath("$.externalId").isEqualTo("00u2lookupEXT");
+        client.get().uri("/admin/employees/lookup?externalId=00u2lookupEXT").header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.employeeId").isEqualTo(박문수);
+        client.get().uri("/admin/organizations/lookup?externalId=INFRA001").header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.orgCode").isEqualTo(인프라팀)
+                .jsonPath("$.displayName").isEqualTo("인프라팀");
+
+        // then — 없으면 404 problem details
+        client.get().uri("/admin/employees/lookup?userName=nobody").header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isNotFound()
+                .expectBody().jsonPath("$.detail").isEqualTo("일치하는 직원이 없다");
+
+        // then — 같은 토큰으로 직원 검색·상세는 admin.read 가 없어 403 이다
+        client.get().uri("/admin/employees?userName=ms.park").header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isForbidden();
+        client.get().uri("/admin/employees/" + 박문수).header(HttpHeaders.AUTHORIZATION, 묻는앱)
+                .exchange().expectStatus().isForbidden();
     }
 }

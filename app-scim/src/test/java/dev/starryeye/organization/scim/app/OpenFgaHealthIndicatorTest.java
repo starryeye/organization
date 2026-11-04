@@ -2,8 +2,10 @@ package dev.starryeye.organization.scim.app;
 
 import dev.starryeye.organization.core.fixture.Containers;
 import dev.openfga.sdk.api.client.OpenFgaClient;
+import dev.openfga.sdk.api.configuration.ApiToken;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.configuration.ClientListStoresOptions;
+import dev.openfga.sdk.api.configuration.Credentials;
 import dev.starryeye.organization.authz.OpenFgaProperties;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import org.junit.jupiter.api.DisplayName;
@@ -51,6 +53,7 @@ class OpenFgaHealthIndicatorTest {
         String apiUrl = "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080);
         OpenFgaProperties properties = new OpenFgaProperties();
         properties.setApiUrl(apiUrl);
+        properties.setApiToken(Containers.OPENFGA_KEY);
         properties.setStoreName(storeName);
         properties.setWriteBatchSize(100);
         properties.setMaxRetries(3);
@@ -78,6 +81,7 @@ class OpenFgaHealthIndicatorTest {
         String apiUrl = "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080);
         OpenFgaProperties properties = new OpenFgaProperties();
         properties.setApiUrl(apiUrl);
+        properties.setApiToken(Containers.OPENFGA_KEY);
         properties.setStoreName("health-deleted-" + UUID.randomUUID());
         properties.setCreateStore(true);
         properties.setWriteBatchSize(100);
@@ -88,7 +92,7 @@ class OpenFgaHealthIndicatorTest {
         assertThat(indicator.health().block(Duration.ofSeconds(10)).getStatus().getCode()).isEqualTo("UP");
 
         // given — 누군가 그 store 를 지웠다(부트스트래퍼를 거치지 않는다)
-        new OpenFgaClient(new ClientConfiguration().apiUrl(apiUrl).storeId(storeId)).deleteStore().get();
+        키를_단_클라이언트(apiUrl, storeId).deleteStore().get();
 
         // when
         var health = indicator.health().block(Duration.ofSeconds(10));
@@ -99,9 +103,24 @@ class OpenFgaHealthIndicatorTest {
         assertThat(health.getDetails()).containsEntry("reason", "store 가 없다(지워졌거나 아직 만들지 않았다)");
     }
 
+    /** 부트스트래퍼를 거치지 않는 raw 클라이언트. 시험 OpenFGA 가 사전 공유 키를 요구하므로 키를 단다. {@code storeId} 가 null 이면 store 에 묶지 않는다. */
+    private static OpenFgaClient 키를_단_클라이언트(String apiUrl, String storeId) {
+        try {
+            ClientConfiguration configuration = new ClientConfiguration()
+                    .apiUrl(apiUrl)
+                    .credentials(new Credentials(new ApiToken(Containers.OPENFGA_KEY)));
+            if (storeId != null) {
+                configuration.storeId(storeId);
+            }
+            return new OpenFgaClient(configuration);
+        } catch (Exception e) {
+            throw new IllegalStateException("테스트용 OpenFGA 클라이언트 생성 실패", e);
+        }
+    }
+
     private long countStoresNamed(String apiUrl, String name) {
         try {
-            OpenFgaClient client = new OpenFgaClient(new ClientConfiguration().apiUrl(apiUrl));
+            OpenFgaClient client = 키를_단_클라이언트(apiUrl, null);
             long count = 0;
             String continuationToken = null;
             do {

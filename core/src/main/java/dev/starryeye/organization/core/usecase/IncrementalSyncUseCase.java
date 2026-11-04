@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditRecorder;
@@ -833,7 +834,7 @@ public class IncrementalSyncUseCase {
      *
      * <p><b>요청과 떼어 돈다(점검 S3).</b> 락 잡기부터 반납까지를 요청의 구독과 따로 돌린다. IdP 가 연결을 끊어도 커밋까지 마치고
      * 반납한다 — 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다. 락을 잡는 도중에
-     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId)는 이어받는다. 요청이 떠난 뒤의 실패·부분 반영은 받을 곳이 없으므로
+     * 끊겨 리스가 새는 일도 없어진다. 요청의 Reactor Context(traceId·행위자)는 이어받는다. 요청이 떠난 뒤의 실패·부분 반영은 받을 곳이 없으므로
      * 경고 로그로 남긴다 — 요청이 남아 있으면 응답과 {@code ScimRouter} 가 알리므로 남기지 않는다.
      *
      * <p><b>리스를 지킨다.</b> 쥔 동안 {@link LeaseKeeper} 가 리스를 갱신하고, 잃으면 멈춰 503 이다. OpenFGA 쓰기 직전·DynamoDB 커밋 직전에
@@ -853,7 +854,8 @@ public class IncrementalSyncUseCase {
      */
     private Mono<IncrementalSyncResult> withLock(BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
-            AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context));
+            // 행위자도 traceId 처럼 요청 Context 에서 지금 읽어 원인에 담는다 — 요청이 떠난 뒤에 남기는 이력도 이 값을 쓴다(설계 2026-10-28 인증 §5.2)
+            AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context), Actor.from(context));
             AuditChanges 기록 = new AuditChanges();
             // 락 안의 일이 끝난 때 — 값·오류·취소(리스 상실) 무엇이든 반납 전이다. 이력의 시각이다(설계 2026-10-15 §6)
             AtomicReference<Instant> 끝난_시각 = new AtomicReference<>();

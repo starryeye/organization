@@ -153,6 +153,21 @@ class ScimDiscoveryTest {
                 .isEqualTo(true);
     }
 
+    @Test
+    @DisplayName("인증 방식은 oauthbearertoken 하나다 — RFC 7643 §5 가 이 칸을 요구하고, 값은 설계 §4.6 그대로다")
+    void 인증_방식은_oauthbearertoken_하나다() {
+        // when, then
+        client.get().uri("/scim/v2/ServiceProviderConfig").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.authenticationSchemes").value(방식 -> assertThat((List<?>) 방식).hasSize(1))
+                .jsonPath("$.authenticationSchemes[0].type").isEqualTo("oauthbearertoken")
+                .jsonPath("$.authenticationSchemes[0].name").isEqualTo("OAuth Bearer Token")
+                .jsonPath("$.authenticationSchemes[0].description").isEqualTo("OAuth 2.0 client credentials 로 받은 bearer 토큰(RFC 6750)")
+                .jsonPath("$.authenticationSchemes[0].specUri").isEqualTo("https://www.rfc-editor.org/info/rfc6750")
+                .jsonPath("$.authenticationSchemes[0].primary").isEqualTo(true);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"/scim/v2/Schemas", "/scim/v2/ResourceTypes"})
     @DisplayName("filter 가 오면 403 SCIM 오류다 — RFC 7644 §4")

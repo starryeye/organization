@@ -1,5 +1,6 @@
 package dev.starryeye.organization.scim.app;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.DailyOnce;
@@ -71,7 +72,9 @@ public class ArchiveScheduler {
         Observation observation = Observation.createNotStarted(name, observations).start();
         work.doOnError(observation::error)
                 .doFinally(signal -> observation.stop())
-                .contextWrite(context -> context.put(ObservationThreadLocalAccessor.KEY, observation))
+                .contextWrite(context -> context
+                        .put(ObservationThreadLocalAccessor.KEY, observation)
+                        .put(Actor.KEY, Actor.ARCHIVE))
                 .subscribe(ignored -> {
                 }, error -> {
                     // 로깅은 이미 work 안에서 끝났다. 여기서 다시 찍으면 traceId 없이 중복된다.

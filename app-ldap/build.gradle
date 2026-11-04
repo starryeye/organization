@@ -6,6 +6,8 @@ dependencies {
     implementation project(':authz-openfga')
     implementation project(':connector-ldap')
     implementation project(':admin-api')
+    // 리소스 서버 — 경로별 범위, 표면에 맞춘 401·403, 행위자 웹 필터(설계 2026-10-28 §4). 시험 도우미(testFixtures)는 아래 testImplementation 에만 둔다
+    implementation project(':web-security')
 
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
@@ -19,6 +21,10 @@ dependencies {
     testImplementation testFixtures(project(':authz-openfga'))
     testImplementation testFixtures(project(':connector-ldap'))
     testImplementation testFixtures(project(':admin-api'))
+    // 리소스 서버(web-security)의 시험 도우미 — 시험 토큰(TestTokens)과 모든 범위의 기본 머리. 시험 키가 들어 있으므로 main 클래스패스에는 절대 올리지 않는다
+    testImplementation testFixtures(project(':web-security'))
+    // 컨트롤러 슬라이스 시험이 보안 필터체인 없이 인증 주체를 직접 넣을 때 쓴다(mockAuthentication)
+    testImplementation 'org.springframework.security:spring-security-test'
     testImplementation libs.testcontainers.junit
     testImplementation libs.unboundid.ldapsdk
     testImplementation libs.openfga.sdk

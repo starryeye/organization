@@ -1,9 +1,11 @@
 # SCIM
 
-> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 8b492c6 (auth, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)(식별자·표지판·책갈피·키 한도)
 
-app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 받아 [장부](02-용어집.md#장부)와 [현재상태](02-용어집.md#현재상태)에 반영한다. 이 문서는 그 모든 동작을 다룬다. 엔드포인트, 리소스 모양, 조회와 필터, PATCH 해석, 쓰기 한 건의 흐름, 오류 응답, 예시, IdP 별 메모 순이다.
+app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 받아 [장부](02-용어집.md#장부)와 [현재상태](02-용어집.md#현재상태)에 반영한다. 이 문서는 그 모든 동작을 다룬다. 엔드포인트와 인증, 리소스 모양, 조회와 필터, PATCH 해석, 쓰기 한 건의 흐름, 오류 응답, 예시, IdP 별 메모 순이다.
+
+모든 SCIM 요청은 `scim` [범위](02-용어집.md#범위)의 bearer 토큰을 실어야 한다 — 발견 엔드포인트도 그렇다. 토큰은 IdP 가 인가 서버 app-auth 에서 client credentials 로 받는다([§2.5](#25-인증)).
 
 다른 문서가 맡는 것:
 
@@ -20,7 +22,8 @@ app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 �
 
 | 클래스 | 모듈 | 하는 일 |
 |---|---|---|
-| `ScimRouter` | connector-scim | 라우트 표, 라우트 밖 요청(501·405·404), 오류 번역. 오류 응답은 여기 한 곳에서만 만든다 |
+| `ScimRouter` | connector-scim | 라우트 표, 라우트 밖 요청(501·405·404), 오류 번역. 라우터에 닿은 요청의 오류 응답은 여기 한 곳에서만 만든다. 그보다 앞의 보안 필터가 끝낸 401·403·503 은 `AuthFailureResponses` 가 같은 SCIM Error 모양으로 쓴다 |
+| `ResourceServerSecurityConfig`·`AuthFailureResponses`·`ActorWebFilter` | web-security | 토큰 검증과 `scim` 범위 검사, 그 거절의 SCIM Error 본문, 토큰의 `sub` 를 [행위자](02-용어집.md#행위자)로 요청 Context 에 싣기([§2.5](#25-인증)) |
 | `ScimUserHandler`·`ScimGroupHandler` | connector-scim | 단건 GET 과 POST·PUT·PATCH·DELETE. 본문 해석, 유스케이스 호출, 응답 만들기 |
 | `ScimListHandler`·`ScimUserListing`·`ScimGroupListing`·`ScimPager` | connector-scim | 목록·필터·`.search`, 페이지 자르기, [책갈피](02-용어집.md#책갈피) |
 | `ScimGroupStream` | connector-scim | 멤버를 싣는 조직 응답을 흘려 쓴다 |
@@ -95,7 +98,7 @@ flowchart LR
 | GET | `/scim/v2`, `/scim/v2/` | 서버 루트 조회 | — | — | 501 |
 | POST | `/scim/v2/.search` | 서버 루트 조회 | — | — | 501 |
 
-- 표의 "그 밖에 나올 수 있는 상태 코드" 는 그 경로에 고유한 것이다. 어느 경로든 저장소·OpenFGA 의 일시 장애는 503, 버그는 500 이다([§7](#7-오류-응답)).
+- 표의 "그 밖에 나올 수 있는 상태 코드" 는 그 경로에 고유한 것이다. 어느 경로든 토큰이 없거나 틀리면 401, `scim` 범위가 없으면 403, 인가 서버의 키 목록을 받지 못하면 503 이고([§2.5](#25-인증)), 저장소·OpenFGA 의 일시 장애는 503, 버그는 500 이다([§7](#7-오류-응답)).
 - 모든 성공 응답의 `Content-Type` 은 `application/scim+json` 이다(`ScimRouter.SCIM_JSON`, RFC 7644 §3.1).
 - 201 의 `Location` 은 본문 `meta.location` 과 같은 상대 경로다 — `/scim/v2/Users/<id>`, `/scim/v2/Groups/<id>`(`ScimMapper.userLocation`·`groupLocation`).
 - 직원 PATCH 와 PUT 은 200 과 리소스, 조직 PATCH 는 204 가 기본이다. 조직 PATCH 에 `attributes` 쿼리 파라미터를 붙이면 RFC 7644 §3.5.2 대로 200 과 고른 속성을 돌려준다. `excludedAttributes` 만 있으면 그대로 204 다(`ScimGroupHandler.patch`).
@@ -124,7 +127,8 @@ flowchart LR
 
 - `GET /scim/v2/Users/.search` 는 `GET /Users/{id}` 라우트에 `id=".search"` 로 맞아 404("직원을 찾을 수 없습니다: .search")다.
 - 서버 루트에 GET 이 아닌 메서드(예: `DELETE /scim/v2`)는 501 이 아니라 405 다. 501 은 루트 **조회**(GET, `POST /.search`)에만 난다.
-- `/scim/v2` 밖의 경로(예: `/scim/v1/Users`)는 이 라우터가 받지 않는다. 그 응답은 스프링 기본이고 SCIM Error 가 아니다.
+- `/scim/v2` 밖의 경로(예: `/scim/v1/Users`)는 이 라우터가 받지 않는다. 보안 규칙 밖의 경로라 토큰이 있으면 403, 없으면 401 이고 본문이 없다 — SCIM Error 가 아니다.
+- 라우트 밖 요청의 501·405·404 도 `scim` 범위의 토큰이 있을 때만 나온다. 토큰이 없으면 어느 `/scim/v2/**` 경로든 먼저 401 이다.
 
 ### 2.3 요청 형식과 본문 한도
 
@@ -155,12 +159,17 @@ flowchart LR
   "changePassword": {"supported": false},
   "sort": {"supported": true},
   "etag": {"supported": false},
-  "authenticationSchemes": []
+  "authenticationSchemes": [
+    {"type": "oauthbearertoken", "name": "OAuth Bearer Token",
+     "description": "OAuth 2.0 client credentials 로 받은 bearer 토큰(RFC 6750)",
+     "specUri": "https://www.rfc-editor.org/info/rfc6750", "primary": true}
+  ]
 }
 ```
 
 - `filter.supported` 가 참이지만 받는 것은 `eq` 와 `and` 뿐이다([§4.3](#43-필터)). RFC 7644 는 지원 여부만 선언하게 하고 부분 지원은 400 `invalidFilter` 로 알리게 한다.
-- `authenticationSchemes` 가 비어 있다. 인증은 아직 구현하지 않았다([개요](01-개요.md)).
+- `authenticationSchemes` 는 `oauthbearertoken` 하나다(RFC 7643 §5 가 이 칸을 요구한다). 선언만 할 뿐 토큰을 요구하는 것은 라우터가 아니라 앞의 보안 필터다([§2.5](#25-인증)).
+- 발견 엔드포인트 셋(`ServiceProviderConfig`·`ResourceTypes`·`Schemas`)도 `scim` 범위의 토큰이 있어야 한다. RFC 7644 §2 는 익명 발견을 "허용해도 된다(MAY)" 고만 하고, IdP 는 같은 토큰으로 발견도 부른다.
 
 **`GET /ResourceTypes`, `GET /Schemas`** — ListResponse 로 둘(User, Group)을 준다. 클래스를 불러올 때 한 번 짓고, 응답마다 복사본을 내보낸다.
 
@@ -174,6 +183,33 @@ flowchart LR
 | Group | `displayName`, `members`(복수 — `value`(필수, `immutable`), `type`(정규값 `User`·`Group`, `immutable`)) |
 
 문자열 속성은 모두 `caseExact: false` 로 선언된다(`ScimDiscovery.속성`).
+
+### 2.5 인증
+
+app-scim 은 OAuth2 [리소스 서버](02-용어집.md#리소스-서버)다. `/scim/v2/**` 의 모든 요청은 `Authorization: Bearer <토큰>` 을 실어야 하고, 토큰에 `scim` [범위](02-용어집.md#범위)가 있어야 한다. 검사는 SCIM 라우터 앞의 보안 필터(web-security 의 `ResourceServerSecurityConfig`)가 한다 — 서명(키 목록), 발급자, 만료를 보고 `aud` 는 보지 않는다. 관리 API·actuator 와 같은 체인이다([09 — 인증과 범위](09-관리-API.md#10-인증과-범위)).
+
+**IdP 가 토큰을 받는 법.** IdP 는 인가 서버 app-auth 의 토큰 엔드포인트(`POST <발급자>/oauth2/token`)에서 client credentials 로 토큰을 받아 싣는다. 로컬 개발 클라이언트는 `scim-idp`(범위 `scim`, 토큰 수명 60분)다. 범위를 요청하지 않으면 등록된 범위를 모두 받으므로, IdP 화면에 범위 칸이 없어도 `scim` 을 받는다. 붙여 넣는 토큰만 받는 IdP(Okta 의 HTTP Header 방식)는 운영자가 수명을 길게(최대 365일) 준 클라이언트로 한 번 받아 붙여 넣는다([11 — IdP 에 붙이기](11-운영.md#96-idp-와-prometheus-에-붙이기)). 로컬 재생 도구 `docker/scim/replay.py` 도 IdP 처럼 `scim-idp` 로 토큰을 받고, 401 을 받으면 한 번 새로 받아 다시 보낸다.
+
+**거절.** 보안 필터가 끝낸 요청은 `ScimRouter` 의 오류 번역을 거치지 않고 `AuthFailureResponses` 가 SCIM Error(`application/scim+json`, `status` 는 문자열)로 쓴다. `scimType` 은 없다.
+
+| 경우 | 상태 | `WWW-Authenticate` | `detail` |
+|---|---|---|---|
+| 토큰 없음 | 401 | `Bearer` | `인증이 필요하다` |
+| 토큰을 받아들이지 못함 — 서명·발급자·만료·꼴 | 401 | `Bearer error="invalid_token"` | `인증이 필요하다` |
+| `scim` 범위 없음 | 403 | `Bearer error="insufficient_scope"` | `이 요청에 필요한 범위가 없다` |
+| 인가 서버의 키 목록을 받지 못함(연결 2초·전체 5초 초과, 2xx 아님, 키 목록이 아닌 본문) | 503 + `Retry-After: 10` | 없음 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+Content-Type: application/scim+json
+
+{"schemas":["urn:ietf:params:scim:api:messages:2.0:Error"],"status":"401","detail":"인증이 필요하다"}
+```
+
+- 거절된 요청은 아무것도 바꾸지 않는다 — 락도, 감사 이력도 없다.
+- 키 목록 장애가 401 이 아닌 까닭: 거듭된 401 은 IdP 가 자격 문제로 읽어 프로비저닝을 격리할 수 있다. 503 + `Retry-After` 면 IdP 가 다시 보낸다(§7.3 의 일시 장애와 같은 신호). 키 목록은 받아 둔 것을 쓰고 모르는 `kid` 를 볼 때만 다시 받으므로, 인가 서버가 잠깐 내려가도 키 목록을 이미 받은 인스턴스는 그대로 받는다.
+- 토큰의 `sub` 는 [행위자](02-용어집.md#행위자) `client:<sub>` 로 SCIM 쓰기의 감사 이력 원인에 남는다(예 `client:scim-idp`, [10 — 원인](10-감사-이력.md#2-원인)).
 
 ---
 
@@ -316,7 +352,7 @@ compValue = JSON 문자열 / true / false
 - `eq`·`and` 키워드는 대소문자를 가리지 않는다. 속성 이름도 가리지 않는다. 값의 `true`·`false` 는 소문자여야 한다.
 - 문자열 값은 RFC 8259 JSON 문자열이다. 큰따옴표만 구분자이고 이스케이프(`\"`, `\\`, `\n`, `\uXXXX` 등)를 푼다. 작은따옴표로 감싼 값은 400 이다.
 - 빈 필터(`filter=`)는 400 `invalidFilter` "필터가 비어 있습니다".
-- 문법 오류의 문구에는 받은 입력이 붙는다(예: "지원하지 않는 값입니다: '5' — 문자열과 true/false 만 받습니다 — filter: userName eq 5"). 입력 조각은 셋이다 — 끝의 필터 원문, 받지 않는 속성 경로, 받지 않는 값 token. **각각 앞 100자(코드 포인트)까지만** 싣고, 넘으면 `…` 를 붙인다(`ScimFilter.Parser.앞부분`). 원문만 자르면 token 이 필터의 대부분일 때 문구 길이에 상한이 없기 때문이다 — 인증 없는 엔드포인트가 본문 한도(256KB)까지 메아리치지 않게 한다.
+- 문법 오류의 문구에는 받은 입력이 붙는다(예: "지원하지 않는 값입니다: '5' — 문자열과 true/false 만 받습니다 — filter: userName eq 5"). 입력 조각은 셋이다 — 끝의 필터 원문, 받지 않는 속성 경로, 받지 않는 값 token. **각각 앞 100자(코드 포인트)까지만** 싣고, 넘으면 `…` 를 붙인다(`ScimFilter.Parser.앞부분`). 원문만 자르면 token 이 필터의 대부분일 때 문구 길이에 상한이 없기 때문이다 — 오류 응답이 받은 본문을 본문 한도(256KB)까지 메아리치지 않게 한다.
 
 **리소스별로 받는 속성.** 필터에는 인덱스로 찾을 수 있는 조건이 적어도 하나 있어야 한다. 그 조건 하나로 후보를 찾고(찾는 조건), `and` 로 붙은 나머지 조건은 후보 위에서 메모리로 확인한다. 전원을 훑는 필터는 받지 않는다.
 
@@ -600,7 +636,7 @@ flowchart TD
 락 잡기부터 반납까지는 요청의 구독과 따로 돈다(`withLock` 의 `subscribe`, [03 요청과 떼어 돌리기](03-아키텍처.md#요청과-떼어-돌리기)).
 
 - IdP 가 연결을 끊어도 커밋까지 마치고 반납한다. 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다.
-- 요청의 Reactor Context(traceId)는 이어받는다. 로그와 감사 이력의 원인 id 가 같은 traceId 로 묶인다.
+- 요청의 Reactor Context(traceId·행위자)는 이어받는다. 로그와 감사 이력의 원인 id 가 같은 traceId 로 묶이고, 원인의 `actor` 는 토큰의 `client:<sub>` 다. 둘 다 `withLock` 이 락 구간을 띄우기 전에 Context 에서 읽어 둔다 — 요청이 떠난 뒤 남기는 이력도 같은 값이다.
 - 요청이 떠난 뒤의 실패·부분 반영은 받을 곳이 없어 경고 로그로만 남는다. "요청이 떠난 뒤 SCIM 쓰기가 부분 반영으로 끝났다 — 실패한 튜플 N개. IdP 는 이 결과를 받지 못했다".
 - SCIM 쓰기에는 기한이 없다. `sync.job-timeout` 은 회차(재적재)에만 걸린다. 오래 걸리는 쓰기는 리스를 갱신하며 끝까지 간다.
 
@@ -828,7 +864,7 @@ SCIM 재적재(`mode=tuples`)는 보류 목록을 처음부터 다시 정하고,
 
 ### 7.1 본문 모양
 
-모든 오류는 SCIM Error(RFC 7644 §3.12)로 나간다. 라우트 밖 요청과 Content-Type 불일치처럼 WebFlux 가 정한 오류도 같다(`ScimRouter.write`).
+모든 오류는 SCIM Error(RFC 7644 §3.12)로 나간다. 라우트 밖 요청과 Content-Type 불일치처럼 WebFlux 가 정한 오류도 같다(`ScimRouter.write`). 보안 필터의 401·403·503 도 같은 모양이지만 라우터가 아니라 web-security 가 쓰고 `scimType` 이 없다([§2.5](#25-인증)).
 
 ```json
 {
@@ -854,6 +890,8 @@ SCIM 재적재(`mode=tuples`)는 보류 목록을 처음부터 다시 정하고,
 | 400 | `invalidValue` | 키 한도 초과, 조직 계층이 너무 큼, 값 붙은 `remove members`, `active` 값, 빈 `userName`, 조직 `externalId` 가 객체, 조회 파라미터(`startIndex`·`count`·`sortBy`·`sortOrder`·속성 고르기) | "userName 이(가) 1024바이트를 넘습니다" | 고쳐 보낸다(다시 보내도 늘 같다) |
 | 400 | `noTarget` | path 없는 `remove`, 이메일이 없는데 `emails[type eq "work"]` replace | "remove 에는 path 가 있어야 합니다" | 고쳐 보낸다 |
 | 400 | `mutability` | `remove userName` | "userName 은 필수라 지울 수 없습니다" | 고쳐 보낸다 |
+| 401 | — | 토큰이 없거나, 서명·발급자·만료·꼴이 틀렸다 — 보안 필터([§2.5](#25-인증)). `WWW-Authenticate` 가 붙는다 | "인증이 필요하다" | 토큰을 새로 받는다 |
+| 403 | — | 토큰에 `scim` 범위가 없다 — 보안 필터. `WWW-Authenticate: Bearer error="insufficient_scope"` | "이 요청에 필요한 범위가 없다" | 클라이언트의 범위를 고친다 |
 | 403 | — | `/Schemas`·`/ResourceTypes` 에 `filter` | "이 엔드포인트는 filter 를 받지 않습니다 — RFC 7644 §4" | — |
 | 404 | — | 없는 직원·조직(락 안 존재 확인 포함), 없는 스키마·자원 종류, 없는 SCIM 경로 | "직원을 찾을 수 없습니다: 3f6c…", "없는 SCIM 경로입니다: /scim/v2/Users/kim/extra" | — |
 | 405 | — | 있는 경로에 받지 않는 메서드. `Allow` 헤더 | "이 경로는 DELETE 를 받지 않습니다: /scim/v2/Users" | — |
@@ -861,7 +899,7 @@ SCIM 재적재(`mode=tuples`)는 보류 목록을 처음부터 다시 정하고,
 | 413 | — | 본문이 `spring.codec.max-in-memory-size` 를 넘었다 | "요청 본문이 한도(262144바이트)를 넘었습니다 — 큰 조직의 멤버는 PATCH 로 나눠 보내세요" | 멤버를 PATCH 로 나눠 보낸다 |
 | 415 | — | 디코더가 읽지 못하는 Content-Type | "Content-Type 은 application/scim+json 또는 application/json 이어야 합니다" | 고쳐 보낸다 |
 | 501 | — | Bulk, `/Me`, 서버 루트 조회 | "지원하지 않는 SCIM 엔드포인트입니다: /scim/v2/Bulk", "서버 루트 조회는 지원하지 않습니다 — /scim/v2/Users 나 /scim/v2/Groups 로 조회하세요" | — |
-| 503 | — | 일시 장애(아래 표). `Retry-After` | "일시적으로 처리할 수 없습니다 — 10초 뒤 다시 보내 주세요", "일부 튜플 적용에 실패했습니다 — 잠시 뒤 다시 보내 주세요: <id>" | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
+| 503 | — | 일시 장애(아래 표). `Retry-After`. 인가 서버의 키 목록을 받지 못한 것도 503 이다(보안 필터, `Retry-After: 10`) | "일시적으로 처리할 수 없습니다 — 10초 뒤 다시 보내 주세요", "일부 튜플 적용에 실패했습니다 — 잠시 뒤 다시 보내 주세요: <id>", 키 목록 장애는 "일시 장애 — 잠시 뒤 다시 시도한다" | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
 | 500 | — | 우리 버그. 예기치 않은 예외. ERROR 로그 | "내부 오류가 발생했습니다", "저장된 리소스를 다시 읽지 못했습니다: <id>" | 로그를 본다 |
 
 WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그 상태를 그대로 쓰고 문구는 HTTP reason phrase 다. Spring 의 reason 은 내부 클래스 이름이 나갈 수 있어 싣지 않는다.
@@ -874,6 +912,7 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 | 다른 쓰기가 같은 `userName`·`externalId` 표지판을 차지하고 아직 저장하지 않았다 | 2초 | `UniqueMarkers.쓰는_중_대기` |
 | 재적재가 변경 락을 쥐었다 — 다시 시도하지 않고 바로([07 재적재 동안의 SCIM 쓰기](07-재적재-초기화-아카이빙.md#5-재적재-동안의-scim-쓰기)) | 60초 | `LockUnavailableException.긴_작업_대기` |
 | 락 저장소 오류, 락 획득 시도가 시도 한도로 끊긴 채 획득 한도에 닿음(쥔 쪽을 모른다), 리스 상실(작업 도중·쓰기 직전·커밋 직전), 차단기(`TupleWriteAbortedException`), 부분 실패, OpenFGA·DynamoDB 일시 장애(SDK 시간 한도 포함), I/O 실패·시간 초과 | 10초 | `TemporaryFailureException.기본_대기` |
+| 인가 서버의 키 목록을 받지 못했다 — 라우터에 닿기 전, 보안 필터([§2.5](#25-인증)) | 10초 | `AuthFailureResponses.재시도_초`(web-security) |
 
 일시 장애를 가르는 법(`TemporaryFailureClassifier.재시도_대기`, core `port`) — 원인 사슬을 따라가며 처음 맞는 것을 쓴다. 관리 API 예외 처리기도 같은 분류기를 쓴다([09 — 오류](09-관리-API.md#오류)).
 
@@ -881,15 +920,15 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 2. 어댑터 인식기. `DynamoDbTemporaryFailures`: `SdkClientException`, 스로틀링, 5xx, SDK 가 재시도 가능하다고 표시한 것. `OpenFgaTemporaryFailures`: `FgaError.isRetryable()`(429, 501 을 뺀 5xx).
 3. `IOException`(Jackson 의 `JacksonException` 은 뺀다 — 다시 보내도 같다)이나 `TimeoutException` — 10초.
 
-어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·인증 오류·store 없음(`StoreNotFoundException` — 생성이 꺼진 배포에서 이름의 store 가 없다)·응답 해석 실패는 다시 보내도 같다.
+어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·OpenFGA 가 키를 거절한 것(401·403 — [사전 공유 키](02-용어집.md#사전-공유-키)가 틀렸거나 없다)·store 없음(`StoreNotFoundException` — 생성이 꺼진 배포에서 이름의 store 가 없다)·응답 해석 실패는 다시 보내도 같다. 그래서 500 이다. 다만 OpenFGA 쓰기 배치의 실패는 예외가 아니라 결과의 실패로 담긴다 — 키 거절도 그렇다. 그래서 Check 를 먼저 부르지 않는 연산(조직 삭제, 멤버만 빼는 PATCH)에서 OpenFGA 가 키를 거절하면 500 이 아니라 부분 실패 503 일 수 있다([12 — 7.6](12-장애와-복구.md#76-openfga-가-키를-거절한다401403)).
 
-503 의 `detail` 은 우리가 쓴 문구뿐이다. 예외 메시지에는 OpenFGA 서버 메시지, 라이브러리 예외 문자열, 락을 쥔 쪽의 용도가 들어 있고 이 엔드포인트는 인증이 없다. 원인은 서버 로그(WARN "SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After N초")에만 남는다. 부분 실패의 503 만 우리가 만든 `ScimException` 이라 문구에 id 가 있다.
+503 의 `detail` 은 우리가 쓴 문구뿐이다. 예외 메시지에는 OpenFGA 서버 메시지, 라이브러리 예외 문자열, 락을 쥔 쪽의 용도가 들어 있다 — 응답으로 내보내지 않는다. 원인은 서버 로그(WARN "SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After N초")에만 남는다. 부분 실패의 503 만 우리가 만든 `ScimException` 이라 문구에 id 가 있다.
 
 영구히 거절되는 튜플이 섞인 부분 실패도 지금은 503 이라 IdP 가 되풀이할 수 있다. 서버가 발급한 UUID 아래에서는 OpenFGA 가 거절할 id 가 거의 없다.
 
 ### 7.4 번역 순서
 
-`ScimRouter.toScimError` 는 위에서부터 처음 맞는 것을 쓴다. 순서에 뜻이 있다.
+`ScimRouter.toScimError` 는 위에서부터 처음 맞는 것을 쓴다. 순서에 뜻이 있다. 토큰·범위·키 목록의 거절은 이 번역에 오기 전에 보안 필터가 끝낸다([§2.5](#25-인증)).
 
 1. `ScimException` — 그 상태·`scimType`·문구·`Retry-After`·`Allow`.
 2. `DirectoryConflictException` — 409 `uniqueness`.
@@ -905,7 +944,7 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 
 ## 8. 예시
 
-예시의 id 는 읽기 쉽게 줄였다. 실제로는 UUID 다.
+예시의 id 는 읽기 쉽게 줄였다. 실제로는 UUID 다. 요청마다 `Authorization: Bearer <scim 범위의 토큰>` 머리가 있다고 보고 줄였다.
 
 ### 8.1 직원을 만들고 조직에 넣기
 
@@ -1088,6 +1127,8 @@ PUT /scim/v2/Groups/G-backend?excludedAttributes=members
 
 | IdP | 메모 | 이 서버의 동작 | IdP 동작 확인 |
 |---|---|---|---|
+| Entra | 프로비저닝 인증 방식으로 OAuth2 client credentials 를 고르고, 토큰 엔드포인트 `https://<app-auth>/oauth2/token` 과 그 IdP 용 클라이언트(범위 `scim`)의 id·비밀을 적는다. 토큰 수명은 60분을 권한다 | 범위를 보내지 않으면 등록된 범위를 모두 준다(`DefaultScopes`) — 화면에 범위 칸이 없어도 `scim` 을 받는다 | 확인 못 함(범위 칸이 있는지도 모른다) |
+| Okta | HTTP Header 인증은 토큰 하나를 붙여 넣는다 | 그 IdP 용 클라이언트만 수명을 길게 준다(예 `180d`, 365일을 넘으면 app-auth 가 뜨지 않는다). 운영자가 한 번 받아 붙여 넣고 만료 전에 바꿔 넣는다. 서명 키를 바꾸면 무효다 | 확인 못 함 |
 | Entra | SCIM 테넌트 URL 끝에 `?aadOptscim062020` 을 **반드시** 붙인다. 없으면 멤버 한 명을 값 붙은 `remove members` 로 뺀다 | 값 붙은 `remove members` 는 400 `invalidValue`(문구에 옵션 안내). 옵션을 켜면 `members[value eq "…"]` 로 오고 받는다 | 확인 못 함 |
 | Entra | 이 옵션은 비활성화·경로 없는 PATCH 의 모양도 표준으로 바꾼다 | 두 모양 모두 받는다 | 확인 못 함 |
 | Entra | `active` 를 문자열(`"True"`/`"False"`)로, `op` 를 `"Replace"` 처럼 보낸다 | PATCH 의 `active` 문자열은 대소문자 무관으로 받는다. `op` 도 대소문자 무관 | 문서 근거만 있다 |
@@ -1099,7 +1140,7 @@ PUT /scim/v2/Groups/G-backend?excludedAttributes=members
 | Entra | 개별 오류는 다음 주기에 재시도한다 | 503 + `Retry-After` 로 알린다 | 문서 근거만 있다 |
 | Entra | 대상을 다시 읽어 차이만 보낸다 — 비활성으로 저장된 직원에 재시도하지 않을 수 있다 | 하루 아카이빙이 남은 회수를 지운다 | 확인 못 함("알려져 있다") |
 | Entra | 순서: 빈 조직 → 직원 → 멤버 PATCH | 시험 하네스(`ScimIdBook`)가 이 순서로 다시 쓰였다 | 확인 못 함 |
-| Entra | `objectId` 를 `externalId` 로 매핑했다면 권한을 묻는 앱이 그 값으로 employeeId 를 찾는다 | 관리 API `GET /admin/employees?externalId=` | 확인 못 함 |
+| Entra | `objectId` 를 `externalId` 로 매핑했다면 권한을 묻는 앱이 그 값으로 employeeId 를 찾는다 | 관리 API 정확 조회 `GET /admin/employees/lookup?externalId=`(범위 `directory.lookup`) | 확인 못 함 |
 | Entra·Okta | 멤버를 `type` 없이 보낸다 | 현재상태로 판정. 있는 직원이면 로그 없음 | 확인 못 함 |
 | Entra·Okta | 비활성화를 `active=false` 로 명시해 보낸다 | "없음 = 활성" 규칙을 그대로 두는 근거 | 확인 못 함 |
 | Okta | 필터는 `eq` 만 쓴다(Entra 는 `eq`·`and`) | `eq`·`and` 만 받는다 | 확인 못 함 |
@@ -1131,6 +1172,7 @@ PUT /scim/v2/Groups/G-backend?excludedAttributes=members
 | `openfga.request-concurrency` | 4 | BatchCheck 요청(50건씩)과 같은 단계의 쓰기 배치를 동시에 보내는 수 |
 | `openfga.max-retries` | 3 | 배치마다 일시 오류 재시도 |
 | `dynamodb.table-name`, `openfga.store-name` | yml `organization-scim`(클래스 기본값은 없다 — 비면 기동을 멈춘다) | app-ldap 과 늘 다르게 둔다([개요](01-개요.md)) |
+| `spring.security.oauth2.resourceserver.jwt.issuer-uri`, `jwk-set-uri` | 로컬 `http://localhost:9000`, `http://localhost:9000/oauth2/jwks`(prod 는 `AUTH_ISSUER_URI`·`AUTH_JWK_SET_URI`) | 토큰 검증 — 발급자와 키 목록 주소. 둘 다 있어야 뜬다([11 — 리소스 서버 설정](11-운영.md#110-두-앱-공통--리소스-서버)) |
 
 SCIM 쓰기 경로의 지표(`ScimSyncMetrics`):
 
@@ -1167,3 +1209,4 @@ SCIM 쓰기 경로의 지표(`ScimSyncMetrics`):
 - 키 한도, 발견 엔드포인트, 405: `docs/superpowers/specs/2026-10-17-scim-standard-rest-design.md`
 - 요청한 `active` 저장, 삭제 실패 시 비활성, 아카이빙의 남은 회수: `docs/superpowers/specs/2026-10-20-revocation-convergence-design.md` §6
 - 필터 오류 문구의 100자, 회수 카운터, 분류기를 core 로 옮긴 것, 락 획득 시도 한도: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §6·§8·§10
+- 인증(`scim` 범위, 401·403 본문, `authenticationSchemes`, 행위자): `docs/superpowers/specs/2026-10-28-auth-design.md` §4·§5(키 목록 장애 503 은 구현 중 정했다 — `AuthFailureResponses`)

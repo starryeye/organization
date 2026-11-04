@@ -4,6 +4,7 @@ import dev.starryeye.organization.authz.fixture.ScaleContainers;
 import dev.starryeye.organization.core.fixture.ScaleTest;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.security.fixture.TestTokens;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.junit.jupiter.api.DisplayName;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -64,8 +66,12 @@ class ScimWriteContentionScaleTest {
     @Autowired DirectoryStateRepository state;
     @Autowired MeterRegistry registry;
 
+    /** 직접 만든 클라이언트라 자동으로 붙는 기본 머리가 없다 — 다른 앱 시험의 {@code WebTestClient} 와 같은 토큰(모든 범위의 test-client)을 싣는다. */
     private WebClient 웹() {
-        return WebClient.create("http://127.0.0.1:" + port);
+        return WebClient.builder()
+                .baseUrl("http://127.0.0.1:" + port)
+                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + TestTokens.발급한다("test-client", TestTokens.ALL_SCOPES))
+                .build();
     }
 
     private static String 아이디(int i) {

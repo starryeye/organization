@@ -29,8 +29,11 @@ public record AuditHistoryItem(
         Members membersRemoved
 ) {
 
-    /** 원인 — 회차면 {@code id} 가 {@code /admin/sync/runs} 의 runId, SCIM 요청이면 로그의 traceId 다. */
-    public record Cause(String source, String kind, String id) {
+    /**
+     * 원인 — 회차면 {@code id} 가 {@code /admin/sync/runs} 의 runId, SCIM 요청이면 로그의 traceId 다. {@code actor} 는 변경을 일으킨 쪽이다:
+     * {@code client:<sub>}·{@code system:scheduler}·{@code system:archive}, 모르면 {@code system:unknown}.
+     */
+    public record Cause(String source, String kind, String id, String actor) {
     }
 
     public record Members(int count, List<Member> items) {
@@ -44,7 +47,8 @@ public record AuditHistoryItem(
         boolean 조직 = entry.subject().type() == MemberType.GROUP;
         return new AuditHistoryItem(
                 record.at().toString(),
-                new Cause(record.cause().source().name(), record.cause().kind().name(), record.cause().id()),
+                new Cause(record.cause().source().name(), record.cause().kind().name(), record.cause().id(),
+                        record.cause().actor()),
                 entry.created(),
                 entry.deleted(),
                 entry.attributes(),

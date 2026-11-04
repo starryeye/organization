@@ -8,9 +8,12 @@ import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.security.Callers;
+import dev.starryeye.organization.security.Scopes;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -45,11 +48,13 @@ public class AdminSyncController {
     private final SyncMetrics metrics;
 
     /**
-     * @param force true 면 삭제 가드를 건너뛴다. ABORTED 이후 사람이 판단해서 승인하는 통로다
+     * @param force  true 면 삭제 가드를 건너뛴다. ABORTED 이후 사람이 판단해서 승인하는 통로다. {@code admin.sync} 에 더해 {@code admin.destructive} 가 있어야 한다
+     * @param caller 토큰의 호출자. 보안 필터가 {@code admin.sync} 를 본 뒤에 오며, {@code force} 의 추가 범위는 여기서 본다
      */
     @PostMapping("/full")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public Mono<SyncRunResponse> full(@RequestParam(defaultValue = "false") boolean force) {
+    public Mono<SyncRunResponse> full(@RequestParam(defaultValue = "false") boolean force, Authentication caller) {
+        요구한다_force(force, caller);
         SyncTrigger trigger = force ? SyncTrigger.FORCED : SyncTrigger.MANUAL;
         log.info("수동 전체 동기화 요청: trigger={}", trigger);
         return 걸되_겹치면_409(() -> fullSync.start(trigger, metrics::record));
@@ -62,11 +67,14 @@ public class AdminSyncController {
      * 가드가 걸려도 디렉터리가
      * 막았다고 명시한 회수(비활성 직원의 줄)를 따로 떼어 같은 가드로 보아, 그 회수만으로 가드 안이면 그것만 지우고 나머지는 보류한다(설계 2026-10-20 §5.4).
      * 그 회수가 없거나 그것도 가드를 넘으면 아무것도 지우지 않는다. 옛 {@code mode} 파라미터가 오면 400 으로 알린다.
+     * {@code force=true} 는 {@code admin.sync} 에 더해 {@code admin.destructive} 가 있어야 한다 — 없으면 무엇보다 먼저 403 이다.
      */
     @PostMapping("/rebuild")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Mono<SyncRunResponse> rebuild(@RequestParam(required = false) String mode,
-                                         @RequestParam(defaultValue = "false") boolean force) {
+                                         @RequestParam(defaultValue = "false") boolean force,
+                                         Authentication caller) {
+        요구한다_force(force, caller);
         if (mode != null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "재적재 모드는 하나로 합쳐졌습니다 — mode 없이 POST /admin/sync/rebuild 를 호출하세요 (받은 mode: " + mode + ")");
@@ -88,6 +96,16 @@ public class AdminSyncController {
                 .map(SyncRunResponse::from)
                 .switchIfEmpty(Mono.error(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND, "실행 기록이 없습니다: " + runId)));
+    }
+
+    /**
+     * {@code force=true} 는 삭제 가드를 건너뛰는 위험한 요청이라 {@code admin.destructive} 를 더 요구한다(설계 2026-10-28 §4.3, A4). 필터가 쿼리 문자열을
+     * 따로 읽지 않고 스프링이 바꾼 {@code boolean} 으로 판정하므로 {@code force=yes}·{@code 1} 도 같은 길이다. 회차를 열거나 락을 잡는 어떤 일보다 앞에서 부른다.
+     */
+    private static void 요구한다_force(boolean force, Authentication caller) {
+        if (force) {
+            Callers.요구한다(caller, Scopes.ADMIN_DESTRUCTIVE, "force=true");
+        }
     }
 
     /** 작업 락을 못 잡았다는 것은 다른 인스턴스가 동기화·재적재 중이라는 뜻이다 — 곧바로 409, 관리자가 잠시 뒤 다시 건다. */

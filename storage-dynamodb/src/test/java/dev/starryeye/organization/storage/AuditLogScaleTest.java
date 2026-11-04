@@ -59,7 +59,7 @@ class AuditLogScaleTest extends DynamoDbTestSupport {
 
         WriteCounter counter = new WriteCounter();
         DynamoDbAuditLog auditLog = new DynamoDbAuditLog(counter.wrap(client), properties);
-        AuditEvent event = new AuditEvent(Instant.now(), AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1"), entries);
+        AuditEvent event = new AuditEvent(Instant.now(), AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, "run-1", "client:ops"), entries);
 
         // when
         long 시작 = System.currentTimeMillis();

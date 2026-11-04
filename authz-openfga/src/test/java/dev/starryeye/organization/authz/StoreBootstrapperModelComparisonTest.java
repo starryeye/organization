@@ -11,6 +11,8 @@ import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.List;
 import java.util.Map;
 
@@ -19,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 서버의 최신 인가 모델과 우리 모델을 견주는 규칙(설계 2026-10-27 §4). 컨테이너 없이 순수 단위로 본다 —
  * 같은 모델이면 쓰지 않아야 기동마다 버전이 쌓이지 않고, 다른 모델이면 쓰지 않는 쪽으로 틀리면 안 된다.
+ * 견줄 우리 모델을 클래스패스에서 읽는 길도 여기서 본다.
  */
 class StoreBootstrapperModelComparisonTest {
 
@@ -53,6 +56,30 @@ class StoreBootstrapperModelComparisonTest {
 
     private static Userset 직접_관계() {
         return new Userset()._this(Map.of());
+    }
+
+    @Test
+    @DisplayName("스레드의 문맥 클래스 로더가 이 모듈을 보지 못해도 인가 모델을 읽는다 — 부트 fat jar 에서 ForkJoinPool 스레드가 읽는 경우")
+    void 문맥_클래스_로더가_이_모듈을_보지_못해도_인가_모델을_읽는다() {
+        // given — 부트 fat jar(java -jar)에서 모델을 읽는 ForkJoinPool 스레드의 문맥 클래스 로더는 안쪽 jar 를 보지 못한다. 그 로더로 자원을 찾으면
+        // 기동 때 WARN 과 SCIM 503 이 났다(bootRun·시험에서는 보이지 않는다). 부모가 부트스트랩 로더뿐인 빈 로더로 흉내 낸다
+        OpenFgaProperties properties = new OpenFgaProperties();
+        properties.setStoreName("model-resource-test");
+        var 부트스트래퍼 = new StoreBootstrapper(properties);
+        Thread 스레드 = Thread.currentThread();
+        ClassLoader 원래_로더 = 스레드.getContextClassLoader();
+        스레드.setContextClassLoader(new URLClassLoader(new URL[0], null));
+        WriteAuthorizationModelRequest 모델;
+        try {
+            // when
+            모델 = 부트스트래퍼.authorizationModel();
+        } finally {
+            스레드.setContextClassLoader(원래_로더);
+        }
+
+        // then
+        assertThat(모델.getSchemaVersion()).isEqualTo("1.1");
+        assertThat(모델.getTypeDefinitions()).isNotEmpty();
     }
 
     @Test

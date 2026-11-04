@@ -134,7 +134,7 @@ class LastSuccessGaugeTest {
     void 아직_도는_회차는_세지_않는다() {
         // given
         끝난_회차를_심는다("run-1", SyncStatus.SUCCEEDED, "2026-10-23T01:00:00Z");
-        runs.seed(SyncRun.started("run-2", SyncSource.LDAP, SyncTrigger.SCHEDULED, Instant.parse("2026-10-23T02:00:00Z")));
+        runs.seed(SyncRun.started("run-2", SyncSource.LDAP, SyncTrigger.SCHEDULED, Instant.parse("2026-10-23T02:00:00Z"), null));
 
         // when
         gauge.갱신한다().block();

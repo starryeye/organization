@@ -5,6 +5,7 @@ import dev.openfga.sdk.api.client.model.ClientReadAuthorizationModelResponse;
 import dev.openfga.sdk.api.configuration.ClientConfiguration;
 import dev.openfga.sdk.api.model.TypeDefinition;
 import dev.openfga.sdk.api.model.WriteAuthorizationModelRequest;
+import dev.openfga.sdk.errors.FgaApiAuthenticationError;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -39,6 +40,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         // given — 아직 아무도 해석하지 않은 새 이름의 store 를 노리는 여러 호출자
         OpenFgaProperties freshProperties = new OpenFgaProperties();
         freshProperties.setApiUrl(properties.getApiUrl());
+        freshProperties.setApiToken(properties.getApiToken());
         freshProperties.setStoreName("concurrent-" + UUID.randomUUID());
         freshProperties.setCreateStore(true);
         freshProperties.setWriteBatchSize(properties.getWriteBatchSize());
@@ -74,11 +76,12 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         // 뒤쪽 페이지에 위치하게 된다.
         OpenFgaProperties targetProperties = new OpenFgaProperties();
         targetProperties.setApiUrl(properties.getApiUrl());
+        targetProperties.setApiToken(properties.getApiToken());
         targetProperties.setStoreName("paged-target-" + UUID.randomUUID());
         targetProperties.setWriteBatchSize(properties.getWriteBatchSize());
         targetProperties.setMaxRetries(properties.getMaxRetries());
 
-        OpenFgaClient rawClient = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()));
+        OpenFgaClient rawClient = 키를_단_클라이언트(properties.getApiUrl(), null);
         String fillerPrefix = "filler-" + UUID.randomUUID() + "-";
         for (int i = 0; i < 150; i++) {
             createStoreDirectly(rawClient, fillerPrefix + i);
@@ -137,11 +140,12 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
         // given — 이름이 같은 store 두 개를 미리 만들어 경쟁으로 이미 어긋난 상태를 흉내낸다
         OpenFgaProperties duplicateProperties = new OpenFgaProperties();
         duplicateProperties.setApiUrl(properties.getApiUrl());
+        duplicateProperties.setApiToken(properties.getApiToken());
         duplicateProperties.setStoreName("duplicate-" + UUID.randomUUID());
         duplicateProperties.setWriteBatchSize(properties.getWriteBatchSize());
         duplicateProperties.setMaxRetries(properties.getMaxRetries());
 
-        OpenFgaClient rawClient = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()));
+        OpenFgaClient rawClient = 키를_단_클라이언트(properties.getApiUrl(), null);
         createStoreDirectly(rawClient, duplicateProperties.getStoreName());
         createStoreDirectly(rawClient, duplicateProperties.getStoreName());
 
@@ -151,6 +155,36 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
                 .hasMessageContaining(duplicateProperties.getStoreName());
     }
 
+    // ---------- 사전 공유 키(설계 2026-10-28 §7) ----------
+
+    @Test
+    @DisplayName("키가 틀리면 store 해석이 401 로 실패한다 — 틀린 키로는 OpenFGA 에 아무것도 만들지 못한다")
+    void 키가_틀리면_store_해석이_401_로_실패한다() {
+        // given — 이 OpenFGA 는 test-openfga-key 만 받는다. 다른 키를 단 부트스트래퍼
+        OpenFgaProperties 속성 = 새_속성("wrong-key-");
+        속성.setApiToken("wrong-openfga-key");
+        StoreBootstrapper 부트스트래퍼 = new StoreBootstrapper(속성);
+
+        // when, then — 실패의 원인 사슬에 401(FgaApiAuthenticationError)이 있다
+        assertThatThrownBy(() -> 부트스트래퍼.resolveStore().block(Duration.ofSeconds(10)))
+                .satisfies(실패 -> assertThat(원인_사슬(실패)).anyMatch(FgaApiAuthenticationError.class::isInstance));
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
+    }
+
+    @Test
+    @DisplayName("키를 달지 않으면 store 해석이 401 로 실패한다 — 익명 호출이 막힌다")
+    void 키가_없으면_store_해석이_401_로_실패한다() {
+        // given — 키 없는 부트스트래퍼(OpenFGA 가 키를 요구한다)
+        OpenFgaProperties 속성 = 새_속성("no-key-");
+        속성.setApiToken(null);
+        StoreBootstrapper 부트스트래퍼 = new StoreBootstrapper(속성);
+
+        // when, then
+        assertThatThrownBy(() -> 부트스트래퍼.resolveStore().block(Duration.ofSeconds(10)))
+                .satisfies(실패 -> assertThat(원인_사슬(실패)).anyMatch(FgaApiAuthenticationError.class::isInstance));
+        assertThat(countStoresNamed(속성.getStoreName())).isZero();
+    }
+
     // ---------- 동시 첫 생성 수렴(점검 M17) ----------
 
     @Test
@@ -158,7 +192,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
     void 먼저_만든_store_가_이긴다() throws Exception {
         // given — 다른 인스턴스가 먼저 만들고, 내가 곧이어 만든 순간
         OpenFgaProperties 속성 = 새_속성("converge-");
-        OpenFgaClient raw = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()));
+        OpenFgaClient raw = 키를_단_클라이언트(properties.getApiUrl(), null);
         String 먼저 = createStoreDirectly(raw, 속성.getStoreName());
         Thread.sleep(5);
         String 나중 = createStoreDirectly(raw, 속성.getStoreName());
@@ -178,7 +212,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
     void 내가_먼저면_그대로_쓴다() throws Exception {
         // given
         OpenFgaProperties 속성 = 새_속성("converge-first-");
-        OpenFgaClient raw = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()));
+        OpenFgaClient raw = 키를_단_클라이언트(properties.getApiUrl(), null);
         String 먼저 = createStoreDirectly(raw, 속성.getStoreName());
         Thread.sleep(5);
         createStoreDirectly(raw, 속성.getStoreName());
@@ -232,7 +266,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
     void 모델이_다르면_새로_쓴다() throws Exception {
         // given — 누군가 타입 하나짜리 다른 모델을 최신으로 써 두었다(도우미가 쓴 것과 합쳐 둘)
         String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
-        OpenFgaClient raw = new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(번호));
+        OpenFgaClient raw = 키를_단_클라이언트(properties.getApiUrl(), 번호);
         raw.writeAuthorizationModel(new WriteAuthorizationModelRequest()
                 .schemaVersion("1.1")
                 .typeDefinitions(List.of(new TypeDefinition().type("user")))).get();
@@ -255,7 +289,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
             @Override
             public OpenFgaClient clientFor(String storeId) {
                 try {
-                    return new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(storeId)) {
+                    return new OpenFgaClient(키를_단_설정(properties.getApiUrl(), storeId)) {
                         @Override
                         public CompletableFuture<ClientReadAuthorizationModelResponse> readLatestAuthorizationModel() {
                             return CompletableFuture.completedFuture(null);
@@ -360,7 +394,7 @@ class StoreBootstrapperTest extends OpenFgaTestSupport {
     void 해석한_store_가_지워지면_findExistingStore_가_빈다() throws Exception {
         // given — 이미 해석했고(캐시한 번호가 있다), 누군가 부트스트래퍼를 거치지 않고 그 store 를 지웠다
         String 번호 = bootstrapper.resolveStore().block(Duration.ofSeconds(10));
-        new OpenFgaClient(new ClientConfiguration().apiUrl(properties.getApiUrl()).storeId(번호)).deleteStore().get();
+        키를_단_클라이언트(properties.getApiUrl(), 번호).deleteStore().get();
 
         // when
         String 찾은_번호 = bootstrapper.findExistingStore().block(Duration.ofSeconds(10));

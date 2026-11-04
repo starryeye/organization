@@ -1,11 +1,13 @@
 package dev.starryeye.organization.admin;
 
+import dev.starryeye.organization.core.port.DirectoryQueryRepository;
 import dev.starryeye.organization.core.port.DirectorySearchRepository;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.port.TemporaryFailureRecognizer;
 import dev.starryeye.organization.core.usecase.AdminQueryUseCase;
+import dev.starryeye.organization.core.usecase.DirectoryLookupUseCase;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
@@ -17,8 +19,8 @@ import org.springframework.context.annotation.Configuration;
  * 두 스프링부트 앱 모두 {@code scanBasePackages = "dev.starryeye.organization"} 이라 스캔이
  * {@code dev.starryeye.organization.admin} 까지 닿는데, 같은 빈을 스캔과 {@code @Bean} 양쪽으로
  * 등록하면 {@code allowBeanDefinitionOverriding=false} 기본값에서 컨텍스트 기동이
- * {@code BeanDefinitionOverrideException} 으로 깨진다. {@code AdminQueryUseCase} 와
- * {@code AdminQueryMetrics} 는 스테레오타입 애노테이션이 없는 평범한 클래스라 {@code @Bean} 으로
+ * {@code BeanDefinitionOverrideException} 으로 깨진다. {@code AdminQueryUseCase}·{@code DirectoryLookupUseCase}
+ * 와 {@code AdminQueryMetrics} 는 스테레오타입 애노테이션이 없는 평범한 클래스라 {@code @Bean} 으로
  * 등록해야 하고({@code ScimConfig} 가 {@code ScimUserHandler}/{@code ScimGroupHandler} 를
  * 등록하는 것과 같은 이유), 그래서 충돌하지 않는다. {@code TemporaryFailureClassifier} 도 core 의 평범한 클래스라 같다 —
  * {@code AdminExceptionHandler}({@code @RestControllerAdvice})는 스캔으로 등록되고, 분류기만 여기서 {@code @Bean} 이다.
@@ -31,6 +33,13 @@ public class AdminQueryConfig {
                                                DirectorySearchRepository search,
                                                RelationTupleChecker checker) {
         return new AdminQueryUseCase(state, search, checker);
+    }
+
+    /** 정확 조회 둘의 유스케이스. {@code DirectoryQueryRepository} 는 {@code DynamoDbConfig} 가 두 앱 모두에 낸다. */
+    @Bean
+    public DirectoryLookupUseCase directoryLookupUseCase(DirectoryStateRepository state,
+                                                         DirectoryQueryRepository query) {
+        return new DirectoryLookupUseCase(state, query);
     }
 
     @Bean

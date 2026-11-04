@@ -24,14 +24,25 @@ public final class Containers {
     /** 한 번의 시도가 기다리는 최대 시간. 가짜에 걸렸을 때 다음 시도로 빨리 넘어가게 짧게 둔다. */
     public static final java.time.Duration 시작_대기 = java.time.Duration.ofSeconds(30);
 
+    /**
+     * 시험 OpenFGA 가 받는 사전 공유 키(설계 2026-10-28 §7). 서버가 이 키 없는 호출을 401 로 막으므로, OpenFGA 에 닿는 클라이언트는 앱 시험이든
+     * 직접 만든 클라이언트든 모두 이 키를 단다 — 앱 시험은 각 앱의 {@code application-test.yml} 이 {@code openfga.api-token} 으로 준다.
+     */
+    public static final String OPENFGA_KEY = "test-openfga-key";
+
     private Containers() {
     }
 
-    /** OpenFGA v1.10.2(메모리 저장). {@code /healthz} 가 {@code SERVING} 을 답할 때까지 기다린다. */
+    /**
+     * OpenFGA v1.10.2(메모리 저장, 사전 공유 키 {@link #OPENFGA_KEY}). {@code /healthz} 가 {@code SERVING} 을 답할 때까지 기다린다 —
+     * 사전 공유 키 모드에서도 {@code /healthz} 는 키 없이 열려 있다(v1.10.2 에서 확인), 그래서 대기 조건에 키를 싣지 않는다.
+     */
     public static GenericContainer<?> openFga() {
         return new GenericContainer<>(DockerImageName.parse("openfga/openfga:v1.10.2"))
                 .withCommand("run")
                 .withEnv("OPENFGA_DATASTORE_ENGINE", "memory")
+                .withEnv("OPENFGA_AUTHN_METHOD", "preshared")
+                .withEnv("OPENFGA_AUTHN_PRESHARED_KEYS", OPENFGA_KEY)
                 .withExposedPorts(8080)
                 .waitingFor(Wait.forHttp("/healthz").forPort(8080).forStatusCode(200)
                         .forResponsePredicate(body -> body.contains("SERVING")))

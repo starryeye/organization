@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.audit.AuditObserver;
@@ -80,7 +81,7 @@ class SyncJobsAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event -> {
-            assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId()));
+            assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId(), Actor.UNKNOWN));
             assertThat(event.at()).isEqualTo(지금);
         });
         assertThat(auditLog.lastOf(김).granted()).containsExactly(김_개발);
@@ -265,6 +266,6 @@ class SyncJobsAuditTest {
 
         // then
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId(), Actor.UNKNOWN)));
     }
 }

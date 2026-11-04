@@ -173,7 +173,8 @@ public final class ScimRouter {
         // 다시 보내면 나을 수 있는 실패(락을 얻지 못함, 쓰기 차단, 하위 시스템 일시 장애)는 503 + Retry-After 다. IdP 는 503 을 재시도 신호로 보므로
         // 프로비저닝이 유실되지 않고, 재시도 시점에는 풀린 상태 위에서 처리된다. 400 이나 500 으로 뭉개면 IdP 가 영구 실패로 판단해 포기하거나
         // 무한히 재시도한다. 500 은 버그에만 남긴다(점검 M4, 설계 2026-10-05 §3.4).
-        // 문구는 우리 것만 쓴다 — 예외 메시지에는 OpenFGA 서버 메시지·라이브러리 예외 문자열·락 쥔 쪽의 용도가 들어 있고, 이 엔드포인트는 인증이 없다(점검 S10). 메시지는 로그로만 간다.
+        // 문구는 우리 것만 쓴다 — 예외 메시지에는 OpenFGA 서버 메시지·라이브러리 예외 문자열·락 쥔 쪽의 용도가 들어 있다. 토큰을 가진 IdP 에게도 내부를
+        // 알릴 까닭이 없다(점검 S10 — 그때는 인증이 없었다). 메시지는 로그로만 간다.
         Optional<Duration> 대기 = 분류기.재시도_대기(error);
         if (대기.isPresent()) {
             log.warn("SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After {}초", 재시도_초(대기.get()), error);
@@ -239,7 +240,8 @@ public final class ScimRouter {
     /**
      * 지원하는 기능을 정직하게 선언한다. 필터는 {@code eq}·{@code and} 만 받고 나머지는 {@code invalidFilter}
      * 다 — RFC 7644 는 필터 지원 여부만 선언하게 하고 부분 지원을 400 으로 알리게 한다(S-1 설계 §4.1).
-     * 정렬은 인덱스 키({@code userName}/{@code displayName})로만 한다.
+     * 정렬은 인덱스 키({@code userName}/{@code displayName})로만 한다. 인증 방식은 {@code oauthbearertoken} 하나다(RFC 7643 §5, 설계 2026-10-28 §4.6) —
+     * 토큰을 요구하는 것은 이 라우터가 아니라 앞의 보안 필터체인(web-security)이다.
      */
     private static Mono<ServerResponse> serviceProviderConfig() {
         Map<String, Object> config = Map.of(
@@ -250,7 +252,12 @@ public final class ScimRouter {
                 "changePassword", Map.of("supported", false),
                 "sort", Map.of("supported", true),
                 "etag", Map.of("supported", false),
-                "authenticationSchemes", List.of());
+                "authenticationSchemes", List.of(Map.of(
+                        "type", "oauthbearertoken",
+                        "name", "OAuth Bearer Token",
+                        "description", "OAuth 2.0 client credentials 로 받은 bearer 토큰(RFC 6750)",
+                        "specUri", "https://www.rfc-editor.org/info/rfc6750",
+                        "primary", true)));
         return ServerResponse.ok().contentType(SCIM_JSON).bodyValue(config);
     }
 }

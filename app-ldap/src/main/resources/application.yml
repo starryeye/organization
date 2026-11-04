@@ -2,6 +2,9 @@ server:
   port: 8081
 
 spring:
+  main:
+    # 이 앱은 리액티브다. app-auth(서블릿)가 같은 클래스패스에 올라와도(시험) 서블릿으로 판정되지 않게 못박는다
+    web-application-type: reactive
   application:
     name: organization-ldap
   reactor:
@@ -15,6 +18,14 @@ spring:
     # 우리 코드뿐 아니라 Spring·AWS SDK 의 리액티브 경로까지 포함된다.
     # I/O 대기가 지배적인 워크로드라 비용을 감수할 만하다고 보고 켠다.
     context-propagation: auto
+  # 리소스 서버(설계 2026-10-28 A2) — 토큰은 jwk-set-uri 의 키로 서명을 보고 issuer-uri 의 발급자를 확인해 그 자리에서 검증한다. 기동 때 인가 서버에 묻지 않는다
+  # (키 목록은 첫 토큰을 볼 때 받는다). 둘 다 있어야 뜬다 — 로컬 값은 app-auth(포트 9000)다. 운영(application-prod.yml)은 환경 변수로 받고 https 여야 한다
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:9000
+          jwk-set-uri: http://localhost:9000/oauth2/jwks
 
 # cron(sync.cron·sync.purge-cron)과 기한(sync.job-timeout)의 기본값은 속성 클래스(SyncProperties)에만 있다 — 덮어쓸 때만 여기에 적는다.
 sync:
@@ -68,6 +79,8 @@ ldap:
 
 openfga:
   api-url: http://localhost:8080
+  # 사전 공유 키. 로컬 docker-compose 의 OpenFGA 가 이 키로 뜬다. 운영(application-prod.yml)은 환경 변수 OPENFGA_API_TOKEN 으로 덮어쓴다
+  api-token: local-openfga-key
   store-name: organization
   # 기동 때 store 가 없으면 만든다. 로컬만 true — 운영(application-prod.yml)은 false 라 이름 오타가 빈 store 를 새로 만들지 않고 기동을 멈춘다.
   # 켜든 끄든 인가 모델은 최신과 내용이 다를 때만 쓴다
@@ -97,9 +110,12 @@ management:
         include: health,info,metrics,prometheus
   endpoint:
     health:
-      # 8081 은 관리 API 와 같은 포트이고 인증이 없다. always 로 두면 openfga.api-url, dynamodb.table-name, ldap.url·base-dn,
-      # Health.down(error) 의 예외 메시지가 그대로 공개된다.
+      # 8081 은 관리 API 와 같은 포트다. 프로브(/actuator/health, /health/liveness, /health/readiness)는 토큰 없이 열려 있으므로
+      # always 로 두면 openfga.api-url, dynamodb.table-name, ldap.url·base-dn, Health.down(error) 의 예외 메시지가 그대로 공개된다.
+      # 세부는 actuator 범위가 있는 토큰에만 보인다(설계 2026-10-28 A6). roles 가 없으면 범위가 다른 인증된 클라이언트도 세부를 본다.
+      # 부트는 roles 를 스프링 시큐리티의 권한 이름과도 맞춘다 — 리소스 서버가 scope 클레임을 SCOPE_<범위> 권한으로 만든다
       show-details: when-authorized
+      roles: SCOPE_actuator
       # liveness·readiness 그룹은 부트 기본 구성 그대로 둔다 — 외부 의존(OpenFGA·DynamoDB·LDAP)을 넣지 않는다. 그 장애가 재시작을
       # 부르면 안 되기 때문이다. 외부 의존은 /actuator/health 본 그룹에서 본다.
       probes:

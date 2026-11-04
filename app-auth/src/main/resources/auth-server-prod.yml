@@ -1,0 +1,31 @@
+# 운영(prod 프로필). 개발 클라이언트(auth-server.yml 의 !prod 문서)는 여기서 빠진다 — 클라이언트는 운영 설정이
+# spring.security.oauth2.authorizationserver.client.<이름>.* 로 준다(개발 클라이언트와 같은 모양 — registration 의 client-authentication-methods 는
+# 부트가 요구한다). 비밀은 {bcrypt} 해시, 수명은 10분(IdP 용은 60분 권장, 365일을 넘으면 기동을 멈춘다).
+# 수명(token.access-token-time-to-live)은 반드시 명시한다 — 빠뜨리면 부트 기본 5분이 된다(설계의 기본 10분이 아니다).
+#
+# 운영 설정 파일의 이름도 auth-server 다. 이 앱은 spring.config.name=auth-server 로 뜨므로(AuthServerApplication) 바깥 설정도 auth-server.yml·
+# auth-server-prod.yml 로 둬야 읽힌다 — application.yml·application-prod.yml 은 /config/ 아래에 두든 spring.config.additional-location 으로 주든
+# 아무 말 없이 무시된다. 파일 대신 환경 변수(SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_CLIENT_<이름>_... 등)로 줘도 된다.
+#
+# 서명 키와 발급자는 환경에서 받는다 — 기본값을 두지 않는다(설계 2026-10-28 §3.3). 환경 변수가 없으면 부트는 자리표시자를 풀지 못하고 "${AUTH_SIGNING_KEY}"
+# 문자열을 그대로 넣으므로 SigningKeys·ClientSettingsCheck 가 기동 때 그 값을 알아보고 멈춘다(값은 오류 문구에 싣지 않는다).
+#   AUTH_SIGNING_KEY: RSA 개인 키, PKCS#8 PEM(-----BEGIN PRIVATE KEY-----). 예: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+#                     kid 는 공개 키의 지문이라 여러 대가 같은 키로 뜨면 같은 kid 를 낸다. 키를 바꾸면 그 전 토큰은 모두 무효다(§3.4).
+#   AUTH_ISSUER:      https:// 발급자. 리소스 서버(app-scim·app-ldap)의 issuer-uri 와 같아야 한다.
+auth:
+  signing-key: ${AUTH_SIGNING_KEY}
+  require-signing-key: true
+  require-hashed-secrets: true
+  require-https: true
+
+spring:
+  security:
+    oauth2:
+      authorizationserver:
+        issuer: ${AUTH_ISSUER}
+
+# 다른 앱과 같이 운영 로그는 JSON(ECS)으로 낸다
+logging:
+  structured:
+    format:
+      console: ecs

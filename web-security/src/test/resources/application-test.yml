@@ -1,0 +1,17 @@
+# 시험 서버는 127.0.0.1 에만 연다 — 두 앱의 시험 yml 과 같은 이유(macOS 에서 모든 주소로 열면 127.0.0.1 전용 리스너와 번호가 겹쳐 요청이 샌다).
+server:
+  address: 127.0.0.1
+
+# 시험 디코더(TestTokens 의 공개 키)와 모든 범위의 기본 머리 — TestAuthAutoConfiguration
+test:
+  auth:
+    fixed-key: true
+
+# 기동 검사(ResourceServerSettings)는 두 주소를 늘 요구한다. 시험 디코더를 쓰는 동안 이 키 목록 주소에는 묻지 않는다
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://auth.test
+          jwk-set-uri: https://auth.test/oauth2/jwks

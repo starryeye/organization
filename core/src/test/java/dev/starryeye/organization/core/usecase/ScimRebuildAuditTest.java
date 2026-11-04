@@ -1,5 +1,6 @@
 package dev.starryeye.organization.core.usecase;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditKind;
@@ -88,7 +89,7 @@ class ScimRebuildAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event -> {
-            assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId()));
+            assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId(), Actor.UNKNOWN));
             assertThat(event.entries()).singleElement().satisfies(entry -> {
                 assertThat(entry.subject()).isEqualTo(MemberRef.user("ghost"));
                 assertThat(entry.revoked()).containsExactly(찌꺼기);
@@ -214,7 +215,7 @@ class ScimRebuildAuditTest {
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(run.message()).startsWith("장부는 맞췄다 — 스냅샷 저장 실패");
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.SCIM, AuditKind.REBUILD, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(MemberRef.user("ghost")).revoked()).containsExactly(찌꺼기);
     }
 

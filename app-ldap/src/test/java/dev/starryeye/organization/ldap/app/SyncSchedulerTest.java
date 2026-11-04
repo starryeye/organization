@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.fake.FakeDailyJobClaims;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.guard.DeletionGuard;
@@ -20,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -97,5 +99,28 @@ class SyncSchedulerTest {
 
         // then
         assertThat(snapshots.purgeCalls).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("예약 동기화의 행위자는 scheduler 다 — 동기화를 거는 구독의 Context 에 싣는다")
+    void 예약_동기화의_행위자는_scheduler_다() {
+        // given — 동기화를 걸 때 받은 Context 의 행위자를 적어 두는 가짜
+        var 받은_행위자 = new AtomicReference<Object>();
+        var 동기화 = new 정해둔_동기화(Mono.empty()) {
+            @Override
+            public Mono<SyncRun> start(SyncTrigger trigger, Consumer<SyncRun> onFinished) {
+                return Mono.deferContextual(context -> {
+                    받은_행위자.set(context.getOrDefault(Actor.KEY, null));
+                    return Mono.empty();
+                });
+            }
+        };
+        var scheduler = 스케줄러(동기화, new FakeSnapshotRepository(), new FakeDailyJobClaims());
+
+        // when
+        scheduler.전체동기화();
+
+        // then
+        assertThat(받은_행위자.get()).isEqualTo("system:scheduler");
     }
 }

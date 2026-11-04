@@ -1,6 +1,7 @@
 package dev.starryeye.organization.core.usecase;
 
 import dev.starryeye.organization.core.audit.AttributeChange;
+import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditEntry;
 import dev.starryeye.organization.core.audit.AuditKind;
@@ -123,7 +124,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event ->
-                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId(), Actor.UNKNOWN)));
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.created()).isTrue();
         assertThat(김의_줄.joined()).containsExactly("DEV");
@@ -206,7 +207,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
         assertThat(auditLog.events).singleElement().satisfies(event ->
-                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(MemberRef.user("user0")).revoked())
                 .containsExactly(RelationTuple.directMember("user0", "DEV"));
         assertThat(auditLog.entriesOf(MemberRef.group("DEV"))).isEmpty();
@@ -324,7 +325,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.created()).isTrue();
@@ -344,7 +345,7 @@ class LdapSyncAuditTest {
         // then — 장부 맞추기와 달리 첫 적재의 부여 이력이 사라지지 않는다(설계 2026-10-10 §4.2)
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event ->
-                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+                assertThat(event.cause()).isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId(), Actor.UNKNOWN)));
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.created()).isTrue();
         assertThat(김의_줄.granted()).containsExactly(김_개발);
@@ -365,7 +366,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
         assertThat(auditLog.lastOf(김).granted()).isEmpty();
     }
@@ -383,7 +384,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.SYNC, run.runId(), Actor.UNKNOWN)));
         AuditEntry 김의_줄 = auditLog.lastOf(김);
         assertThat(김의_줄.granted()).containsExactly(김_개발);
         assertThat(김의_줄.created()).isFalse();
@@ -447,7 +448,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.LEDGER_ALIGNMENT, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
         assertThat(auditLog.entriesOf(김)).isEmpty();
     }
@@ -466,7 +467,7 @@ class LdapSyncAuditTest {
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
-                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, run.runId())));
+                .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
     }
 }

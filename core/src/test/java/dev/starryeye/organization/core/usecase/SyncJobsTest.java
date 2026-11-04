@@ -250,7 +250,7 @@ class SyncJobsTest {
     private SyncJobs 기록을_이렇게_여는(Supplier<Mono<SyncRun>> 열기) {
         return new SyncJobs(new FakeSyncRunRepository(지금) {
             @Override
-            public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger) {
+            public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, String requestedBy) {
                 return 열기.get();
             }
         }, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1));
@@ -429,9 +429,9 @@ class SyncJobsTest {
     @DisplayName("락을 잡은 작업은 시작할 때 같은 앱의 끝나지 못한 락 작업 기록을 '비정상 종료로 중단'으로 닫는다 — 아카이빙 기록과 자기 기록은 두고")
     void 끝나지_못한_기록을_닫는다() {
         // given — 죽은 인스턴스가 남긴 SCIM 재적재 기록, 도는 중인 아카이빙, 다른 앱(LDAP)의 기록
-        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300)));
-        runs.seed(SyncRun.started("도는-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(60)));
-        runs.seed(SyncRun.started("다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(600)));
+        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300), null));
+        runs.seed(SyncRun.started("도는-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(60), null));
+        runs.seed(SyncRun.started("다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(600), null));
 
         // when
         SyncRun 끝난것 = runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
@@ -451,9 +451,9 @@ class SyncJobsTest {
     @DisplayName("최근 100건 밖에 밀려난 RUNNING 기록도 닫는다 — 죽은 기록 뒤로 끝난 기록이 100건 넘게 쌓여도")
     void 최근_100건_밖의_RUNNING_도_닫는다() {
         // given — 죽은 SCIM 재적재 RUNNING 을 먼저 심고, 그 뒤로 끝난 기록 100건을 쌓는다
-        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300)));
+        runs.seed(SyncRun.started("죽은-재적재", SyncSource.SCIM, SyncTrigger.REBUILD, 지금.minusSeconds(300), null));
         for (int i = 0; i < 100; i++) {
-            runs.seed(SyncRun.started("끝난-" + i, SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(200 - i))
+            runs.seed(SyncRun.started("끝난-" + i, SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minusSeconds(200 - i), null)
                     .finished(SyncOutcome.noChange(), 지금.minusSeconds(100)));
         }
 
@@ -472,8 +472,8 @@ class SyncJobsTest {
     @DisplayName("시작한 지 기한 + 10분이 지난 아카이빙 기록은 닫고 최근 것은 둔다 — 락을 잡지 않는 종류라도 나이로 닫는다")
     void 오래된_아카이빙_기록은_닫고_최근_것은_둔다() {
         // given — 기한 1분, 닫는 나이는 11분. 오래된 아카이빙(12분 전)과 최근 아카이빙(5분 전)
-        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(12))));
-        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(5))));
+        runs.seed(SyncRun.started("오래된-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(12)), null));
+        runs.seed(SyncRun.started("최근-아카이빙", SyncSource.SCIM, SyncTrigger.ARCHIVE, 지금.minus(Duration.ofMinutes(5)), null));
 
         // when
         runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
@@ -491,8 +491,8 @@ class SyncJobsTest {
     @DisplayName("오래된 다른 앱의 기록도 나이로 닫는다 — 같은 source 가 아니어도 기한 + 10분이 지났으면 죽은 것이다")
     void 오래된_다른_앱의_기록도_나이로_닫는다() {
         // given — LDAP 기록이 12분 전(닫는 나이 11분), 최근 LDAP 기록은 5분 전
-        runs.seed(SyncRun.started("오래된-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(12))));
-        runs.seed(SyncRun.started("최근-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(5))));
+        runs.seed(SyncRun.started("오래된-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(12)), null));
+        runs.seed(SyncRun.started("최근-다른-앱", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minus(Duration.ofMinutes(5)), null));
 
         // when
         runs.awaitFinished(jobs.startLocked(SyncSource.SCIM, SyncTrigger.REBUILD,
@@ -510,7 +510,7 @@ class SyncJobsTest {
     @DisplayName("막 끝난 기록이 오래된 목록에 RUNNING 으로 보여도 덮어쓰지 않는다 — 반납과 기록 사이의 틈")
     void 막_끝난_기록은_덮어쓰지_않는다() {
         // given — 저장된 기록은 이미 SUCCEEDED 인데, findRunning 이(최종 일관성 때문에) 그 앞에 낡은 RUNNING 사본을 얹어 준다
-        SyncRun 앞_작업_RUNNING = SyncRun.started("앞-작업", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(60));
+        SyncRun 앞_작업_RUNNING = SyncRun.started("앞-작업", SyncSource.LDAP, SyncTrigger.SCHEDULED, 지금.minusSeconds(60), null);
         FakeSyncRunRepository 낡은_목록_저장소 = new FakeSyncRunRepository(지금) {
             @Override
             public Flux<SyncRun> findRunning() {
