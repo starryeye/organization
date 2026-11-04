@@ -100,16 +100,17 @@ import java.util.stream.Collectors;
  *       하위 조직은 일부러 멤버를 비워 싣기 때문에({@link #expandWithReferencedGroups})
  *       두 홉 이상 떨어진 순환은 최소 스냅샷에서 보이지 않는다. 한 홉 순환도 그 DFS 는 조직코드
  *       순서로 버릴 쪽을 골라 두 연결을 다 버릴 수 있다(점검 S4). 그래서 순증 경로는 목표를 순환 제거 없이 만든다.
- *       → 새로 생기는 child 엣지마다 {@link OrgGraph} 가 저장소의 <b>튜플 그래프(멤버 줄 − 보류 목록(OpenFGA 에 없는 줄))</b>를
- *       부모에서 위로 올라가 확인하고, 순환을 닫는 엣지는 쓰지 않고 보류 목록에 적는다 — 먼저 저장된
- *       연결이 이긴다. 멤버 줄은 남긴다. 조상·자손 전체를 스냅샷에 싣는 방법도 있지만 요청 한 건마다
+ *       → 새로 생기는 child 엣지마다 {@link OrgGraph} 가 저장소의 <b>튜플 그래프(원천 연결(멤버 줄의 하위 조직 연결 ∪ 지정 연결)
+ *       − 보류 목록(OpenFGA 에 없는 줄))</b>를 부모에서 위로 올라가 확인하고, 순환을 닫는 엣지는 쓰지 않고 보류 목록에 적는다 — 먼저 저장된
+ *       연결이 이긴다(지정 연결도, 설계 2026-11-04 H5·H6). 멤버 줄은 남긴다. 조상·자손 전체를 스냅샷에 싣는 방법도 있지만 요청 한 건마다
  *       비용이 훨씬 크다.</li>
  * </ul>
  *
  * <p><b>손으로 만드는 튜플 — 지울 줄만(설계 2026-10-02 §4.1·§4.2).</b> 조직 삭제({@link #removeGroup})의 줄과 조직 PATCH·PUT 에서
  * 빠지는 멤버의 줄은 {@link TupleMapper} 를 거치지 않고 {@link #tupleFor} 로 바로 만든다 — "튜플 규칙은 한 곳에만"의 예외다.
  * 지우기뿐이라 안전하다. 비활성 직원처럼 줄이 없어야 할 멤버의 줄도 함께 넣고 "없으면 무시"로 지우므로 활성 여부·존재 같은 규칙을
- * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다.
+ * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다. 조직 삭제는 그 조직이 끼인 지정 연결의
+ * {@code child} 줄도 넣고, PATCH·PUT 은 지정 연결이 받치는 하위 조직의 줄을 뺀다(설계 2026-11-04 §5.3·§5.6).
  *
  * <p>이 유스케이스는 회차 기록({@code SyncRun})을 남기지 않는다. SCIM 은 요청 단위라 요청마다 회차를 열면 동기화 이력이 폭증한다. 변경 이력은
  * 요청마다 남긴다 — 요청의 traceId 를 원인으로, 락을 반납한 뒤·응답 전에 쓴다({@link #withLock}, 설계 2026-10-10 §4.2·§4.4).
@@ -500,6 +501,7 @@ public class IncrementalSyncUseCase {
      * 점검하지 않는다(설계 §11). 전체 교체는 목록이 전원을 가리키므로 바뀌는 멤버만 싣는다.
      *
      * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
+     * 단 빠지는 하위 조직의 지정 상위가 이 조직이면 그 줄은 지정 연결이 받치므로 지우지 않고 멤버 행만 뺀다 — 빠지는 하위 조직마다 지정 상위를 읽는다(설계 2026-11-04 §5.3).
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      *
@@ -525,9 +527,6 @@ public class IncrementalSyncUseCase {
                         DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
                                 차집합(전후.전(), 빠질것));
                         DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
-                        Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
-                                .map(member -> tupleFor(member, groupId))
-                                .collect(Collectors.toCollection(LinkedHashSet::new));
 
                         Commit commit = (result, beforeTuples, afterTuples) -> {
                             DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
@@ -539,8 +538,17 @@ public class IncrementalSyncUseCase {
                         };
 
                         boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
-                        return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
-                                RelationTuple.groupRef(groupId), 확인없이_지울것, lease, 기록, commit)
+                        return 지정이_받치는_하위(groupId, 빠질것)
+                                .flatMap(받치는것 -> {
+                                    // 지정 상위가 이 조직인 하위 조직의 줄은 지정 연결이 받친다 — 지우지 않고 그림에도 싣지 않는다(설계 2026-11-04 §5.3).
+                                    // 그러면 재조정이 그 줄을 "있던 줄이 아님" 으로 읽어 멤버 행을 지운다. 그림에 실으면 이미 있는 줄을 다시 쓴다
+                                    Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
+                                            .filter(member -> !받치는것.contains(member))
+                                            .map(member -> tupleFor(member, groupId))
+                                            .collect(Collectors.toCollection(LinkedHashSet::new));
+                                    return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
+                                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, 기록, commit);
+                                })
                                 .flatMap(result -> 하위_조직을_뺀다
                                         ? 보류를_다시_본다(lease, 기록).thenReturn(result)
                                         : Mono.just(result));
@@ -590,6 +598,16 @@ public class IncrementalSyncUseCase {
                 .filterWhen(id -> state.findGroupHeader(id).hasElement())
                 .collect(Collectors.toSet())
                 .<Predicate<String>>map(조직 -> 조직::contains);
+    }
+
+    /** 빠지는 멤버 중 지정 상위가 이 조직인 하위 조직 — 하위 조직마다 지정 상위를 하나씩 읽는다(락 안, 강한 일관성). 직원은 읽지 않는다. */
+    private Mono<Set<MemberRef>> 지정이_받치는_하위(String groupId, Set<MemberRef> 빠질것) {
+        return Flux.fromIterable(빠질것)
+                .filter(member -> member.type() == MemberType.GROUP)
+                .flatMap(member -> state.findAssignedParent(member.id())
+                        .filter(groupId::equals)
+                        .map(parent -> member), LOAD_CONCURRENCY)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     private static Set<MemberRef> 차집합(Set<MemberRef> from, Set<MemberRef> minus) {
@@ -663,12 +681,13 @@ public class IncrementalSyncUseCase {
 
     /**
      * 조직 삭제 (설계 2026-10-02 §4.1). 삭제 뒤의 모습은 "이 조직을 언급하는 줄이 하나도 없음"으로 정해져 있어 계산(직원 읽기·Check·diff)을 하지 않는다.
-     * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
+     * 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다(소속 줄). 이 조직이 끼인 지정 연결(지정 상위·지정 하위)도 읽는다(설계 2026-11-04 §5.6).
+     * 그 조직을 언급하는 줄을 "없으면 무시"로 지운다.
      *
-     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄만 뺀다 — 응답은 503 이고
+     * <p>다 지웠으면 조직을 지운다(META 맨 마지막 — 저장소 계약). 일부를 못 지웠으면 조직을 남기고 지운 멤버·상위 조직 줄·지정 연결만 뺀다 — 응답은 503 이고
      * IdP 의 재시도가 남은 것을 지운다. 대상이 없으면 빈 {@code Mono} 다 — 존재 확인도 락 안이다(SCIM 쓰기 락 설계 §3).
      *
-     * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
+     * <p>하위 조직 연결이나 지정 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 2026-11-04 §5.5).
      */
     public Mono<IncrementalSyncResult> removeGroup(String groupId) {
         return withLock((lease, 기록) -> removeGroupInternal(groupId, lease, 기록));
@@ -676,14 +695,17 @@ public class IncrementalSyncUseCase {
 
     private Mono<IncrementalSyncResult> removeGroupInternal(String groupId, LockLease lease, AuditChanges 기록) {
         return state.findGroup(groupId)
-                .flatMap(group -> state.findGroupIdsContaining(MemberRef.group(groupId))
-                        .collect(LinkedHashSet<String>::new, Set::add)
-                        .flatMap(parentIds -> {
-                            boolean 연결을_지운다 = !parentIds.isEmpty()
+                .flatMap(group -> Mono.zip(
+                                state.findGroupIdsContaining(MemberRef.group(groupId)).collect(LinkedHashSet<String>::new, Set::add),
+                                지정_연결(groupId))
+                        .flatMap(읽은것 -> {
+                            Set<String> parentIds = 읽은것.getT1();
+                            Set<GroupEdge> 지정 = 읽은것.getT2();
+                            boolean 연결을_지운다 = !parentIds.isEmpty() || !지정.isEmpty()
                                     || group.members().stream().anyMatch(member -> member.type() == MemberType.GROUP);
                             return 표지판을_정리한다(
-                                    반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds)), lease, 기록,
-                                            result -> 조직_삭제를_커밋한다(group, parentIds, result, 기록))
+                                    반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds, 지정)), lease, 기록,
+                                            result -> 조직_삭제를_커밋한다(group, parentIds, 지정, result, 기록))
                                             .flatMap(result -> 연결을_지운다
                                                     ? 보류를_다시_본다(lease, 기록).thenReturn(result)
                                                     : Mono.just(result)),
@@ -691,16 +713,35 @@ public class IncrementalSyncUseCase {
                         }));
     }
 
-    /** 조직이 사라지면 없어야 할 줄 — 직원→조직, 하위 조직→조직, 조직→상위 조직. 비활성 직원의 줄도 넣는다 — 있으면 지워야 하고 없으면 무시된다. */
-    private static Set<RelationTuple> 조직을_언급하는_튜플(DirectoryGroup group, Set<String> parentIds) {
+    /**
+     * 이 조직이 끼인 지정 연결 — 이 조직의 지정 상위와의 연결, 이 조직을 상위로 지정한 하위 조직들(역색인을 정본과 맞춘 것)과의 연결(설계 2026-11-04 §5.6).
+     * 락 안에서 읽는다.
+     */
+    private Mono<Set<GroupEdge>> 지정_연결(String groupId) {
+        return state.findAssignedParent(groupId).map(parent -> new GroupEdge(parent, groupId))
+                .concatWith(state.findAssignedChildren(groupId).map(child -> new GroupEdge(groupId, child)))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * 조직이 사라지면 없어야 할 줄 — 직원→조직, 하위 조직→조직, 조직→상위 조직, 그리고 이 조직이 끼인 지정 연결. 지정 연결을 남기면 조직이 사라진 뒤에도 지정 하위의
+     * 직원이 이 조직을 거쳐 지정 상위의 member 로 남는다(설계 2026-11-04 §5.6). 비활성 직원의 줄도 넣는다 — 있으면 지워야 하고 없으면 무시된다.
+     * 멤버 행과 지정 연결이 같은 쌍이면 한 줄이다.
+     */
+    private static Set<RelationTuple> 조직을_언급하는_튜플(DirectoryGroup group, Set<String> parentIds, Set<GroupEdge> 지정) {
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         group.members().forEach(member -> tuples.add(tupleFor(member, group.id())));
         parentIds.forEach(parent -> tuples.add(RelationTuple.child(group.id(), parent)));
+        지정.forEach(edge -> tuples.add(edge.tuple()));
         return tuples;
     }
 
-    private Mono<Void> 조직_삭제를_커밋한다(DirectoryGroup group, Set<String> parentIds, TupleWriteResult result,
-                                    AuditChanges 기록) {
+    /**
+     * 다 지웠으면 조직을 지운다 — 지정 아이템도 {@code deleteGroup} 이 양방향으로 정리한다. 일부를 못 지웠으면 조직(META)을 남기고 지운 줄의 멤버 행·상위 조직 줄·
+     * 지정 아이템만 뺀다 — 못 지운 지정 아이템을 남겨야 IdP 의 재시도가 그것을 다시 읽어 남은 줄을 지운다(설계 2026-11-04 §5.6).
+     */
+    private Mono<Void> 조직_삭제를_커밋한다(DirectoryGroup group, Set<String> parentIds, Set<GroupEdge> 지정,
+                                    TupleWriteResult result, AuditChanges 기록) {
         MemberRef 이조직 = MemberRef.group(group.id());
         GroupHeader header = 이름표(group);
         if (!result.hasFailure()) {
@@ -720,14 +761,19 @@ public class IncrementalSyncUseCase {
                 .flatMap(parent -> state.saveGroupChange(parent, parent, Set.of(), Set.of(이조직))
                         .then(남긴다(() -> 기록.membership(parent.id(), Set.of(), Set.of(이조직)))), LOAD_CONCURRENCY)
                 .then();
-        return 상위에서_뺀다.then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)))
+        Mono<Void> 지정을_뺀다 = Flux.fromIterable(지정)
+                .filter(edge -> result.deleted().contains(edge.tuple()))
+                .flatMap(edge -> state.deleteAssignedParent(edge.child(), edge.parent()), LOAD_CONCURRENCY)
+                .then();
+        return 상위에서_뺀다.then(지정을_뺀다)
+                .then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)))
                 .then(남긴다(() -> 기록.membership(group.id(), Set.of(), 지운멤버)))
                 .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(지운멤버)));
     }
 
     /**
      * 하위 조직 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1). 순환은 연결을 지울 때만 풀린다. 튜플이 이미 OpenFGA 에 있는 줄과
-     * 멤버 줄이 없는 보류 줄은 지우고, 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
+     * 원천(멤버 줄도 지정 연결도, 설계 2026-11-04 H6)이 없는 보류 줄은 지우고, 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
      *
      * <p><b>원래 요청을 실패시키지 않는다.</b> 원래 연산은 이미 커밋됐다. 여기서 난 오류(OpenFGA·DynamoDB·리스 확인)는 경고만 남기고 목록을 그대로 둔다 — 다음 지우기
      * 요청이나 재적재가 다시 본다.
@@ -747,8 +793,8 @@ public class IncrementalSyncUseCase {
     }
 
     private Mono<Void> 한_줄을_다시_본다(GroupEdge edge, OrgGraph 그래프, LockLease lease, AuditChanges 기록) {
-        return state.findMembers(edge.parent(), Set.of(MemberRef.group(edge.child()))).flatMap(멤버 -> {
-            if (멤버.isEmpty()) {
+        return 원천이_있다(edge).flatMap(있다 -> {
+            if (!있다) {
                 그래프.보류에서_뺀다(edge);
                 return state.changeCutEdges(Set.of(), Set.of(edge));
             }
@@ -766,6 +812,16 @@ public class IncrementalSyncUseCase {
                                 return state.changeCutEdges(Set.of(), Set.of(edge));
                             }));
         });
+    }
+
+    /**
+     * 보류 줄의 원천이 아직 있는가 — 상위 조직의 멤버 행이나 하위 조직의 지정 연결(설계 2026-11-04 H6). 둘 다 없으면 버린다. 멤버 행이 있으면 지정은 읽지 않는다.
+     */
+    private Mono<Boolean> 원천이_있다(GroupEdge edge) {
+        return state.findMembers(edge.parent(), Set.of(MemberRef.group(edge.child())))
+                .flatMap(멤버 -> 멤버.isEmpty()
+                        ? state.findAssignedParent(edge.child()).map(edge.parent()::equals).defaultIfEmpty(false)
+                        : Mono.just(true));
     }
 
     // ---------- 공통 ----------
