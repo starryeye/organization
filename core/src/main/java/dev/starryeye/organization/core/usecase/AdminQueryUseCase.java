@@ -313,8 +313,8 @@ public class AdminQueryUseCase {
      * 하위 조직 아이디는 {@code MEMBER#GROUP#} 줄만 상한까지 읽는다.
      *
      * <p><b>여기에도 상한을 둔다.</b> "보통 수십 개" 는 정상 조직도의 이야기이고, 이 엔드포인트는
-     * 인증이 없어 누구나 부를 수 있다. 하위 조직이 수천 개인 조직이 하나라도 있으면 요청 하나가
-     * 그만큼의 읽기를 무제한으로 낸다. 조용히 짧은 목록을 주는 대신 {@code ancestorsOf} 와 같이
+     * {@code admin.read} 토큰이면 누구나 몇 번이고 부를 수 있다. 하위 조직이 수천 개인 조직이 하나라도
+     * 있으면 요청 하나가 그만큼의 읽기를 무제한으로 낸다. 조용히 짧은 목록을 주는 대신 {@code ancestorsOf} 와 같이
      * 경고를 남긴다 — {@code OrganizationDetail} 에는 {@code truncated} 를 실을 자리가 없다.
      */
     private Mono<List<GroupSummary>> childrenOf(String orgCode) {

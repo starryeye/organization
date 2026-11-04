@@ -12,7 +12,8 @@ import java.util.regex.Pattern;
  *   <li><b>키의 모양.</b> 키가 있으면(요구하든 않든) 눈에 보이는 ASCII 만 받는다. SDK 는 키를 {@code Authorization: Bearer <키>} 헤더로 싣는데, JDK HTTP
  *       클라이언트는 줄바꿈·공백·제어문자·ASCII 밖 글자가 든 헤더 값을 {@code IllegalArgumentException: invalid header value: "Bearer <키>"} 로 거절하며
  *       <b>키를 오류 문구에 싣는다</b>. 이 오류는 401 이 아니라 {@link OpenFgaStoreInitializer} 가 경고 로그로, 헬스 인디케이터가 {@code Health.down(error)}
- *       로 그대로 내보낸다. 비밀 파일을 {@code $(cat key)} 로 읽으면 끝에 줄바꿈이 붙는 것이 현실적인 계기라, 요청이 나가기 전에 여기서 막는다.
+ *       로 그대로 내보낸다. 줄바꿈으로 끝나는 비밀 파일이나 환경 변수를 손대지 않고 그대로 주입하면 키 끝에 줄바꿈이 남는 것이 현실적인
+ *       계기라(셸의 {@code $(cat key)} 는 끝 줄바꿈을 떼므로 그 길은 아니다), 요청이 나가기 전에 여기서 막는다.
  *   <li><b>TLS.</b> {@code openfga.require-tls} 인데 {@code openfga.api-url} 이 {@code https://} 가 아니면 멈춘다 — 키가 평문으로 다니지 않는다.
  * </ul>
  *

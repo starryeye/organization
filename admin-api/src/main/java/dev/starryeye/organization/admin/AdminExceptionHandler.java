@@ -21,7 +21,8 @@ import java.util.Set;
 
 /**
  * 관리 API({@link AdminApi} 를 단 컨트롤러)의 예외를 RFC 9457 problem details({@code application/problem+json})로 낸다(설계 2026-10-27 §10).
- * 칸은 {@code type}(about:blank)·{@code title}(상태 문구)·{@code status}·{@code detail} 이다.
+ * 칸은 {@code type}(about:blank)·{@code title}(상태 문구)·{@code status}·{@code detail}, 그리고 스프링이 채우는 {@code instance}(요청 경로)다 — 보안
+ * 필터가 내는 401·403 본문({@code AuthFailureResponses})에는 {@code instance} 가 없다.
  *
  * <p>판정은 아래 순서다. 원인 사슬은 같은 예외를 두 번 보지 않고 따라간다.
  * <ol>
@@ -30,7 +31,8 @@ import java.util.Set;
  *       ({@link ResponseStatusException#getHeaders()})는 응답에 그대로 옮긴다 — 컨트롤러의 범위 부족 403 이 싣는 {@code WWW-Authenticate} 가 그 예다(설계 2026-10-28 §4.4).</li>
  *   <li>사슬에 {@link LockUnavailableException} 이 있으면 409 다. detail 은 그 메시지다.</li>
  *   <li>분류기가 일시 장애로 보면 503 + {@code Retry-After}(초) 다. detail 은 정한 문구다. 예외 문구는 로그로만 간다.</li>
- *   <li>그 밖은 500 이다. detail 은 {@code 내부 오류} 뿐이다 — 이 엔드포인트는 인증이 없어 예외 문구(저장소·라이브러리 메시지)를 싣지 않는다.</li>
+ *   <li>그 밖은 500 이다. detail 은 {@code 내부 오류} 뿐이다 — 예외 문구(저장소·라이브러리 메시지)는 싣지 않는다. 토큰을 가진 호출자에게도 내부를
+ *       알릴 까닭이 없고, 예외는 로그로만 간다.</li>
  * </ol>
  *
  * <p><b>락 경합(2)을 분류기(3)보다 먼저 본다.</b> {@link LockUnavailableException} 은 {@code TemporaryFailureException} 의 하위라 분류기가

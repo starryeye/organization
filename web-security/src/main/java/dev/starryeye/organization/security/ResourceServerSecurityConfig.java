@@ -90,6 +90,8 @@ public class ResourceServerSecurityConfig {
      */
     @Bean
     JwkSetUriReactiveJwtDecoderBuilderCustomizer 키_목록_클라이언트() {
+        // 부트는 이 customizer 를 issuer-uri 만으로 디코더를 만드는 길(발견)에도 건다 — 그 길의 첫 응답은 키 목록이 아니라 OIDC 메타데이터라
+        // KeySetClient 가 해석에 실패해 모든 토큰이 503 이 된다. 지금은 ResourceServerSettings 가 jwk-set-uri 를 늘 요구해 그 길에 닿지 않는다
         return 빌더 -> 빌더.webClient(KeySetClient.만든다());
     }
 

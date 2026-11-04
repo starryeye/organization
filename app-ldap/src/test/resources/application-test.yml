@@ -74,6 +74,6 @@ openfga:
 management:
   endpoint:
     health:
-      # 운영 기본값은 when-authorized 다. 테스트에는 인증이 없어 컴포넌트별 상태를
-      # 확인할 수 없으므로 여기서만 되돌린다.
+      # 운영 값은 when-authorized(roles SCOPE_actuator)다. 시험은 어느 토큰으로 부르든(토큰이 없어도) 컴포넌트별 상태를 보도록 여기서만
+      # 되돌린다. 운영 값의 동작은 LdapAuthEndToEndTest 가 그 값으로 띄워 본다.
       show-details: always

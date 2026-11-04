@@ -23,7 +23,7 @@ import reactor.core.publisher.Mono;
  *   <li>다음 쪽 커서는 이번 쪽이 {@code limit} 줄로 찼을 때 준다 — 마지막 쪽 뒤에 빈 쪽이 하나 올 수 있다.</li>
  * </ul>
  *
- * <p>인증이 없다 — 지금 관리 API 와 같은 노출 수준이다(설계 §10). 이력에는 이전 값(이름·이메일 등)이 담긴다.
+ * <p>다른 관리 API 조회와 같이 {@code admin.read} 범위의 토큰이 필요하다(설계 2026-10-28 §4.2). 이력에는 이전 값(이름·이메일 등)이 담긴다.
  */
 @AdminApi
 @RestController
