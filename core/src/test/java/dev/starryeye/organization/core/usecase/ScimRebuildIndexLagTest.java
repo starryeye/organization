@@ -43,6 +43,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
@@ -71,6 +72,7 @@ class ScimRebuildIndexLagTest {
     private static final RelationTuple 이_하위 = RelationTuple.directMember("lee", "SUB");
     private static final RelationTuple 하위_팀 = RelationTuple.child("SUB", "TEAM");
     private static final RelationTuple 지정_연결 = RelationTuple.child("C", "P");
+    private static final RelationTuple 숨은_지정_연결 = RelationTuple.child("H", "P");
 
     /** GSI 지연을 흉내 낸다 — 숨긴 대상은 열거(loadAll)에서만 빠지고 강한 읽기(findUsers·findGroup)에서는 보인다. 조직 파티션은 강한 읽기라 멤버로는 보인다. */
     static class 열거가_늦은_저장소 extends FakeStateRepository {
@@ -101,11 +103,15 @@ class ScimRebuildIndexLagTest {
             });
         }
 
-        /** 지정 연결은 그대로 싣는다 — 숨긴 것은 직원·조직이고, 이 시험이 보는 것은 보강이 조직도를 다시 만들 때 지정 연결을 이월하는지다. */
+        /**
+         * 실제 저장소의 {@code loadAll} 은 지정 연결을 열거한 조직의 파티션에서 읽는다 — 하위 조직이 열거에서 빠졌으면 그 조직 자신의 지정 상위도 빠진다.
+         * 하위 조직은 보이고 상위 조직만 숨겼으면 보이는 하위 조직의 파티션에서 읽혀 남는다.
+         */
         @Override
         public Mono<DirectorySnapshot> loadAll() {
             return super.loadAll().map(all -> new DirectorySnapshot(
-                    보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직), all.assignedEdges()));
+                    보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직),
+                    all.assignedEdges().stream().filter(edge -> !숨긴_조직.contains(edge.child())).collect(Collectors.toSet())));
         }
 
         /**
@@ -337,6 +343,29 @@ class ScimRebuildIndexLagTest {
         assertThat(state.findUsersCalls).contains(Set.of("lee"));
         assertThat(writer.deleted).doesNotContain(지정_연결);
         assertThat(writer.stored).contains(김_백엔드, 이_백엔드, 지정_연결);
+    }
+
+    @Test
+    @DisplayName("tuples — 열거에서 빠진 조직 자신의 지정 상위도 보강한 조직도에 싣는다 — 그 조직의 지정 상위는 열거로 읽히지 않는다")
+    void 숨은_조직_자신의_지정_상위도_보강한_그림에_싣는다() {
+        // given — H 는 GSI 에 아직 없고 P 아래로 지정돼 있다. 장부에 child(H,P) 가 있다. 열거는 H 의 파티션을 읽지 않아 그 지정 연결을 얻지 못한다.
+        //         kim→DEV002 는 보이는 평소 줄이다 — 있어야 할 줄이 하나도 없으면 빈 조직도 가드가 먼저 멈춘다
+        state.saveUser(직원("kim")).block();
+        조직을_심는다("DEV002", 김);
+        조직을_심는다("P");
+        조직을_심는다("H");
+        state.assignedParents.put("H", "P");
+        writer.stored.addAll(Set.of(김_백엔드, 숨은_지정_연결));
+        state.숨긴_조직.add("H");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — H 를 다시 읽었고(보강 경로), 그 조직의 지정 상위도 읽어 줄이 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.findGroupCalls).containsExactly("H");
+        assertThat(writer.deleted).doesNotContain(숨은_지정_연결);
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 숨은_지정_연결);
     }
 
     @Test
