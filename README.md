@@ -93,7 +93,7 @@ type group
 **불변 id는 이름에서 만들지 않는다.** SCIM은 이 서버가 직원·조직 POST 때 발급하는 UUID(`UUID.randomUUID()` — IdP 가 정하지 않는다), LDAP은 디렉터리
 서버가 엔트리마다 만들어 두는 `entryUUID`(AD는 `objectGUID`)다. 계정명이나 조직명이 바뀌어도 id는 그대로라 튜플이 바뀌지 않고, 지운 직원의 이름을 새 입사자가
 쓰더라도 옛 id로 남은 권한을 물려받지 않는다. 대신 **권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다** — 아래 "조회 API"의
-`?userName=`·`?externalId=`로 찾는다. 튜플이 UUID 라 OpenFGA 를 직접 열어 보면 읽기 어렵다 — 누구의 튜플인지는 관리 API 로 본다.
+정확 조회(`/admin/employees/lookup`·`/admin/organizations/lookup`)로 찾는다. 튜플이 UUID 라 OpenFGA 를 직접 열어 보면 읽기 어렵다 — 누구의 튜플인지는 관리 API 로 본다.
 
 튜플을 다루는 OpenFGA 호출은 세 가지뿐이다. 쓰기는 Write(쓰기·지우기), 판단은 Check·BatchCheck(점 조회), 그리고
 **Read(목록 읽기)는 장부 훑기에서만** 쓴다(`RelationTupleScanner`) — 재적재와, 기준선을 믿을 수 없는 LDAP 회차(지난 회차가 기록 전에 멈춘 뒤, 스냅샷이 아직 없는 첫 회차)다. ListObjects는 쓰지 않는다.
@@ -114,22 +114,31 @@ type group
 | `authz-openfga` | store 해석, 인가 모델 등록, 멱등 튜플 쓰기 |
 | `connector-ldap` | groupOfNames / DIT 두 매핑 전략 |
 | `connector-scim` | SCIM 2.0 엔드포인트 |
-| `admin-api` | 관리 조회 API(직원·조직·변경 이력)와 관리 API 예외 처리기 — 두 앱이 함께 쓴다 |
+| `admin-api` | 관리 조회 API(직원·조직·변경 이력·정확 조회)와 관리 API 예외 처리기 — 두 앱이 함께 쓴다 |
+| `web-security` | 두 앱의 리소스 서버 보안 — 경로별 범위, 표면에 맞춘 401·403·503, 행위자 웹 필터(아래 "인증") |
 | `app-ldap` | LDAP 동기화 인스턴스 (8081) |
 | `app-scim` | SCIM 수신 인스턴스 (8082) |
+| `app-auth` | 인가 서버 (9000) — client credentials 로 JWT 를 발급한다. 이 앱만 서블릿(Spring MVC)이다 |
 
-의존 방향은 항상 `app-*` → 어댑터(`storage-dynamodb`/`authz-openfga`/`connector-*`) → `core`다.
-`core`는 스프링 컨텍스트도, 어떤 구체 어댑터도 모른다.
+의존 방향은 항상 `app-*` → 어댑터(`storage-dynamodb`/`authz-openfga`/`connector-*`/`web-security`) → `core`다.
+`core`는 스프링 컨텍스트도, 어떤 구체 어댑터도 모른다. `app-auth` 는 어느 모듈에도 기대지 않는다.
 
 ## 로컬 실행
 
 ```bash
 docker compose up -d
+./gradlew :app-auth:bootRun   # 인가 서버(9000) — 토큰을 받으려면 떠 있어야 한다(아래 "인증")
 ./gradlew :app-ldap:bootRun
 ```
 
 `docker-compose.yml`은 OpenFGA, DynamoDB Local, (수동 검증용) OpenLDAP을 띄운다. 로컬 `application.yml` 은
 `openfga.create-store: true` 라 app-ldap을 띄우면 시작 시점에 OpenFGA store를 만들고 인가 모델을 쓴다(모델은 최신과 내용이 다를 때만 쓴다).
+두 앱은 app-auth 없이도 뜬다 — 키 목록은 첫 토큰을 볼 때 받는다. 그때 app-auth 가 없으면 503 이다.
+
+**로컬 OpenFGA 는 사전 공유 키 `local-openfga-key` 로 뜬다**(`OPENFGA_AUTHN_METHOD: preshared`). 두 앱의 로컬 `application.yml` 이 같은 키(`openfga.api-token`)를
+싣고, 키 없는 호출은 401 이다(`/healthz` 는 열려 있다). 키 없이 띄워 둔 컨테이너가 있으면 다시 만들고 앱도 다시 띄운다 — 메모리 저장소라 장부가
+비므로, 스냅샷이 빈 장부와 어긋나지 않게 DynamoDB Local 도 함께 만든다(`docker compose up -d --force-recreate openfga dynamodb-local`).
+키 모드에서 플레이그라운드(3000)가 되는지는 확인하지 않았다.
 
 DynamoDB 테이블은 기동 때 늘 확인하고, 없을 때 `dynamodb.create-table-on-startup` 이 켜져 있어야만 만든다. 이 값은 로컬
 `application.yml` 만 `true` 이고 클래스 기본값과 `application-prod.yml` 은 `false` 다 — **운영에서는 앱이 테이블·store 를 만들지 않는다.**
@@ -171,10 +180,12 @@ ENABLED 또는 ENABLING)을 보고 다르면 다른 점을 모두 적어 "테이
 
 | 서비스 | 주소 |
 |---|---|
-| OpenFGA | http://localhost:8080 (플레이그라운드 http://localhost:3000) |
+| OpenFGA | http://localhost:8080 (플레이그라운드 http://localhost:3000) — 사전 공유 키 `local-openfga-key` |
 | DynamoDB Local | http://localhost:8000 |
 | OpenLDAP | ldap://localhost:1389 |
+| app-auth | http://localhost:9000 — 발급자 `http://localhost:9000` |
 | app-ldap | http://localhost:8081 |
+| app-scim | http://localhost:8082 |
 
 **시드 생성기.** 손으로 띄워 두드려 볼 5,000명 조직도(`OrgChartFixture.오천명()`)를 파일로 만든다. 자동화 테스트는 이 파일 없이 돈다. 만든 파일은 git 에 넣지 않는다.
 
@@ -182,14 +193,106 @@ ENABLED 또는 ENABLING)을 보고 다르면 다른 점을 모두 적어 "테이
 # LDAP — docker/ldap/scale-groupofnames/scale.ldif 와 docker/ldap/scale-dit/scale.ldif(겸직을 푼 DIT)를 만든다
 ./gradlew :connector-ldap:generateScaleSeed
 LDAP_SEED_DIR=./docker/ldap/scale-groupofnames docker compose up -d   # DIT 는 ./docker/ldap/scale-dit + ldap.strategy=dit
+./gradlew :app-auth:bootRun
 ./gradlew :app-ldap:bootRun
-curl -XPOST localhost:8081/admin/sync/full
+TOKEN=$(curl -s -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)
+curl -XPOST -H "Authorization: Bearer $TOKEN" localhost:8081/admin/sync/full
 
 # SCIM — docker/scim/initial-sync.ndjson(IdP 의 최초 싱크 요청, 한 줄에 요청 하나)을 만들고 순차로 쏜다
 ./gradlew :connector-scim:generateScimSeed
 docker compose up -d openfga dynamodb-local
+./gradlew :app-auth:bootRun
 ./gradlew :app-scim:bootRun
 python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 인자로 바꾼다. POST 응답의 id 로 뒤 요청의 경로·멤버를 바꿔 보낸다
+# replay.py 는 IdP 처럼 app-auth 에서 scim-idp 로 토큰을 받아 싣는다 — AUTH_TOKEN_URL·SCIM_CLIENT_ID·SCIM_CLIENT_SECRET 로 바꾼다
+```
+
+## 인증
+
+호출자는 모두 기계(IdP, 운영 도구, 권한을 묻는 앱, Prometheus)라 사람 로그인이 없다. 인가 서버 `app-auth`(Spring Authorization Server)가
+**client credentials** 로 서명된 JWT 를 발급하고, 두 앱은 OAuth2 리소스 서버로 그 토큰을 그 자리에서 검증한다 — 서명(`jwk-set-uri` 의 키)·발급자
+(`issuer-uri`)·만료를 보고 `aud` 는 보지 않는다. 기동 때 인가 서버에 묻지 않는다. 표준(RFC 6749·6750·7519)이라 회사 IdP 를 인가 서버로 쓸 수도
+있지만 시험하지 않았다. 설계: `docs/superpowers/specs/2026-10-28-auth-design.md`.
+
+**범위와 경로.** 권한은 토큰의 `scope` 클레임에서 `SCOPE_<범위>` 로 만든다. 위에서부터 처음 맞는 규칙이다. 범위 하나가 다른 범위를 품지 않는다 —
+클라이언트에 필요한 범위를 모두 준다.
+
+| 경로 | 범위 |
+|---|---|
+| `/scim/v2/**` — 발견(`ServiceProviderConfig`·`Schemas`·`ResourceTypes`) 포함 | `scim` |
+| `GET /admin/employees/lookup`·`GET /admin/organizations/lookup` | `directory.lookup` 또는 `admin.read` |
+| 그 밖의 `GET /admin/**` — 조회·변경 이력·실행 기록 | `admin.read` |
+| `POST /admin/sync/**` | `admin.sync`. `force=true`·`mode=wipe` 는 `admin.destructive` 도 |
+| `/actuator/health`·`/actuator/health/liveness`·`/actuator/health/readiness` | 없음 — 상태만. 세부는 `actuator` 가 있을 때만 |
+| 그 밖의 `/actuator/**`(`info`·`metrics`·`prometheus`) | `actuator` |
+| 나머지 | 거절 — 토큰이 통과하면 403, 없으면 401 |
+
+**로컬 클라이언트.** `auth-server.yml` 의 prod 가 아닌 프로필에만 있다(운영 클라이언트는 아래 "운영 배포"). 비밀은 `<id>-secret` 이다.
+
+| 클라이언트 | 범위 | 토큰 수명 | 누가 |
+|---|---|---|---|
+| `scim-idp` | `scim` | 60분 | IdP — `replay.py` 가 쓴다 |
+| `ops` | `admin.read admin.sync` | 10분 | 운영 도구 |
+| `ops-break-glass` | `admin.read admin.sync admin.destructive` | 10분 | 비상 — `force=true`·`mode=wipe` |
+| `asking-app` | `directory.lookup` | 10분 | 권한을 묻는 앱 — 정확 조회 둘만 |
+| `prometheus` | `actuator` | 10분 | 스크레이프 |
+
+**토큰 받기.**
+
+```bash
+curl -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token   # 응답 JSON 의 access_token
+TOKEN=$(curl -s -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)
+curl -H "Authorization: Bearer $TOKEN" 'localhost:8081/admin/sync/runs?limit=5'
+```
+
+- `-u` 는 `client_secret_basic` 이다. 폼 값(`client_id`·`client_secret`)으로 보내는 `client_secret_post` 도 받는다.
+- `scope` 를 보내지 않으면 등록된 범위를 모두 받는다(RFC 6749 §3.3 — 범위 칸이 없는 IdP 화면을 위해서다). `-d scope=admin.read` 로 좁힐 수 있다.
+  등록되지 않은 범위는 400 `invalid_scope`, 틀린 비밀은 401 `invalid_client` 다.
+- 토큰의 `sub` 는 클라이언트 id 다. 그 토큰으로 일으킨 변경은 행위자 `client:<sub>` 로 남는다(아래 "변경 이력"의 `cause.actor`, 실행 기록의 `requestedBy`).
+  운영자마다 클라이언트를 따로 주면 사람 단위로 남는다.
+- app-auth 가 받는 것은 토큰(`/oauth2/token`), 키 목록(`/oauth2/jwks`), 메타데이터(`/.well-known/oauth-authorization-server`), `/actuator/health/**` 뿐이고
+  나머지(인가 코드·디바이스·토큰 조회·폐기 끝점 포함)는 403 이다. 메타데이터에 `authorization_endpoint` 가 남는 것은 Spring Authorization Server 가 그 칸을
+  요구해서이고 그 끝점도 403 이다. 발급 기록을 남기지 않으므로 토큰 하나만 무효로 할 수 없다 — 무효화는 키 교체다(아래 "운영 배포").
+
+**거절.** 보안 필터의 거절은 그 표면의 오류 형식으로 나간다 — `/scim/v2/**` 는 SCIM Error(`application/scim+json`, `status` 는 문자열), `/admin/**` 는
+problem details(`type` about:blank, `title` 상태 문구), 그 밖(actuator 등)은 본문이 없다. 토큰 내용과 검증 실패의 세부(만료 시각 등)는 머리·본문 어디에도 싣지 않는다.
+
+| 경우 | 상태 | `WWW-Authenticate` | `detail` |
+|---|---|---|---|
+| 토큰 없음 | 401 | `Bearer` | `인증이 필요하다` |
+| 토큰을 받지 않음 — 서명·발급자·만료·꼴 | 401 | `Bearer error="invalid_token"` | `인증이 필요하다` |
+| 범위 없음(규칙 밖의 경로 포함) | 403 | `Bearer error="insufficient_scope"` | `이 요청에 필요한 범위가 없다` |
+| `force=true`·`mode=wipe` 에 `admin.destructive` 없음 — 컨트롤러가 회차·락을 만들기 전에 본다 | 403 | `Bearer error="insufficient_scope"` | `force=true은 admin.destructive 범위가 필요하다`(`mode=wipe은 …`) |
+| 키 목록(`jwk-set-uri`)을 받지 못함 — 연결 2초·응답 5초 초과, 2xx 아님, 키 목록이 아닌 본문 | 503 + `Retry-After: 10` | 없음 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+
+- `force`·`mode` 는 스프링이 바꾼 값으로 본다 — `force=yes`·`force=1`·`mode=WIPE` 도 같은 판정이라 쿼리 모양으로 우회하지 못한다.
+- 키 목록 장애는 토큰 탓이 아니라 503 이다 — 401 `invalid_token` 은 멀쩡한 토큰을 버리라는 뜻이라 IdP 가 자격 문제로 읽는다. 키 목록을 받지 못한 원인이
+  아닌 토큰 실패(JWE 꼴 등)는 모두 401 이다. 키 목록은 받아 둔 것을 쓰고 모르는 `kid` 를 볼 때만 다시 받으므로, app-auth 가 내려가도 받아 둔 인스턴스는
+  이미 발급된 토큰을 만료까지 받는다 — 새 토큰을 받지 못할 뿐이다.
+
+**IdP 에 붙이기(SCIM).** IdP 가 닿는 https 주소가 필요하고 SCIM 주소는 app-scim 의 `/scim/v2` 다(Entra 는 끝에 `?aadOptscim062020` — 아래 SCIM 절).
+실제 Entra·Okta 로 붙여 보지는 않았다 — 근거는 IdP 문서다(설계 §11).
+
+- **Entra ID — client credentials.** 프로비저닝 인증 방식으로 OAuth2 client credentials 를 고르고, 토큰 엔드포인트 `https://<app-auth>/oauth2/token` 과
+  그 IdP 용 클라이언트(범위 `scim`)의 id·비밀을 적는다. 범위 칸이 있으면 `scim`, 없거나 비워 두면 등록된 범위를 모두 받는다. 토큰 수명은 60분을 권한다.
+- **Okta — 붙여 넣는 토큰.** HTTP Header 인증은 토큰 하나를 붙여 넣는다. 그 IdP 용 클라이언트만 수명을 길게(예: `access-token-time-to-live: 180d`) 주고,
+  운영자가 위 `curl` 로 한 번 받아 붙여 넣는다. 만료 전에 다시 받아 바꿔 넣는다. **수명이 365일을 넘는 클라이언트 설정은 기동을 멈춘다**(RFC 7644 §7 —
+  bearer 토큰의 수명은 유한해야 한다). 로컬 app-auth 는 기동마다 키를 새로 만들므로 다시 띄우면 붙여 넣은 토큰도 무효다.
+
+**Prometheus.** `/actuator/prometheus` 는 `actuator` 범위가 필요하다. 스크레이프 설정의 `oauth2` 가 client credentials 로 토큰을 받아 싣는다. 같은 범위로
+`/actuator/health` 의 세부도 보인다.
+
+```yaml
+scrape_configs:
+  - job_name: organization
+    metrics_path: /actuator/prometheus
+    oauth2:
+      client_id: prometheus
+      client_secret_file: /etc/prometheus/secrets/organization-prometheus   # 평문 비밀. app-auth 에는 {bcrypt} 해시
+      token_url: https://<app-auth>/oauth2/token
+      scopes: [actuator]
+    static_configs:
+      - targets: ['<app-scim>:8082']   # app-ldap 이면 8081
 ```
 
 ## 운영 배포
@@ -213,6 +316,12 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 | `ldap.strategy`(app-ldap) | `group-of-names` | `group-of-names` | — | `group-of-names`·`dit`(대소문자 무시) 밖이면 오타도 멈춘다 |
 | `ldap.bind-password`(app-ldap) | 없음 | `adminpassword` | `${LDAP_BIND_PASSWORD}` | 환경 변수로 받는다. 바인드 DN 이 있는데 비었거나 풀리지 않은 자리표시자면 멈춘다 — 오류 문구에 값을 싣지 않는다 |
 | `ldap.require-tls`(app-ldap) | `false` | — | `true` | `ldap.url` 이 `ldaps://` 가 아니면 멈춘다. StartTLS 는 지원하지 않는다 |
+| `spring.security.oauth2.resourceserver.jwt.issuer-uri` | 없음 | `http://localhost:9000` | `${AUTH_ISSUER_URI}` | 인가 서버의 발급자 — 토큰의 `iss` 와 같아야 한다(다르면 모든 토큰이 401). 없거나 비면 멈춘다(로컬도) |
+| `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` | 없음 | `http://localhost:9000/oauth2/jwks` | `${AUTH_JWK_SET_URI}` | 서명 키 목록 주소. 없거나 비면 멈춘다(로컬도) |
+| `auth.require-https` | `false` | — | `true` | 위 둘이 `https://` 가 아니면 멈춘다 — 평문 키 목록은 중간자가 자기 키를 내밀어 아무 토큰이나 위조하게 한다 |
+| `openfga.api-token` | 없음 | `local-openfga-key` | `${OPENFGA_API_TOKEN}` | OpenFGA 사전 공유 키 — 모든 호출에 `Authorization: Bearer` 로 싣는다. 눈에 보이는 ASCII 만 받는다(끝에 줄바꿈이 붙어도 멈춘다). 기동 때 OpenFGA 가 401·403 이면 멈춘다 |
+| `openfga.require-api-token` | `false` | — | `true` | 키가 비었거나 풀리지 않은 자리표시자면 `openfga.require-api-token 인데 openfga.api-token 이 비었거나 풀리지 않은 자리표시자다 — 환경 변수 OPENFGA_API_TOKEN 을 준다` 로 멈춘다 |
+| `openfga.require-tls` | `false` | — | `true` | `openfga.api-url` 이 `https://` 가 아니면 멈춘다 — 키가 평문으로 다니지 않는다 |
 
 - **PITR 로 복원한 테이블**이면 기동 때 WARN 을 한 번 남긴다: `PITR 로 복원한 테이블이다 — 장부보다 낡은 기준선일 수 있어 재적재를 권한다(SCIM 은 mode=tuples)`. 자동으로 재적재하지는 않는다.
 - **`ldaps://` 는 JVM 트러스트스토어로 연다.** 사설 CA 가 서명한 인증서면 `-Djavax.net.ssl.trustStore=<트러스트스토어 파일>` 로 넘긴다.
@@ -231,7 +340,63 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 
 **헬스와 프로브.** 두 앱 모두 `management.endpoint.health.probes.enabled: true` 다. `/actuator/health/liveness`·`/actuator/health/readiness` 는 부트 기본
 구성 그대로라 외부 의존(OpenFGA·DynamoDB·LDAP)을 보지 않는다 — 그 장애로 인스턴스가 재시작되지 않게 한다. 외부 의존은 `/actuator/health` 가 본다(아래 "관리 API").
-세부(`show-details`)는 두 앱 모두 `when-authorized` 라 인증이 없는 지금은 상태만 나온다 — 주소·테이블 이름·예외 문구를 공개하지 않는다.
+세 경로는 토큰 없이 열려 있고 상태만 낸다. 세부(`show-details: when-authorized`)는 `actuator` 범위가 있는 토큰에만 보인다(`management.endpoint.health.roles:
+SCOPE_actuator` — 범위가 다른 토큰도 상태만 받는다). 주소·테이블 이름·예외 문구를 공개하지 않는다. app-auth 는 헬스(프로브 포함)만 내고 인증 없이 열려 있다.
+
+**app-auth(인가 서버).** 설정 파일 이름이 `auth-server.yml`·`auth-server-prod.yml` 이다(`spring.config.name=auth-server` — 같은 JVM 에서 도는 시험에서
+다른 앱의 `application.yml` 과 겹치지 않게). **바깥 설정도 `auth-server*.yml` 이어야 읽힌다** — `application*.yml` 은 어디에 두든 아무 말 없이 무시된다.
+환경 변수로 줘도 된다. 개발 클라이언트는 prod 프로필에서 빠지므로 운영 클라이언트는 운영 설정이 준다. 서명 키를 고정하고 발급 기록을 남기지 않으므로
+상태가 없다 — 같은 키를 주면 여러 대로 띄울 수 있다(`kid` 가 공개 키의 지문이라 같다).
+
+| 설정 | 로컬 `auth-server.yml` | `auth-server-prod.yml` | 뜻 |
+|---|---|---|---|
+| `auth.signing-key` | 없음 — 기동마다 RSA 2048 을 만든다(재시작하면 그 전 토큰은 모두 무효) | `${AUTH_SIGNING_KEY}` | RSA 개인 키, PKCS#8 PEM(`-----BEGIN PRIVATE KEY-----` — 예: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`. PKCS#1 이면 `openssl pkcs8 -topk8 -nocrypt` 로 바꾼다). 읽히지 않거나 2048비트보다 짧으면 멈춘다 |
+| `auth.require-signing-key` | `false` | `true` | 키가 비었거나 풀리지 않은 자리표시자면 멈춘다 |
+| `spring.security.oauth2.authorizationserver.issuer` | `http://localhost:9000` | `${AUTH_ISSUER}` | 발급자. 두 앱의 `issuer-uri`(`AUTH_ISSUER_URI`)와 같은 값이고, 키 목록은 `<발급자>/oauth2/jwks`(`AUTH_JWK_SET_URI`)다 |
+| `auth.require-https` | `false` | `true` | 발급자가 `https://` 가 아니면 멈춘다 |
+| `auth.require-hashed-secrets` | `false` | `true` | `{bcrypt}` 해시가 아닌 클라이언트 비밀이 있으면 멈춘다 — 평문은 클라이언트(IdP·운영 도구) 쪽에만 둔다 |
+| `spring.security.oauth2.authorizationserver.client.<이름>.*` | 개발 클라이언트 다섯(`{noop}` 비밀, 위 "인증") | 없음 — 운영 설정이 준다 | 아래 예. 토큰 수명이 365일을 넘으면 멈춘다(로컬도) |
+
+```yaml
+spring:
+  security:
+    oauth2:
+      authorizationserver:
+        client:
+          scim-idp:
+            registration:
+              client-id: scim-idp
+              client-secret: "{bcrypt}<bcrypt 해시>"
+              client-authentication-methods: client_secret_basic, client_secret_post   # 없으면 부트가 기동을 멈춘다
+              authorization-grant-types: client_credentials
+              scopes: scim
+            token:
+              access-token-time-to-live: 60m   # 반드시 적는다 — 빠뜨리면 부트 기본 5분이다. 그 밖의 클라이언트는 10m
+```
+
+**https.** 비밀이 다니는 새 경로는 prod 에서 https 여야 한다 — app-auth 의 발급자, 두 앱의 `issuer-uri`·`jwk-set-uri`(둘 다 `auth.require-https`), 키를
+싣는 `openfga.api-url`(`openfga.require-tls`). 아니면 기동을 멈춘다. 검사는 주소의 모양만 본다 — app-auth 도 TLS 를 직접 열지 않으므로
+(`server.ssl` 설정이 없다) 발급자 주소의 https 는 앞단(로드밸런서 등)이 끝낸다.
+
+**OpenFGA 키를 켜는 순서.** OpenFGA 서버에 사전 공유 키를 켜는 순간 키 없이 Check 하던 권한을 묻는 앱은 모두 401 이다. 그래서 키를 먼저 나눠 준다.
+
+1. 키를 정한다 — 이 배포의 앱(app-ldap 이나 app-scim)용 하나와 권한을 묻는 앱마다 하나. OpenFGA 는 키를 여럿 받는다(`OPENFGA_AUTHN_PRESHARED_KEYS`).
+2. 클라이언트에 먼저 싣는다 — 이 배포의 앱은 `OPENFGA_API_TOKEN`, 권한을 묻는 앱은 각자의 설정.
+3. OpenFGA 서버에 키를 켠다(`OPENFGA_AUTHN_METHOD: preshared`).
+
+사전 공유 키는 익명 호출만 막는다 — 맞는 키는 어느 것이든 OpenFGA API 전부(쓰기 포함)를 연다. 장부 쓰기를 이 서버로만 좁히는 것은 범위 밖이다. `/healthz` 는 키
+없이 열려 있다. 실행 중에 OpenFGA 가 401·403 을 주면 일시 장애가 아니라 다시 보내지 않는다(요청이면 500). OpenFGA 서버를 다른 팀과 함께 쓰면 서버의 인증을
+켜고 끄는 것은 이 저장소가 정할 수 없다.
+
+**키 교체 = 전부 무효화.** 서명 키는 하나다. `AUTH_SIGNING_KEY` 를 바꿔 app-auth 를 다시 띄우면 그 전에 발급한 토큰은 모두 무효가 된다 — 토큰 하나만
+무효로 하는 길은 없다. 붙여 넣은 토큰(Okta)이 샜을 때의 처방이 이것이다. 한 배포에 커넥터가 하나라 다시 붙여 넣을 IdP 도 하나다.
+
+- **무효가 되는 때는 인스턴스마다 다르다.** 두 앱은 받아 둔 키 목록을 쓰다가 모르는 `kid` 의 토큰을 볼 때만 다시 받는다. 그래서 옛 토큰은 그 인스턴스가
+  새 키의 토큰을 처음 받을 때까지 통한다. client credentials 클라이언트가 곧 새 토큰을 가져오므로 대개 금방이지만, 새 토큰이 아직 오지 않은 인스턴스에서는
+  붙여 넣은 긴 수명 토큰도 계속 통한다. 곧바로 끊어야 하면 두 앱의 인스턴스도 다시 띄운다 — 키 목록은 메모리에만 있다.
+- **client credentials 클라이언트는 다음 토큰부터 새 키다.** 401 을 받으면 토큰을 다시 받는 클라이언트(`replay.py`)는 곧바로 낫고, 만료에만 새로 받는
+  클라이언트는 들고 있던 토큰의 남은 수명(길면 10분, IdP 60분)만큼 401 일 수 있다. 붙여 넣은 토큰만 운영자가 다시 받아 붙여 넣는다.
+- app-auth 가 여러 대면 한꺼번에 바꾼다 — 키가 섞여 도는 동안은 키 목록이 인스턴스마다 달라진다.
 
 ## 관리 API
 
@@ -244,8 +409,8 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 | 요청 | 설명 |
 |---|---|
 | `POST /admin/sync/full` | 전체 동기화를 건다 — 202 + 실행 기록(`runId`, `RUNNING`) |
-| `POST /admin/sync/full?force=true` | 삭제 가드를 건너뛰고 건다 |
-| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true`(기록의 `trigger` 가 `FORCED_REBUILD`) |
+| `POST /admin/sync/full?force=true` | 삭제 가드를 건너뛰고 건다 — `admin.destructive` 범위가 더 있어야 한다 |
+| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true`(기록의 `trigger` 가 `FORCED_REBUILD`, `admin.destructive` 범위) |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
 | `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 없으면 404 |
 
@@ -254,26 +419,31 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 | 요청 | 설명 |
 |---|---|
 | `POST /admin/sync/rebuild?mode=tuples` | 재적재를 건다 — **현재상태(DynamoDB)가 요구하는 튜플을 전부 쓰고, 장부를 훑어 요구하지 않는 줄을 지운다.** 조직도는 건드리지 않는다 |
-| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 **조직도까지 전부 지운다.** 되돌릴 수 없다 — 아래 경고 참고 |
+| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 **조직도까지 전부 지운다.** 되돌릴 수 없다 — `admin.destructive` 범위가 더 있어야 한다. 아래 경고 참고 |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 (재적재 + 하루 1회 아카이빙) |
 | `GET /admin/sync/runs/{runId}` | 실행 기록 하나. 없으면 404 |
 
 **실행 기록은 이번 달·지난달(UTC, 시작 시각 기준) 파티션만 읽는다.** `runs`·`runs/{runId}`·app-ldap 의 `sync_last_success` 가 모두 같다 —
 `dynamodb.syncrun-retention-days`(기본 30일)를 늘려도 그보다 앞선 달의 기록은 테이블에 남아 있을 뿐 관리 API 로 찾지 못한다.
 
+**실행 기록의 `requestedBy` 는 그 회차를 건 행위자다** — 관리 API 로 걸면 `client:<sub>`, 예약 LDAP 동기화는 `system:scheduler`, SCIM 아카이빙은
+`system:archive`. 이 칸이 생기기 전의 기록에는 없다.
+
 `GET /actuator/health`는 두 앱 공통이며 DynamoDB(DescribeTable) / OpenFGA 상태를 포함한다. OpenFGA 는 캐시한 store 번호를 `GetStore` 로 실제로 묻는다 —
 OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는다(아직 해석 전이면 이름으로 찾기만 하고 만들지 않는다). 둘 다 2초 안에 답이 없으면 DOWN 이다.
 app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
 
 **관리 API 의 오류는 RFC 9457 problem details(`application/problem+json`)다** — `type`(about:blank)·`title`·`status`·`detail`·`instance`(요청 경로 — 스프링이 채운다) 등을 싣는다. `/admin/sync`·
-조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다).
+조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다). 보안 필터의 401·403·503 은 이 처리기를 거치지 않고 같은 모양으로 직접
+나간다(위 "인증").
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록 | 그 사유 |
-| 409 | 락 경합 — 다른 작업이 락을 쥐고 있다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등) |
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다 | 그 사유 |
+| 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이다 | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
+| 409 | 락 경합 — 다른 작업이 락을 쥐고 있다. 정확 조회에 여럿이 일치한다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등). 정확 조회는 `<N>명이 일치한다 — externalId 로 찾는다`·`<N>개가 일치한다` |
 | 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패 | `일시 장애 — 잠시 뒤 다시 시도한다` |
-| 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 간다(인증이 없는 엔드포인트다) |
+| 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 가고 응답에 싣지 않는다 |
 
 ### 재적재·수동 동기화 (두 앱 공통)
 
@@ -378,7 +548,8 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 실패하면 조직도가 빈 채로 남는다.
 
 그래서 `confirm`에 DynamoDB 테이블명을 그대로 적어야 실행된다. 불리언 플래그는 손가락이
-미끄러지면 눌리지만, 테이블명은 관리자가 자기가 무엇을 지우는지 찾아보게 만든다.
+미끄러지면 눌리지만, 테이블명은 관리자가 자기가 무엇을 지우는지 찾아보게 만든다. 테이블명은 비밀이 아니므로 막는 것은 범위다 —
+`admin.sync` 에 더해 `admin.destructive` 가 있는 토큰(로컬 `ops-break-glass`)이어야 하고, 없으면 확인값을 보기 전에 403 이다.
 
 지우는 순서는 **장부 먼저, 조직도 나중**이다. 장부 청소가 한 줄이라도 실패하면 조직도를 건드리지 않고
 `FAILED`로 끝난다 — 다시 실행하면 남은 줄부터 지운다. 순서를 뒤집으면 조직도가 사라진 채 낡은 권한만
@@ -394,13 +565,15 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 ### 조회 API
 
 `admin-api` 모듈이 두 앱(`app-ldap`, `app-scim`) 모두에 공유 코드로 배선돼 있다. 읽기 전용이고
-현재상태(DynamoDB)와 OpenFGA의 실제 판정을 나란히 보여준다.
+현재상태(DynamoDB)와 OpenFGA의 실제 판정을 나란히 보여준다. `admin.read` 범위가 있어야 하고, 정확 조회 둘만 `directory.lookup` 으로도 열린다(위 "인증").
 
 | 요청 | 설명 |
 |---|---|
+| `GET /admin/employees/lookup?userName=` 또는 `?externalId=` | 직원 정확 조회 — 하나면 200(`employeeId`·`userName`·`displayName`·`active`·`externalId`), 없으면 404, 여럿이면 409(수만). 권한을 묻는 앱이 우리 id를 얻는 길 |
+| `GET /admin/organizations/lookup?externalId=` | 조직 정확 조회 — 하나면 200(`orgCode`·`displayName`·`externalId`), 없으면 404, 여럿이면 409 |
 | `GET /admin/employees?userName=` | 계정명 접두사로 직원 검색 |
 | `GET /admin/employees?displayName=` | 표시명 접두사로 직원 검색 |
-| `GET /admin/employees?externalId=` | `externalId`가 정확히 같은 직원 검색 — 권한을 묻는 앱이 IdP의 사용자 id로 우리 id를 얻는 길 |
+| `GET /admin/employees?externalId=` | `externalId`가 정확히 같은 직원 검색 |
 | `GET /admin/employees/{employeeId}` | 직원 상세 — 직속 소속과 상위 계층 전부, 각 줄에 실제 판정 포함 |
 | `GET /admin/organizations?displayName=` | 표시명 접두사로 조직 검색 |
 | `GET /admin/organizations?externalId=` | `externalId`가 정확히 같은 조직 검색 |
@@ -447,15 +620,23 @@ displayName  홍길동
 `displayName`을 함께 볼 수 있다.
 
 **권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다.** 토큰의 사용자 식별과 `employeeId`를 자동으로 잇지는 않는다.
-앱이 아는 값으로 한 번 조회해 `employeeId`를 얻는다.
+앱이 아는 값으로 정확 조회를 한 번 해 `employeeId`를 얻는다. `directory.lookup` 범위만 가진 클라이언트(로컬 `asking-app`)로 부른다 — 이 범위는
+검색·상세·이력을 열지 않는다.
 
-- `GET /admin/employees?userName=gd.hong` — 계정명으로 찾는다. 접두사 검색이라 더 긴 계정명도 함께 올라오므로 `userName`이 같은 줄을 고른다
-- `GET /admin/employees?externalId=<IdP의 사용자 id>` — 정확히 일치한다. SCIM이면 IdP가 보낸 `externalId`(Okta의 사용자 id, Entra에서
+- `GET /admin/employees/lookup?userName=gd.hong` — 계정명이 대소문자를 빼고 정확히 같은 직원
+- `GET /admin/employees/lookup?externalId=<IdP의 사용자 id>` — 대소문자까지 정확히 같은 직원. SCIM이면 IdP가 보낸 `externalId`(Okta의 사용자 id, Entra에서
   `objectId`를 `externalId`로 매핑했다면 그 값)이고, LDAP이면 서버가 준 절대 DN이다. **LDAP은 관리 API가 보여 주는 DN을 그대로 쓴다** — 저장된
   값은 서버가 준 DN을 `LdapName`으로 다시 쓴 문자열이라, 앱이 따로 적은 표기(공백·이스케이프·대소문자)는 맞지 않을 수 있다
 
-`Check(user:<얻은 employeeId>, member, group:<조직 id>)`로 묻는다. app-scim은 `GET /scim/v2/Users?filter=userName eq "…"`·
-`filter=externalId eq "…"`로도 찾을 수 있다.
+둘 중 정확히 하나를 준다(아니면 400). 하나면 200 이고 비활성 직원도 그대로 준다 — 앱이 `active` 를 본다. 없으면 404 `일치하는 직원이 없다`, 여럿이면 409
+`<N>명이 일치한다 — externalId 로 찾는다` 이고 목록은 싣지 않는다 — LDAP 의 `userName` 은 유일하지 않을 수 있고, 직원 `externalId` 는 어느 쪽도 유일하게
+지키지 않는다. 조직은 `GET /admin/organizations/lookup?externalId=` 로 `orgCode` 를 얻는다 — 404 `일치하는 조직이 없다`, 409 `<N>개가 일치한다`(SCIM 은 조직
+`externalId` 를 유일하게 지키므로 LDAP 에서만 날 수 있다). SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 라 `mode=wipe` 뒤에 바뀐다 — 다시 찾는다.
+그다음 `Check(user:<employeeId>, member, group:<orgCode>)`로 묻는다.
+
+요청마다 전원을 읽지 않는다 — 인덱스 한 번이다. `externalId` 는 GSI3 후보를 본 테이블에서 다시 읽고(아래 `?externalId=` 와 같다 — 방금 만든 리소스는 잠깐 404),
+`userName` 은 GSI1 에서 바로 읽으므로 방금 바뀐 값(`active`·`displayName`, 계정명 변경)이 잠깐(보통 1초 미만) 늦게 보일 수 있다 — 계정명을 넘겨받은
+직원이 잠깐 409 일 수 있다. app-scim 의 `GET /scim/v2/Users?filter=…` 도 찾을 수 있지만 `scim` 범위는 쓰기도 열므로 권한을 묻는 앱에는 주지 않는다.
 
 **`?externalId=`는 정확히 일치만 찾고 한 페이지로 끝난다**(`nextCursor`는 null). 같은 `externalId`를 가진 리소스가 둘이면 줄이 여럿 온다 —
 SCIM 조직의 `externalId`는 겹치면 409지만(아래 SCIM 절) 직원의 `externalId`는 겹침을 막지 않는다. 이 조회는 GSI3(`externalId`)로
@@ -496,9 +677,8 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 버려지므로 재적재의 근거가 될 수 없다 — 고쳐야 할 것은 조직도 쪽의 순환이다. SCIM 이면 버려진 간선이 보류 목록에 남는다(SCIM 절의
 "중첩 조직과 순환").
 
-**인증이 없다.** `/admin/sync`와 마찬가지로 `/admin/employees`, `/admin/organizations`도
-누구나 호출할 수 있게 열려 있다. 조직도와 소속 정보를 그대로 노출하므로, 실제 운영에
-투입하기 전에 반드시 앞단에서 보호해야 한다.
+**검색·상세·멤버 목록·이력은 `admin.read` 범위다.** 조직도와 소속, 이름·이메일을 그대로 보여 주므로 그 범위는 운영 도구에만 준다. 권한을 묻는 앱에는
+정확 조회 둘만 여는 `directory.lookup` 을 준다.
 
 ### 변경 이력(감사 로그)
 
@@ -506,7 +686,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 
 ```json
 {"items":[{"at":"2026-10-10T03:00:00.123Z",
-  "cause":{"source":"SCIM","kind":"SCIM_REQUEST","id":"4bf92f3577b34da6a3ce929d0e0e4736"},
+  "cause":{"source":"SCIM","kind":"SCIM_REQUEST","id":"4bf92f3577b34da6a3ce929d0e0e4736","actor":"client:scim-idp"},
   "created":false,"deleted":false,
   "attributes":[{"name":"displayName","before":"김철수","after":"김철수2"}],
   "joined":[],"left":[],"granted":[],"revoked":[]}],
@@ -518,6 +698,8 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
   - `source` 는 `LDAP`·`SCIM` 이다.
   - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(지난 회차가 장부·스냅샷을 기록하다 멈춘 뒤의 동기화. 기준선이 없어 훑어 맞춘 첫 회차는 `SYNC` 그대로다)·`SCIM_REQUEST` 다.
   - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청이면 로그의 traceId 다.
+  - `actor` 는 변경을 일으킨 쪽이다 — 토큰으로 온 요청(SCIM 쓰기, 관리 API 로 건 회차)은 `client:<sub>`(`sub` 는 클라이언트 id), 예약 LDAP 동기화는
+    `system:scheduler`, SCIM 아카이빙과 그 남은 회수 지우기는 `system:archive`. 찾지 못하면 `system:unknown` 이고 WARN 을 남긴다 — 이 칸이 생기기 전의 줄도 이 값이다.
 - **조직도 변경.**
   - `created`·`deleted`.
   - 바뀐 속성(`attributes`): 직원은 `externalId`·`userName`·`displayName`·`email`·`active`·`name.*`, 조직은 `externalId`·`displayName`.
@@ -526,7 +708,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - **권한 변경.** 이 대상이 user 쪽인 튜플 중 실제로 쓴 것(`granted`)과 지운 것(`revoked`)이다.
 - **남기지 않는 것.**
   - 재적재·장부 맞추기가 "쓴" 튜플. 중복 무시로 써서 이미 있던 줄과 가를 수 없다. 지운 줄은 남긴다. 기준선 없는 첫 회차만 첫 적재의 부여 이력을 잃지 않으려고 쓴 줄도 남긴다(새 테이블 옆에 줄이 있던 store 면 그 줄도 부여로 남는다).
-  - 아카이빙의 비교와 스냅샷. 상태를 바꾸지 않는다. 다만 남은 회수 복구가 지운 줄은 `revoked` 로 남는다(원인은 `SCIM_REQUEST`).
+  - 아카이빙의 비교와 스냅샷. 상태를 바꾸지 않는다. 다만 남은 회수 복구가 지운 줄은 `revoked` 로 남는다(원인은 `SCIM_REQUEST`, 행위자는 `system:archive`).
 - **보관.**
   - 보관 기간은 `dynamodb.audit-retention-days`(기본 30일)다. 늘리려면 `dynamodb.syncrun-retention-days` 와 함께 늘린다.
   - 테이블 TTL 이 지우므로, 기한이 막 지난 줄이 며칠 보일 수 있다.
@@ -548,7 +730,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - **SCIM 의 확인 없는 지우기.** 조직 멤버 빼기와 조직 삭제는 줄을 확인 없이 지운다. 그래서 비활성 직원처럼 원래 없던 줄도 `revoked` 에 나올 수 있다.
 - **큰 조직.** 10만 명 조직이 한 회차에 통째로 바뀐 줄(초기 적재·`wipe`)은 응답 하나가 수 MB 다.
 - **다음 쪽.** 쪽이 `limit` 줄로 차면 `nextCursor` 를 준다. 그래서 마지막 쪽 뒤에 빈 쪽이 하나 올 수 있다.
-- **인증이 없다.** 이력에는 이전 값(이름·이메일 등)이 담긴다. 다른 관리 API 처럼 앞단에서 보호해야 한다.
+- **`admin.read` 범위다.** 이력에는 이전 값(이름·이메일 등)이 담긴다 — `directory.lookup` 으로는 읽지 못한다.
 
 ## LDAP
 
@@ -770,6 +952,8 @@ SCIM은 push 모델이라 LDAP처럼 전체를 읽어 diff하지 않는다. IdP�
 
 `/Schemas`·`/ResourceTypes` 는 RFC 7644 §4 의 발견 엔드포인트다. 목록은 ListResponse 이고, 단건의 URN·이름은 대소문자를 가리지 않으며 모르면 404 다.
 `filter` 를 붙이면 403 이고 GET 외의 메서드는 405 다. 스키마에는 응답이 실제로 저장하고 돌려주는 속성만 싣는다.
+발견 엔드포인트도 `scim` 범위 토큰이 있어야 한다 — RFC 7644 §2 는 익명을 허용해도 된다고 할 뿐이고, IdP 는 같은 토큰으로 발견도 부른다.
+`ServiceProviderConfig` 의 `authenticationSchemes` 는 `oauthbearertoken` 하나다(RFC 7643 §5).
 
 목록·필터 조회(RFC 7644 §3.4.2)와, 같은 조회를 본문으로 보내는 `POST /scim/v2/Users/.search`·`/Groups/.search` 를
 지원한다. 같은 경로의 GET(`GET /scim/v2/Users/.search`)은 아이디가 `.search` 인 단건 조회로 읽혀 405 가 아니라 404 다.
@@ -934,19 +1118,20 @@ remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. 멤버 �
 | 상태 | 언제 | IdP 는 |
 |---|---|---|
 | 400 (`invalidSyntax`·`invalidPath`·`invalidValue`·`invalidFilter`·`noTarget`·`mutability`) | 요청이 틀렸다 | 고쳐 보낸다 |
-| 403 | `/Schemas`·`/ResourceTypes` 에 `filter` 를 붙였다(RFC 7644 §4) | — |
+| 401 + `WWW-Authenticate` | 토큰이 없거나 받지 않았다(서명·발급자·만료) — 위 "인증" | 토큰을 다시 받는다 |
+| 403 | `/Schemas`·`/ResourceTypes` 에 `filter` 를 붙였다(RFC 7644 §4). 토큰에 `scim` 범위가 없다(`WWW-Authenticate` 를 단다) | — |
 | 404 | 없는 리소스·경로 | — |
 | 405 + `Allow` | 경로가 받지 않는 메서드(`Allow` 는 그 경로가 받는 메서드, 이름순) | — |
 | 409 `uniqueness` | `userName`·조직 `externalId` 가 겹친다 | — |
 | 413 | 본문이 한도(기본 256KB, `spring.codec.max-in-memory-size`)를 넘었다 | 멤버를 PATCH 로 나눠 보낸다 |
 | 415 | Content-Type 이 `application/scim+json`·`application/json` 이 아니다 | — |
 | 501 | 지원하지 않는 기능 — Bulk, `/Me`, 서버 루트 조회 | — |
-| 503 + `Retry-After` | 일시 장애 — 다른 SCIM 쓰기가 락을 쥐고 있다(2초), 다른 쓰기가 같은 `userName`·조직 `externalId` 의 표지판을 차지하고 아직 저장하지 않았다(2초), 재적재가 락을 쥐고 있다(60초), OpenFGA·DynamoDB 의 일시 장애(아래 분류)·리스 상실·쓰기 차단·부분 실패(10초) | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
+| 503 + `Retry-After` | 일시 장애 — 다른 SCIM 쓰기가 락을 쥐고 있다(2초), 다른 쓰기가 같은 `userName`·조직 `externalId` 의 표지판을 차지하고 아직 저장하지 않았다(2초), 재적재가 락을 쥐고 있다(60초), OpenFGA·DynamoDB 의 일시 장애(아래 분류)·리스 상실·쓰기 차단·부분 실패(10초), 토큰을 검증할 키 목록을 받지 못했다(10초 — 위 "인증") | `Retry-After` 뒤에 같은 요청을 다시 보낸다 |
 | 500 | 일시 장애로 분류되지 않는 예외 — 우리 버그, 또는 사람이 고칠 상태(같은 이름 store 가 둘 등). OpenFGA·DynamoDB 오류여도 아래 분류에 들지 않으면 500 이다 | 로그를 본다 |
 
 `noTarget` 은 값 경로 필터가 가리킨 값이 없을 때와, `path` 없는 `remove` 일 때(무엇을 지울지 가리키지 않았다, RFC 7644 §3.5.2.2)다.
 `Retry-After` 는 정수 초(RFC 9110 §10.2.3)로 올림하며 최소 1초다. 429 는 쓰지 않는다 — HTTP 에서 429 는 속도 제한이다. 503 의 `detail` 은 우리가
-쓴 문구뿐이다. OpenFGA 서버 메시지·라이브러리 예외 문자열·락을 쥔 쪽의 용도 같은 내부 원인은 인증 없는 엔드포인트로 내보내지 않고 서버 로그에만 남긴다.
+쓴 문구뿐이다. OpenFGA 서버 메시지·라이브러리 예외 문자열·락을 쥔 쪽의 용도 같은 내부 원인은 응답으로 내보내지 않고 서버 로그에만 남긴다.
 
 **500 은 분류되지 않은 예외에만 남는다.** 재시도하면 낫는 실패는 503, 요청이 틀렸으면 4xx 이고, 어느 쪽도 아닌 예외만 500 과 ERROR 로그다 — 대개 버그지만,
 같은 이름 store 가 둘이라 멈춘 것처럼 다시 보내도 같은 OpenFGA·DynamoDB 오류도 여기 온다. 이 분류기는 관리 API 도 함께 쓴다. 튜플 일부만
@@ -972,7 +1157,7 @@ DynamoDB 커밋이 실패한 경우처럼 쓰면 지운 직원의 권한이 되�
 실패한 직원은 다음 날 다시 잡힌다. 아카이빙 기록(`trigger=ARCHIVE`)의 메시지는 "어긋난 직원 N명 다시 맞춤(실패 M명)" 이고, 남은 줄이 잡힌 직원이 없으면 메시지가 없다. 기록의
 `writtenCount` 는 스냅샷에 담은 줄 수(OpenFGA 에 쓴 수가 아니다. 저장하지 못했으면 0), `deletedCount`·`failureCount` 는 복구가 지운·지우지 못한 줄 수다. 어긋남의 수는 비교가 끝나는 즉시 내고, 스냅샷
 저장과 복구는 서로를 막지 않는다 — 저장이 실패해도 복구는 하고 기록은 `FAILED` 다. 복구의 이력은
-`SCIM_REQUEST` 이고 원인 id 는 아카이빙 스케줄러의 traceId 다. 그러므로 **IdP 재시도 없이 회수가 끝나는 것은 다음 아카이빙 때**다(`sync.archive-cron`, 기본 새벽 3~8시 창에서
+`SCIM_REQUEST` 이고 원인 id 는 아카이빙 스케줄러의 traceId, 행위자는 `system:archive` 다. 그러므로 **IdP 재시도 없이 회수가 끝나는 것은 다음 아카이빙 때**다(`sync.archive-cron`, 기본 새벽 3~8시 창에서
 성공할 때까지 매시 — 두 날의 비교 간격은 길면 약 29.5시간, 아래 경보 절). 조직 연결 줄(`child`)의
 어긋남은 지표로만 내고, 멤버 줄이 없는 고아 튜플은 여전히 재적재 몫이다.
 
@@ -1233,6 +1418,12 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 지워지고 "기준선 없음" 메모와 직원별 이력이 남는지, 1,200바이트 `description` 조직이 있어도 동기화가 두 번 모두 성공하고 조직 상세가 200 인지 본다. `app-scim` 의
 `ScimRevocationConvergenceEndToEndTest` 는 비활성 직원에게 `direct_member` 줄을 직접 다시 써 두고 하루 아카이빙(빈 호출)이 그 줄을 지우는지(Check), 기록 메시지와 `scim.archive.drift`·
 `scim.archive.drift.observed` 게이지가 맞는지 본다.
+
+**앱 시험도 보안 필터를 운영과 같은 구성으로 탄다(설계 2026-10-28 §8).** 바뀌는 것은 키를 어디서 받느냐뿐이다. 두 앱의 test 프로필(`test.auth.fixed-key: true`)은
+web-security testFixtures 의 시험 키로 검증하고(발급자 `https://auth.test`), 실행 중인 서버에 묶인 `WebTestClient` 는 여섯 범위를 모두 가진 `test-client`
+토큰을 기본 머리로 싣는다 — 그 요청의 행위자는 `client:test-client` 다. 범위·만료·발급자를 바꾼 토큰은 `TestTokens.발급한다`, 다른 키로 서명한 토큰은
+`TestTokens.다른_키로_발급한다` 로 만든다. 시험 OpenFGA 는 키 `test-openfga-key` 로 뜬다(`Containers.openFga()`). 진짜 app-auth 가 발급한 토큰은 app-scim 의
+`RealAuthServerEndToEndTest` 가 본다 — 같은 JVM 에 app-auth 를 띄워 SCIM 쓰기와 관리 API 가 통과하고 행위자가 남는지, 키를 바꿔 다시 띄우면 옛 토큰이 401 인지.
 
 **id 가 바뀐 뒤의 테스트.** app-ldap 의 test 프로필은 이름 기반 id(groupOfNames `uid`/`cn`, DIT `uid`/`ou`)를 명시해 기존 e2e·규모 테스트가
 그대로 돈다. 기본값 `entryUUID` 는 connector-ldap 의 `ImmutableIdentifierTest`, app-ldap 의 `LdapImmutableIdEndToEndTest`(groupOfNames)·
