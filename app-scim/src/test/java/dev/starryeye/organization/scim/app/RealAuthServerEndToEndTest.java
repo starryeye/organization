@@ -58,9 +58,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 진짜 인가 서버로 하는 시험(설계 2026-10-28 §8.2). app-auth 를 같은 JVM 에서 무작위 포트로 띄우고, app-scim 을 그 키 목록({@code jwk-set-uri})과
  * 발급자로 띄운다. 시험 디코더({@code test.auth.fixed-key})를 끄므로 토큰은 운영과 같은 길로 검증된다 — 키 목록을 받아 서명을, 그리고 발급자·만료를 본다.
  * 시험 디코더와 함께 기본 머리(모든 범위의 {@code test-client} 토큰)도 꺼지므로 요청마다 app-auth 에서 client credentials 로 받은 토큰을 싣는다.
- * 클라이언트는 개발 클라이언트({@code auth-server.yml} 의 {@code !prod} 문서) 중 둘이다 — {@code scim-idp}({@code scim}), {@code ops}
- * ({@code admin.read admin.sync}). 발급자가 https 라 개발 클라이언트의 {@code {noop}} 비밀로는 app-auth 가 뜨지 않으므로(app-auth 의
- * {@code ClientSettingsCheck}) 다섯 모두의 비밀을 같은 평문의 bcrypt 해시로 바꿔 띄운다({@link #해시한_비밀_인자}).
+ * 클라이언트는 개발 클라이언트({@code auth-server.yml} 의 {@code !prod} 문서) 중 셋이다 — {@code scim-idp}({@code scim}), {@code ops}
+ * ({@code admin.read admin.sync}), {@code org-chart}({@code admin.read admin.hierarchy}). 발급자가 https 라 개발 클라이언트의
+ * {@code {noop}} 비밀로는 app-auth 가 뜨지 않으므로(app-auth 의 {@code ClientSettingsCheck}) 여섯 모두의 비밀을 같은 평문의 bcrypt 해시로 바꿔
+ * 띄운다({@link #해시한_비밀_인자}).
  *
  * <p><b>한 클래스패스에 두 앱.</b> app-auth(서블릿)는 이 모듈의 시험 클래스패스에만 올라온다.
  * <ul>
@@ -85,10 +86,10 @@ class RealAuthServerEndToEndTest {
     private static final String 발급자 = "https://auth.test";
 
     /**
-     * 개발 클라이언트 다섯({@code auth-server.yml} 의 {@code !prod} 문서)의 비밀을 같은 평문({@code <id>-secret})의 bcrypt 해시로 바꾸는 명령줄 인자.
+     * 개발 클라이언트 여섯({@code auth-server.yml} 의 {@code !prod} 문서)의 비밀을 같은 평문({@code <id>-secret})의 bcrypt 해시로 바꾸는 명령줄 인자.
      * 하나라도 빠지면 app-auth 가 그 아이디를 대며 뜨지 않는다 — 개발 클라이언트를 더하면 여기에도 더한다. 띄울 때마다 해시하지 않게 한 번 만든다.
      */
-    private static final List<String> 해시한_비밀_인자 = Stream.of("scim-idp", "ops", "ops-break-glass", "asking-app", "prometheus")
+    private static final List<String> 해시한_비밀_인자 = Stream.of("scim-idp", "ops", "ops-break-glass", "org-chart", "asking-app", "prometheus")
             .map(아이디 -> "--spring.security.oauth2.authorizationserver.client." + 아이디 + ".registration.client-secret={bcrypt}"
                     + new BCryptPasswordEncoder().encode(아이디 + "-secret"))
             .toList();
@@ -254,6 +255,19 @@ class RealAuthServerEndToEndTest {
                 .expectBody()
                 .jsonPath("$.status").isEqualTo(403)
                 .jsonPath("$.detail").isEqualTo("이 요청에 필요한 범위가 없다");
+    }
+
+    @Test
+    @DisplayName("org-chart 토큰은 admin.read 와 admin.hierarchy 를 싣는다 — 범위를 보내지 않으면 등록된 범위를 모두 받는다")
+    void org_chart_토큰은_admin_hierarchy_범위를_싣는다() throws Exception {
+        // given
+        String 토큰 = 토큰을_받는다("org-chart", "org-chart-secret");
+
+        // when
+        List<String> 범위 = SignedJWT.parse(토큰).getJWTClaimsSet().getStringListClaim("scope");
+
+        // then
+        assertThat(범위).containsExactlyInAnyOrder(Scopes.ADMIN_READ, Scopes.ADMIN_HIERARCHY);
     }
 
     @Test

@@ -60,6 +60,15 @@ spring:
               scopes: admin.read, admin.sync, admin.destructive
             token:
               access-token-time-to-live: 10m
+          org-chart:
+            registration:
+              client-id: org-chart
+              client-secret: "{noop}org-chart-secret"
+              client-authentication-methods: client_secret_basic, client_secret_post
+              authorization-grant-types: client_credentials
+              scopes: admin.read, admin.hierarchy
+            token:
+              access-token-time-to-live: 10m
           asking-app:
             registration:
               client-id: asking-app

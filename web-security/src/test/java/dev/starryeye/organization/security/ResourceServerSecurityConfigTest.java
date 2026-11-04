@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 리소스 서버 보안(설계 2026-10-28 §4.1~§4.4, A2·A3·A5·A9). 흉내 라우트만 올린 작은 앱({@link MockRoutesApplication})을 띄우고 진짜 요청을 보낸다.
  * 시험 프로필이 {@code test.auth.fixed-key=true} 라 testFixtures 의 시험 디코더가 {@link TestTokens} 의 공개 키로 검증하고, 주입받은 클라이언트는
- * 여섯 범위를 모두 가진 {@code test-client} 토큰을 기본 머리로 싣는다. 토큰 없는 요청은 그 머리를 뺀 클라이언트로, 다른 토큰은 요청마다 머리를 덮어써 보낸다.
+ * 일곱 범위를 모두 가진 {@code test-client} 토큰을 기본 머리로 싣는다. 토큰 없는 요청은 그 머리를 뺀 클라이언트로, 다른 토큰은 요청마다 머리를 덮어써 보낸다.
  */
 @ActiveProfiles("test")
 @SpringBootTest(classes = MockRoutesApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -213,7 +213,16 @@ class ResourceServerSecurityConfigTest {
             "directory.lookup,  GET,  /admin/employees,              403",
             "directory.lookup,  POST, /admin/sync/full,              403",
             "directory.lookup,  GET,  /scim/v2/Users,                403",
-            "directory.lookup,  GET,  /actuator/prometheus,          403"})
+            "directory.lookup,  GET,  /actuator/prometheus,          403",
+            "admin.hierarchy,   PUT,    /admin/organizations/X/parent, 204",
+            "admin.hierarchy,   DELETE, /admin/organizations/X/parent, 204",
+            "admin.read,        PUT,    /admin/organizations/X/parent, 403",
+            "admin.sync,        DELETE, /admin/organizations/X/parent, 403",
+            "admin.destructive, PUT,    /admin/organizations/X/parent, 403",
+            "scim,              PUT,    /admin/organizations/X/parent, 403",
+            "admin.hierarchy,   GET,    /admin/employees,              403",
+            "admin.hierarchy,   POST,   /admin/sync/full,              403",
+            "admin.hierarchy,   PUT,    /admin/organizations/X,        403"})
     @DisplayName("범위 하나짜리 토큰 × 경로 — 범위는 자기 경로만 연다. 한 범위가 다른 범위를 품지 않는다(설계 §4.2)")
     void 범위는_자기_경로만_연다(String 범위, String 메서드, String 경로, int 상태) {
         // given
@@ -222,6 +231,24 @@ class ResourceServerSecurityConfigTest {
         // when, then
         client.method(HttpMethod.valueOf(메서드)).uri(경로).header(HttpHeaders.AUTHORIZATION, 토큰).exchange()
                 .expectStatus().isEqualTo(상태);
+    }
+
+    @Test
+    @DisplayName("토큰 없이 지정 상위를 바꾸면(PUT·DELETE) 관리 API 의 problem details 401 이다 — WWW-Authenticate 는 error 없는 Bearer")
+    void 토큰이_없으면_지정_상위_경로는_problem_401_이다() {
+        // when, then
+        for (HttpMethod 메서드 : new HttpMethod[]{HttpMethod.PUT, HttpMethod.DELETE}) {
+            토큰_없이().method(메서드).uri("/admin/organizations/X/parent").exchange()
+                    .expectStatus().isUnauthorized()
+                    .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, 토큰_없음)
+                    .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                    .expectBody()
+                    .jsonPath("$.length()").isEqualTo(4)
+                    .jsonPath("$.type").isEqualTo("about:blank")
+                    .jsonPath("$.title").isEqualTo("Unauthorized")
+                    .jsonPath("$.status").isEqualTo(401)
+                    .jsonPath("$.detail").isEqualTo(인증_필요);
+        }
     }
 
     @Test

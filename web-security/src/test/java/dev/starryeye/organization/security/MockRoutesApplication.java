@@ -13,7 +13,7 @@ import reactor.core.publisher.Mono;
  * 보안 시험용 작은 앱 — 두 앱의 표면(SCIM·관리 API·actuator)을 흉내 내는 라우트만 올리고 자동 구성은 앱과 같게 받는다(이 모듈과 testFixtures 의
  * {@code AutoConfiguration.imports} 포함). 컴포넌트 스캔은 하지 않는다.
  *
- * <p>라우트는 보안을 지나면 200(쓰기는 202)과 짧은 글을 돌려준다. {@code GET /admin/employees} 만 요청 Context 의 행위자({@link Actor#from})를 돌려준다.
+ * <p>라우트는 보안을 지나면 200(쓰기는 202, 지정 상위 둘은 204)과 짧은 글을 돌려준다. {@code GET /admin/employees} 만 요청 Context 의 행위자({@link Actor#from})를 돌려준다.
  * {@code GET /elsewhere} 는 규칙 밖의 경로다 — 처리기가 있어도 보안이 거절해야 한다.
  */
 @SpringBootConfiguration
@@ -28,6 +28,8 @@ class MockRoutesApplication {
                 .GET("/admin/employees/lookup", 요청 -> 답한다("employee lookup"))
                 .GET("/admin/organizations/lookup", 요청 -> 답한다("organization lookup"))
                 .POST("/admin/sync/full", 요청 -> ServerResponse.accepted().bodyValue("started"))
+                .PUT("/admin/organizations/{orgCode}/parent", 요청 -> ServerResponse.noContent().build())
+                .DELETE("/admin/organizations/{orgCode}/parent", 요청 -> ServerResponse.noContent().build())
                 .GET("/actuator/health", 요청 -> 답한다("UP"))
                 .GET("/actuator/health/liveness", 요청 -> 답한다("UP"))
                 .GET("/actuator/health/readiness", 요청 -> 답한다("UP"))

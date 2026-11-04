@@ -1,7 +1,7 @@
 package dev.starryeye.organization.security;
 
 /**
- * 범위(scope) 여섯(설계 2026-10-28 §4.2, A3). 토큰의 {@code scope} 클레임에 실리고, 리소스 서버는 범위마다 {@code SCOPE_<범위>} 권한을 만든다(스프링 기본).
+ * 범위(scope) 일곱(설계 2026-10-28 §4.2, A3, 설계 2026-11-04 §8 H8). 토큰의 {@code scope} 클레임에 실리고, 리소스 서버는 범위마다 {@code SCOPE_<범위>} 권한을 만든다(스프링 기본).
  * 범위 하나가 다른 범위를 품지 않는다 — 클라이언트에 필요한 범위를 모두 준다.
  */
 public final class Scopes {
@@ -23,6 +23,12 @@ public final class Scopes {
 
     /** 프로브 밖의 actuator 와 헬스 세부. Prometheus 가 받는다. */
     public static final String ACTUATOR = "actuator";
+
+    /**
+     * 조직의 지정 상위를 두고 없앤다({@code PUT}·{@code DELETE /admin/organizations/{orgCode}/parent}). 계층이 바뀌면 하위 조직 전체의 롤업 권한이 생기거나
+     * 사라지므로 읽기({@link #ADMIN_READ})·동기화({@link #ADMIN_SYNC})와 가른다. 스크립트가 조직을 찾으려면 {@link #ADMIN_READ} 도 받아야 한다.
+     */
+    public static final String ADMIN_HIERARCHY = "admin.hierarchy";
 
     private static final String 권한_접두사 = "SCOPE_";
 

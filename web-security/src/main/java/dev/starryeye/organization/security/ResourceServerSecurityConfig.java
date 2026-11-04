@@ -32,6 +32,7 @@ import static dev.starryeye.organization.security.Scopes.권한;
  *   <tr><td>{@code GET /admin/employees/lookup}·{@code /admin/organizations/lookup}</td><td>{@code SCOPE_directory.lookup} 또는 {@code SCOPE_admin.read}</td></tr>
  *   <tr><td>그 밖 {@code GET /admin/**}</td><td>{@code SCOPE_admin.read}</td></tr>
  *   <tr><td>{@code POST /admin/sync/**}</td><td>{@code SCOPE_admin.sync}({@code force=true}·{@code mode=wipe} 는 컨트롤러가 더 본다 — {@link Callers})</td></tr>
+ *   <tr><td>{@code PUT}·{@code DELETE /admin/organizations/{orgCode}/parent}(지정 상위, 설계 2026-11-04 §8)</td><td>{@code SCOPE_admin.hierarchy}</td></tr>
  *   <tr><td>{@code /actuator/health}·{@code /health/liveness}·{@code /health/readiness}</td><td>없음(프로브)</td></tr>
  *   <tr><td>그 밖 {@code /actuator/**}</td><td>{@code SCOPE_actuator}</td></tr>
  *   <tr><td>나머지</td><td>거절 — 인증이 있으면 403, 없으면 401</td></tr>
@@ -62,6 +63,8 @@ public class ResourceServerSecurityConfig {
                         .hasAnyAuthority(권한(Scopes.DIRECTORY_LOOKUP), 권한(Scopes.ADMIN_READ))
                         .pathMatchers(HttpMethod.GET, "/admin/**").hasAuthority(권한(Scopes.ADMIN_READ))
                         .pathMatchers(HttpMethod.POST, "/admin/sync/**").hasAuthority(권한(Scopes.ADMIN_SYNC))
+                        .pathMatchers(HttpMethod.PUT, "/admin/organizations/*/parent").hasAuthority(권한(Scopes.ADMIN_HIERARCHY))
+                        .pathMatchers(HttpMethod.DELETE, "/admin/organizations/*/parent").hasAuthority(권한(Scopes.ADMIN_HIERARCHY))
                         .pathMatchers("/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness").permitAll()
                         .pathMatchers("/actuator/**").hasAuthority(권한(Scopes.ACTUATOR))
                         .anyExchange().denyAll())
