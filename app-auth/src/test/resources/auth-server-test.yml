@@ -1,5 +1,5 @@
 # 시험 프로필(@ActiveProfiles("test")). 설정 파일 이름이 auth-server 라 application-test.yml 이 아니라 이 파일을 읽는다(AuthServerApplication).
-# 클라이언트는 auth-server.yml 의 !prod 문서(개발 클라이언트)를 그대로 쓴다.
+# 클라이언트는 auth-server.yml 의 !prod 문서(개발 클라이언트)를 쓰되, 비밀만 아래에서 해시로 바꾼다.
 
 # 시험 서버는 127.0.0.1 에만 연다(app-scim 의 application-test.yml 과 같은 까닭 — 모든 주소로 열면 같은 번호를 127.0.0.1 에 연 다른 프로그램으로
 # 시험 요청이 샐 수 있다).
@@ -12,3 +12,22 @@ spring:
       authorizationserver:
         # 시험 발급자. 요청을 받는 주소(127.0.0.1:무작위 포트)와 달라도 된다 — 발급자를 정해 두면 토큰의 iss·메타데이터는 이 값을 쓴다
         issuer: https://auth.test
+        # 발급자가 https 라 {noop} 비밀로는 뜨지 않는다(ClientSettingsCheck). 개발 클라이언트의 비밀을 같은 평문(<id>-secret)의 bcrypt 해시로 준다.
+        # 해시는 README 의 방법(htpasswd -bnBC 10 "" '<비밀>' | tr -d ':\n')으로 만든 $2y$ 해시다 — 이 비밀로 토큰을 받는 시험이 스프링이 $2y$ 를
+        # 받는다는 것도 함께 본다
+        client:
+          scim-idp:
+            registration:
+              client-secret: "{bcrypt}$2y$10$o6Uc4B.WURAhbgEODteTJ.PLZuVd3v6eq/VMuHaKrq8d2CUa7A.zm"
+          ops:
+            registration:
+              client-secret: "{bcrypt}$2y$10$QvOczSJr8RAI9..Sezqc8OfiG7GS8ginJP51UXKRVF9UbL0g9DgBS"
+          ops-break-glass:
+            registration:
+              client-secret: "{bcrypt}$2y$10$XdBhJPRcFSR3DJEATCt3iungOSJaaWIPEqFSCwzkTYgtfKKwRvEya"
+          asking-app:
+            registration:
+              client-secret: "{bcrypt}$2y$10$6zUXoTkCDoTB0MGY1/P62OuDu2oJkdCKDN.DhN5GQe/AntvPRx5UG"
+          prometheus:
+            registration:
+              client-secret: "{bcrypt}$2y$10$vaJpm1D/FrYbOi03SB4/1euv/qy7RgN8nbE/C6VXWQrbA/P4rPLee"

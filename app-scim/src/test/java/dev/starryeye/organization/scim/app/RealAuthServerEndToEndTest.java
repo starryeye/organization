@@ -32,6 +32,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -44,9 +45,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -56,7 +59,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 발급자로 띄운다. 시험 디코더({@code test.auth.fixed-key})를 끄므로 토큰은 운영과 같은 길로 검증된다 — 키 목록을 받아 서명을, 그리고 발급자·만료를 본다.
  * 시험 디코더와 함께 기본 머리(모든 범위의 {@code test-client} 토큰)도 꺼지므로 요청마다 app-auth 에서 client credentials 로 받은 토큰을 싣는다.
  * 클라이언트는 개발 클라이언트({@code auth-server.yml} 의 {@code !prod} 문서) 중 둘이다 — {@code scim-idp}({@code scim}), {@code ops}
- * ({@code admin.read admin.sync}).
+ * ({@code admin.read admin.sync}). 발급자가 https 라 개발 클라이언트의 {@code {noop}} 비밀로는 app-auth 가 뜨지 않으므로(app-auth 의
+ * {@code ClientSettingsCheck}) 다섯 모두의 비밀을 같은 평문의 bcrypt 해시로 바꿔 띄운다({@link #해시한_비밀_인자}).
  *
  * <p><b>한 클래스패스에 두 앱.</b> app-auth(서블릿)는 이 모듈의 시험 클래스패스에만 올라온다.
  * <ul>
@@ -79,6 +83,15 @@ class RealAuthServerEndToEndTest {
      * {@code iss} 는 이 값이고, app-scim 은 인가 서버에 키 목록 주소로만 묻는다.
      */
     private static final String 발급자 = "https://auth.test";
+
+    /**
+     * 개발 클라이언트 다섯({@code auth-server.yml} 의 {@code !prod} 문서)의 비밀을 같은 평문({@code <id>-secret})의 bcrypt 해시로 바꾸는 명령줄 인자.
+     * 하나라도 빠지면 app-auth 가 그 아이디를 대며 뜨지 않는다 — 개발 클라이언트를 더하면 여기에도 더한다. 띄울 때마다 해시하지 않게 한 번 만든다.
+     */
+    private static final List<String> 해시한_비밀_인자 = Stream.of("scim-idp", "ops", "ops-break-glass", "asking-app", "prometheus")
+            .map(아이디 -> "--spring.security.oauth2.authorizationserver.client." + 아이디 + ".registration.client-secret={bcrypt}"
+                    + new BCryptPasswordEncoder().encode(아이디 + "-secret"))
+            .toList();
 
     @Container
     static final GenericContainer<?> OPENFGA = Containers.openFga();
@@ -121,17 +134,19 @@ class RealAuthServerEndToEndTest {
     @Autowired ApplicationContext context;
 
     /**
-     * app-auth 를 띄운다. 빌더의 기본값({@code properties(…)})은 {@code auth-server.yml} 에 지므로 yml 에 있는 것(포트 9000·발급자)을 바꾸려면 명령줄 인자로
+     * app-auth 를 띄운다. 빌더의 기본값({@code properties(…)})은 {@code auth-server.yml} 에 지므로 yml 에 있는 것(포트 9000·발급자·클라이언트 비밀)을 바꾸려면 명령줄 인자로
      * 준다. 서명 키({@code auth.signing-key})를 주지 않으므로 띄울 때마다 키를 새로 만든다.
      */
     private static ConfigurableApplicationContext 띄운다(int 포트) {
+        var 인자 = new ArrayList<>(List.of("--server.port=" + 포트,
+                // app-scim 의 시험 서버와 같은 까닭으로 127.0.0.1 에만 연다(application-test.yml)
+                "--server.address=127.0.0.1",
+                "--spring.security.oauth2.authorizationserver.issuer=" + 발급자,
+                "--spring.autoconfigure.exclude=" + 우리_모듈의_자동_구성()));
+        인자.addAll(해시한_비밀_인자);
         return AuthServerApplication.애플리케이션()
                 .web(WebApplicationType.SERVLET)
-                .run("--server.port=" + 포트,
-                        // app-scim 의 시험 서버와 같은 까닭으로 127.0.0.1 에만 연다(application-test.yml)
-                        "--server.address=127.0.0.1",
-                        "--spring.security.oauth2.authorizationserver.issuer=" + 발급자,
-                        "--spring.autoconfigure.exclude=" + 우리_모듈의_자동_구성());
+                .run(인자.toArray(String[]::new));
     }
 
     /** 이 시험 클래스패스에 올라온 우리 모듈의 자동 구성 이름들(쉼표로 잇는다). 모듈이 자동 구성을 더해도 따라온다 */

@@ -22,6 +22,8 @@ management:
 # 개발 클라이언트 — 운영(prod 프로필)에는 없다. 운영 클라이언트는 운영 설정이 {bcrypt} 비밀로 준다(auth-server-prod.yml).
 # 비밀은 {noop}<id>-secret. 범위를 보내지 않고 요청하면 등록된 범위를 모두 받는다(RFC 6749 §3.3, DefaultScopes).
 # 토큰 수명은 10분, IdP(Entra 의 client credentials)용 scim-idp 는 60분. 365일을 넘는 수명은 기동을 멈춘다(ClientSettingsCheck).
+# 발급자를 https 로 바꾸면 {noop} 비밀 때문에 기동을 멈춘다(ClientSettingsCheck) — 프로필 이름이 prod 가 아니어도(production 등) 이 클라이언트들로
+# 진짜 토큰을 내지 못한다.
 spring:
   config:
     activate:

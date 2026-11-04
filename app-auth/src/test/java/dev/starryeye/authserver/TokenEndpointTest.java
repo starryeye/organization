@@ -42,7 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 토큰 엔드포인트와 그 곁의 공개 끝점(설계 2026-10-28 §3.1·§3.2, A1). 개발 클라이언트({@code auth-server.yml} 의 {@code !prod} 문서)로 진짜 요청을
- * 보낸다. 시험 발급자는 {@code https://auth.test} 다({@code auth-server-test.yml}).
+ * 보낸다. 시험 발급자는 {@code https://auth.test} 다({@code auth-server-test.yml}) — https 발급자라 그 파일이 개발 클라이언트의 비밀을 같은 평문의
+ * bcrypt 해시로 바꾼다.
  */
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "spring.config.name=auth-server")

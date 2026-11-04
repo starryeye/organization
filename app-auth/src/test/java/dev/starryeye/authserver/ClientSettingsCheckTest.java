@@ -23,7 +23,8 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * 기동 때 클라이언트·발급자 설정을 검사한다(설계 2026-10-28 §3.2·§3.5, A12). 부트가 {@code spring.security.oauth2.authorizationserver.*} 로 받은
- * 클라이언트를 본다. 앞의 세 시험은 검사만 부르고, 마지막 시험은 운영 프로필로 앱을 띄워 {@code auth-server-prod.yml} 의 요구가 기동을 멈추는지 본다.
+ * 클라이언트를 본다. 앞의 시험들은 검사만 부르고, 끝의 두 시험은 앱을 띄워 본다 — 운영 프로필이면 {@code auth-server-prod.yml} 의 요구가, 이름만 다른
+ * 프로필({@code production})이면 https 발급자와 개발 클라이언트의 조합이 기동을 멈추는지.
  */
 class ClientSettingsCheckTest {
 
@@ -31,7 +32,8 @@ class ClientSettingsCheckTest {
 
     private static OAuth2AuthorizationServerProperties 인가_서버(Duration 수명, String 비밀) {
         var 인가_서버 = new OAuth2AuthorizationServerProperties();
-        인가_서버.setIssuer("https://auth.example.com");
+        // 로컬 발급자 — {noop} 비밀을 받는 유일한 발급자다. https 발급자를 보는 시험은 따로 바꾼다
+        인가_서버.setIssuer("http://localhost:9000");
         var 클라이언트 = new OAuth2AuthorizationServerProperties.Client();
         클라이언트.getRegistration().setClientId("scim-idp");
         클라이언트.getRegistration().setClientSecret(비밀);
@@ -69,6 +71,26 @@ class ClientSettingsCheckTest {
                 .hasMessage("클라이언트 scim-idp 의 비밀이 {bcrypt} 해시가 아니다");
         assertThatCode(() -> ClientSettingsCheck.검사한다(해시, 요구함)).doesNotThrowAnyException();
         assertThatCode(() -> ClientSettingsCheck.검사한다(평문, new AuthServerProperties())).doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"https://auth.example.com", "HTTPS://auth.example.com"})
+    @DisplayName("발급자가 https:// 면 해시를 요구하지 않아도(prod 가 아닌 프로필) {bcrypt} 가 아닌 비밀은 멈추고, 오류 문구에 클라이언트 아이디만 싣는다")
+    void 발급자가_https_면_해시를_요구하지_않아도_noop_비밀은_멈춘다(String 발급자) {
+        // given — 프로필 이름이 prod 가 아니면(production 등) 개발 클라이언트({noop} 공개 비밀)가 남는다. 발급자만 https 로 주면 그 클라이언트가
+        // 진짜 토큰을 낸다 — ops-break-glass 는 admin.destructive 까지
+        var 요구하지_않음 = new AuthServerProperties();
+        var 평문 = 인가_서버(Duration.ofMinutes(10), "{noop}scim-idp-secret");
+        평문.setIssuer(발급자);
+        var 해시 = 인가_서버(Duration.ofMinutes(10), BCRYPT_비밀);
+        해시.setIssuer(발급자);
+
+        // when, then
+        assertThatThrownBy(() -> ClientSettingsCheck.검사한다(평문, 요구하지_않음))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("발급자가 https:// 인데 클라이언트 scim-idp 의 비밀이 {bcrypt} 해시가 아니다"
+                        + " — {noop} 비밀(개발 클라이언트)은 http 발급자(로컬)에서만 받는다");
+        assertThatCode(() -> ClientSettingsCheck.검사한다(해시, 요구하지_않음)).doesNotThrowAnyException();
     }
 
     @ParameterizedTest
@@ -145,6 +167,29 @@ class ClientSettingsCheckTest {
                 System.setProperty(형식_속성, 이전_형식);
             }
         }
+    }
+
+    @Test
+    @DisplayName("prod 가 아닌 이름의 프로필(production)에 https 발급자를 주면 개발 클라이언트 때문에 기동을 멈춘다 — 부트의 환경 변수로 발급자만 바꾼 경우")
+    void prod_가_아닌_프로필에_https_발급자를_주면_개발_클라이언트_때문에_멈춘다() {
+        // given — production 은 prod 가 아니라 auth-server.yml 의 !prod 문서(개발 클라이언트 다섯)가 그대로 올라온다. 발급자는 부트 자신의 속성
+        // (SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_ISSUER 와 같은 것)으로 준다
+        var 인자 = List.of(
+                "--spring.profiles.active=production",
+                "--logging.level.root=OFF",
+                "--spring.main.banner-mode=off",
+                "--server.port=0",
+                "--server.address=127.0.0.1",
+                "--spring.security.oauth2.authorizationserver.issuer=https://auth.example.com");
+
+        // when
+        Throwable 실패 = 운영으로_띄운다(인자);
+
+        // then — 어느 클라이언트가 먼저 걸리든(부트가 클라이언트를 순서 없는 맵에 담는다) 아이디만 싣고 비밀(<id>-secret)은 싣지 않는다
+        assertThat(실패).isNotNull()
+                .rootCause().isInstanceOf(IllegalStateException.class)
+                .hasMessageStartingWith("발급자가 https:// 인데 클라이언트 ")
+                .hasMessageNotContaining("-secret");
     }
 
     @ParameterizedTest(name = "[{index}] {0} 이 빠짐")
