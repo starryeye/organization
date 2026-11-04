@@ -28,7 +28,8 @@ import java.util.Set;
  * <ol>
  *   <li>사슬에 {@link ResponseStatusException} 이 있으면 그 상태다. detail 은 그 사유이고, 없으면 상태 문구다.
  *       {@code ServerWebInputException}(요청 파라미터 형식 오류 등)도 여기다 — 400 에 스프링의 이유를 싣는다. 그 예외가 든 머리
- *       ({@link ResponseStatusException#getHeaders()})는 응답에 그대로 옮긴다 — 컨트롤러의 범위 부족 403 이 싣는 {@code WWW-Authenticate} 가 그 예다(설계 2026-10-28 §4.4).</li>
+ *       ({@link ResponseStatusException#getHeaders()})는 응답에 그대로 옮긴다 — 컨트롤러의 범위 부족 403 이 싣는 {@code WWW-Authenticate} 가 그 예다(설계 2026-10-28 §4.4).
+ *       지정 API 가 락 경합을 409 가 아닌 503 으로 내려고 던지는 {@link RetryLaterStatusException} 의 {@code Retry-After} 도 같은 길이다(설계 2026-11-04 §3.1).</li>
  *   <li>사슬에 {@link LockUnavailableException} 이 있으면 409 다. detail 은 그 메시지다.</li>
  *   <li>분류기가 일시 장애로 보면 503 + {@code Retry-After}(초) 다. detail 은 정한 문구다. 예외 문구는 로그로만 간다.</li>
  *   <li>그 밖은 500 이다. detail 은 {@code 내부 오류} 뿐이다 — 예외 문구(저장소·라이브러리 메시지)는 싣지 않는다. 토큰을 가진 호출자에게도 내부를
@@ -105,7 +106,7 @@ public class AdminExceptionHandler {
     }
 
     /** Retry-After 에 쓰는 초 — 정수 초(RFC 9110 §10.2.3)이고, 1초보다 짧은 대기도 0 이 아니라 1 로 올린다. SCIM 라우터와 같은 규칙이다. */
-    private static long 재시도_초(Duration 대기) {
+    static long 재시도_초(Duration 대기) {
         long 올림 = 대기.toSeconds() + (대기.toNanosPart() > 0 ? 1 : 0);
         return Math.max(1, 올림);
     }

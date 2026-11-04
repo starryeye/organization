@@ -105,6 +105,32 @@ class AdminExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("RetryLaterStatusException 은 503 이고 Retry-After 를 올림 초로 싣는다 — detail 은 컨트롤러가 준 사유 그대로다")
+    void 다시_시도_상태_예외는_503_과_Retry_After_다() {
+        // when, then — 1200ms 는 2초로 올린다. 일시 장애 처리기의 정한 문구가 아니라 사유를 싣는 점이 일시 장애 경로와 다르다
+        client.get().uri("/retry-later").exchange()
+                .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectHeader().valueEquals("Retry-After", "2")
+                .expectBody()
+                .jsonPath("$.title").isEqualTo("Service Unavailable")
+                .jsonPath("$.status").isEqualTo(503)
+                .jsonPath("$.detail").isEqualTo("x");
+    }
+
+    @Test
+    @DisplayName("락 경합을 원인으로 품은 RetryLaterStatusException 도 409 가 아니라 503 이다 — 상태 예외가 먼저 답한다")
+    void 락_경합을_품은_다시_시도_예외는_409_가_아니라_503_이다() {
+        // when, then
+        // SYNC 가 쥔 락이라 쥔 쪽의 긴 작업 대기(60초)를 그대로 싣는다
+        client.get().uri("/retry-later-with-lock-cause").exchange()
+                .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                .expectHeader().valueEquals("Retry-After", "60")
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(503);
+    }
+
+    @Test
     @DisplayName("락 획득이 시도 한도로 끊긴 것은 조건 실패가 아니라 일시 장애라 503 이다")
     void 락_획득_시간_초과는_503_이다() {
         // when, then
@@ -217,6 +243,17 @@ class AdminExceptionHandlerTest {
         @GetMapping("/short-temporary")
         Mono<String> 짧은_일시_장애() {
             return Mono.error(new TemporaryFailureException("x", Duration.ofMillis(300)));
+        }
+
+        @GetMapping("/retry-later")
+        Mono<String> 다시_시도() {
+            return Mono.error(new RetryLaterStatusException("x", Duration.ofMillis(1200), null));
+        }
+
+        @GetMapping("/retry-later-with-lock-cause")
+        Mono<String> 락_경합을_품은_다시_시도() {
+            LockUnavailableException 락 = LockUnavailableException.잡혀_있다(LockPurpose.SYNC);
+            return Mono.error(new RetryLaterStatusException(락.getMessage(), 락.retryAfter(), 락));
         }
 
         @GetMapping("/lock-attempt-timeout")
