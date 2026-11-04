@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.model.MemberType;
 import dev.starryeye.organization.core.model.RelationTuple;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -68,8 +69,8 @@ public final class TupleMapper {
     }
 
     /**
-     * 이 스냅샷의 멤버십에서 나올 수 있는 <b>모든</b> 튜플. `active` 필터도 순환 필터도
-     * 적용하지 않는다 (설계 §5.1).
+     * 이 스냅샷의 멤버십과 지정 연결에서 나올 수 있는 <b>모든</b> 튜플. `active` 필터도 순환 필터도
+     * 적용하지 않는다 (설계 §5.1). 지정 연결은 양끝이 그림에 있는지도 보지 않고 싣는다 — 싣지 않으면 Check 대상에서 빠져 "빠짐" 으로 센다.
      *
      * <p><b>{@link #toTuples} 와 다른 질문에 답한다.</b> {@code toTuples} 는 "있어야 하는
      * 튜플" 이고 이쪽은 "혹시 있을지 모르는 튜플" 이다. 잘못 남은 튜플은 대개 비활성 직원의
@@ -91,6 +92,9 @@ public final class TupleMapper {
                     case GROUP -> RelationTuple.child(member.id(), group.id());
                 });
             }
+        }
+        for (GroupEdge edge : snapshot.assignedEdges()) {
+            candidates.add(edge.tuple());
         }
         return candidates;
     }
@@ -119,7 +123,10 @@ public final class TupleMapper {
         return tuples;
     }
 
-    /** 조직코드 사전순으로 부모 → 자식 인접 리스트를 만든다. 순서를 고정해야 결과가 결정적이다. */
+    /**
+     * 조직코드 사전순으로 부모 → 자식 인접 리스트를 만든다. 순서를 고정해야 결과가 결정적이다.
+     * 멤버 행의 하위 조직 연결에 지정 연결({@link DirectorySnapshot#assignedEdges()})을 합친다 — 같은 쌍은 한 줄이다(설계 2026-11-04 §5.1).
+     */
     private static Map<String, Set<String>> collectChildEdges(DirectorySnapshot snapshot, List<String> warnings) {
         Map<String, Set<String>> edges = new TreeMap<>();
         for (DirectoryGroup group : sortedGroups(snapshot)) {
@@ -136,6 +143,14 @@ public final class TupleMapper {
                 children.add(member.id());
             }
             edges.put(group.id(), children);
+        }
+        for (GroupEdge edge : sortedAssignedEdges(snapshot)) {
+            if (!snapshot.groups().containsKey(edge.parent()) || !snapshot.groups().containsKey(edge.child())) {
+                warnings.add("지정 연결 '%s' → '%s' 의 조직이 스냅샷에 없어 건너뜁니다"
+                        .formatted(edge.parent(), edge.child()));
+                continue;
+            }
+            edges.get(edge.parent()).add(edge.child());
         }
         return edges;
     }
@@ -204,6 +219,13 @@ public final class TupleMapper {
     private static List<DirectoryGroup> sortedGroups(DirectorySnapshot snapshot) {
         return snapshot.groups().values().stream()
                 .sorted((a, b) -> a.id().compareTo(b.id()))
+                .toList();
+    }
+
+    /** 지정 연결을 (상위, 하위) 아이디순으로 — 경고 순서가 일정하도록. */
+    private static List<GroupEdge> sortedAssignedEdges(DirectorySnapshot snapshot) {
+        return snapshot.assignedEdges().stream()
+                .sorted(Comparator.comparing(GroupEdge::parent).thenComparing(GroupEdge::child))
                 .toList();
     }
 

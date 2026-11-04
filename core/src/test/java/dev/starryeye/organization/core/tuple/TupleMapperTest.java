@@ -362,6 +362,155 @@ class TupleMapperTest {
         assertThat(result.cutEdges()).isEmpty();
     }
 
+    /** 조직 P·C(멤버 없음)에 지정 연결 {@code assigned} 를 실은 그림. */
+    private static DirectorySnapshot 지정_그림(GroupEdge... assigned) {
+        return 스냅샷(Set.of(), Set.of(조직("P", "가"), 조직("C", "나")))
+                .withAssignedEdges(Set.of(assigned));
+    }
+
+    @Test
+    @DisplayName("지정 연결은 하위 조직 연결 튜플이 된다")
+    void 지정_연결은_child_튜플이_된다() {
+        // given — 멤버 행은 없고 지정 (P, C) 뿐이다
+        var snapshot = 지정_그림(new GroupEdge("P", "C"));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then
+        assertThat(result.tuples()).containsExactly(RelationTuple.child("C", "P"));
+        assertThat(result.warnings()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("멤버 행의 하위 조직 연결과 같은 쌍인 지정 연결은 한 줄이다")
+    void 멤버_연결과_같은_쌍은_한_줄이다() {
+        // given — P 의 멤버가 하위 조직 C 이고 지정도 (P, C) 다
+        var snapshot = 스냅샷(Set.of(), Set.of(조직("P", "가", MemberRef.group("C")), 조직("C", "나")))
+                .withAssignedEdges(Set.of(new GroupEdge("P", "C")));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then
+        assertThat(result.tuples().stream().filter(t -> RelationTuple.CHILD.equals(t.relation())))
+                .containsExactly(RelationTuple.child("C", "P"));
+        assertThat(result.warnings()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지정 연결의 양끝 조직이 그림에 없으면 경고하고 건너뛴다")
+    void 양끝이_없으면_경고하고_건너뛴다() {
+        // given — 지정 (P, X) 인데 X 는 그림에 없다
+        var snapshot = 지정_그림(new GroupEdge("P", "X"));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then
+        assertThat(result.tuples()).doesNotContain(RelationTuple.child("X", "P"));
+        assertThat(result.tuples()).isEmpty();
+        assertThat(result.warnings()).containsExactly("지정 연결 'P' → 'X' 의 조직이 스냅샷에 없어 건너뜁니다");
+    }
+
+    @Test
+    @DisplayName("지정 연결의 위쪽 조직이 그림에 없어도 경고하고 건너뛴다")
+    void 위쪽이_없어도_경고하고_건너뛴다() {
+        // given — 지정 (X, C) 인데 X 는 그림에 없다
+        var snapshot = 지정_그림(new GroupEdge("X", "C"));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then
+        assertThat(result.tuples()).isEmpty();
+        assertThat(result.warnings()).containsExactly("지정 연결 'X' → 'C' 의 조직이 스냅샷에 없어 건너뜁니다");
+    }
+
+    @Test
+    @DisplayName("보류 목록에 있는 지정 연결은 빠진다")
+    void 보류에_있으면_빠진다() {
+        // given
+        var snapshot = 지정_그림(new GroupEdge("P", "C"));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot, Set.of(new GroupEdge("P", "C")));
+
+        // then
+        assertThat(result.tuples()).doesNotContain(RelationTuple.child("C", "P"));
+        assertThat(result.tuples()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지정 연결이 닫는 순환도 사전순 DFS 가 자른다")
+    void 지정_연결이_닫는_순환은_DFS_가_자른다() {
+        // given — P ⊃ C 는 멤버 행이고 (C, P) 는 지정이다
+        var snapshot = 스냅샷(Set.of(), Set.of(조직("P", "가", MemberRef.group("C")), 조직("C", "나")))
+                .withAssignedEdges(Set.of(new GroupEdge("C", "P")));
+
+        // when
+        var result = TupleMapper.toTuples(snapshot);
+
+        // then — 둘 가운데 하나만 버려진다
+        assertThat(result.cutEdges()).hasSize(1);
+        assertThat(result.tuples().stream().filter(t -> RelationTuple.CHILD.equals(t.relation()))).hasSize(1);
+        assertThat(result.warnings()).anySatisfy(w -> assertThat(w).contains("순환"));
+    }
+
+    @Test
+    @DisplayName("순환을 버리지 않는 변환도 지정 연결을 싣는다")
+    void 순환을_버리지_않는_변환도_지정_연결을_싣는다() {
+        // given
+        var snapshot = 지정_그림(new GroupEdge("P", "C"));
+
+        // when
+        var result = TupleMapper.toTuplesKeepingCycles(snapshot);
+
+        // then
+        assertThat(result.tuples()).containsExactly(RelationTuple.child("C", "P"));
+        assertThat(result.cutEdges()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("순환을 버리지 않는 변환은 양끝이 없는 지정 연결을 경고하고 건너뛴다")
+    void 순환을_버리지_않는_변환도_양끝이_없으면_건너뛴다() {
+        // given
+        var snapshot = 지정_그림(new GroupEdge("P", "X"));
+
+        // when
+        var result = TupleMapper.toTuplesKeepingCycles(snapshot);
+
+        // then
+        assertThat(result.tuples()).isEmpty();
+        assertThat(result.warnings()).containsExactly("지정 연결 'P' → 'X' 의 조직이 스냅샷에 없어 건너뜁니다");
+    }
+
+    @Test
+    @DisplayName("후보 집합에 지정 연결이 실린다 — 양끝이 그림에 없는 것도 걸러 내지 않는다")
+    void 후보에_지정_연결이_실린다() {
+        // given — 지정 (P, C) 와 양끝이 없는 지정 (P, X)
+        var snapshot = 지정_그림(new GroupEdge("P", "C"), new GroupEdge("P", "X"));
+
+        // when
+        Set<RelationTuple> 후보 = TupleMapper.candidateTuples(snapshot);
+
+        // then
+        assertThat(후보).contains(RelationTuple.child("C", "P"), RelationTuple.child("X", "P"));
+    }
+
+    @Test
+    @DisplayName("지정 연결이 없는 그림의 후보는 지금과 같다")
+    void 지정_연결이_없으면_후보는_그대로다() {
+        // given — 멤버 행의 하위 조직 연결 하나뿐이다
+        var snapshot = 스냅샷(Set.of(), Set.of(조직("P", "가", MemberRef.group("C")), 조직("C", "나")));
+
+        // when
+        Set<RelationTuple> 후보 = TupleMapper.candidateTuples(snapshot);
+
+        // then
+        assertThat(후보).containsExactly(RelationTuple.child("C", "P"));
+    }
+
     @Test
     @DisplayName("하위 조직 연결 튜플을 연결 값으로 되돌린다 — direct_member 는 연결이 아니다")
     void 튜플을_연결로_되돌린다() {
