@@ -56,6 +56,23 @@ class DirectoryLookupUseCaseTest {
     }
 
     @Test
+    @DisplayName("저장된 userName 에 대문자가 섞여 있어도 소문자·대문자로 물어 찾고, 돌려주는 userName 은 저장된 그대로다")
+    void 저장된_userName_에_대문자가_섞여_있어도_찾는다() {
+        // given — userName 은 받은 그대로(Kim.Lee) 저장되고 색인 키만 소문자다. 후보의 저장된 값을 소문자로 바꾸지 않고 견주면 물은 쪽만
+        // 소문자라 어긋난다
+        state.users.put("u-1", 직원("u-1", "okta-00u1", "Kim.Lee", true));
+
+        // when
+        var 소문자로 = useCase.직원을_찾는다("kim.lee", null).block();
+        var 대문자로 = useCase.직원을_찾는다("KIM.LEE", null).block();
+
+        // then
+        var 기대 = new 결과.하나<>(new UserSummary("u-1", "Kim.Lee", "Kim.Lee-이름", true, "okta-00u1"));
+        assertThat(소문자로).isEqualTo(기대);
+        assertThat(대문자로).isEqualTo(기대);
+    }
+
+    @Test
     @DisplayName("userName 이 같은 직원이 둘이면 여럿(2)이다 — LDAP 은 userName 유일성을 지키지 않는다")
     void 둘이면_여럿_2() {
         // given — 다른 OU 에 같은 uid 가 있다
