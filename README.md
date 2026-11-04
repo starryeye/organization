@@ -127,9 +127,13 @@ type group
 
 ```bash
 docker compose up -d
-./gradlew :app-auth:bootRun   # 인가 서버(9000) — 토큰을 받으려면 떠 있어야 한다(아래 "인증")
-./gradlew :app-ldap:bootRun
+# bootRun 은 앱이 도는 동안 돌아오지 않는다 — 아래 둘은 터미널을 따로 열어 하나씩 띄운다
+./gradlew :app-auth:bootRun   # 터미널 1 — 인가 서버(9000). 토큰을 받으려면 떠 있어야 한다(아래 "인증")
+./gradlew :app-ldap:bootRun   # 터미널 2
 ```
+
+아래 예의 `TOKEN=$(curl … | jq -r .access_token)` 줄은 `jq` 로 응답 JSON 에서 토큰을 꺼낸다 — `jq` 가 없으면 응답의
+`access_token` 값을 손으로 옮긴다.
 
 `docker-compose.yml`은 OpenFGA, DynamoDB Local, (수동 검증용) OpenLDAP을 띄운다. 로컬 `application.yml` 은
 `openfga.create-store: true` 라 app-ldap을 띄우면 시작 시점에 OpenFGA store를 만들고 인가 모델을 쓴다(모델은 최신과 내용이 다를 때만 쓴다).
@@ -193,17 +197,18 @@ ENABLED 또는 ENABLING)을 보고 다르면 다른 점을 모두 적어 "테이
 # LDAP — docker/ldap/scale-groupofnames/scale.ldif 와 docker/ldap/scale-dit/scale.ldif(겸직을 푼 DIT)를 만든다
 ./gradlew :connector-ldap:generateScaleSeed
 LDAP_SEED_DIR=./docker/ldap/scale-groupofnames docker compose up -d   # DIT 는 ./docker/ldap/scale-dit + ldap.strategy=dit
-./gradlew :app-auth:bootRun
-./gradlew :app-ldap:bootRun
+./gradlew :app-auth:bootRun   # 터미널 1 — bootRun 은 돌아오지 않으므로 앱마다 터미널을 따로 연다
+./gradlew :app-ldap:bootRun   # 터미널 2
+# 터미널 3 — jq 로 응답에서 토큰을 꺼낸다
 TOKEN=$(curl -s -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)
 curl -XPOST -H "Authorization: Bearer $TOKEN" localhost:8081/admin/sync/full
 
 # SCIM — docker/scim/initial-sync.ndjson(IdP 의 최초 싱크 요청, 한 줄에 요청 하나)을 만들고 순차로 쏜다
 ./gradlew :connector-scim:generateScimSeed
 docker compose up -d openfga dynamodb-local
-./gradlew :app-auth:bootRun
-./gradlew :app-scim:bootRun
-python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 인자로 바꾼다. POST 응답의 id 로 뒤 요청의 경로·멤버를 바꿔 보낸다
+./gradlew :app-auth:bootRun            # 터미널 1
+./gradlew :app-scim:bootRun            # 터미널 2
+python3 docker/scim/replay.py          # 터미널 3 — 기본 http://localhost:8082 — 첫 인자로 바꾼다. POST 응답의 id 로 뒤 요청의 경로·멤버를 바꿔 보낸다
 # replay.py 는 IdP 처럼 app-auth 에서 scim-idp 로 토큰을 받아 싣는다 — AUTH_TOKEN_URL·SCIM_CLIENT_ID·SCIM_CLIENT_SECRET 로 바꾼다
 ```
 
@@ -228,6 +233,7 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 | 나머지 | 거절 — 토큰이 통과하면 403, 없으면 401 |
 
 **로컬 클라이언트.** `auth-server.yml` 의 prod 가 아닌 프로필에만 있다(운영 클라이언트는 아래 "운영 배포"). 비밀은 `<id>-secret` 이다.
+발급자를 `https://` 로 바꾸면 이 클라이언트들로는 app-auth 가 뜨지 않는다(아래 "운영 배포"의 app-auth).
 
 | 클라이언트 | 범위 | 토큰 수명 | 누가 |
 |---|---|---|---|
@@ -241,7 +247,7 @@ python3 docker/scim/replay.py          # 기본 http://localhost:8082 — 첫 �
 
 ```bash
 curl -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token   # 응답 JSON 의 access_token
-TOKEN=$(curl -s -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)
+TOKEN=$(curl -s -u ops:ops-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)   # jq 로 토큰만 꺼낸다
 curl -H "Authorization: Bearer $TOKEN" 'localhost:8081/admin/sync/runs?limit=5'
 ```
 
@@ -251,11 +257,13 @@ curl -H "Authorization: Bearer $TOKEN" 'localhost:8081/admin/sync/runs?limit=5'
 - 토큰의 `sub` 는 클라이언트 id 다. 그 토큰으로 일으킨 변경은 행위자 `client:<sub>` 로 남는다(아래 "변경 이력"의 `cause.actor`, 실행 기록의 `requestedBy`).
   운영자마다 클라이언트를 따로 주면 사람 단위로 남는다.
 - app-auth 가 받는 것은 토큰(`/oauth2/token`), 키 목록(`/oauth2/jwks`), 메타데이터(`/.well-known/oauth-authorization-server`), `/actuator/health/**` 뿐이고
-  나머지(인가 코드·디바이스·토큰 조회·폐기 끝점 포함)는 403 이다. 메타데이터에 `authorization_endpoint` 가 남는 것은 Spring Authorization Server 가 그 칸을
+  나머지(인가 코드·디바이스·토큰 조회·폐기 끝점 포함)는 403 이다. 세 끝점에 그 끝점이 받지 않는 메서드로 오면(토큰은 `POST`, 키 목록·메타데이터는
+  `GET` 만 받는다) 401 이다. 거절한 요청도 세션을 만들지 않는다. 메타데이터에 `authorization_endpoint` 가 남는 것은 Spring Authorization Server 가 그 칸을
   요구해서이고 그 끝점도 403 이다. 발급 기록을 남기지 않으므로 토큰 하나만 무효로 할 수 없다 — 무효화는 키 교체다(아래 "운영 배포").
 
 **거절.** 보안 필터의 거절은 그 표면의 오류 형식으로 나간다 — `/scim/v2/**` 는 SCIM Error(`application/scim+json`, `status` 는 문자열), `/admin/**` 는
-problem details(`type` about:blank, `title` 상태 문구), 그 밖(actuator 등)은 본문이 없다. 토큰 내용과 검증 실패의 세부(만료 시각 등)는 머리·본문 어디에도 싣지 않는다.
+problem details(`type` about:blank, `title` 상태 문구, `status`, `detail` — `instance` 는 싣지 않는다. 관리 API 처리기의 오류에는 있다, 아래 "관리 API"),
+그 밖(actuator 등)은 본문이 없다. 토큰 내용과 검증 실패의 세부(만료 시각 등)는 머리·본문 어디에도 싣지 않는다.
 
 | 경우 | 상태 | `WWW-Authenticate` | `detail` |
 |---|---|---|---|
@@ -263,7 +271,7 @@ problem details(`type` about:blank, `title` 상태 문구), 그 밖(actuator 등
 | 토큰을 받지 않음 — 서명·발급자·만료·꼴 | 401 | `Bearer error="invalid_token"` | `인증이 필요하다` |
 | 범위 없음(규칙 밖의 경로 포함) | 403 | `Bearer error="insufficient_scope"` | `이 요청에 필요한 범위가 없다` |
 | `force=true`·`mode=wipe` 에 `admin.destructive` 없음 — 컨트롤러가 회차·락을 만들기 전에 본다 | 403 | `Bearer error="insufficient_scope"` | `force=true은 admin.destructive 범위가 필요하다`(`mode=wipe은 …`) |
-| 키 목록(`jwk-set-uri`)을 받지 못함 — 연결 2초·응답 5초 초과, 2xx 아님, 키 목록이 아닌 본문 | 503 + `Retry-After: 10` | 없음 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+| 키 목록(`jwk-set-uri`)을 받지 못함 — 연결 2초·전체 5초(연결 포함) 초과, 2xx 아님, 키 목록이 아닌 본문 | 503 + `Retry-After: 10` | 없음 | `일시 장애 — 잠시 뒤 다시 시도한다` |
 
 - `force`·`mode` 는 스프링이 바꾼 값으로 본다 — `force=yes`·`force=1`·`mode=WIPE` 도 같은 판정이라 쿼리 모양으로 우회하지 못한다.
 - 키 목록 장애는 토큰 탓이 아니라 503 이다 — 401 `invalid_token` 은 멀쩡한 토큰을 버리라는 뜻이라 IdP 가 자격 문제로 읽는다. 키 목록을 받지 못한 원인이
@@ -276,8 +284,11 @@ problem details(`type` about:blank, `title` 상태 문구), 그 밖(actuator 등
 - **Entra ID — client credentials.** 프로비저닝 인증 방식으로 OAuth2 client credentials 를 고르고, 토큰 엔드포인트 `https://<app-auth>/oauth2/token` 과
   그 IdP 용 클라이언트(범위 `scim`)의 id·비밀을 적는다. 범위 칸이 있으면 `scim`, 없거나 비워 두면 등록된 범위를 모두 받는다. 토큰 수명은 60분을 권한다.
 - **Okta — 붙여 넣는 토큰.** HTTP Header 인증은 토큰 하나를 붙여 넣는다. 그 IdP 용 클라이언트만 수명을 길게(예: `access-token-time-to-live: 180d`) 주고,
-  운영자가 위 `curl` 로 한 번 받아 붙여 넣는다. 만료 전에 다시 받아 바꿔 넣는다. **수명이 365일을 넘는 클라이언트 설정은 기동을 멈춘다**(RFC 7644 §7 —
-  bearer 토큰의 수명은 유한해야 한다). 로컬 app-auth 는 기동마다 키를 새로 만들므로 다시 띄우면 붙여 넣은 토큰도 무효다.
+  운영자가 그 IdP 용 클라이언트의 id·비밀로 운영 app-auth 에서 한 번 받아 붙여 넣는다 —
+  `curl -s -u '<IdP 클라이언트 id>:<비밀>' -d grant_type=client_credentials https://<app-auth>/oauth2/token | jq -r .access_token`(위 토큰 받기의
+  `ops:ops-secret`·`localhost` 는 로컬 개발 클라이언트다). 만료 전에 다시 받아 바꿔 넣는다. **수명이 365일을 넘는 클라이언트 설정은 기동을 멈춘다**(RFC 7644 §7 —
+  bearer 토큰의 수명은 유한해야 한다). 로컬 app-auth 는 기동마다 키를 새로 만들므로 다시 띄우면 붙여 넣은 토큰도 무효가 된다 — 두 앱의 인스턴스마다
+  새 키의 토큰을 처음 볼 때다(아래 "키 교체").
 
 **Prometheus.** `/actuator/prometheus` 는 `actuator` 범위가 필요하다. 스크레이프 설정의 `oauth2` 가 client credentials 로 토큰을 받아 싣는다. 같은 범위로
 `/actuator/health` 의 세부도 보인다.
@@ -350,12 +361,12 @@ SCOPE_actuator` — 범위가 다른 토큰도 상태만 받는다). 주소·테
 
 | 설정 | 로컬 `auth-server.yml` | `auth-server-prod.yml` | 뜻 |
 |---|---|---|---|
-| `auth.signing-key` | 없음 — 기동마다 RSA 2048 을 만든다(재시작하면 그 전 토큰은 모두 무효) | `${AUTH_SIGNING_KEY}` | RSA 개인 키, PKCS#8 PEM(`-----BEGIN PRIVATE KEY-----` — 예: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`. PKCS#1 이면 `openssl pkcs8 -topk8 -nocrypt` 로 바꾼다). 읽히지 않거나 2048비트보다 짧으면 멈춘다 |
+| `auth.signing-key` | 없음 — 기동마다 RSA 2048 을 만든다(재시작하면 그 전 토큰은 모두 무효가 된다 — 두 앱의 인스턴스마다 새 `kid` 를 처음 볼 때, 아래 "키 교체") | `${AUTH_SIGNING_KEY}` | RSA 개인 키, PKCS#8 PEM(`-----BEGIN PRIVATE KEY-----` — 예: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`. PKCS#1 이면 `openssl pkcs8 -topk8 -nocrypt` 로 바꾼다). 읽히지 않거나 2048비트보다 짧으면 멈춘다 |
 | `auth.require-signing-key` | `false` | `true` | 키가 비었거나 풀리지 않은 자리표시자면 멈춘다 |
 | `spring.security.oauth2.authorizationserver.issuer` | `http://localhost:9000` | `${AUTH_ISSUER}` | 발급자. 두 앱의 `issuer-uri`(`AUTH_ISSUER_URI`)와 같은 값이고, 키 목록은 `<발급자>/oauth2/jwks`(`AUTH_JWK_SET_URI`)다 |
 | `auth.require-https` | `false` | `true` | 발급자가 `https://` 가 아니면 멈춘다 |
 | `auth.require-hashed-secrets` | `false` | `true` | `{bcrypt}` 해시가 아닌 클라이언트 비밀이 있으면 멈춘다 — 평문은 클라이언트(IdP·운영 도구) 쪽에만 둔다 |
-| `spring.security.oauth2.authorizationserver.client.<이름>.*` | 개발 클라이언트 다섯(`{noop}` 비밀, 위 "인증") | 없음 — 운영 설정이 준다 | 아래 예. 토큰 수명이 365일을 넘으면 멈춘다(로컬도) |
+| `spring.security.oauth2.authorizationserver.client.<이름>.*` | 개발 클라이언트 다섯(`{noop}` 비밀, 위 "인증") | 없음 — 운영 설정이 준다 | 아래 예. 토큰 수명이 365일을 넘으면 멈춘다(로컬도). 발급자가 `https://` 면 `{bcrypt}` 가 아닌 비밀도 멈춘다(아래) |
 
 ```yaml
 spring:
@@ -374,6 +385,16 @@ spring:
               access-token-time-to-live: 60m   # 반드시 적는다 — 빠뜨리면 부트 기본 5분이다. 그 밖의 클라이언트는 10m
 ```
 
+- **bcrypt 해시 만들기.** `htpasswd -bnBC 10 "" '<비밀>' | tr -d ':\n'` 이 `$2y$10$…` 를 낸다. 앞에 `{bcrypt}` 를 붙여 `client-secret` 에 넣는다
+  (`"{bcrypt}$2y$10$…"`). 스프링의 `BCryptPasswordEncoder` 는 `$2y$` 를 받는다 — app-auth 의 시험 설정(`auth-server-test.yml`)이 이 방법으로 만든
+  해시로 토큰을 받는다. `-b` 는 비밀을 명령줄로 받으므로 셸 기록에 남는다 — 기록에서 지운다. `htpasswd` 는 Apache 의 도구다(macOS 기본,
+  리눅스는 `apache2-utils`·`httpd-tools`).
+- **발급자가 `https://` 면 `{bcrypt}` 가 아닌 비밀로는 뜨지 않는다** — `auth.require-hashed-secrets` 와 상관없이(`ClientSettingsCheck`).
+  프로필 이름이 `prod` 가 아니면(예 `production`) 개발 클라이언트(공개 `{noop}` 비밀, `ops-break-glass` 는 `admin.destructive` 까지)가 그대로 남는다.
+  거기에 발급자만 부트의 속성·환경 변수(`SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_ISSUER`)로 https 를 주면 그 클라이언트들이 진짜 토큰을 낸다 — 그래서
+  `발급자가 https:// 인데 클라이언트 <id> 의 비밀이 {bcrypt} 해시가 아니다 — {noop} 비밀(개발 클라이언트)은 http 발급자(로컬)에서만 받는다` 로 멈춘다.
+  스킴은 대소문자를 가리지 않는다(`HTTPS://` 도 같다).
+
 **https.** 비밀이 다니는 새 경로는 prod 에서 https 여야 한다 — app-auth 의 발급자, 두 앱의 `issuer-uri`·`jwk-set-uri`(둘 다 `auth.require-https`), 키를
 싣는 `openfga.api-url`(`openfga.require-tls`). 아니면 기동을 멈춘다. 검사는 주소의 모양만 본다 — app-auth 도 TLS 를 직접 열지 않으므로
 (`server.ssl` 설정이 없다) 발급자 주소의 https 는 앞단(로드밸런서 등)이 끝낸다.
@@ -385,7 +406,10 @@ spring:
 3. OpenFGA 서버에 키를 켠다(`OPENFGA_AUTHN_METHOD: preshared`).
 
 사전 공유 키는 익명 호출만 막는다 — 맞는 키는 어느 것이든 OpenFGA API 전부(쓰기 포함)를 연다. 장부 쓰기를 이 서버로만 좁히는 것은 범위 밖이다. `/healthz` 는 키
-없이 열려 있다. 실행 중에 OpenFGA 가 401·403 을 주면 일시 장애가 아니라 다시 보내지 않는다(요청이면 500). OpenFGA 서버를 다른 팀과 함께 쓰면 서버의 인증을
+없이 열려 있다. 실행 중에 OpenFGA 가 401·403 을 주면(서버의 키를 바꿨다 등) 일시 장애가 아니라 다시
+보내지 않는다. SCIM 쓰기는 대개 500 이다 — 먼저 부르는 Check 가 실패하고 분류기가 일시 장애로 보지 않는다. Check 없이 지우는 연산(조직 삭제, 멤버만
+빼는 PATCH)은 쓰기 배치가 실패로 끝나 부분 실패 503 + `Retry-After` 일 수 있다. 관리 API 의 직원 상세·조직 멤버 목록은 200 이고 그 줄의 `openFgaCheck` 가
+`null` 이다(Check 실패를 줄마다 WARN 으로 남기고 삼킨다). OpenFGA 서버를 다른 팀과 함께 쓰면 서버의 인증을
 켜고 끄는 것은 이 저장소가 정할 수 없다.
 
 **키 교체 = 전부 무효화.** 서명 키는 하나다. `AUTH_SIGNING_KEY` 를 바꿔 app-auth 를 다시 띄우면 그 전에 발급한 토큰은 모두 무효가 된다 — 토큰 하나만
@@ -393,10 +417,19 @@ spring:
 
 - **무효가 되는 때는 인스턴스마다 다르다.** 두 앱은 받아 둔 키 목록을 쓰다가 모르는 `kid` 의 토큰을 볼 때만 다시 받는다. 그래서 옛 토큰은 그 인스턴스가
   새 키의 토큰을 처음 받을 때까지 통한다. client credentials 클라이언트가 곧 새 토큰을 가져오므로 대개 금방이지만, 새 토큰이 아직 오지 않은 인스턴스에서는
-  붙여 넣은 긴 수명 토큰도 계속 통한다. 곧바로 끊어야 하면 두 앱의 인스턴스도 다시 띄운다 — 키 목록은 메모리에만 있다.
+  붙여 넣은 긴 수명 토큰도 계속 통한다. 곧바로 끊으려면 아래 순서로 두 앱의 인스턴스도 다시 띄운다 — 키 목록은 메모리에만 있다.
 - **client credentials 클라이언트는 다음 토큰부터 새 키다.** 401 을 받으면 토큰을 다시 받는 클라이언트(`replay.py`)는 곧바로 낫고, 만료에만 새로 받는
   클라이언트는 들고 있던 토큰의 남은 수명(길면 10분, IdP 60분)만큼 401 일 수 있다. 붙여 넣은 토큰만 운영자가 다시 받아 붙여 넣는다.
 - app-auth 가 여러 대면 한꺼번에 바꾼다 — 키가 섞여 도는 동안은 키 목록이 인스턴스마다 달라진다.
+
+**샌 토큰을 곧바로 끊는 순서.** 보안 절차다 — 순서가 바뀌면 끊기지 않는다.
+
+1. app-auth 의 모든 인스턴스를 새 `AUTH_SIGNING_KEY` 로 다시 띄운다.
+2. app-auth 가 새 키만 내는지 본다 — `curl -s https://<app-auth>/oauth2/jwks | jq -r '.keys[].kid'` 가 새 `kid`(기동 로그의 `kid=`) 하나뿐이어야 한다.
+   앞단이 여러 대에 나눠 보내면 여러 번 불러 본다.
+3. **그 뒤에** 두 앱(app-ldap 이나 app-scim)의 인스턴스를 모두 다시 띄운다. 비어 뜬 인스턴스는 다음 토큰 때 그때의 키 목록을 받는다. app-auth 가 아직 옛 키를
+   내는 동안 먼저 다시 띄우면 옛 키 목록을 다시 받아 두므로, 샌 토큰이 그 인스턴스에서 새 `kid` 의 토큰이 올 때까지 계속 통한다.
+4. 붙여 넣는 토큰을 쓰는 IdP 에 새 토큰을 받아 넣는다.
 
 ## 관리 API
 
@@ -434,8 +467,8 @@ OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는�
 app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
 
 **관리 API 의 오류는 RFC 9457 problem details(`application/problem+json`)다** — `type`(about:blank)·`title`·`status`·`detail`·`instance`(요청 경로 — 스프링이 채운다) 등을 싣는다. `/admin/sync`·
-조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다). 보안 필터의 401·403·503 은 이 처리기를 거치지 않고 같은 모양으로 직접
-나간다(위 "인증").
+조회·변경 이력 모두 같다. 판정은 표의 위에서부터다(원인 사슬을 따라 본다). 보안 필터의 401·403·503 은 이 처리기를 거치지 않고 직접 나간다 —
+칸은 `type`·`title`·`status`·`detail` 이고 `instance` 는 없다(위 "인증").
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
