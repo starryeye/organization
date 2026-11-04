@@ -272,6 +272,41 @@ class SnapshotArchiveUseCaseTest {
     }
 
     @Test
+    @DisplayName("지정 연결은 빠짐으로 세지 않는다 — OpenFGA 에 그 줄이 있으면 빠짐도 여분도 0 이다(설계 2026-11-04 §5.6)")
+    void 지정_연결은_빠짐으로_세지_않는다() {
+        // given — C 는 IdP 의 멤버 행에 없고 운영자가 P 아래로 지정했다. 장부에 child(C,P) 가 있다
+        state.saveGroup(new DirectoryGroup("P", null, "P", Set.of())).block();
+        state.saveGroup(new DirectoryGroup("C", null, "C", Set.of())).block();
+        state.assignedParents.put("C", "P");
+        writer.stored.add(RelationTuple.child("C", "P"));
+
+        // when
+        var run = useCase.execute().block();
+
+        // then — 지정 연결이 Check 대상에 들어 있어 장부에 있는 줄로 읽히고, 스냅샷에도 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(알린_어긋남).containsExactly(new 어긋남(0, 0));
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(RelationTuple.child("C", "P"));
+    }
+
+    @Test
+    @DisplayName("장부에 없는 지정 연결의 줄은 빠짐으로 센다 — 지표로만 낸다")
+    void 없는_지정_줄은_빠짐으로_센다() {
+        // given — 위와 같은데 장부가 비어 있다
+        state.saveGroup(new DirectoryGroup("P", null, "P", Set.of())).block();
+        state.saveGroup(new DirectoryGroup("C", null, "C", Set.of())).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var run = useCase.execute().block();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(알린_어긋남).containsExactly(new 어긋남(0, 1));
+        assertThat(writer.stored).isEmpty();
+    }
+
+    @Test
     @DisplayName("어긋난 직원을 다시 맞춰 남은 줄을 지운다 — 스냅샷에는 지우기 전에 본 실제가 남는다(설계 2026-10-20 §6.4)")
     void 어긋난_직원을_다시_맞춰_남은_줄을_지운다() {
         // given — 비활성으로 저장된 kim 의 줄이 남았다. 동료 lee 는 상태와 장부가 맞는다

@@ -188,7 +188,8 @@ public class ScimRebuildUseCase {
                         직원들.putAll(found);
                         Map<String, DirectoryGroup> 조직들 = new LinkedHashMap<>(directory.groups());
                         조직들.putAll(groups);
-                        return new DirectorySnapshot(직원들, 조직들);
+                        // 지정 연결은 열거로 읽은 그대로 이월한다 — 빠뜨리면 다시 만든 조직도가 지정 연결의 줄을 "없어야 할 줄" 로 지운다
+                        return new DirectorySnapshot(직원들, 조직들, directory.assignedEdges());
                     });
                 });
     }

@@ -70,6 +70,7 @@ class ScimRebuildIndexLagTest {
     private static final MemberRef 하위 = MemberRef.group("SUB");
     private static final RelationTuple 이_하위 = RelationTuple.directMember("lee", "SUB");
     private static final RelationTuple 하위_팀 = RelationTuple.child("SUB", "TEAM");
+    private static final RelationTuple 지정_연결 = RelationTuple.child("C", "P");
 
     /** GSI 지연을 흉내 낸다 — 숨긴 대상은 열거(loadAll)에서만 빠지고 강한 읽기(findUsers·findGroup)에서는 보인다. 조직 파티션은 강한 읽기라 멤버로는 보인다. */
     static class 열거가_늦은_저장소 extends FakeStateRepository {
@@ -100,10 +101,11 @@ class ScimRebuildIndexLagTest {
             });
         }
 
+        /** 지정 연결은 그대로 싣는다 — 숨긴 것은 직원·조직이고, 이 시험이 보는 것은 보강이 조직도를 다시 만들 때 지정 연결을 이월하는지다. */
         @Override
         public Mono<DirectorySnapshot> loadAll() {
             return super.loadAll().map(all -> new DirectorySnapshot(
-                    보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직)));
+                    보이는_것(all.users(), 숨긴_직원), 보이는_것(all.groups(), 숨긴_조직), all.assignedEdges()));
         }
 
         /**
@@ -312,6 +314,29 @@ class ScimRebuildIndexLagTest {
         // 다시 계산한 조직도의 변환 경고도 남긴다 — 보강으로 새로 끊긴 순환 연결은 여기서만 보이고, 처음 변환의 경고와 앞말로 가른다
         assertThat(로그.list).extracting(ILoggingEvent::getFormattedMessage)
                 .anySatisfy(message -> assertThat(message).startsWith("튜플 변환 경고: 다시 계산한 조직도 — ").contains("A", "B"));
+    }
+
+    @Test
+    @DisplayName("tuples — 열거에서 빠진 대상을 보강해 조직도를 다시 만들어도 지정 연결의 줄을 지우지 않는다")
+    void 보강한_조직도도_지정_연결을_싣는다() {
+        // given — lee 는 GSI 에 아직 없어 보강 경로를 탄다. C 는 P 아래로 지정돼 있고 장부에 child(C,P) 가 있다
+        state.saveUser(직원("kim")).block();
+        state.saveUser(직원("lee")).block();
+        조직을_심는다("DEV002", 김, 이);
+        조직을_심는다("P");
+        조직을_심는다("C");
+        state.assignedParents.put("C", "P");
+        writer.stored.addAll(Set.of(김_백엔드, 이_백엔드, 지정_연결));
+        state.숨긴_직원.add("lee");
+
+        // when
+        SyncRun run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — 보강 경로를 탔고(lee 를 다시 읽었다), 다시 만든 조직도가 지정 연결을 잃지 않아 줄이 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.findUsersCalls).contains(Set.of("lee"));
+        assertThat(writer.deleted).doesNotContain(지정_연결);
+        assertThat(writer.stored).contains(김_백엔드, 이_백엔드, 지정_연결);
     }
 
     @Test
