@@ -148,7 +148,7 @@ class ScimHierarchyEndToEndTest {
     @SuppressWarnings("unchecked")
     @DisplayName("SCIM 에는 지정이 보이지 않고 관리 API 에는 보인다 — 지정은 IdP 의 멤버 목록이 아니다")
     void SCIM_에는_지정이_보이지_않고_관리_API_에는_보인다() {
-        // when, then — IdP 가 읽는 조직 표현에는 TEAM 이 멤버로 없다
+        // when, then — IdP 가 읽는 조직 표현에는 TEAM 이 멤버로 없다(IdP 가 보낸 멤버 행은 보인다는 양성 대조는 ④)
         client.get().uri("/scim/v2/Groups/{id}", 서버("DIV")).exchange()
                 .expectStatus().isOk()
                 .expectBody()
@@ -169,26 +169,9 @@ class ScimHierarchyEndToEndTest {
 
     @Test
     @Order(3)
-    @DisplayName("IdP 가 상위의 멤버를 통째로 바꿔도 지정한 롤업은 남는다")
-    void IdP_가_멤버를_통째로_바꿔도_롤업이_남는다() {
-        // when — 같은 이름에 멤버가 빈 PUT. 지정이 없었다면 TEAM 의 줄도 함께 사라질 자리다
-        client.put().uri("/scim/v2/Groups/{id}", 서버("DIV")).contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("""
-                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
-                         "displayName":"전략본부","members":[]}
-                        """)
-                .exchange().expectStatus().isOk();
-
-        // then
-        assertThat(kim이_속한다("DIV")).isTrue();
-        assertThat(state.findAssignedParent(서버("TEAM")).blockOptional()).contains(서버("DIV"));
-    }
-
-    @Test
-    @Order(4)
     @DisplayName("이력에 지정이 남는다 — 원인은 HIERARCHY_REQUEST, 행위자는 토큰의 클라이언트, 속성은 assignedParent")
     void 이력에_지정과_원인이_남는다() {
-        // when
+        // when — IdP 의 멤버 추가·교체(④)가 TEAM 의 이력에 SCIM_REQUEST 줄을 더하기 전에 본다. 맨 위 줄이 지정이어야 한다
         JsonNode 맨_위 = client.get().uri("/admin/organizations/{orgCode}/history", 서버("TEAM")).exchange()
                 .expectStatus().isOk()
                 .expectBody(JsonNode.class).returnResult().getResponseBody()
@@ -201,6 +184,43 @@ class ScimHierarchyEndToEndTest {
         assertThat(맨_위.get("attributes")).hasSize(1);
         assertThat(맨_위.get("attributes").get(0).get("name").asText()).isEqualTo("assignedParent");
         assertThat(맨_위.get("attributes").get(0).get("after").asText()).isEqualTo(서버("DIV"));
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("IdP 가 같은 쌍을 멤버로 보냈다가 통째로 비워도 지정이 받치는 롤업은 남는다")
+    void IdP_가_멤버를_통째로_바꿔도_롤업이_남는다() {
+        // given — IdP 가 TEAM 을 DIV 의 멤버로 보낸다. 지정이 이미 같은 쌍(TEAM child DIV)을 받치고 있으니 줄은 그대로이고 멤버 행만 더해진다
+        client.patch().uri("/scim/v2/Groups/{id}", 서버("DIV")).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                         "Operations":[{"op":"add","path":"members",
+                                        "value":[{"value":"%s","type":"Group"}]}]}
+                        """.formatted(서버("TEAM")))
+                .exchange().expectStatus().isNoContent();
+        // 양성 대조 — SCIM 은 IdP 가 보낸 멤버 행을 보인다(②의 "안 보인다"가 응답이 원래 비어서가 아님을 보인다)
+        client.get().uri("/scim/v2/Groups/{id}", 서버("DIV")).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.members[?(@.value == '%s')]".formatted(서버("TEAM"))).exists();
+        assertThat(kim이_속한다("DIV")).isTrue();
+
+        // when — IdP 가 멤버를 통째로 비운다. 멤버 행의 줄을 지우는 자리인데 같은 쌍을 지정이 받친다(설계 2026-11-04 §5.3)
+        client.put().uri("/scim/v2/Groups/{id}", 서버("DIV")).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                         "displayName":"전략본부","members":[]}
+                        """)
+                .exchange().expectStatus().isOk();
+
+        // then — 멤버 행은 사라졌지만 줄과 롤업은 지정이 지킨다
+        client.get().uri("/scim/v2/Groups/{id}", 서버("DIV")).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.members[?(@.value == '%s')]".formatted(서버("TEAM"))).doesNotExist();
+        assertThat(check("group:" + 서버("TEAM"), "child", "group:" + 서버("DIV"))).isTrue();
+        assertThat(kim이_속한다("DIV")).isTrue();
+        assertThat(state.findAssignedParent(서버("TEAM")).blockOptional()).contains(서버("DIV"));
     }
 
     @Test
