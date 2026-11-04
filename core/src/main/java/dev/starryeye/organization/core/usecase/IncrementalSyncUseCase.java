@@ -547,7 +547,9 @@ public class IncrementalSyncUseCase {
                         return 지정이_받치는_하위(groupId, 빠질것)
                                 .flatMap(받치는것 -> {
                                     // 지정 상위가 이 조직인 하위 조직의 줄은 지정 연결이 받친다 — 지우지 않고 그림에도 싣지 않는다(설계 2026-11-04 §5.3).
-                                    // 그러면 재조정이 그 줄을 "있던 줄이 아님" 으로 읽어 멤버 행을 지운다. 그림에 실으면 이미 있는 줄을 다시 쓴다
+                                    // 그림에 싣지 않으니 재조정이 그 줄을 "있던 줄이 아님" 으로 읽어 멤버 행을 지운다(줄은 남는다). 그림에 실으면 Check 기준선
+                                    // (actual)이 그 줄을 담고, reconcileGroupMembers 의 existedBefore && !deleted 가 그 멤버 행을 되살린다 — IdP 가 같은 빼기를
+                                    // 끝없이 되풀이하게 된다. 그래서 그림에는 싣지 않고 확인없이_지울것 에서만 뺀다
                                     Set<RelationTuple> 확인없이_지울것 = 빠질것.stream()
                                             .filter(member -> !받치는것.contains(member))
                                             .map(member -> tupleFor(member, groupId))

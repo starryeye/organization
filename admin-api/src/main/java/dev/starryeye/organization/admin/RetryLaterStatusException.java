@@ -1,5 +1,6 @@
 package dev.starryeye.organization.admin;
 
+import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -26,6 +27,17 @@ public class RetryLaterStatusException extends ResponseStatusException {
     public RetryLaterStatusException(String reason, Duration retryAfter, Throwable cause) {
         super(HttpStatus.SERVICE_UNAVAILABLE, reason, cause);
         this.재시도_초 = AdminExceptionHandler.재시도_초(retryAfter);
+    }
+
+    /**
+     * 원인 사슬에 {@link LockUnavailableException} 이 있으면 그것을 503 + 그 예외의 {@code Retry-After} 로 바꾼 예외, 없으면 {@code error} 그대로다.
+     * 쓰기 요청의 컨트롤러가 {@code onErrorMap} 에 건다 — 락 경합을 직접 던진 경우뿐 아니라 다른 예외가 원인으로 품은 경우도 처리기가 사슬에서 찾아 409 로
+     * 내면 순환과 섞이기 때문이다. 사슬은 처리기와 같은 탐색으로 따라간다(같은 예외를 두 번 보지 않는다). 바뀐 예외는 원래 예외를 원인으로 든다.
+     */
+    public static Throwable 락_경합이면_바꾼다(Throwable error) {
+        return AdminExceptionHandler.원인에서_찾는다(error, LockUnavailableException.class)
+                .<Throwable>map(락 -> new RetryLaterStatusException(락.getMessage(), 락.retryAfter(), error))
+                .orElse(error);
     }
 
     @Override

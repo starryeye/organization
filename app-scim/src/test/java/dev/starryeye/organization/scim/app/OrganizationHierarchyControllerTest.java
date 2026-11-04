@@ -182,6 +182,21 @@ class OrganizationHierarchyControllerTest {
     }
 
     @Test
+    @DisplayName("락 경합을 원인으로 품은 예외도 503 이고 Retry-After 는 안쪽 예외의 값이다 — 처리기가 사슬에서 찾아 409 로 내지 않는다")
+    void 락_경합을_품은_예외도_503_과_Retry_After() {
+        // given — 저장소 계층이 락 경합을 다른 예외로 감싸 던진 꼴. 안쪽 예외의 대기는 2.3초(3초로 올림)이고 바깥 예외는 대기를 모른다
+        LockUnavailableException 못_잡았다 = new LockUnavailableException("다른 작업이 변경 락을 쥐고 있습니다", Duration.ofMillis(2300));
+        when(useCase.assignParent(대상, 상위)).thenReturn(Mono.error(new RuntimeException("x", 못_잡았다)));
+
+        // when
+        var 응답 = 지정한다(지정_본문);
+
+        // then — 409 는 순환이 쓴다. detail 은 안쪽 락 경합의 사유다
+        문제_응답이다(응답, HttpStatus.SERVICE_UNAVAILABLE, 못_잡았다.getMessage());
+        응답.expectHeader().valueEquals("Retry-After", "3");
+    }
+
+    @Test
     @DisplayName("재적재가 락을 쥐고 있으면 Retry-After 는 쥔 쪽의 긴 작업 대기(60)다")
     void 재적재가_쥐고_있으면_Retry_After_60() {
         // given

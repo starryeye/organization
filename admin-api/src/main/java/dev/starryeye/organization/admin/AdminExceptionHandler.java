@@ -89,8 +89,11 @@ public class AdminExceptionHandler {
         return 응답.body(ProblemDetail.forStatusAndDetail(상태, detail));
     }
 
-    /** 원인 사슬에서 이 종류의 첫 예외 — 같은 예외를 두 번 보지 않는다(원인이 자기 자신을 가리키는 순환도 끝낸다) */
-    private static <T extends Throwable> Optional<T> 원인에서_찾는다(Throwable error, Class<T> 종류) {
+    /**
+     * 원인 사슬에서 이 종류의 첫 예외 — 같은 예외를 두 번 보지 않는다(원인이 자기 자신을 가리키는 순환도 끝낸다).
+     * {@link RetryLaterStatusException#락_경합이면_바꾼다} 도 같은 탐색을 쓴다.
+     */
+    static <T extends Throwable> Optional<T> 원인에서_찾는다(Throwable error, Class<T> 종류) {
         Set<Throwable> 본것 = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Throwable 원인 = error; 원인 != null && 본것.add(원인); 원인 = 원인.getCause()) {
             if (종류.isInstance(원인)) {
