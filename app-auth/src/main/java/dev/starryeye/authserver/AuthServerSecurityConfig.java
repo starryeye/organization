@@ -14,6 +14,7 @@ import org.springframework.security.oauth2.server.authorization.OAuth2Authorizat
 import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
 import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.util.matcher.AnyRequestMatcher;
 
 import java.util.List;
 import java.util.Map;
@@ -69,6 +70,11 @@ class AuthServerSecurityConfig {
                         .authorizationServerMetadataEndpoint(metadata -> metadata
                                 .authorizationServerMetadataCustomizer(알림 -> 알림.claims(AuthServerSecurityConfig::쓸_수_있는_것만))))
                 .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
+                // 나머지 체인과 같은 까닭으로 CSRF 를 끈다. 다만 disable 은 남지 않는다 — Spring Authorization Server 의 구성기가 빌드 때 csrf(…)
+                // 를 다시 불러 CSRF 필터를 되살리고 자기 끝점(키 목록·메타데이터 GET, 토큰 POST)만 뺀다. 그러면 그 끝점에 다른 메서드로 온 익명
+                // 요청(POST /oauth2/jwks 등)이 CSRF 검사에 걸려, 403 을 내기 전에 CSRF 토큰을 세션에 저장하려고 요청마다 세션을 만든다.
+                // 그래서 모든 요청을 CSRF 검사에서 뺀다 — 검사하지 않는 요청은 토큰을 만들지도, 세션에 저장하지도 않는다
+                .csrf(csrf -> csrf.ignoringRequestMatchers(AnyRequestMatcher.INSTANCE))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
         return http.build();
     }

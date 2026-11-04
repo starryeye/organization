@@ -34,6 +34,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -251,11 +252,31 @@ class TokenEndpointTest {
         var 거절한_POST = rest.postForEntity("/anything", null, String.class);
         var 인증_없는_발급 = rest.postForEntity("/oauth2/token", null, String.class);
 
+        // when — 인가 서버 체인의 끝점에 그 끝점이 받지 않는 메서드로 온 익명 요청. 인가 서버가 받는 것은 키 목록·메타데이터 GET 과 토큰 POST
+        // 뿐이라 POST·PUT·DELETE 는 CSRF 검사에 걸렸고, 그 검사가 CSRF 토큰을 세션에 저장하려고 요청마다 세션(30분)을 만들었다 — 익명으로 메모리를
+        // 채울 수 있었다. GET /oauth2/token 은 CSRF 를 검사하지 않는 메서드라 처음부터 세션 없이 401 이었다 — 나머지도 이제 그와 같다
+        var 다른_메서드 = new LinkedHashMap<String, ResponseEntity<String>>();
+        for (var 요청 : List.of(
+                Map.entry(HttpMethod.POST, "/oauth2/jwks"),
+                Map.entry(HttpMethod.PUT, "/oauth2/jwks"),
+                Map.entry(HttpMethod.DELETE, "/oauth2/jwks"),
+                Map.entry(HttpMethod.POST, "/.well-known/oauth-authorization-server"),
+                Map.entry(HttpMethod.GET, "/oauth2/token"),
+                Map.entry(HttpMethod.PUT, "/oauth2/token"),
+                Map.entry(HttpMethod.DELETE, "/oauth2/token"))) {
+            다른_메서드.put(요청.getKey() + " " + 요청.getValue(), rest.exchange(요청.getValue(), 요청.getKey(), null, String.class));
+        }
+
         // then
         assertThat(발급.getHeaders().get(HttpHeaders.SET_COOKIE)).as("발급").isNull();
         assertThat(거절.getHeaders().get(HttpHeaders.SET_COOKIE)).as("거절").isNull();
         assertThat(거절한_POST.getHeaders().get(HttpHeaders.SET_COOKIE)).as("거절한 POST").isNull();
         assertThat(인증_없는_발급.getHeaders().get(HttpHeaders.SET_COOKIE)).as("인증 없는 발급").isNull();
+        // 인증이 필요한 체인의 익명 요청이라 401 이다(인가 서버가 이 체인에 둔 진입점). CSRF 에 걸리던 때는 403 이었다
+        다른_메서드.forEach((이름, 응답) -> {
+            assertThat(응답.getHeaders().get(HttpHeaders.SET_COOKIE)).as(이름).isNull();
+            assertThat(응답.getStatusCode()).as(이름).isEqualTo(HttpStatus.UNAUTHORIZED);
+        });
     }
 
     @Test
