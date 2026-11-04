@@ -1,6 +1,6 @@
 # SCIM
 
-> 기준 커밋: da1ff7c (auth, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 8b492c6 (auth, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)(식별자·표지판·책갈피·키 한도)
 
 app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 받아 [장부](02-용어집.md#장부)와 [현재상태](02-용어집.md#현재상태)에 반영한다. 이 문서는 그 모든 동작을 다룬다. 엔드포인트와 인증, 리소스 모양, 조회와 필터, PATCH 해석, 쓰기 한 건의 흐름, 오류 응답, 예시, IdP 별 메모 순이다.
@@ -920,7 +920,7 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 2. 어댑터 인식기. `DynamoDbTemporaryFailures`: `SdkClientException`, 스로틀링, 5xx, SDK 가 재시도 가능하다고 표시한 것. `OpenFgaTemporaryFailures`: `FgaError.isRetryable()`(429, 501 을 뺀 5xx).
 3. `IOException`(Jackson 의 `JacksonException` 은 뺀다 — 다시 보내도 같다)이나 `TimeoutException` — 10초.
 
-어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·OpenFGA 가 키를 거절한 것(401·403 — [사전 공유 키](02-용어집.md#사전-공유-키)가 틀렸거나 없다)·store 없음(`StoreNotFoundException` — 생성이 꺼진 배포에서 이름의 store 가 없다)·응답 해석 실패는 다시 보내도 같다. 그래서 500 이다.
+어디에도 없으면 일시 장애가 아니다. 조건 실패·검증 오류·OpenFGA 가 요청 내용을 거절한 것(400)·OpenFGA 가 키를 거절한 것(401·403 — [사전 공유 키](02-용어집.md#사전-공유-키)가 틀렸거나 없다)·store 없음(`StoreNotFoundException` — 생성이 꺼진 배포에서 이름의 store 가 없다)·응답 해석 실패는 다시 보내도 같다. 그래서 500 이다. 다만 OpenFGA 쓰기 배치의 실패는 예외가 아니라 결과의 실패로 담긴다 — 키 거절도 그렇다. 그래서 Check 를 먼저 부르지 않는 연산(조직 삭제, 멤버만 빼는 PATCH)에서 OpenFGA 가 키를 거절하면 500 이 아니라 부분 실패 503 일 수 있다([12 — 7.6](12-장애와-복구.md#76-openfga-가-키를-거절한다401403)).
 
 503 의 `detail` 은 우리가 쓴 문구뿐이다. 예외 메시지에는 OpenFGA 서버 메시지, 라이브러리 예외 문자열, 락을 쥔 쪽의 용도가 들어 있다 — 응답으로 내보내지 않는다. 원인은 서버 로그(WARN "SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After N초")에만 남는다. 부분 실패의 503 만 우리가 만든 `ScimException` 이라 문구에 id 가 있다.
 
