@@ -40,6 +40,9 @@ public final class AuditChanges {
             "name.formatted", "name.familyName", "name.givenName", "name.middleName",
             "name.honorificPrefix", "name.honorificSuffix");
 
+    /** 조직의 지정 상위 속성 이름(설계 2026-11-04 §6) — {@link #속성_순서} 의 속성들 뒤에 붙는다. */
+    private static final String 지정_상위 = "assignedParent";
+
     private static final Comparator<MemberRef> 멤버순 =
             Comparator.comparing(MemberRef::type).thenComparing(MemberRef::id);
     private static final Comparator<RelationTuple> 튜플순 = Comparator.comparing(RelationTuple::user)
@@ -70,6 +73,15 @@ public final class AuditChanges {
             대상(MemberRef.group(id)).상태를_본다(속성(before), before == null, 속성(after), after == null);
         }
         멤버를_적는다(id, added, removed);
+        return this;
+    }
+
+    /**
+     * 조직 하나의 지정 상위 이전·이후(설계 2026-11-04 §6). null 은 지정이 없음이다. 속성 {@code assignedParent} 로 적고, 다른 속성 뒤에 온다. 여러 번 오면
+     * 처음의 이전과 마지막의 이후를 비교한다 — 이름표와 따로 본다.
+     */
+    public synchronized AuditChanges assignedParent(String orgCode, String before, String after) {
+        대상(MemberRef.group(orgCode)).지정을_본다(before, after);
         return this;
     }
 
@@ -181,6 +193,9 @@ public final class AuditChanges {
         private Map<String, String> 이후 = Map.of();
         private boolean 이전_없음;
         private boolean 이후_없음;
+        private boolean 지정을_봤다;
+        private String 지정_이전;
+        private String 지정_이후;
         private final Set<String> joined = new TreeSet<>();
         private final Set<String> left = new TreeSet<>();
         private final Set<MemberRef> membersAdded = new TreeSet<>(멤버순);
@@ -199,6 +214,14 @@ public final class AuditChanges {
             이후_없음 = afterMissing;
         }
 
+        void 지정을_본다(String before, String after) {
+            if (!지정을_봤다) {
+                지정_이전 = before;
+                지정을_봤다 = true;
+            }
+            지정_이후 = after;
+        }
+
         AuditEntry 줄(MemberRef subject) {
             boolean created = 상태를_봤다 && 이전_없음 && !이후_없음;
             boolean deleted = 상태를_봤다 && !이전_없음 && 이후_없음;
@@ -209,6 +232,9 @@ public final class AuditChanges {
                 if (!Objects.equals(before, after)) {
                     attributes.add(new AttributeChange(name, before, after));
                 }
+            }
+            if (지정을_봤다 && !Objects.equals(지정_이전, 지정_이후)) {
+                attributes.add(new AttributeChange(지정_상위, 지정_이전, 지정_이후));
             }
             return new AuditEntry(subject, created, deleted, attributes,
                     List.copyOf(joined), List.copyOf(left),

@@ -31,6 +31,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Signal;
 import reactor.core.publisher.Sinks;
+import reactor.util.context.ContextView;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -46,11 +47,13 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * SCIM 이 보낸 단건 변경을 튜플에 반영한다.
@@ -111,6 +114,8 @@ import java.util.stream.Collectors;
  * 지우기뿐이라 안전하다. 비활성 직원처럼 줄이 없어야 할 멤버의 줄도 함께 넣고 "없으면 무시"로 지우므로 활성 여부·존재 같은 규칙을
  * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다. 조직 삭제는 그 조직이 끼인 지정 연결의
  * {@code child} 줄도 넣고, PATCH·PUT 은 지정 연결이 받치는 하위 조직의 줄을 뺀다(설계 2026-11-04 §5.3·§5.6).
+ *
+ * <p>관리 API 의 지정 상위 두기·없애기({@link #assignParent}·{@link #clearParent})도 같은 락·Check 기준선·diff·이력으로 반영한다(설계 2026-11-04 H7).
  *
  * <p>이 유스케이스는 회차 기록({@code SyncRun})을 남기지 않는다. SCIM 은 요청 단위라 요청마다 회차를 열면 동기화 이력이 폭증한다. 변경 이력은
  * 요청마다 남긴다 — 요청의 traceId 를 원인으로, 락을 반납한 뒤·응답 전에 쓴다({@link #withLock}, 설계 2026-10-10 §4.2·§4.4).
@@ -314,7 +319,8 @@ public class IncrementalSyncUseCase {
             Mono<DirectorySnapshot> 그림 = 직원한명_그림(headers, 저장본.id(), Mono.just(저장본));
             // 상태는 바꾸지 않는다 — 커밋할 것이 없다
             Commit 커밋하지_않는다 = (result, beforeTuples, afterTuples) -> Mono.empty();
-            return diffAndApply(그림, 그림, RelationTuple.userRef(저장본.id()), Set.of(), lease, 기록, 커밋하지_않는다, true);
+            return diffAndApply(그림, 그림, RelationTuple.userRef(저장본.id()), Set.of(), lease, 기록, 커밋하지_않는다, true, 거름 -> {
+            });
         });
     }
 
@@ -739,6 +745,7 @@ public class IncrementalSyncUseCase {
     /**
      * 다 지웠으면 조직을 지운다 — 지정 아이템도 {@code deleteGroup} 이 양방향으로 정리한다. 일부를 못 지웠으면 조직(META)을 남기고 지운 줄의 멤버 행·상위 조직 줄·
      * 지정 아이템만 뺀다 — 못 지운 지정 아이템을 남겨야 IdP 의 재시도가 그것을 다시 읽어 남은 줄을 지운다(설계 2026-11-04 §5.6).
+     * 지운 지정 연결은 그 하위 조직의 이력에 지정 상위 → 없음으로 남긴다(§6) — 이 조직을 상위로 지정했던 하위 조직들과, 이 조직 자신의 지정 상위다.
      */
     private Mono<Void> 조직_삭제를_커밋한다(DirectoryGroup group, Set<String> parentIds, Set<GroupEdge> 지정,
                                     TupleWriteResult result, AuditChanges 기록) {
@@ -749,6 +756,7 @@ public class IncrementalSyncUseCase {
                     .then(남긴다(() -> {
                         기록.group(header, null, Set.of(), group.members());
                         parentIds.forEach(parent -> 기록.membership(parent, Set.of(), Set.of(이조직)));
+                        지정.forEach(edge -> 기록.assignedParent(edge.child(), edge.parent(), null));
                     }))
                     .then(센다(RevocationObserver.Kind.DELETE_GROUP, 직원_수(group.members())));
         }
@@ -763,7 +771,8 @@ public class IncrementalSyncUseCase {
                 .then();
         Mono<Void> 지정을_뺀다 = Flux.fromIterable(지정)
                 .filter(edge -> result.deleted().contains(edge.tuple()))
-                .flatMap(edge -> state.deleteAssignedParent(edge.child(), edge.parent()), LOAD_CONCURRENCY)
+                .flatMap(edge -> state.deleteAssignedParent(edge.child(), edge.parent())
+                        .then(남긴다(() -> 기록.assignedParent(edge.child(), edge.parent(), null))), LOAD_CONCURRENCY)
                 .then();
         return 상위에서_뺀다.then(지정을_뺀다)
                 .then(Mono.defer(() -> state.saveGroupChange(header, header, Set.of(), 지운멤버)))
@@ -772,7 +781,107 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 하위 조직 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1). 순환은 연결을 지울 때만 풀린다. 튜플이 이미 OpenFGA 에 있는 줄과
+     * 관리 API 의 지정 — 조직 {@code orgCode} 의 지정 상위를 {@code parentOrgCode} 로 둔다(설계 2026-11-04 H1·H4, §3.1). 이전 지정이 있으면 바꾸기다 — 옛
+     * 연결 지우기와 새 연결 쓰기가 한 요청이다. 대상 조직이 없으면 빈 {@code Mono} 다. 존재 확인·순환 판정·쓰기가 모두 락 안이다.
+     *
+     * <p>SCIM 쓰기와 같은 길이다(H7) — 같은 락, Check 기준선, diff, 이력. 이력의 원인은 {@link AuditCause#hierarchyRequest} 이고, 하위 조직의 줄에 지정 상위
+     * 이전 → 이후를 남긴다. 같은 상위로 다시 지정하면 지정은 그대로이고 줄이 OpenFGA 에 없을 때만 쓴다 — 바뀐 것이 없으면 이력도 없다.
+     *
+     * <p>상위 조직이 없거나 지정이 순환을 닫으면 {@link HierarchyRejectedException} 이고 아무것도 바꾸지 않는다(H5). 순환은 지금의 판정({@link OrgGraph#거른다})이
+     * 그 줄을 남길 것에서 뺐는가로 본다 — 상위가 이 조직의 하위인 경우와 같은 상위의 지정이 보류 중인 경우가 모두 여기 걸린다(보류 중인 줄은 판정이 새로 보류하지
+     * 않아 {@code 새로_보류} 로는 알 수 없다). 걷기 예산을 넘으면 {@link GroupGraphTooLargeException} 이다.
+     *
+     * <p>줄 반영이 하나라도 실패하면 지정을 저장하지 않는다 — 다시 보내면 Check 기준선이 남은 것만 반영한다. 옛 지정을 바꿨으면 끝에서 보류 목록을 다시 본다(§5.5).
+     */
+    public Mono<IncrementalSyncResult> assignParent(String orgCode, String parentOrgCode) {
+        return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode).flatMap(하위 -> {
+            if (orgCode.equals(parentOrgCode)) {
+                return Mono.error(new HierarchyRejectedException(HierarchyRejectedException.Reason.CYCLE, orgCode, parentOrgCode));
+            }
+            return state.findGroupHeader(parentOrgCode)
+                    .switchIfEmpty(Mono.error(() -> new HierarchyRejectedException(
+                            HierarchyRejectedException.Reason.PARENT_NOT_FOUND, orgCode, parentOrgCode)))
+                    .flatMap(상위 -> 지금_지정(orgCode).map(Optional::of).defaultIfEmpty(Optional.empty())
+                            .flatMap(이전 -> 지정을_바꾼다(하위, 이전.orElse(null), 상위, lease, 기록)));
+        }));
+    }
+
+    /**
+     * 관리 API 의 지정 없애기(설계 2026-11-04 H1, §3.1). 지정이 없으면 아무것도 하지 않는다. 대상 조직이 없으면 빈 {@code Mono} 다. IdP 가 보낸 멤버 행이
+     * 같은 쌍을 받치면 줄은 남기고 지정만 지운다(§5.3). 끝에서 보류 목록을 다시 본다 — 지정이 막던 IdP 연결이 돌아올 수 있다(§5.5). 그 밖은 {@link #assignParent} 와 같다.
+     */
+    public Mono<IncrementalSyncResult> clearParent(String orgCode) {
+        return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode)
+                .flatMap(하위 -> 지금_지정(orgCode)
+                        .flatMap(이전 -> 지정을_바꾼다(하위, 이전, null, lease, 기록))
+                        .defaultIfEmpty(IncrementalSyncResult.noChange())));
+    }
+
+    private AuditCause 지정_요청(ContextView context) {
+        return AuditCause.hierarchyRequest(traceIds.traceIdOf(context), Actor.from(context));
+    }
+
+    /** 지금 지정 상위의 이름표 — 지정이 없거나 가리키는 조직이 없으면 빈 {@code Mono} 다(없는 것으로 친다). */
+    private Mono<GroupHeader> 지금_지정(String orgCode) {
+        return state.findAssignedParent(orgCode).flatMap(state::findGroupHeader);
+    }
+
+    /**
+     * 지정 상위를 {@code 이전} 에서 {@code 이후} 로 바꾼다 — null 은 지정 없음이다. 전 그림은 옛 지정을, 후 그림은 새 지정을 싣고 diff 가 바뀐 줄만 쓰고 지운다.
+     * 새 지정이 있으면 순환 판정이 그 줄을 남겼는지 쓰기 전에 본다. 커밋은 줄을 다 반영했고 지정이 바뀔 때만 저장하고 이력에 더한다.
+     */
+    private Mono<IncrementalSyncResult> 지정을_바꾼다(GroupHeader 하위, GroupHeader 이전, GroupHeader 이후,
+                                                LockLease lease, AuditChanges 기록) {
+        String 하위_id = 하위.id();
+        String 이전_id = 이전 == null ? null : 이전.id();
+        String 이후_id = 이후 == null ? null : 이후.id();
+        boolean 바뀐다 = !Objects.equals(이전_id, 이후_id);
+        Commit commit = (result, beforeTuples, afterTuples) -> {
+            if (result.hasFailure() || !바뀐다) {
+                return Mono.empty();
+            }
+            Mono<Void> 저장 = 이후_id == null
+                    ? state.deleteAssignedParent(하위_id, 이전_id)
+                    : state.saveAssignedParent(하위_id, 이후_id, 이전_id);
+            return 저장.then(남긴다(() -> 기록.assignedParent(하위_id, 이전_id, 이후_id)));
+        };
+        Consumer<OrgGraph.거른결과> 순환이면_거절한다 = 거름 -> {
+            if (이후_id != null && !거름.남길것().contains(RelationTuple.child(하위_id, 이후_id))) {
+                throw new HierarchyRejectedException(HierarchyRejectedException.Reason.CYCLE, 하위_id, 이후_id);
+            }
+        };
+        return 지정_그림(하위, Stream.of(이전, 이후).filter(Objects::nonNull).distinct().toList())
+                .flatMap(그림 -> diffAndApply(Mono.just(그림.withAssignedEdges(연결(이전_id, 하위_id))),
+                        Mono.just(그림.withAssignedEdges(연결(이후_id, 하위_id))),
+                        RelationTuple.groupRef(하위_id), Set.of(), lease, 기록, commit, false, 순환이면_거절한다))
+                .flatMap(result -> 이전_id != null && 바뀐다
+                        ? 보류를_다시_본다(lease, 기록).thenReturn(result)
+                        : Mono.just(result));
+    }
+
+    /**
+     * 지정 요청의 그림(설계 2026-11-04 §5.3) — 하위 조직(멤버 없이)과 옛·새 상위. 상위의 멤버로는 하위 조직의 멤버 행이 있으면 그것 하나만 싣는다 — IdP 가 같은
+     * 쌍을 받치면 전·후 그림 모두에 그 줄이 있어 diff 가 지우지 않는다. 다른 멤버는 초점({@link #mentioning}) 밖이라 싣지 않는다. 지정 연결은 부르는 쪽이 붙인다.
+     */
+    private Mono<DirectorySnapshot> 지정_그림(GroupHeader 하위, List<GroupHeader> 상위들) {
+        Set<MemberRef> 하위만 = Set.of(MemberRef.group(하위.id()));
+        return Flux.fromIterable(상위들)
+                .concatMap(상위 -> state.findMembers(상위.id(), 하위만)
+                        .map(멤버 -> new DirectoryGroup(상위.id(), 상위.externalId(), 상위.displayName(), 멤버)))
+                .collect(Collectors.toCollection(LinkedHashSet<DirectoryGroup>::new))
+                .flatMap(조직들 -> {
+                    조직들.add(new DirectoryGroup(하위.id(), 하위.externalId(), 하위.displayName(), Set.of()));
+                    return snapshotOfGroups(조직들);
+                });
+    }
+
+    /** 지정 연결 하나 — 상위가 null 이면 없다. */
+    private static Set<GroupEdge> 연결(String parent, String child) {
+        return parent == null ? Set.of() : Set.of(new GroupEdge(parent, child));
+    }
+
+    /**
+     * 하위 조직 연결이나 지정 연결을 지운 요청 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5, 점검 M1, 2026-11-04 §5.5). 순환은 연결을 지울 때만 풀린다. 튜플이 이미 OpenFGA 에 있는 줄과
      * 원천(멤버 줄도 지정 연결도, 설계 2026-11-04 H6)이 없는 보류 줄은 지우고, 이제 순환이 아닌 연결은 리스를 확인한 뒤 튜플을 쓰고 목록에서 뺀다. 보류 목록은 보통 비어 있어 읽기 1번으로 끝난다.
      *
      * <p><b>원래 요청을 실패시키지 않는다.</b> 원래 연산은 이미 커밋됐다. 여기서 난 오류(OpenFGA·DynamoDB·리스 확인)는 경고만 남기고 목록을 그대로 둔다 — 다음 지우기
@@ -884,9 +993,9 @@ public class IncrementalSyncUseCase {
      * 변경 하나를 락 안에서 실행한다 (설계 §4, 2026-10-02 §3).
      *
      * <p><b>왜 유스케이스가 잡나.</b> 핸들러마다 넣으면 나중에 경로가 하나 늘 때 조용히 빠지고,
-     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 여덟 경로({@link #upsertUser}·
+     * 그 빠진 곳이 하필 다른 인스턴스와 경합한다. 여기 두면 SCIM 의 여덟 경로({@link #upsertUser}·
      * {@link #createUser}·{@link #changeUser}·{@link #removeUser}·{@link #upsertGroup}·
-     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})가 빠짐없이 덮인다.
+     * {@link #createGroup}·{@link #changeGroup}·{@link #removeGroup})와 관리 API 의 지정({@link #assignParent}·{@link #clearParent})이 빠짐없이 덮인다.
      *
      * <p><b>요청과 떼어 돈다(점검 S3).</b> 락 잡기부터 반납까지를 요청의 구독과 따로 돌린다. IdP 가 연결을 끊어도 커밋까지 마치고
      * 반납한다 — 끊기는 순간 반납하면 이미 보낸 OpenFGA 쓰기가 다음 요청의 Check 뒤에 떨어져 그 요청의 기준선이 틀린다. 락을 잡는 도중에
@@ -909,9 +1018,15 @@ public class IncrementalSyncUseCase {
      * 시각이 되어 최신순이 뒤집힌다.
      */
     private Mono<IncrementalSyncResult> withLock(BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
+        return withLock(context -> AuditCause.scimRequest(traceIds.traceIdOf(context), Actor.from(context)), work);
+    }
+
+    /** 이력의 원인을 요청 Context 로 만드는 쪽을 받는다 — SCIM 쓰기는 {@code scimRequest}, 관리 API 의 지정은 {@code hierarchyRequest} 다(설계 2026-11-04 H7). */
+    private Mono<IncrementalSyncResult> withLock(Function<ContextView, AuditCause> 원인을_만든다,
+                                                 BiFunction<LockLease, AuditChanges, Mono<IncrementalSyncResult>> work) {
         return Mono.deferContextual(context -> {
             // 행위자도 traceId 처럼 요청 Context 에서 지금 읽어 원인에 담는다 — 요청이 떠난 뒤에 남기는 이력도 이 값을 쓴다(설계 2026-10-28 인증 §5.2)
-            AuditCause 원인 = AuditCause.scimRequest(traceIds.traceIdOf(context), Actor.from(context));
+            AuditCause 원인 = 원인을_만든다.apply(context);
             AuditChanges 기록 = new AuditChanges();
             // 락 안의 일이 끝난 때 — 값·오류·취소(리스 상실) 무엇이든 반납 전이다. 이력의 시각이다(설계 2026-10-15 §6)
             AtomicReference<Instant> 끝난_시각 = new AtomicReference<>();
@@ -1061,7 +1176,8 @@ public class IncrementalSyncUseCase {
                                                       LockLease lease,
                                                       AuditChanges 기록,
                                                       Commit commit) {
-        return diffAndApply(beforeMono, afterMono, focus, 확인없이_지울것, lease, 기록, commit, false);
+        return diffAndApply(beforeMono, afterMono, focus, 확인없이_지울것, lease, 기록, commit, false, 거름 -> {
+        });
     }
 
     /**
@@ -1097,6 +1213,8 @@ public class IncrementalSyncUseCase {
      * @param 기록 이 요청의 변경 모음 — 반영한 튜플을 더한다
      * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표는 그대로다. 어긋남은 로그에만 남기고
      *                 {@link DriftObserver} 는 부르지 않는다(아카이빙 게이지가 같은 줄을 센다).
+     * @param 쓰기전_확인 순환 판정({@link OrgGraph#거른다}) 직후·반영 전에 그 결과로 부른다. 던지면 OpenFGA·상태·보류 목록 어디에도 쓰지 않고 그 오류로
+     *                 끝난다 — 관리 API 의 지정이 순환을 거절한다({@link #assignParent}).
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
@@ -1105,7 +1223,8 @@ public class IncrementalSyncUseCase {
                                                       LockLease lease,
                                                       AuditChanges 기록,
                                                       Commit commit,
-                                                      boolean 지우기만) {
+                                                      boolean 지우기만,
+                                                      Consumer<OrgGraph.거른결과> 쓰기전_확인) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
             DirectorySnapshot afterSnapshot = both.getT2();
@@ -1139,6 +1258,7 @@ public class IncrementalSyncUseCase {
                 }
 
                 return 그래프.거른다(actual, 원하는것, focus).flatMap(거름 -> {
+                    쓰기전_확인.accept(거름);
                     Set<RelationTuple> after = 거름.남길것();
                     TupleDelta 전체 = TupleDiff.between(actual, after);
                     TupleDelta 계산 = 지우기만 ? TupleDelta.deleteOnly(전체.toDelete()) : 전체;

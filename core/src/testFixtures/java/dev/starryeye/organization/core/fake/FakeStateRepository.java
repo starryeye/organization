@@ -16,6 +16,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -73,6 +74,9 @@ public class FakeStateRepository implements DirectoryStateRepository {
      * 하위이거나 상위인 줄을 지우고, {@link #replaceWith} 는 끝에서 조직이 없는 쪽이 낀 줄을 지운다(wipe).
      */
     public final Map<String, String> assignedParents = new LinkedHashMap<>();
+
+    /** {@link #saveAssignedParent} 가 받은 {@code [orgCode, parentOrgCode, previousParentOrgCode]}(이전이 없으면 null) — 넘긴 이전 값을 단언한다. */
+    public final List<List<String>> saveAssignedParentCalls = new ArrayList<>();
 
     /**
      * 유일 값 표지판(설계 2026-10-14 §3) — 차지·넘겨받기로 적은 것. 직원·조직 지도에 바로 심은 것은 여기 적지 않아도 지금 값의 표지판을
@@ -251,7 +255,10 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> saveAssignedParent(String orgCode, String parentOrgCode, String previousParentOrgCode) {
-        return Mono.fromRunnable(() -> assignedParents.put(orgCode, parentOrgCode));
+        return Mono.fromRunnable(() -> {
+            saveAssignedParentCalls.add(Arrays.asList(orgCode, parentOrgCode, previousParentOrgCode));
+            assignedParents.put(orgCode, parentOrgCode);
+        });
     }
 
     /** 정본이 {@code parentOrgCode} 를 가리킬 때만 지운다 — 실제 저장소의 조건부 삭제와 같다. */

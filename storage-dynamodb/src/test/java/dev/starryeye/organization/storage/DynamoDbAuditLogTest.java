@@ -132,6 +132,25 @@ class DynamoDbAuditLogTest extends DynamoDbTestSupport {
     }
 
     @Test
+    @DisplayName("관리 API 의 지정 요청 원인과 지정 상위 속성을 그대로 돌려준다 — 종류는 이름으로 저장한다")
+    void 지정_요청을_그대로_돌려준다() {
+        // given
+        AuditCause 지정_요청 = AuditCause.hierarchyRequest("trace-3", "client:org-chart");
+        쓴다(auditLog, T1, 지정_요청, new AuditEntry(개발, false, false,
+                List.of(new AttributeChange("assignedParent", null, "HQ")), null, null, null, null, null, null));
+
+        // when
+        Page<AuditRecord> page = 읽는다(auditLog, 개발, null, 20);
+
+        // then
+        assertThat(page.items()).singleElement().satisfies(record -> {
+            assertThat(record.cause()).isEqualTo(지정_요청);
+            assertThat(record.cause().kind()).isEqualTo(AuditKind.HIERARCHY_REQUEST);
+            assertThat(record.entry().attributes()).containsExactly(new AttributeChange("assignedParent", null, "HQ"));
+        });
+    }
+
+    @Test
     @DisplayName("대상마다 파티션이 따로다 — 같은 사건의 다른 대상 줄은 섞이지 않고, 기록이 없으면 빈 쪽이다")
     void 대상마다_따로다() {
         // given
