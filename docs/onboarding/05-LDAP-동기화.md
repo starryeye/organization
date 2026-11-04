@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: da1ff7c (auth, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -64,23 +64,25 @@ flowchart TD
 
 ## 2. 회차를 거는 것
 
-| [트리거](02-용어집.md#트리거) | 무엇이 거나 | 삭제 가드 | 락을 못 잡으면 |
-|---|---|---|---|
-| `SCHEDULED` | `sync.cron`(기본 `0 0 * * * *`, 매시 정각. 기본값은 `SyncProperties` 에만 있고 `@Scheduled(cron = "#{@syncProperties.cron}")` 가 속성 빈을 읽는다 — yml 에 키가 없어도 뜬다) → `SyncScheduler.전체동기화` | 본다 | 기록 없이 건너뛴다. 로그 "다른 인스턴스가 동기화·재적재 중이라 이번 스케줄을 건너뛴다" |
-| `MANUAL` | `POST /admin/sync/full` → `AdminSyncController.full` | 본다 | 409, 사유 "다른 동기화·재적재가 진행 중입니다"(아래 각주) |
-| `FORCED` | `POST /admin/sync/full?force=true` | **건너뛴다** — 비교 경로와 장부 맞추기 모두 | 409 |
+| [트리거](02-용어집.md#트리거) | 무엇이 거나 | 삭제 가드 | 락을 못 잡으면 | 실행 기록의 `requestedBy` |
+|---|---|---|---|---|
+| `SCHEDULED` | `sync.cron`(기본 `0 0 * * * *`, 매시 정각. 기본값은 `SyncProperties` 에만 있고 `@Scheduled(cron = "#{@syncProperties.cron}")` 가 속성 빈을 읽는다 — yml 에 키가 없어도 뜬다) → `SyncScheduler.전체동기화` | 본다 | 기록 없이 건너뛴다. 로그 "다른 인스턴스가 동기화·재적재 중이라 이번 스케줄을 건너뛴다" | `system:scheduler` |
+| `MANUAL` | `POST /admin/sync/full` → `AdminSyncController.full`. 토큰에 `admin.sync` 범위 | 본다 | 409, 사유 "다른 동기화·재적재가 진행 중입니다"(아래 각주) | `client:<sub>` |
+| `FORCED` | `POST /admin/sync/full?force=true`. `admin.sync` 와 `admin.destructive` 범위 — 없으면 회차를 열기 전에 403 | **건너뛴다** — 비교 경로와 장부 맞추기 모두 | 409 | `client:<sub>` |
 
-- 오류 응답은 RFC 9457 problem details 이고, 409 의 사유는 `detail` 칸에 실린다. 락을 잡거나 실행 기록을 여는 중의 일시 장애는 409 가 아니라 503 + `Retry-After` 다 — 회차는 시작하지 않았다([09 — 오류](09-관리-API.md#오류)).
+- 오류 응답은 RFC 9457 problem details 이고, 409 의 사유는 `detail` 칸에 실린다. 락을 잡거나 실행 기록을 여는 중의 일시 장애는 409 가 아니라 503 + `Retry-After` 다 — 회차는 시작하지 않았다([09 — 오류](09-관리-API.md#오류)). 토큰·범위의 401·403 은 [09 — 인증과 범위](09-관리-API.md#10-인증과-범위).
+- [행위자](02-용어집.md#행위자)(`requestedBy` 칸)는 그 회차의 감사 이력 원인 `actor` 에도 같은 값으로 남는다.
 - `sync.cron` 은 스프링 cron(초 칸이 있다)이다. `-` 를 주면 정기 동기화가 꺼진다.
 - 여러 대를 띄우면 정각에 모든 인스턴스의 스케줄러가 깨지만, 락을 잡은 한 대만 돈다. 나머지는 오류가 아니라 건너뜀이다.
 - 같은 락을 재적재(용도 `REBUILD`)도 쓴다. 재적재가 도는 동안 동기화는 걸리지 않는다. 락의 구조는 [08](08-동시성과-작업.md).
 - `force=true` 는 "사람이 보고 승인했다" 는 통로다. 삭제 가드만 건너뛴다. 그 밖의 검사(LDAP [데이터 오류](02-용어집.md#데이터-오류) — 사람 소속이 하나도 없는 그림 포함 —, 기준선 무결성 등)는 그대로다.
-- 스케줄러는 관측(`Observation`) `sync.ldap.full` 을 만들어 Reactor Context 에 싣는다. 회차의 로그가 traceId 하나로 묶인다(`SyncScheduler.관측하며실행`).
+- 스케줄러는 관측(`Observation`) `sync.ldap.full` 과 행위자 `system:scheduler` 를 Reactor Context 에 싣는다. 회차의 로그가 traceId 하나로 묶이고, 그 회차가 남기는 이력의 행위자가 정해진다(`SyncScheduler.관측하며실행`).
 
 수동으로 걸면 202 와 방금 연 기록을 받는다(`SyncRunResponse`). 결과는 `GET /admin/sync/runs/{runId}` 로 본다([09](09-관리-API.md)).
 
 ```
 POST /admin/sync/full
+Authorization: Bearer <admin.sync 범위의 토큰>
 → 202 Accepted
 {
   "runId": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
@@ -91,7 +93,8 @@ POST /admin/sync/full
   "status": "RUNNING",
   "writtenCount": 0, "deletedCount": 0, "failureCount": 0,
   "snapshotId": null,
-  "message": null
+  "message": null,
+  "requestedBy": "client:ops"
 }
 ```
 

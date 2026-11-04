@@ -1,49 +1,52 @@
 # 관리 API
 
-> 기준 커밋: 44147b3 (ops-readiness, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: da1ff7c (auth, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
 
-- **조회**(직원·조직·감사 이력)는 `admin-api` 모듈이 맡는다. `AdminQueryController`, `AuditHistoryController`(`dev.starryeye.organization.admin`)가 두 앱에 모두 들어간다. 읽기 전용이다.
+- **조회**(직원·조직·감사 이력·[정확 조회](02-용어집.md#정확-조회))는 `admin-api` 모듈이 맡는다. `AdminQueryController`, `AuditHistoryController`, `DirectoryLookupController`(`dev.starryeye.organization.admin`)가 두 앱에 모두 들어간다. 읽기 전용이다.
 - **작업 트리거와 실행 기록**(`/admin/sync/**`)은 앱마다 따로다. `AdminSyncController`(app-ldap 은 `dev.starryeye.organization.ldap.app`, app-scim 은 `dev.starryeye.organization.scim.app`)가 [재적재](02-용어집.md#재적재)·동기화를 걸고 [실행 기록](02-용어집.md#실행-기록)을 보여 준다.
 
-쓰는 사람은 둘이다. 운영자는 작업을 걸고 결과·직원·조직·감사 이력을 본다. [권한을 묻는 앱](02-용어집.md#권한을-묻는-앱)은 로그인한 사용자를 [employeeId](02-용어집.md#employeeid)로 바꾸려고 직원 검색을 부른다([8절](#8-로그인을-employeeid-로-바꾸기)).
+쓰는 사람은 둘이다. 운영자는 작업을 걸고 결과·직원·조직·감사 이력을 본다. [권한을 묻는 앱](02-용어집.md#권한을-묻는-앱)은 로그인한 사용자를 [employeeId](02-용어집.md#employeeid)로, IdP 의 조직 식별자를 [orgCode](02-용어집.md#orgcode)로 바꾸려고 정확 조회 둘을 부른다([8절](#8-로그인을-employeeid-로-바꾸기)).
 
-> **인증이 없다.** 이 문서의 모든 경로는 누구나 부를 수 있다. 응답에는 직원의 이름·이메일·계정명과 소속, 감사 이력의 이전 값이 그대로 담긴다. 실제 운영에 넣기 전에 반드시 앞단에서 막아야 한다. 인증은 마지막 슬라이드에서 한다 — [10절](#10-인증이-없다)과 [13 한계와 알려진 문제](13-한계와-알려진-문제.md).
+> **모든 경로가 토큰을 요구한다.** 인가 서버(app-auth)가 발급한 bearer 토큰을 `Authorization: Bearer <토큰>` 으로 싣고, 경로마다 정해진 [범위](02-용어집.md#범위)가 토큰에 있어야 한다 — 조회는 `admin.read`, 걸기는 `admin.sync`, `force=true`·`mode=wipe` 는 `admin.destructive` 도, 정확 조회 둘은 `directory.lookup`(또는 `admin.read`). 토큰이 없거나 틀리면 401, 범위가 없으면 403 이다([10절](#10-인증과-범위)). 이 문서의 `curl` 예는 `TOKEN` 에 토큰을 받아 두었다고 본다 — 받는 법은 [11 — 토큰 받기](11-운영.md#92-클라이언트와-토큰-받기).
 
 ## 1. 경로 한눈에
 
-| 경로 | 앱 | 하는 일 | 성공 | 실패 |
-|---|---|---|---|---|
-| `GET /admin/employees?userName=` `?displayName=` `?externalId=` | 둘 다 | 직원 검색([3.1](#31-검색)) | 200 한 쪽 | 400 |
-| `GET /admin/employees/{employeeId}` | 둘 다 | 직원 상세 — 소속·상위 조직과 각 줄의 실제 판정([3.2](#32-상세)) | 200 | 404 |
-| `GET /admin/employees/{employeeId}/history` | 둘 다 | 직원의 감사 이력([5절](#5-감사-이력-조회)) | 200 한 쪽 | 400 |
-| `GET /admin/organizations?displayName=` `?externalId=` | 둘 다 | 조직 검색([4.1](#41-검색)) | 200 한 쪽 | 400 |
-| `GET /admin/organizations/{orgCode}` | 둘 다 | 조직 상세([4.2](#42-상세)) | 200 | 404 |
-| `GET /admin/organizations/{orgCode}/members` | 둘 다 | 조직의 직속 직원 멤버 목록([4.3](#43-멤버-목록)) | 200 한 쪽 | 400, 404 |
-| `GET /admin/organizations/{orgCode}/history` | 둘 다 | 조직의 감사 이력 | 200 한 쪽 | 400 |
-| `POST /admin/sync/full[?force=true]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)) | 202 실행 기록 | 400, 409 |
-| `POST /admin/sync/rebuild[?force=true]` | app-ldap | 재적재를 건다 | 202 실행 기록 | 400, 409 |
-| `POST /admin/sync/rebuild?mode=tuples\|wipe[&confirm=<테이블명>]` | app-scim | 재적재 또는 [초기화](02-용어집.md#초기화)를 건다([9.3](#93-app-scim)) | 202 실행 기록 | 400, 409 |
-| `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)) | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
-| `GET /admin/sync/runs/{runId}` | 둘 다 | 실행 기록 하나 | 200 | 404 |
+| 경로 | 앱 | 하는 일 | 범위 | 성공 | 실패 |
+|---|---|---|---|---|---|
+| `GET /admin/employees?userName=` `?displayName=` `?externalId=` | 둘 다 | 직원 검색([3.1](#31-검색)) | `admin.read` | 200 한 쪽 | 400 |
+| `GET /admin/employees/lookup?userName=` 또는 `?externalId=` | 둘 다 | 직원 정확 조회 — 한 명이어야 200([8.1](#81-직원-정확-조회)) | `directory.lookup` 또는 `admin.read` | 200 한 명 | 400, 404, 409 |
+| `GET /admin/employees/{employeeId}` | 둘 다 | 직원 상세 — 소속·상위 조직과 각 줄의 실제 판정([3.2](#32-상세)) | `admin.read` | 200 | 404 |
+| `GET /admin/employees/{employeeId}/history` | 둘 다 | 직원의 감사 이력([5절](#5-감사-이력-조회)) | `admin.read` | 200 한 쪽 | 400 |
+| `GET /admin/organizations?displayName=` `?externalId=` | 둘 다 | 조직 검색([4.1](#41-검색)) | `admin.read` | 200 한 쪽 | 400 |
+| `GET /admin/organizations/lookup?externalId=` | 둘 다 | 조직 정확 조회 — 하나여야 200([8.2](#82-조직-정확-조회)) | `directory.lookup` 또는 `admin.read` | 200 하나 | 400, 404, 409 |
+| `GET /admin/organizations/{orgCode}` | 둘 다 | 조직 상세([4.2](#42-상세)) | `admin.read` | 200 | 404 |
+| `GET /admin/organizations/{orgCode}/members` | 둘 다 | 조직의 직속 직원 멤버 목록([4.3](#43-멤버-목록)) | `admin.read` | 200 한 쪽 | 400, 404 |
+| `GET /admin/organizations/{orgCode}/history` | 둘 다 | 조직의 감사 이력 | `admin.read` | 200 한 쪽 | 400 |
+| `POST /admin/sync/full[?force=true]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)) | `admin.sync`. `force=true` 는 `admin.destructive` 도 | 202 실행 기록 | 400, 403, 409 |
+| `POST /admin/sync/rebuild[?force=true]` | app-ldap | 재적재를 건다 | 같다 | 202 실행 기록 | 400, 403, 409 |
+| `POST /admin/sync/rebuild?mode=tuples\|wipe[&confirm=<테이블명>]` | app-scim | 재적재 또는 [초기화](02-용어집.md#초기화)를 건다([9.3](#93-app-scim)) | `admin.sync`. `mode=wipe` 는 `admin.destructive` 도 | 202 실행 기록 | 400, 403, 409 |
+| `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)) | `admin.read` | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
+| `GET /admin/sync/runs/{runId}` | 둘 다 | 실행 기록 하나 | `admin.read` | 200 | 404 |
 
-모든 경로가 저장소의 일시 장애에는 503 + `Retry-After`, 그 밖의 예기치 않은 실패에는 500 으로 답한다([오류](#오류)). 표의 "실패" 칸은 그 둘을 빼고 적었다.
+모든 경로가 토큰이 없거나 틀리면 401, 그 경로의 범위가 토큰에 없으면 403, 인가 서버의 키 목록을 받지 못하면 503 + `Retry-After: 10` 이다([10절](#10-인증과-범위)). 저장소의 일시 장애에는 503 + `Retry-After`, 그 밖의 예기치 않은 실패에는 500 으로 답한다([오류](#오류)). 표의 "실패" 칸은 이것들을 빼고 그 경로에 고유한 것만 적었다(`force=true`·`mode=wipe` 의 403 은 고유한 것이라 적었다).
+
+`/admin/**` 아래에서 `GET` 도 `POST /admin/sync/**` 도 아닌 요청(예: `POST /admin/employees`, `DELETE /admin/sync/runs/{runId}`)은 보안 규칙 밖이라 토큰이 있으면 403, 없으면 401 이다 — 컨트롤러에 닿지 않는다. `GET` 은 `admin.read` 가 있으면 규칙을 지나므로 없는 경로는 스프링의 404 다.
 
 없는 것이 있다.
 
 - 직원·조직을 고치거나 지우는 경로는 없다. 조직도는 디렉터리가 바꾼다.
 - 한 사람의 권한만 즉시 거두는 경로는 없다. 급하면 `POST /admin/sync/full`(app-ldap)을 건다.
 - app-scim 에는 `full` 이 없다. SCIM 은 push 라 "전체를 다시 달라" 고 말할 상대가 없다.
-- 로그인 이름을 정확히 한 명으로 바꿔 주는 전용 경로는 아직 없다([8절](#8-로그인을-employeeid-로-바꾸기)).
 
 ## 2. 공통 규칙
 
 ### 요청과 응답
 
 - 본문 없는 `GET`·`POST` 뿐이다. 모든 입력은 경로와 쿼리 파라미터다.
-- 응답은 JSON 이다. 시각(`Instant`)은 ISO-8601 UTC 문자열이다(예 `2026-10-25T04:00:00.015Z`, 소수 자릿수는 일정하지 않다). 값이 없는 칸은 `null` 로 나온다. 감사 이력 한 줄만 최상위의 `null` 칸을 빼고 낸다(`attributes` 안의 `before`·`after` 는 없는 값이 `null` 이다).
+- 응답은 JSON 이다. 시각(`Instant`)은 ISO-8601 UTC 문자열이다(예 `2026-10-25T04:00:00.015Z`, 소수 자릿수는 일정하지 않다). 값이 없는 칸은 `null` 로 나온다. 감사 이력 한 줄만 최상위의 `null` 칸을 빼고 낸다(`attributes` 안의 `before`·`after` 는 없는 값이 `null` 이다). 실행 기록의 `requestedBy` 도 없으면 칸을 뺀다.
 - 검색·멤버 목록·감사 이력은 한 쪽(page)씩 준다.
 
   ```json
@@ -55,9 +58,11 @@
 
 ### 오류
 
-관리 API 의 오류는 **RFC 9457 problem details**(`application/problem+json`)다. 예외 처리기 `AdminExceptionHandler`(admin-api, `@RestControllerAdvice`)가 표지 애너테이션 `@AdminApi` 를 단 네 컨트롤러 — `AdminQueryController`, `AuditHistoryController`, 두 앱의 `AdminSyncController` — 에만 걸린다. SCIM 라우터와 actuator 는 건드리지 않는다. 새 관리 컨트롤러를 더하면 `@AdminApi` 를 달아야 같은 오류 응답을 낸다.
+관리 API 의 오류는 **RFC 9457 problem details**(`application/problem+json`)다. 예외 처리기 `AdminExceptionHandler`(admin-api, `@RestControllerAdvice`)가 표지 애너테이션 `@AdminApi` 를 단 다섯 컨트롤러 — `AdminQueryController`, `AuditHistoryController`, `DirectoryLookupController`, 두 앱의 `AdminSyncController` — 에만 걸린다. SCIM 라우터와 actuator 는 건드리지 않는다. 새 관리 컨트롤러를 더하면 `@AdminApi` 를 달아야 같은 오류 응답을 낸다.
 
 본문의 칸은 `type`(`about:blank`), `title`(상태 문구, 예 `Conflict`), `status`, `detail`, `instance`(요청 경로 — 스프링이 채운다)다.
+
+**보안 필터의 거절(401·403·키 목록 503)은 이 처리기를 거치지 않는다.** 요청이 컨트롤러에 닿기 전에 web-security 의 `AuthFailureResponses` 가 같은 모양의 problem details 를 직접 쓴다 — 칸은 `type`·`title`·`status`·`detail` 넷이고 `instance` 가 없다([10.2](#102-거절)). 컨트롤러가 내는 범위 403(`force=true`·`mode=wipe`)은 이 처리기를 거치므로 `instance` 가 있다.
 
 ```json
 {
@@ -73,22 +78,24 @@
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 컨트롤러가 정한 상태(400·404·409) | 원인 사슬에 `ResponseStatusException` 이 있다 — 컨트롤러가 정한 오류(아래)와, 스프링의 입력 오류(`ServerWebInputException` — 형식이 틀린 파라미터). 두 앱의 `AdminSyncController` 는 락 경합을 409 로 감싸 여기로 온다 | 그 사유. 없으면 상태 문구 |
+| 컨트롤러가 정한 상태(400·403·404·409) | 원인 사슬에 `ResponseStatusException` 이 있다 — 컨트롤러가 정한 오류(아래)와, 스프링의 입력 오류(`ServerWebInputException` — 형식이 틀린 파라미터). 두 앱의 `AdminSyncController` 는 락 경합을 409 로 감싸 여기로 온다. 그 예외가 든 머리(`ResponseStatusException.getHeaders`)는 응답에 그대로 옮긴다 — 범위 403 의 `WWW-Authenticate` 가 그 예다 | 그 사유. 없으면 상태 문구 |
 | 409 | 감싸지 않은 채 원인 사슬에 `LockUnavailableException` 이 있다 — 남이 [변경 락](02-용어집.md#변경-락)을 쥐었다 | 그 예외의 메시지 |
 | 503 + `Retry-After`(초) | 분류기(`TemporaryFailureClassifier`, core `port`)가 [일시 장애](02-용어집.md#일시-장애)로 본다 — SCIM 과 같은 분류기다. DynamoDB 의 스로틀·5xx·클라이언트 오류(시간 한도 포함), OpenFGA 의 재시도 가능한 오류, I/O 실패 | `일시 장애 — 잠시 뒤 다시 시도한다`. 예외 문구는 WARN 로그로만 간다 |
-| 500 | 그 밖 | `내부 오류` — 예외 문구는 ERROR 로그로만 간다(인증이 없는 엔드포인트다) |
+| 500 | 그 밖 | `내부 오류` — 예외 문구(저장소·라이브러리 메시지)는 응답에 싣지 않고 ERROR 로그로만 간다 |
 
 - **409 의 사유.** app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등)다.
 - **락 경합을 분류기보다 먼저 본다.** `LockUnavailableException` 은 일시 장애의 하위 타입이라 분류기가 503 으로 읽는다. 게다가 두 앱의 `AdminSyncController` 는 락 경합을 원인으로 품은 `ResponseStatusException(409)` 로 감싼다. 그래서 `ResponseStatusException` 이 자기 상태로 먼저 답하고, 감싸지 않은 락 경합도 분류기 앞에서 409 로 거른다.
 - **`Retry-After`** 는 정수 초다. 1초보다 짧은 대기도 1 로 올린다. 대개 10초(`TemporaryFailureException.기본_대기`)다.
 - **걸기 요청이 503 이나 500 이면 작업은 시작하지 않았다.** 락을 잡는 중의 DynamoDB 오류, 실행 기록을 열지 못한 경우(오류는 분류대로 503·500, 빈 응답은 `IllegalStateException` 이라 500)가 여기다 — 다시 걸어도 된다. 일시 장애로 분류되지 않는 락 저장소 오류도 500 이지만 마찬가지로 시작 전이다.
 
-컨트롤러가 정한 400·404 는 이렇다.
+컨트롤러가 정한 400·403·404·409 는 이렇다.
 
 | 상태 | 언제 |
 |---|---|
-| 400 | 검색 파라미터가 정확히 하나가 아니다. `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언이 아니다. app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
-| 404 | 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
+| 400 | 검색 파라미터가 정확히 하나가 아니다. 정확 조회의 파라미터가 맞지 않다(직원은 `userName`·`externalId` 중 정확히 하나, 조직은 `externalId`). `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언으로 읽히지 않는다(스프링은 `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 읽는다). app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
+| 403 | `force=true`(app-ldap)·`mode=wipe`(app-scim)인데 토큰에 `admin.destructive` 가 없다 — `force=true은 admin.destructive 범위가 필요하다`, `mode=wipe은 admin.destructive 범위가 필요하다`. `WWW-Authenticate: Bearer error="insufficient_scope"` 가 붙는다([10.3](#103-위험한-요청--admindestructive)) |
+| 404 | 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). 정확 조회가 하나도 찾지 못했다 — `일치하는 직원이 없다`, `일치하는 조직이 없다`. **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
+| 409 | 락 경합(위). 정확 조회가 여럿을 찾았다 — `<N>명이 일치한다 — externalId 로 찾는다`, `<N>개가 일치한다` |
 
 ### 일관성
 
@@ -97,7 +104,8 @@
 | 경로 | 읽는 것 | 일관성 |
 |---|---|---|
 | 직원 검색 `userName`·`displayName`, 조직 검색 `displayName` | GSI1·GSI2 | 최종 |
-| 직원·조직 검색 `externalId` | GSI3 로 후보를 찾고 본 테이블을 다시 읽어 확인 | 후보는 최종, 확인은 [강한 일관성](02-용어집.md#강한-일관성) |
+| 직원·조직 검색 `externalId`, 정확 조회의 `externalId` | GSI3 로 후보를 찾고 본 테이블을 다시 읽어 확인 | 후보는 최종, 확인은 [강한 일관성](02-용어집.md#강한-일관성) |
+| 직원 정확 조회 `userName` | GSI1(`ALL` 프로젝션)만 — 본 테이블을 다시 읽지 않는다 | 최종 |
 | 직원 상세 | 직원 META, 소속 줄·멤버 줄 | 강함 |
 | 직원·조직 상세의 상위 조직 이름 | 조직 META 한 줄(`findGroupSummary`) | 최종 |
 | 조직 상세·멤버 목록 | 이름표, 멤버 줄, 직원 META | 강함 |
@@ -264,7 +272,7 @@ GET /admin/employees?userName=gd.&limit=1
   "items": [
     {
       "at": "2026-10-25T04:01:12.290Z",
-      "cause": { "source": "LDAP", "kind": "SYNC", "id": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54" },
+      "cause": { "source": "LDAP", "kind": "SYNC", "id": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54", "actor": "system:scheduler" },
       "created": false,
       "deleted": false,
       "attributes": [ { "name": "displayName", "before": "홍길동", "after": "홍길동(개발)" } ],
@@ -279,6 +287,7 @@ GET /admin/employees?userName=gd.&limit=1
 ```
 
 - `cause.id` 는 [회차](02-용어집.md#회차)면 `GET /admin/sync/runs/{runId}` 의 `runId`, SCIM 요청이면 그 요청의 traceId 다. 로그에서 같은 traceId 로 찾는다([11 운영](11-운영.md#6-로그와-추적)).
+- `cause.actor` 는 변경을 일으킨 [행위자](02-용어집.md#행위자)다 — `client:<sub>`(토큰으로 온 SCIM 요청·관리 API 회차), `system:scheduler`(정기 동기화), `system:archive`(아카이빙의 남은 회수 지우기), 찾지 못했으면 `system:unknown`. 행위자를 남기기 전에 쓴 옛 줄도 `system:unknown` 이다([10 — 원인](10-감사-이력.md#2-원인)).
 - `granted`·`revoked` 는 튜플을 `user relation object` 한 줄(공백으로 이음)로 적는다. 저장 형식의 `|` 구분이 아니다.
 - 조직 줄에만 `membersAdded`·`membersRemoved`(`{ "count": 숫자, "items": [ { "type": "USER" 또는 "GROUP", "id": "…" } ] }`)가 더 붙는다. 직원 줄에는 이 칸이 없다.
 - 기록이 없는 아이디는 404 가 아니라 **빈 목록**이다. 지운 직원·조직의 이력도 보관 기간(`dynamodb.audit-retention-days`, 기본 30일) 동안은 보인다.
@@ -334,7 +343,7 @@ GSI1SK  gd.hong
 | 멤버 목록: 키 집합이 `PK`·`SK` 둘이 아니다, `PK` 가 이 조직이 아니다, `SK` 가 `MEMBER#USER#` 로 시작하지 않는다, 한도를 넘는다 | 같은 클래스 |
 | 감사 이력: 키 집합이 `PK`·`SK` 둘이 아니다, `PK` 가 이 대상이 아니다, `SK` 가 `#0000` 으로 끝나지 않는다, 한도를 넘는다 | `DynamoDbAuditLog` |
 
-커서에 **서명하지 않는다.** 같은 범위 안의 다른 위치를 가리키도록 고친 커서는 그 위치부터 읽는다. 커서에는 원본 키(직원 id, 계정명 일부 등)가 들어 있어 누구나 풀어 볼 수 있다. 암호화는 인증 슬라이드에서 함께 다룬다(`Cursor` 주석).
+커서에 **서명하지 않고 암호화하지도 않는다.** 같은 범위 안의 다른 위치를 가리키도록 고친 커서는 그 위치부터 읽는다. 커서에는 원본 키(직원 id, 계정명 일부 등)가 들어 있어 받은 쪽이 풀어 볼 수 있다. 커서를 받는 쪽은 그 검색 결과도 받는 `admin.read` 의 호출자라 새로 드러나는 것은 없다. `Cursor` 의 주석은 "암호화는 인증 사이클에서 함께 다룬다" 고 적지만 인증 슬라이드는 커서를 바꾸지 않았다.
 
 ## 7. 상세 조회의 읽기와 비용
 
@@ -379,7 +388,7 @@ flowchart TD
 - 상세와 멤버 목록의 `Check` 는 한 줄에 한 번이다(`BatchCheck` 가 아니라 `Check`). 그래서 한 요청이 OpenFGA 를 많게는 수백 번 부른다. 계층 깊이가 보통 4~6단이라 정상 조직도에서는 한 자릿수에서 수십 번이다(코드 주석).
 - 이 서버는 `Check` 에 별도 시간 제한을 두지 않는다. OpenFGA SDK 0.9.11 의 기본값 — 요청 10초, 연결 10초, 재시도 3번(최소 대기 100ms) — 을 따른다(SDK 의 `FgaConstants` 로 확인했다). OpenFGA 가 느리면 응답도 그만큼 느리다.
 - 캐시를 두지 않는다. 무효화가 새 문제를 만들고, 두 앱이 각자 캐시하면 서로 다른 것을 본다는 이유다(`AdminQueryUseCase` 주석).
-- **인증이 없는 경로가 요청당 읽기를 이만큼 증폭한다.** 상한(200·100)이 있는 것은 이 때문이다. 상한은 호출자를 믿어서가 아니라 익명 호출자가 조종하는 읽기량을 묶으려는 것이다.
+- **요청 하나가 읽기를 이만큼 증폭한다.** 상한(200·100)이 있는 것은 이 때문이다. 상한은 호출자를 믿어서가 아니라 호출자가 조종하는 읽기량을 묶으려는 것이다. 이 경로들은 `admin.read` 범위가 있어야 하지만, 그 범위를 가진 클라이언트가 얼마나 자주 부르는지는 제한하지 않는다([13 — 1.6](13-한계와-알려진-문제.md#16-요청-수-제한이-없다)). 권한을 묻는 앱에는 `admin.read` 대신 `directory.lookup` 을 준다 — 정확 조회 둘은 Check 를 부르지 않는다.
 - `Check` 는 장부가 아직 준비되지 않았으면(시작 때 OpenFGA 가 닿지 않았던 경우) 준비 — 찾기·만들기·모델 등록 — 부터 한다. 읽기 요청이 장부를 만들 수 있다([04](04-데이터-모델.md#장부를-찾고-만드는-법)).
 
 ### 7.4 지표
@@ -397,39 +406,79 @@ flowchart TD
 
 ## 8. 로그인을 employeeId 로 바꾸기
 
-[권한을 묻는 앱](02-용어집.md#권한을-묻는-앱)은 `Check(user:<employeeId>, member, group:<orgCode>)` 로 묻는다. 로그인한 사용자를 `employeeId` 로 바꾸는 일은 앱의 몫이고, 토큰의 사용자 식별과 자동으로 잇지 않는다. 지금은 직원 검색을 불러 바꾼다.
+[권한을 묻는 앱](02-용어집.md#권한을-묻는-앱)은 `Check(user:<employeeId>, member, group:<orgCode>)` 로 묻는다. 로그인한 사용자를 `employeeId` 로, 조직을 `orgCode` 로 바꾸는 일은 앱의 몫이다 — 앱의 로그인과 이 서버의 직원을 자동으로 잇지 않는다. 그 바꾸기를 위해 [정확 조회](02-용어집.md#정확-조회) 둘이 있다(`DirectoryLookupController`(admin-api), `DirectoryLookupUseCase`(core `usecase`)). 결과는 셋뿐이다 — 하나면 200, 없으면 404, 여럿이면 409.
 
-| 앱이 아는 값 | 호출 | 일치 | 비고 |
-|---|---|---|---|
-| IdP 의 사용자 id (SCIM 배포) | `GET /admin/employees?externalId=<값>` | 정확히 일치 | SCIM 은 IdP 가 보낸 `externalId`(Okta 의 사용자 id 등). 토큰의 `sub`·`oid` 와 맞출 수 있다 |
-| 계정명 | `GET /admin/employees?userName=<값>` | **접두사**, 대소문자 무시 | 더 긴 계정명도 함께 온다. 앱이 `userName` 이 같은 줄을 골라야 한다 |
-| 절대 DN (LDAP 배포) | `GET /admin/employees?externalId=<DN>` | 정확히 일치 | 서버가 `LdapName` 으로 다시 쓴 문자열과 같아야 한다. 공백·이스케이프·대소문자가 다르면 안 나온다. 그 문자열은 직원 검색·상세의 `externalId` 칸에 있다 |
+| 앱이 아는 값 | 호출 | 일치 |
+|---|---|---|
+| 계정명(로그인 이름) | `GET /admin/employees/lookup?userName=<값>` | 대소문자 무시, 전체가 같은 것 |
+| IdP 의 사용자 id(SCIM 배포 — Okta 의 사용자 id, Entra 의 `objectId` 를 매핑했다면 그 값) | `GET /admin/employees/lookup?externalId=<값>` | 대소문자 구분, 전체가 같은 것 |
+| 절대 DN(LDAP 배포) | `GET /admin/employees/lookup?externalId=<DN>` | 같다 — 서버가 `LdapName` 으로 다시 쓴 표기여야 한다([아래](#ldap-에서-externalid-를-쓸-때)) |
+| 조직의 외부 식별자(IdP 가 보낸 조직 `externalId`, LDAP 은 조직의 DN) | `GET /admin/organizations/lookup?externalId=<값>` | 대소문자 구분, 전체가 같은 것 |
 
+범위는 `directory.lookup` 또는 `admin.read` 다. 권한을 묻는 앱에는 `directory.lookup` 만 준다 — 이 범위로는 정확 조회 둘 말고 아무것도 부르지 못한다(검색·상세·이력은 `admin.read`). 로컬 개발 클라이언트 `asking-app` 이 이 범위다([11 — 클라이언트와 토큰 받기](11-운영.md#92-클라이언트와-토큰-받기)).
+
+```bash
+curl -G -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/employees/lookup' --data-urlencode 'userName=gd.hong'
+curl -G -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/employees/lookup' --data-urlencode 'externalId=00u1abcd2EFGH3ijk4l5'
+curl -G -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/organizations/lookup' --data-urlencode 'externalId=backend-team'
 ```
-curl -G 'http://localhost:8082/admin/employees' --data-urlencode 'externalId=00u1abcd2EFGH3ijk4l5'
-curl -G 'http://localhost:8081/admin/employees' --data-urlencode 'userName=gd.hong' --data-urlencode 'limit=5'
+
+받은 `employeeId`·`orgCode` 로 OpenFGA 에 직접 묻는다. OpenFGA 가 사전 공유 키를 요구하면 앱도 자기 키를 실어야 한다([11 — OpenFGA 키를 켜는 순서](11-운영.md#95-openfga-키를-켜는-순서)).
+
+### 8.1 직원 정확 조회
+
+`GET /admin/employees/lookup` — `userName` 과 `externalId` 가운데 **정확히 하나**를 준다. 둘 다 주거나 둘 다 없으면 400 `userName·externalId 중 정확히 하나를 지정해야 한다` 다. 비었거나 공백뿐인 값은 없는 것으로 센다.
+
+| 결과 | 응답 |
+|---|---|
+| 정확히 한 명 | 200, `UserSummary` — `employeeId`, `userName`, `displayName`, `active`, `externalId`(검색의 한 줄과 같은 모양, [3.1](#31-검색)) |
+| 없음 | 404 `일치하는 직원이 없다` |
+| 둘 이상 | 409 `<N>명이 일치한다 — externalId 로 찾는다`. 직원 목록은 싣지 않는다 — 이 길은 개인 정보를 훑는 길이 아니다 |
+
+```json
+{ "employeeId": "3f6c1d52-8a0e-4b7d-9c21-5e0f7a4d2b18", "userName": "gd.hong", "displayName": "홍길동",
+  "active": true, "externalId": "uid=gd.hong,ou=people,dc=example,dc=com" }
 ```
 
-받은 `employeeId` 로 OpenFGA 에 직접 묻는다.
+```json
+{ "type": "about:blank", "title": "Conflict", "status": 409,
+  "detail": "2명이 일치한다 — externalId 로 찾는다", "instance": "/admin/employees/lookup" }
+```
+
+- **비활성 직원도 200 이다**(`active: false`). 앱이 `active` 를 본다. 비활성은 어느 조직의 `member` 도 아니므로 `Check` 도 거짓이다.
+- **`userName` 길.** GSI1 의 직원 색인(`USER_INDEX`)에서 정렬키가 물은 값의 소문자와 같은 줄을 찾고(`DirectoryQueryRepository.findUsersByUserName`), 저장된 `userName` 을 소문자로 바꾼 값이 물은 값의 소문자와 같은 것만 센다 — 색인은 이름이 빈 직원을 id 로, 1024바이트를 넘는 이름을 잘라 올리므로 다른 직원이 후보에 오를 수 있기 때문이다. 소문자로 1024바이트를 넘는 값은 DynamoDB 를 부르지 않고 404 다. **본 테이블을 다시 읽지 않는다** — 응답은 GSI1 이 실은 값(`ALL` 프로젝션)이라 최종 일관성이다. 방금 바뀐 `active`·`displayName` 이 잠깐 이전 값일 수 있고, 방금 만든 직원은 잠깐 404 일 수 있으며, 방금 이름을 바꾼 직원은 색인이 따라오기 전까지 옛 이름으로도 찾혀 잠깐 409 가 날 수 있다.
+- **`externalId` 길.** GSI3 로 후보 id 를 찾고(`findUserIdsByExternalId`) 본 테이블을 강한 일관성으로 다시 읽어 `externalId` 가 아직 같은 것만 센다. 낡은 속성을 돌려주지 않지만, 방금 만든 직원은 GSI3 에 아직 없어 잠깐 404 일 수 있다.
+- **읽는 양.** 인덱스 Query 한 번과(`externalId` 길은 후보마다) 본 테이블 GetItem 몇 번이다. 요청마다 전원을 읽지 않고 `Check` 를 부르지 않는다.
+
+### 8.2 조직 정확 조회
+
+`GET /admin/organizations/lookup?externalId=<값>` — `externalId` 가 없거나 비면 400 `externalId 를 지정해야 한다` 다.
+
+| 결과 | 응답 |
+|---|---|
+| 정확히 하나 | 200, `OrganizationLookup` — `orgCode`, `displayName`, `externalId` |
+| 없음 | 404 `일치하는 조직이 없다` |
+| 둘 이상 | 409 `<N>개가 일치한다` |
+
+```json
+{ "orgCode": "8e4a2c6f-3d1b-4a9e-b7c5-0f2d6e8a4b13", "displayName": "백엔드팀", "externalId": "backend-team" }
+```
+
+- GSI3 로 후보를 찾고(`findGroupIdsByExternalId`) 이름표를 강한 일관성으로 다시 읽어 `externalId` 가 같은 것만 센다(`findGroupHeader`). 조직 검색의 `externalId` 와 같은 길이다([4.1](#41-검색)).
+- SCIM 은 조직 `externalId` 를 [표지판](02-용어집.md#표지판)으로 유일하게 지키고 LDAP 은 DN 이라 409 는 드물다. `externalId` 없이 만든 SCIM 조직은 이 길로 찾지 못한다.
+- **SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 다.** [초기화](02-용어집.md#초기화)(`mode=wipe`) 뒤 IdP 가 다시 프로비저닝하면 모든 `orgCode`·`employeeId` 가 새로 발급된다. 앱이 저장해 둔 값은 이 조회로 다시 찾는다([12 — `mode=wipe`](12-장애와-복구.md#84-scim-modewipe--post-adminsyncrebuildmodewipeconfirm테이블명)). LDAP 배포의 `orgCode` 는 디렉터리의 불변 id 라 바뀌지 않는다.
 
 ### `userName` 으로 찾을 때 알아야 할 것
 
-- **접두사 검색이라 줄이 여럿 온다.** `userName=gd.hong` 은 `gd.hong2` 도 돌려준다. 정렬이 소문자 `userName` 순이므로 소문자로 같은 이름은 접두사만 같은 이름보다 앞에 온다(정렬 순서에서 따진 것이며, 이 경로를 따로 시험하지는 않았다). 그래도 앱은 응답에서 `userName` 이 로그인 이름과 대소문자 무시로 같은 줄을 직접 골라야 한다.
-- **0건도 2건 이상도 계약이 없다.** 코드는 "한 명" 을 보장하지 않는다. 앱은 0건(없는 사람, 또는 GSI 가 아직 못 따라온 새 직원)과 2건 이상(아래)을 오류로 다뤄야 한다.
 - **유일성은 배포마다 다르다.**
-  - SCIM: `userName` 은 대소문자를 무시하고 유일하다. [표지판](02-용어집.md#표지판)이 락 안에서 지키므로 겹치면 409 다. 다만 표지판이 생기기 전에 저장된 직원은 이 보호를 받지 못한다(루트 README.md — 그런 테이블은 비우고 IdP 에서 다시 프로비저닝한다).
-  - LDAP: `userName` 은 `ldap.<전략>.user-login-attribute`(기본 `uid`)의 값 그대로다. **코드에 유일성 검사가 없다.** 디렉터리가 같은 값의 엔트리를 둘 허용하면(다른 OU 에 같은 `uid`) 서로 다른 `employeeId` 의 직원 둘이 같은 `userName` 으로 나온다. 로그인 속성이 없는 엔트리는 식별 값(UUID)이 `userName` 이 된다.
-  - 직원의 `externalId` 는 SCIM 이든 LDAP 이든 겹침을 막지 않는다. 같은 값이면 줄이 여럿 온다.
-- **`active` 를 본다.** 비활성 직원도 검색에 나온다(`active: false`). 비활성은 어느 조직의 `member` 도 아니므로 `Check` 가 거짓이다.
-- **최종 일관성.** 방금 만든 직원은 잠깐 안 나올 수 있다([6.2](#62-최종-일관성)).
+  - SCIM: `userName` 은 대소문자를 무시하고 유일하다. 표지판이 락 안에서 지키므로 겹치는 쓰기는 409 다. 그래서 정확 조회의 409 는 이름을 바꾼 직후 색인이 따라오기 전에만 날 수 있다. 다만 표지판이 생기기 전에 저장된 직원은 이 보호를 받지 못한다(루트 README.md — 그런 테이블은 비우고 IdP 에서 다시 프로비저닝한다).
+  - LDAP: `userName` 은 `ldap.<전략>.user-login-attribute`(기본 `uid`)의 값 그대로다. **코드에 유일성 검사가 없다.** 디렉터리가 같은 값의 엔트리를 둘 허용하면(다른 OU 에 같은 `uid`) 정확 조회가 409 다 — 그때는 `externalId`(DN)로 찾는다. 로그인 속성이 없는 엔트리는 식별 값(UUID)이 `userName` 이 된다.
+  - 직원의 `externalId` 는 SCIM 이든 LDAP 이든 겹침을 막지 않는다. 같은 값이면 정확 조회가 409 다.
+- **검색과 다르다.** 직원 검색 `GET /admin/employees?userName=` 은 **접두사** 검색이라 `gd.hong` 이 `gd.hong2` 도 돌려주고, 0건·여러 건의 계약이 없다. 로그인 이름을 바꾸는 데는 정확 조회를 쓴다.
 
 ### LDAP 에서 `externalId` 를 쓸 때
 
-직원의 `externalId`(DN)는 직원 검색·상세의 `externalId` 칸에 나온다 — 이 서버가 `LdapName` 으로 다시 쓴 표기 그대로다. 앱이 DN 을 디렉터리에서 따로 알아 넣으면 그 표기와 정확히 맞아야 한다(공백·이스케이프·대소문자). 그래서 한 번 `userName` 등으로 찾아 응답의 `externalId` 를 저장해 두고, 그 뒤로는 그 값으로 찾는 편이 안전하다.
-
-### 아직 없는 것
-
-`employeeId` 를 정확히 하나로 돌려주는 전용 경로 — "로그인 이름 → employeeId, 없으면 404, 둘이면 오류" 를 약속하는 정확 일치 API — 는 아직 없다. 인증 슬라이드에서 인증된 호출과 함께 만들 몫으로 정해져 있다(설계 2026-10-20 §14, 외부 리뷰 N10). 그때까지는 위의 검색과 앱 쪽 선택이 대신한다.
+직원의 `externalId`(DN)는 직원 검색·상세·정확 조회 응답의 `externalId` 칸에 나온다 — 이 서버가 `LdapName` 으로 다시 쓴 표기 그대로다. 앱이 DN 을 디렉터리에서 따로 알아 넣으면 그 표기와 정확히 맞아야 한다(공백·이스케이프·대소문자). 그래서 한 번 `userName` 으로 찾아 응답의 `externalId` 를 저장해 두고, 그 뒤로는 그 값으로 찾는 편이 안전하다.
 
 ## 9. 동기화 트리거
 
@@ -457,28 +506,30 @@ sequenceDiagram
     API-->>Op: 200 status=SUCCEEDED 등
 ```
 
+- 락을 잡기 전에 두 가지를 본다(그림에는 없다). 보안 필터가 토큰과 `admin.sync` 범위를 보고(없으면 401·403), 컨트롤러가 `force=true`·`mode=wipe` 면 `admin.destructive` 를 본다(없으면 403, [10.3](#103-위험한-요청--admindestructive)). 어느 쪽에서 거절돼도 락도 실행 기록도 만들지 않는다.
 - 락을 못 잡으면 곧바로 409 다. 기다리지 않는다. 락은 클러스터 전체에서 하나(앱마다 따로)라, 다른 인스턴스가 동기화·재적재를 하고 있어도 409 다. 운영자가 잠시 뒤 다시 건다.
 - 락 저장소(DynamoDB)의 오류는 409 로 옮기지 않는다. 409 는 "락 조건이 깨졌다" 에만 쓴다. 일시 장애로 분류되면 503 + `Retry-After`, 아니면 500 이다([오류](#오류)). 락을 잡은 뒤 실행 기록을 열지 못해도 같다(락은 반납한다). 어느 쪽이든 작업은 시작하지 않았다.
-- 202 의 본문은 실행 기록이 막 열린 모습이다: `status: "RUNNING"`, `finishedAt: null`, 세 집계는 0, `snapshotId`·`message` 는 `null`.
+- 202 의 본문은 실행 기록이 막 열린 모습이다: `status: "RUNNING"`, `finishedAt: null`, 세 집계는 0, `snapshotId`·`message` 는 `null`, `requestedBy` 는 건 클라이언트(`client:<sub>`).
 - 완료 시각은 알 수 없다. 호출하는 쪽은 `status` 가 `RUNNING` 이 아니게 될 때까지 다시 읽는다. 작업에는 [기한](02-용어집.md#기한)(`sync.job-timeout`, 기본 30분)이 있어 넘기면 `FAILED` 로 닫힌다.
 - 강제 종료된 회차는 기록이 `RUNNING` 으로 남았다가 [죽은 기록 닫기](02-용어집.md#죽은-기록-닫기)가 닫는다 — 다음에 락을 잡는 회차가 나이와 상관없이, 또는 동기화·재적재·아카이빙 어느 시작이든 시작한 지 기한 + 10분이 지난 것을. app-scim 은 다음 재적재나 다음 하루 창의 아카이빙이 닫는다([08 동시성과 작업](08-동시성과-작업.md#56-죽은-기록-닫기)).
 
 ### 9.2 app-ldap
 
-| 요청 | 하는 일 | 트리거 | 락 용도 |
-|---|---|---|---|
-| `POST /admin/sync/full` | LDAP 을 읽어 동기화한다([05 LDAP 동기화](05-LDAP-동기화.md)) | `MANUAL` | `SYNC` |
-| `POST /admin/sync/full?force=true` | 같되 [삭제 가드](02-용어집.md#삭제-가드)를 건너뛴다. `ABORTED` 뒤 사람이 확인하고 넘기는 통로다 | `FORCED` | `SYNC` |
-| `POST /admin/sync/rebuild` | 재적재 — LDAP 을 다시 읽어 장부를 맞추고 현재상태를 교체한다 | `REBUILD` | `REBUILD` |
-| `POST /admin/sync/rebuild?force=true` | 같되 삭제 가드를 건너뛴다 | `FORCED_REBUILD` | `REBUILD` |
+| 요청 | 하는 일 | 트리거 | 락 용도 | 범위 |
+|---|---|---|---|---|
+| `POST /admin/sync/full` | LDAP 을 읽어 동기화한다([05 LDAP 동기화](05-LDAP-동기화.md)) | `MANUAL` | `SYNC` | `admin.sync` |
+| `POST /admin/sync/full?force=true` | 같되 [삭제 가드](02-용어집.md#삭제-가드)를 건너뛴다. `ABORTED` 뒤 사람이 확인하고 넘기는 통로다 | `FORCED` | `SYNC` | `admin.sync` + `admin.destructive` |
+| `POST /admin/sync/rebuild` | 재적재 — LDAP 을 다시 읽어 장부를 맞추고 현재상태를 교체한다 | `REBUILD` | `REBUILD` | `admin.sync` |
+| `POST /admin/sync/rebuild?force=true` | 같되 삭제 가드를 건너뛴다 | `FORCED_REBUILD` | `REBUILD` | `admin.sync` + `admin.destructive` |
 
-- `force` 는 `true`/`false` 다. 그 밖의 값은 400 이다. `force` 는 삭제 가드만 넘는다 — 사람 소속이 하나도 없는 디렉터리 그림은 가드보다 먼저 데이터 오류(`FAILED`)로 멈추고 `force` 로도 넘기지 못한다([05 LDAP 동기화](05-LDAP-동기화.md)).
+- `force` 는 스프링이 불리언으로 읽는다 — `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 받고, 그 밖의 값은 400 이다. `admin.destructive` 판정도 읽은 값으로 하므로 `force=yes` 도 `force=true` 와 같다. `force` 는 삭제 가드만 넘는다 — 사람 소속이 하나도 없는 디렉터리 그림은 가드보다 먼저 데이터 오류(`FAILED`)로 멈추고 `force` 로도 넘기지 못한다([05 LDAP 동기화](05-LDAP-동기화.md)).
+- `force=true` 의 범위는 무엇보다 먼저 본다. `rebuild` 에 `mode` 와 `force=true` 를 함께 보내면 `admin.destructive` 가 없을 때 400 이 아니라 403 이다.
 - 재적재는 모드가 하나다. `mode` 파라미터가 오면(빈 값이어도) 400 이다 — 옛 `mode=snapshot`·`mode=store` 를 합쳤다는 안내가 담긴다.
-- 정기 동기화(`sync.cron`)도 같은 `FullSyncUseCase.start` 를 건다. 트리거만 `SCHEDULED` 다.
+- 정기 동기화(`sync.cron`)도 같은 `FullSyncUseCase.start` 를 건다. 트리거는 `SCHEDULED`, 요청자는 `system:scheduler` 다.
 - `full`·`rebuild` 의 완료는 `sync.*` 지표로도 남는다([11 운영](11-운영.md#3-지표)).
 
 ```
-curl -X POST 'http://localhost:8081/admin/sync/full'
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full'
 ```
 
 ```json
@@ -493,7 +544,8 @@ curl -X POST 'http://localhost:8081/admin/sync/full'
   "deletedCount": 0,
   "failureCount": 0,
   "snapshotId": null,
-  "message": null
+  "message": null,
+  "requestedBy": "client:ops"
 }
 ```
 
@@ -506,20 +558,21 @@ curl -X POST 'http://localhost:8081/admin/sync/full'
 | `mode` | `tuples`(기본) 또는 `wipe`. 대소문자를 가리지 않는다. 모르는 값이면 400 |
 | `confirm` | `wipe` 일 때만 쓴다. `dynamodb.table-name` 과 **정확히 같아야** 한다(대소문자 구분) |
 
-| 요청 | 하는 일 | 트리거 |
-|---|---|---|
-| `POST /admin/sync/rebuild` 또는 `?mode=tuples` | 현재상태가 요구하는 튜플을 다 쓰고 장부를 훑어 요구하지 않는 줄을 지운다. 조직도는 건드리지 않는다 | `REBUILD` |
-| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 조직도·표지판·보류 목록을 지운다. **되돌릴 수 없다** | `RESET` |
+| 요청 | 하는 일 | 트리거 | 범위 |
+|---|---|---|---|
+| `POST /admin/sync/rebuild` 또는 `?mode=tuples` | 현재상태가 요구하는 튜플을 다 쓰고 장부를 훑어 요구하지 않는 줄을 지운다. 조직도는 건드리지 않는다 | `REBUILD` | `admin.sync` |
+| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 조직도·표지판·보류 목록을 지운다. **되돌릴 수 없다** | `RESET` | `admin.sync` + `admin.destructive` |
 
-- `wipe` 에서 `confirm` 이 없거나 다르면 락을 잡기 전에 400 이다. 불리언 플래그 대신 테이블명을 적게 해, 관리자가 자기가 무엇을 지우는지 찾아보게 만든다.
+- 판정 순서는 `mode` 해석(모르면 400) → `wipe` 면 `admin.destructive`(없으면 403 `mode=wipe은 admin.destructive 범위가 필요하다`) → `confirm`(없거나 다르면 400) → 락이다. 모드를 해석한 값으로 판정하므로 `mode=WIPE` 도 같은 길이다.
+- `wipe` 에서 `confirm` 이 없거나 다르면 락을 잡기 전에 400 이다. 불리언 플래그 대신 테이블명을 적게 해, 관리자가 자기가 무엇을 지우는지 찾아보게 만든다. 테이블명은 비밀이 아니라 이것은 실수를 막는 장치다 — 막는 것은 `admin.destructive` 범위다.
 - 실행 뒤에는 IdP 콘솔에서 전체 재프로비저닝을 걸어야 조직도가 돌아온다. 그 절차는 이 API 밖에 있다. 자세한 것은 [07 재적재·초기화·아카이빙](07-재적재-초기화-아카이빙.md).
 - 재적재가 도는 동안 SCIM 의 변경 요청은 503(`Retry-After: 60`)이다. 이 관리 API 의 조회는 그대로 통과한다([06 SCIM](06-SCIM.md)).
 - 재적재끼리 겹치면 두 번째가 409 다.
 - `confirm` 은 `tuples` 에서 무시한다.
 
 ```
-curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=tuples'
-curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organization-scim'
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync/rebuild?mode=tuples'
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organization-scim'   # admin.destructive — 로컬은 ops-break-glass 의 토큰
 ```
 
 ### 9.4 실행 기록 보기
@@ -544,6 +597,7 @@ curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organiz
 | `writtenCount`, `deletedCount`, `failureCount` | 쓴·지운·실패한 튜플 수. 전부 보류로 끝난 장부 맞추기도 이미 쓴 D 의 수를 남긴다. 아카이빙은 뜻이 다르다 — `writtenCount` 는 스냅샷에 담은 줄 수, `deletedCount`·`failureCount` 는 남은 회수 지우기가 지운·지우지 못한 줄 수다([07](07-재적재-초기화-아카이빙.md#실행-기록)) |
 | `snapshotId` | 남긴 튜플 스냅샷 id. 없을 수 있다 |
 | `message` | 사유·메모. 변경이 없으면 "변경 없음". 가드가 걸렸거나 실패했으면 그 사유. 차단기로 멈췄지만 현재상태를 디렉터리대로 교체한 회차는 끝에 ` — 현재상태는 디렉터리대로 교체했다` 가 붙는다. 감사 이력을 못 쓴 줄이 있으면 앞에 "감사 기록 N건 실패" 가 붙는다 |
+| `requestedBy` | 이 회차를 건 [행위자](02-용어집.md#행위자). 관리 API 로 건 회차는 토큰의 `sub` 로 `client:<sub>`, 정기 동기화는 `system:scheduler`, SCIM 아카이빙은 `system:archive`. 행위자를 남기기 전에 쓴 옛 기록은 이 칸이 아예 없다(`null` 로도 나오지 않는다) |
 
 완료된 기록의 예:
 
@@ -559,21 +613,85 @@ curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organiz
   "deletedCount": 1,
   "failureCount": 0,
   "snapshotId": "20261025T040112301-LDAP",
-  "message": null
+  "message": null,
+  "requestedBy": "system:scheduler"
 }
 ```
 
-## 10. 인증이 없다
+## 10. 인증과 범위
 
-`/admin/**` 에는 인증도 권한 검사도 없다. 같은 포트의 `/scim/v2/**` 와 `/actuator/**` 도 그렇다. 이 문서의 모든 경로를 누구나 부를 수 있다.
+`/admin/**` 의 모든 요청은 bearer 토큰을 실어야 한다(RFC 6750 — `Authorization: Bearer <토큰>`). 토큰은 인가 서버 app-auth 가 client credentials 로 발급한 JWT 이고, 두 앱이 [리소스 서버](02-용어집.md#리소스-서버)로서 그 자리에서 검증한다 — 서명(`spring.security.oauth2.resourceserver.jwt.jwk-set-uri` 의 [키 목록](02-용어집.md#키-목록)), 발급자(`issuer-uri` 와 토큰의 `iss`), 만료(`exp`). `aud` 는 보지 않는다. 기동 때 인가 서버에 묻지 않고, 키 목록은 첫 토큰을 볼 때 받는다. 같은 포트의 `/scim/v2/**`·actuator 도 같은 보안 체인을 탄다([06 — 인증](06-SCIM.md#25-인증), [11 — 헬스](11-운영.md#4-헬스)). 클라이언트 등록·토큰 받기·키·https 는 [11 — 인증 운영](11-운영.md#9-인증-운영)에 있다.
 
-- 읽기 경로는 조직도를 열어 준다. 직원 이름·이메일·계정명, 소속, 감사 이력의 이전 값이 나간다. `displayName=가` 처럼 짧은 접두사로 쪽을 넘기며 전원을 열거할 수도 있다.
-- 쓰기 경로(`POST /admin/sync/**`)는 장부 전체를 다시 맞춘다. `mode=wipe` 는 `confirm` 으로 테이블명을 알아야 하지만 그것은 실수를 막는 장치이지 인증이 아니다.
-- 읽기 한 번이 OpenFGA 를 수백 번까지 부를 수 있다([7.3](#73-비용)).
+보안 체인은 web-security 모듈의 `ResourceServerSecurityConfig` 하나를 두 앱이 함께 쓴다. CSRF·세션·요청 저장·로그아웃 끝점을 두지 않는다 — bearer 토큰만 받는 API 라 거절한 요청도 서버에 아무것도 남기지 않는다.
+
+### 10.1 범위
+
+권한은 토큰의 `scope` 클레임에서 범위마다 `SCOPE_<범위>` 로 만든다(스프링 기본). 경로 규칙은 위에서부터 처음 맞는 것이다(`ResourceServerSecurityConfig.리소스_서버_체인`).
+
+| 경로 | 범위 |
+|---|---|
+| `/scim/v2/**`(발견 포함) | `scim` |
+| `GET /admin/employees/lookup`, `GET /admin/organizations/lookup` | `directory.lookup` 또는 `admin.read` |
+| 그 밖의 `GET /admin/**` — 검색·상세·멤버 목록·이력·실행 기록 | `admin.read` |
+| `POST /admin/sync/**` | `admin.sync`. `force=true`·`mode=wipe` 는 컨트롤러가 `admin.destructive` 를 더 본다([10.3](#103-위험한-요청--admindestructive)) |
+| `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness` | 없음 — 상태만. 세부는 `actuator` 가 있을 때만 |
+| 그 밖의 `/actuator/**`(`info`·`metrics`·`prometheus`, 헬스 항목 하나) | `actuator` |
+| 나머지 모든 경로·메서드 | 거절 — 토큰이 통과하면 403, 없으면 401 |
+
+- 범위 하나가 다른 범위를 품지 않는다(`Scopes`, web-security). `admin.sync` 만 가진 토큰은 자기가 건 회차의 결과(`GET /admin/sync/runs/{runId}`)도 읽지 못한다 — 운영 도구에는 `admin.read admin.sync` 를 함께 준다(로컬 `ops`). `admin.destructive` 도 `admin.sync` 와 함께 있어야 쓸모가 있다(로컬 `ops-break-glass`).
+- 범위 이름은 정확히 여섯이다 — `scim`, `admin.read`, `admin.sync`, `admin.destructive`, `directory.lookup`, `actuator`.
+
+### 10.2 거절
+
+보안 필터의 거절은 컨트롤러와 `AdminExceptionHandler` 를 거치지 않는다. web-security 의 `AuthFailureResponses` 가 그 표면의 오류 형식으로 직접 쓴다 — `/admin/**` 는 problem details(`application/problem+json`, 칸은 `type` `about:blank`·`title`·`status`·`detail`, `instance` 는 없다), `/scim/v2/**` 는 SCIM Error, 그 밖(actuator 등)은 본문이 없다. 토큰 내용과 검증 실패의 세부(만료 시각 등)는 머리·본문 어디에도 싣지 않는다 — 스프링 기본은 `error_description` 에 그것을 싣는데 그 기본을 쓰지 않는다.
+
+| 경우 | 상태 | `WWW-Authenticate` | `detail` |
+|---|---|---|---|
+| 토큰 없음 | 401 | `Bearer` | `인증이 필요하다` |
+| 토큰을 받아들이지 못함 — 서명이 다른 키, 발급자가 다름, 만료, 꼴이 틀림(JWE 꼴 포함) | 401 | `Bearer error="invalid_token"` | `인증이 필요하다` |
+| 그 경로의 범위가 없음(규칙 밖의 경로 포함) | 403 | `Bearer error="insufficient_scope"` | `이 요청에 필요한 범위가 없다` |
+| `force=true`·`mode=wipe` 에 `admin.destructive` 없음 — 컨트롤러가 본다 | 403 | `Bearer error="insufficient_scope"` | `force=true은 admin.destructive 범위가 필요하다`(`mode=wipe은 admin.destructive 범위가 필요하다`) |
+| 인가 서버의 키 목록을 받지 못함 | 503 + `Retry-After: 10` | 없음 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Unauthorized","status":401,"detail":"인증이 필요하다"}
+```
+
+```http
+HTTP/1.1 403 Forbidden
+WWW-Authenticate: Bearer error="insufficient_scope"
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Forbidden","status":403,"detail":"force=true은 admin.destructive 범위가 필요하다","instance":"/admin/sync/full"}
+```
+
+- **401 과 503 을 가르는 규칙은 하나다.** 키 목록을 받는 자리(`KeySetClient`, web-security)에서 실패한 것 — 연결 2초 초과, 연결을 포함한 전체 5초 초과, 2xx 가 아닌 상태, 키 목록으로 해석되지 않는 본문 — 만 표지(`KeySetUnavailableException`)를 달고, 그 표지가 원인 사슬에 있을 때만 503 이다. 그 밖에 토큰을 읽다 난 실패는 무엇이든 401 이다. 예외의 종류로 가르지 않는 까닭: 스프링은 토큰을 읽다 난 예상 밖의 예외도 같은 종류로 내므로, 아무나 보낼 수 있는 이상한 토큰이 503 과 "장애" 경보를 꾸며 낼 수 있다.
+- **키 목록 장애가 401 이 아니라 503 인 까닭.** 401 `invalid_token` 은 클라이언트에게 멀쩡한 토큰을 버리라는 뜻이다. client credentials 클라이언트는 인가 서버를 거듭 두드리고, IdP 는 거듭된 401 을 자격 문제로 읽어 프로비저닝을 격리할 수 있다. 503 + `Retry-After` 면 클라이언트가 스스로 다시 부른다 — 관리 API 의 일시 장애 규칙과 같다. 서버에는 WARN `키 목록을 받지 못해 503 으로 답한다: …` 가 남는다(스택과 토큰은 남기지 않는다).
+- 키 목록은 받아 둔 것을 쓰고 모르는 `kid` 의 토큰을 볼 때만 다시 받는다. 그래서 인가 서버가 내려가도 키 목록을 이미 받은 인스턴스는 발급된 토큰을 만료까지 받는다 — 새 토큰을 받지 못할 뿐이다. 503 은 키 목록을 아직 받지 못한 인스턴스(막 뜬 인스턴스)나 새 키의 토큰이 왔을 때 난다([12 — 인증과 키](12-장애와-복구.md#7-인증과-키)).
+
+### 10.3 위험한 요청 — `admin.destructive`
+
+삭제 가드를 건너뛰는 `force=true`(app-ldap `POST /admin/sync/full`·`/rebuild`)와 조직도의 유일한 사본을 지우는 `mode=wipe`(app-scim `POST /admin/sync/rebuild`)는 `admin.sync` 에 더해 `admin.destructive` 가 있어야 한다.
+
+- **필터가 아니라 컨트롤러가 본다.** 컨트롤러가 스프링이 바꾼 값(`boolean force`, 해석한 `ScimRebuildMode`)으로 판정한 뒤 `Callers.요구한다`(web-security)를 부른다. 필터에서 쿼리 문자열을 따로 읽으면 스프링과 다르게 해석해(`force=yes`·`force=1`·`mode=WIPE`) 우회된다. 그래서 쿼리 모양으로 우회하지 못한다.
+- **무엇보다 먼저 본다.** 실행 기록을 열거나 락을 잡기 전이고, `wipe` 의 `confirm` 확인보다도 앞이다. 거절되면 회차가 생기지 않는다.
+- 403 은 `InsufficientScopeException`(web-security, `ResponseStatusException` 의 하위)이고 `AdminExceptionHandler` 가 problem details 로 바꾼다. 예외가 든 머리 `WWW-Authenticate: Bearer error="insufficient_scope"` 를 응답에 옮기므로 보안 필터의 403 과 같은 머리다.
+- 로컬 개발 클라이언트 가운데 이 범위를 가진 것은 `ops-break-glass` 하나다.
+
+### 10.4 행위자
+
+토큰으로 온 요청은 토큰의 `sub`(app-auth 에서는 클라이언트 id)로 [행위자](02-용어집.md#행위자) `client:<sub>` 가 된다. 보안 체인의 인증 필터 뒤에 둔 `ActorWebFilter`(web-security)가 그 값을 요청의 Reactor Context 에 싣고, 회차의 실행 기록(`requestedBy`)과 감사 이력의 원인(`cause.actor`)에 남는다([10 감사 이력 — 원인](10-감사-이력.md#2-원인)). 토큰에 `sub` 가 없거나 비면 싣지 않는다 — 그러면 `system:unknown` 으로 남고 WARN 한 줄이 남는다. 운영자마다 클라이언트를 따로 주면 사람 단위로 남는다.
+
+### 10.5 범위가 열어 주는 것
+
+- `admin.read` 는 조직도를 열어 준다. 직원 이름·이메일·계정명, 소속, 감사 이력의 이전 값이 나간다. `displayName=가` 처럼 짧은 접두사로 쪽을 넘기며 전원을 열거할 수도 있다. 운영자에게만 준다. 권한을 묻는 앱에는 `directory.lookup` 을 준다 — 정확 조회는 한 명·하나만 돌려주고 여럿일 때 수만 센다.
+- 읽기 한 번이 OpenFGA 를 수백 번까지 부를 수 있다([7.3](#73-비용)). 요청 수는 제한하지 않는다([13 — 1.6](13-한계와-알려진-문제.md#16-요청-수-제한이-없다)).
 - 커서는 서명도 암호화도 하지 않는다([6.4](#64-커서의-형식과-검증)).
-- 감사 [행위자](02-용어집.md#행위자)(누가 걸었나)도 남지 않는다.
-
-운영에 넣기 전에 앞단(게이트웨이, 사설망, 프록시의 인증)에서 `/admin/**`·`/scim/v2/**`·`/actuator/**` 를 막아야 한다. 인증, 감사 행위자, 로그인 → employeeId 정확 일치 API 는 마지막 슬라이드의 몫이다. 상세는 [13 한계와 알려진 문제](13-한계와-알려진-문제.md).
+- 토큰 하나만 무효로 할 길은 없다 — 무효화는 서명 키 교체다([13 — 1.5](13-한계와-알려진-문제.md#15-토큰-하나만-무효로-할-수-없다)).
 
 ## 더 깊이
 
@@ -582,4 +700,4 @@ curl -X POST 'http://localhost:8082/admin/sync/rebuild?mode=wipe&confirm=organiz
 - 감사 이력 조회: `docs/superpowers/specs/2026-10-10-audit-log-design.md` §5
 - 요청과 떼어 돌리기(202), 409: `docs/superpowers/specs/2026-09-29-rebuild-jobs-fixed-store-design.md` §4, `2026-09-30-cluster-jobs-baseline-design.md` §3
 - 오류 응답(problem details·503·500), 직원 응답의 `externalId`: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §10·§11
-- 인증 슬라이드로 미룬 것: `docs/superpowers/specs/2026-10-20-revocation-convergence-design.md` §14, 외부 리뷰 N10: `docs/superpowers/specs/2026-10-19-outsider-review/0-종합.md`
+- 범위·401/403 본문·위험 요청·행위자·정확 조회 둘: `docs/superpowers/specs/2026-10-28-auth-design.md` §4·§5·§6(키 목록 장애 503 은 설계 뒤 구현 중 정했다 — 코드 `AuthFailureResponses`·`KeySetClient`). 정확 조회의 출발점인 외부 리뷰 N10: `docs/superpowers/specs/2026-10-19-outsider-review/0-종합.md`
