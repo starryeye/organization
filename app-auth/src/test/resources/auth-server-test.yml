@@ -25,6 +25,9 @@ spring:
           ops-break-glass:
             registration:
               client-secret: "{bcrypt}$2y$10$XdBhJPRcFSR3DJEATCt3iungOSJaaWIPEqFSCwzkTYgtfKKwRvEya"
+          org-chart:
+            registration:
+              client-secret: "{bcrypt}$2y$10$5xe/8NktJfu0Mv5CPuwsGOTA82GImEQ.acnpHDzbzagcN0z7F7Ch."
           asking-app:
             registration:
               client-secret: "{bcrypt}$2y$10$6zUXoTkCDoTB0MGY1/P62OuDu2oJkdCKDN.DhN5GQe/AntvPRx5UG"

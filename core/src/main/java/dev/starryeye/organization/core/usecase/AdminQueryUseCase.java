@@ -22,7 +22,9 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * 관리자 조회. 현재상태(DynamoDB)에서 계층을 재구성하고 OpenFGA 의 실제 판정을 나란히 싣는다.
@@ -208,7 +210,11 @@ public class AdminQueryUseCase {
         }
         // acceptParent 는 순환/다이아몬드/상한을 만나면 null 을 돌려준다. Flux#map 은 null 을
         // 허용하지 않으므로(NullPointerException) flatMap + Mono.justOrEmpty 로 흡수한다.
-        return state.findGroupIdsContaining(MemberRef.group(step.group().orgCode()))
+        // 상위는 IdP 의 멤버 연결과 운영자가 지정한 연결의 합집합이다(설계 2026-11-04 H2·H11). 같은 쌍이 둘 다이면 한 번만 나온다.
+        // 지정 상위는 조직마다 많아야 하나라 읽기가 노드마다 하나씩만 늘고, LDAP 배포에는 지정이 없어 결과가 같다.
+        String orgCode = step.group().orgCode();
+        return Flux.concat(state.findGroupIdsContaining(MemberRef.group(orgCode)), state.findAssignedParent(orgCode).flux())
+                .distinct()
                 .take(MAX_PATHS + 1)
                 // flatMapSequential 이라 병렬로 읽으면서도 순서를 지킨다 — acceptParent 는 결과를 하나씩 차례로 받는다(점검 S27)
                 .flatMapSequential(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
@@ -269,9 +275,11 @@ public class AdminQueryUseCase {
         // 조직 파티션 전체(findGroup)를 읽지 않는다 — 헤더·하위 조직·멤버 첫 쪽만(설계 2026-10-06 §3.2, 점검 P4)
         return state.findGroupHeader(orgCode).flatMap(header ->
                 Mono.zip(ancestorsOf(header), childrenOf(header.id()),
-                                membersPage(header.id(), null, memberPageSize))
+                                membersPage(header.id(), null, memberPageSize),
+                                // 지정 상위는 이 조직 하나의 정본 GetItem 이다. 없으면 null 로 싣는다(Mono.zip 은 빈 신호를 못 받아 Optional 로 감싼다)
+                                state.findAssignedParent(header.id()).map(Optional::of).defaultIfEmpty(Optional.empty()))
                         .map(parts -> new OrganizationDetail(
-                                header.id(), header.displayName(), header.externalId(),
+                                header.id(), header.displayName(), header.externalId(), parts.getT4().orElse(null),
                                 parts.getT1(), parts.getT2(), parts.getT3())));
     }
 
@@ -310,7 +318,7 @@ public class AdminQueryUseCase {
      * 각 하위 조직을 읽어야 한다 — 코드만 담아 돌려주면 관리 화면의 이름 칸이 비어버린다.
      * 이름표 한 줄씩만 읽으므로({@link #loadGroupOrEmpty}) 하위 조직 수만큼의 GetItem 이고,
      * 동시에 {@code LOAD_CONCURRENCY} 개씩 읽되 순서는 지킨다(점검 S27).
-     * 하위 조직 아이디는 {@code MEMBER#GROUP#} 줄만 상한까지 읽는다.
+     * 하위 조직 아이디는 {@code MEMBER#GROUP#} 줄과 지정 하위만 상한까지 읽는다({@link #childIdsOf}).
      *
      * <p><b>여기에도 상한을 둔다.</b> "보통 수십 개" 는 정상 조직도의 이야기이고, 이 엔드포인트는
      * {@code admin.read} 토큰이면 누구나 몇 번이고 부를 수 있다. 하위 조직이 수천 개인 조직이 하나라도
@@ -318,9 +326,7 @@ public class AdminQueryUseCase {
      * 경고를 남긴다 — {@code OrganizationDetail} 에는 {@code truncated} 를 실을 자리가 없다.
      */
     private Mono<List<GroupSummary>> childrenOf(String orgCode) {
-        return search.findChildOrgCodes(orgCode)
-                .take(MAX_PATHS + 1)
-                .collectList()
+        return childIdsOf(orgCode)
                 .flatMap(childIds -> {
                     if (childIds.size() > MAX_PATHS) {
                         log.warn("조직 '{}' 의 직속 하위 조직이 상한({})을 넘어 잘렸습니다", orgCode, MAX_PATHS);
@@ -330,6 +336,21 @@ public class AdminQueryUseCase {
                             // flatMapSequential 이라 병렬로 읽으면서도 하위 조직 순서를 지킨다(점검 S27)
                             .flatMapSequential(this::loadGroupOrEmpty, LOAD_CONCURRENCY)
                             .collectList();
+                });
+    }
+
+    /**
+     * 직속 하위 조직 아이디 — IdP 의 멤버 연결과 운영자가 지정한 연결의 합집합을 중복 없이 아이디 오름차순으로(설계 2026-11-04 H2·H11).
+     * 두 원천 모두 아이디 순이라 각각 {@code MAX_PATHS + 1} 개까지만 읽어 합쳐도 합집합의 앞쪽 {@code MAX_PATHS + 1} 개가 그 안에 있다 —
+     * 지정 하위는 하위마다 정본 GetItem 이 하나씩 드는데 그 양도 상한이 지킨다. LDAP 배포에는 지정이 없어 결과가 같다.
+     */
+    private Mono<List<String>> childIdsOf(String orgCode) {
+        return Mono.zip(search.findChildOrgCodes(orgCode).take(MAX_PATHS + 1).collectList(),
+                        state.findAssignedChildren(orgCode).take(MAX_PATHS + 1).collectList())
+                .map(원천들 -> {
+                    Set<String> 아이디들 = new TreeSet<>(원천들.getT1());
+                    아이디들.addAll(원천들.getT2());
+                    return 아이디들.stream().limit(MAX_PATHS + 1).toList();
                 });
     }
 

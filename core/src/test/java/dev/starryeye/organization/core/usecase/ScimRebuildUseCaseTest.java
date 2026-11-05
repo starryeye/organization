@@ -386,6 +386,62 @@ class ScimRebuildUseCaseTest {
         assertThat(state.cutEdges).containsExactly(new GroupEdge("A", "B"));
     }
 
+    // ---------- 지정 연결 (설계 2026-11-04 §5.6, H6·H10) ----------
+
+    @Test
+    @DisplayName("재적재는 지정 연결을 튜플로 싣는다 — 멤버 행에 없는 연결이다")
+    void 재적재는_지정_연결을_튜플로_싣는다() {
+        // given — C 는 IdP 가 P 의 하위로 보낸 적이 없고, 운영자가 P 아래로 지정했다
+        state.saveGroup(조직("P")).block();
+        state.saveGroup(조직("C")).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(writer.stored).containsExactly(RelationTuple.child("C", "P"));
+        assertThat(snapshots.saved.get(0).tuples()).containsExactly(RelationTuple.child("C", "P"));
+        assertThat(state.cutEdges).isEmpty();
+    }
+
+    @Test
+    @DisplayName("재적재가 자른 지정 연결은 보류 목록에 들어간다 — IdP 연결과 같은 규칙으로 한쪽만 남는다")
+    void 재적재가_자른_지정_연결은_보류_목록에_들어간다() {
+        // given — IdP 는 P ⊃ C 를 보냈고, 운영자는 P 의 상위를 C 로 지정했다. 둘이 순환을 닫는다
+        state.saveGroup(조직("P", MemberRef.group("C"))).block();
+        state.saveGroup(조직("C")).block();
+        state.assignedParents.put("P", "C");
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.TUPLES);
+
+        // then — DFS 가 한 연결을 버려 보류 목록에 들어가고, 장부에는 child 줄이 하나만 남는다
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.cutEdges).hasSize(1);
+        assertThat(writer.stored).hasSize(1).allSatisfy(tuple -> assertThat(tuple.relation()).isEqualTo(RelationTuple.CHILD));
+        assertThat(state.cutEdges.iterator().next().tuple()).isNotIn(writer.stored);
+    }
+
+    @Test
+    @DisplayName("wipe 는 지정 연결을 모두 지운다 — 옛 조직 id 의 연결은 뜻이 없다(설계 H10)")
+    void wipe_는_지정을_모두_지운다() {
+        // given
+        state.saveGroup(조직("P")).block();
+        state.saveGroup(조직("C")).block();
+        state.assignedParents.put("C", "P");
+        writer.stored.add(RelationTuple.child("C", "P"));
+
+        // when
+        var run = 재적재한다(ScimRebuildMode.WIPE);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(state.assignedParents).isEmpty();
+        assertThat(writer.stored).isEmpty();
+    }
+
     // ---------- wipe 모드 ----------
 
     @Test

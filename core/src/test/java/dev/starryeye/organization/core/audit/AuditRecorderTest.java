@@ -142,4 +142,17 @@ class AuditRecorderTest {
         assertThat(모르는.id()).isNotBlank();
         assertThat(모르는.kind()).isEqualTo(AuditKind.SCIM_REQUEST);
     }
+
+    @Test
+    @DisplayName("관리 API 의 지정 요청은 원천이 SCIM 인 새 종류이고, 아이디는 SCIM 요청과 같은 규칙이다")
+    void 지정_요청_원인() {
+        // given, when
+        AuditCause 아는 = AuditCause.hierarchyRequest("trace-1", "client:org-chart");
+        AuditCause 모르는 = AuditCause.hierarchyRequest(" ", "client:org-chart");
+
+        // then
+        assertThat(아는).isEqualTo(new AuditCause(SyncSource.SCIM, AuditKind.HIERARCHY_REQUEST, "trace-1", "client:org-chart"));
+        assertThat(모르는.id()).isNotBlank();
+        assertThat(모르는.kind()).isEqualTo(AuditKind.HIERARCHY_REQUEST);
+    }
 }

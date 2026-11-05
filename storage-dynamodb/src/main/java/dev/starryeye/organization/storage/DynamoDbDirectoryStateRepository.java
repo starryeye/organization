@@ -110,6 +110,8 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** 보류 목록 줄의 속성(설계 2026-10-03 §4.1). 키에도 담겨 있지만 줄만 보고 읽을 수 있게 둔다. */
     private static final String CUT_PARENT = "parent";
     private static final String CUT_CHILD = "child";
+    /** 지정 연결 정본의 속성(설계 2026-11-04 §4) — 하위 조직 파티션의 {@code ASSIGNED_PARENT} 줄이 상위 조직 id 를 담는다. */
+    private static final String ASSIGNED_PARENT_OF = "parent";
 
     /**
      * 직원 META 에서 없을 수 있는 속성 — 이번 값에 없으면 REMOVE 한다(설계 2026-10-09 §3.1). {@link #userItem} 이
@@ -335,13 +337,28 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
     /** <b>강한 일관성으로 읽는다.</b> 클래스 자바독의 "강한 일관성" 절 참고. */
     @Override
     public Mono<DirectoryGroup> findGroup(String groupId) {
+        return readGroup(groupId).map(GroupRead::group);
+    }
+
+    /**
+     * 조직 파티션을 한 번 읽어 조직과 그 지정 상위를 함께 얻는다 — 지정 연결의 정본이 같은 파티션에 있어 읽기를 더하지 않는다(설계 2026-11-04 §4).
+     * {@link #loadAll} 이 조직마다 이것을 쓴다.
+     */
+    private Mono<GroupRead> readGroup(String groupId) {
         String pk = Keys.groupPk(groupId);
         if (!Keys.fitsPartitionKey(pk)) {
             return Mono.empty();
         }
         return queryPartition(pk)
                 .collectList()
-                .flatMap(items -> Mono.justOrEmpty(toGroup(groupId, items)));
+                .flatMap(items -> {
+                    DirectoryGroup group = toGroup(groupId, items);
+                    return group == null ? Mono.empty() : Mono.just(new GroupRead(group, assignedParentOf(items)));
+                });
+    }
+
+    /** 조직 한 곳과 그 지정 상위 id(없으면 null) — {@link #readGroup} 의 결과. */
+    private record GroupRead(DirectoryGroup group, String assignedParent) {
     }
 
     /**
@@ -574,14 +591,23 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
      * 이 조직의 소속 줄만 읽어 상위 조직을 알아낸다(줄 몇 개) — 멤버 줄 10만 개를 다시 훑지 않는다. 지우기는 25개씩 묶어
      * {@link BatchRequests} 로 보낸다(멤버 10만 명이면 약 8,000번, 묶음 재시도 상한). 지우기 요청은 보낼 차례에 만든다 — 10만 명이면
      * 20만 개를 미리 쥐지 않는다.
+     *
+     * <p>지정 연결(설계 2026-11-04 §4, H9)은 이 조직 파티션의 역색인과 정본을 따로 읽어, META 를 지우기 바로 앞에서 지운다. 하위 조직의 정본은 그것이 이
+     * 조직을 가리킬 때만 지운다 — 낡은 역색인이 가리키는 하위 조직의 정본은 남는다.
      */
     @Override
     public Mono<Void> deleteGroup(String groupId, Set<MemberRef> members) {
         String pk = Keys.groupPk(groupId);
         MemberRef 이조직 = MemberRef.group(groupId);
-        return querySortKeys(pk, Keys.BELONGS_TO_PREFIX)
-                .collectList()
-                .flatMap(소속_정렬키 -> {
+        Mono<List<String>> 소속 = querySortKeys(pk, Keys.BELONGS_TO_PREFIX).collectList();
+        // 지정 연결은 멤버 줄·소속 줄과 따로 읽는다 — members 가 비어 있어도(멤버 없는 조직, 멤버를 이미 지운 재시도) 마저 지운다
+        Mono<List<String>> 지정_하위 = querySortKeys(pk, Keys.ASSIGNED_CHILD_PREFIX).map(Keys::parseAssignedChildSk).collectList();
+        Mono<Optional<String>> 지정_상위 = findAssignedParent(groupId).map(Optional::of).defaultIfEmpty(Optional.empty());
+        return Mono.zip(소속, 지정_하위, 지정_상위)
+                .flatMap(읽음 -> {
+                    List<String> 소속_정렬키 = 읽음.getT1();
+                    List<String> 하위들 = 읽음.getT2();
+                    Optional<String> 상위 = 읽음.getT3();
                     Flux<WriteRequest> 멤버_줄 = Flux.concat(
                             Flux.fromIterable(소속_정렬키)
                                     .map(sk -> 지우기(Keys.groupPk(Keys.parseBelongsToSk(sk)), Keys.memberSk(이조직))),
@@ -594,7 +620,20 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                     // 바뀐 것이다(SCIM Group 은 members 를 담는다, 설계 2026-10-09 §3.2)
                     Flux<Void> 상위_조직 = Flux.fromIterable(소속_정렬키)
                             .flatMap(sk -> 변경_시각을_올린다(Keys.parseBelongsToSk(sk)), QUERY_CONCURRENCY);
-                    return Flux.concat(묶어_보낸다(멤버_줄), 상위_조직, 묶어_보낸다(소속_줄), deleteItem(pk, Keys.META)).then();
+
+                    // 지정 연결은 META 바로 앞에서 지운다: 하위 조직들의 정본(그 정본이 이 조직을 가리킬 때만 — 낡은 역색인이 가리키는 하위 조직의 정본은
+                    // 남긴다) → 이 조직 파티션의 역색인들 → 이 조직의 정본 → 그 상위 파티션의 역색인. 중간에 멈추면 같은 삭제를 다시 불러 마저 지운다
+                    Flux<Void> 지정_하위의_정본 = Flux.fromIterable(하위들)
+                            .flatMap(하위 -> 조건부로_지운다(하위, groupId), QUERY_CONCURRENCY);
+                    Flux<WriteRequest> 지정_역색인 = Flux.fromIterable(하위들)
+                            .map(하위 -> 지우기(pk, Keys.assignedChildSk(하위)));
+                    Mono<Void> 지정_정본 = 상위.isPresent() ? deleteItem(pk, Keys.ASSIGNED_PARENT) : Mono.empty();
+                    Mono<Void> 상위의_역색인 = 상위.isPresent()
+                            ? deleteItem(Keys.groupPk(상위.get()), Keys.assignedChildSk(groupId))
+                            : Mono.empty();
+                    return Flux.concat(묶어_보낸다(멤버_줄), 상위_조직, 묶어_보낸다(소속_줄),
+                            지정_하위의_정본, 묶어_보낸다(지정_역색인), 지정_정본, 상위의_역색인,
+                            deleteItem(pk, Keys.META)).then();
                 });
     }
 
@@ -843,12 +882,23 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
                 .flatMapMany(this::findUsers)
                 .collect(LinkedHashMap::new, (map, user) -> map.put(user.id(), user));
 
-        Mono<Map<String, DirectoryGroup>> groups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
-                .flatMap(this::findGroup, QUERY_CONCURRENCY)
-                .collect(LinkedHashMap::new, (map, group) -> map.put(group.id(), group));
+        // 조직 파티션 읽기 하나에서 조직과 지정 연결을 함께 얻는다 — 조직당 읽기를 더하지 않는다(설계 2026-11-04 §4)
+        Mono<List<GroupRead>> groups = enumerateIds(Keys.GROUP_INDEX, Keys::parseGroupPk)
+                .flatMap(this::readGroup, QUERY_CONCURRENCY)
+                .collectList();
 
         return Mono.zip(users, groups)
-                .map(both -> new DirectorySnapshot(both.getT1(), both.getT2()));
+                .map(both -> {
+                    Map<String, DirectoryGroup> groupMap = new LinkedHashMap<>();
+                    Set<GroupEdge> assignedEdges = new LinkedHashSet<>();
+                    for (GroupRead read : both.getT2()) {
+                        groupMap.put(read.group().id(), read.group());
+                        if (read.assignedParent() != null) {
+                            assignedEdges.add(new GroupEdge(read.assignedParent(), read.group().id()));
+                        }
+                    }
+                    return new DirectorySnapshot(both.getT1(), groupMap, assignedEdges);
+                });
     }
 
     /** GSI1 파티션을 훑어 PK 에서 id 만 뽑는다. Scan 을 쓰지 않는 이유는 스펙 §6.1 참고. */
@@ -903,6 +953,105 @@ public class DynamoDbDirectoryStateRepository implements DirectoryStateRepositor
         item.put(CUT_PARENT, Attrs.s(edge.parent()));
         item.put(CUT_CHILD, Attrs.s(edge.child()));
         return item;
+    }
+
+    // ---------- 지정 연결 ----------
+
+    /** 정본 한 건을 GetItem 으로 읽는다 — 하위 조직 파티션의 크기와 무관하다. */
+    @Override
+    public Mono<String> findAssignedParent(String orgCode) {
+        String pk = Keys.groupPk(orgCode);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Mono.empty();
+        }
+        return Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(pk), Keys.SK, Attrs.s(Keys.ASSIGNED_PARENT)))
+                        .consistentRead(true)
+                        .build()))
+                .filter(GetItemResponse::hasItem)
+                .flatMap(response -> Mono.justOrEmpty(Attrs.str(response.item(), ASSIGNED_PARENT_OF)));
+    }
+
+    /**
+     * 역색인의 정렬키를 오름차순으로 읽고, 하위 조직마다 정본을 GetItem 으로 확인해 이 조직을 가리키는 것만 남긴다 — {@link #findGroupIdsContaining}
+     * 이 소속 줄을 멤버 줄로 확인하는 것과 같다. 순서를 지키려고 {@code flatMapSequential} 이다.
+     */
+    @Override
+    public Flux<String> findAssignedChildren(String orgCode) {
+        String pk = Keys.groupPk(orgCode);
+        if (!Keys.fitsPartitionKey(pk)) {
+            return Flux.empty();
+        }
+        return querySortKeys(pk, Keys.ASSIGNED_CHILD_PREFIX)
+                .map(Keys::parseAssignedChildSk)
+                .flatMapSequential(하위 -> findAssignedParent(하위)
+                        .filter(orgCode::equals)
+                        .map(상위 -> 하위), QUERY_CONCURRENCY);
+    }
+
+    /**
+     * 새 역색인 → 정본 → (바뀌었으면) 옛 역색인 지우기 순서다. 정본보다 역색인을 먼저 써서, 중간에 멈추면 남는 것이 정본과 맞지 않는 역색인뿐이다 —
+     * 읽을 때 걸러진다. META·멤버 줄은 건드리지 않는다.
+     */
+    @Override
+    public Mono<Void> saveAssignedParent(String orgCode, String parentOrgCode, String previousParentOrgCode) {
+        Mono<Void> 옛_역색인 = previousParentOrgCode == null || previousParentOrgCode.equals(parentOrgCode)
+                ? Mono.empty()
+                : deleteItem(Keys.groupPk(previousParentOrgCode), Keys.assignedChildSk(orgCode));
+        return putItem(assignedChildItem(parentOrgCode, orgCode))
+                .then(putItem(assignedParentItem(orgCode, parentOrgCode)))
+                .then(옛_역색인);
+    }
+
+    /** 정본 → 역색인 순서다. 정본이 다른 상위를 가리키면 정본은 두고 {@code parentOrgCode} 파티션의 낡은 역색인만 지운다. */
+    @Override
+    public Mono<Void> deleteAssignedParent(String orgCode, String parentOrgCode) {
+        return 조건부로_지운다(orgCode, parentOrgCode)
+                .then(deleteItem(Keys.groupPk(parentOrgCode), Keys.assignedChildSk(orgCode)));
+    }
+
+    /**
+     * 하위 조직의 정본을 그것이 {@code parentOrgCode} 를 가리킬 때만 지운다. 다른 상위를 가리키거나 이미 없어서 조건이 깨지면 넘어간다 —
+     * {@code ConditionalCheckFailedException} 만 삼킨다.
+     */
+    private Mono<Void> 조건부로_지운다(String childOrgCode, String parentOrgCode) {
+        return Mono.fromFuture(() -> client.deleteItem(DeleteItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.groupPk(childOrgCode)), Keys.SK, Attrs.s(Keys.ASSIGNED_PARENT)))
+                        .conditionExpression("#parent = :parent")
+                        .expressionAttributeNames(Map.of("#parent", ASSIGNED_PARENT_OF))
+                        .expressionAttributeValues(Map.of(":parent", Attrs.s(parentOrgCode)))
+                        .build()))
+                .then()
+                .onErrorResume(ConditionalCheckFailedException.class, 다른_상위 -> Mono.empty());
+    }
+
+    /** 하위 조직 파티션의 정본. <b>GSI 키를 넣지 않는다</b> — 넣으면 직원·조직 열거에 섞인다. */
+    private Map<String, AttributeValue> assignedParentItem(String childOrgCode, String parentOrgCode) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.groupPk(childOrgCode)));
+        item.put(Keys.SK, Attrs.s(Keys.ASSIGNED_PARENT));
+        item.put(ASSIGNED_PARENT_OF, Attrs.s(parentOrgCode));
+        return item;
+    }
+
+    /** 상위 조직 파티션의 역색인. 정본과 같은 이유로 GSI 키가 없다. */
+    private Map<String, AttributeValue> assignedChildItem(String parentOrgCode, String childOrgCode) {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put(Keys.PK, Attrs.s(Keys.groupPk(parentOrgCode)));
+        item.put(Keys.SK, Attrs.s(Keys.assignedChildSk(childOrgCode)));
+        return item;
+    }
+
+    /** 조직 파티션에서 읽은 줄들에서 지정 상위(정본의 {@code parent})를 뽑는다. 없으면 null. {@link #toGroup} 은 이 줄을 무시한다. */
+    private static String assignedParentOf(List<Map<String, AttributeValue>> items) {
+        return items.stream()
+                .filter(item -> Keys.ASSIGNED_PARENT.equals(Attrs.str(item, Keys.SK)))
+                .map(item -> Attrs.str(item, ASSIGNED_PARENT_OF))
+                .filter(상위 -> 상위 != null)
+                .findFirst()
+                .orElse(null);
     }
 
     // ---------- 유일 값 표지판 ----------

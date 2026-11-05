@@ -32,9 +32,9 @@ public final class TestTokens {
     /** 시험 발급자. 시험 디코더가 이 값만 받는다. */
     public static final String ISSUER = "https://auth.test";
 
-    /** 여섯 범위 전부 — 앱 시험의 기본 머리가 싣는다. 바꿀 수 없는 목록이다(시험 여럿이 함께 쓴다). */
+    /** 일곱 범위 전부 — 앱 시험의 기본 머리가 싣는다. 바꿀 수 없는 목록이다(시험 여럿이 함께 쓴다). */
     public static final List<String> ALL_SCOPES = List.of(
-            Scopes.SCIM, Scopes.ADMIN_READ, Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE, Scopes.DIRECTORY_LOOKUP, Scopes.ACTUATOR);
+            Scopes.SCIM, Scopes.ADMIN_READ, Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE, Scopes.DIRECTORY_LOOKUP, Scopes.ACTUATOR, Scopes.ADMIN_HIERARCHY);
 
     /** 기본 수명. 규모 시험까지 한 컨텍스트가 넉넉히 쓴다. */
     private static final Duration 기본_수명 = Duration.ofHours(6);

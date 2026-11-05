@@ -279,6 +279,33 @@ class AuditChangesTest {
     }
 
     @Test
+    @DisplayName("지정 상위와 이름 바꾸기가 같은 조직에 함께 오면 속성은 displayName 다음 assignedParent 다 — 더한 순서와 상관없다")
+    void 지정_상위는_다른_속성_뒤에_온다() {
+        // when
+        List<AuditEntry> entries = new AuditChanges()
+                .assignedParent("DEV", null, "HQ")
+                .group(이름표("DEV", "개발"), 이름표("DEV", "개발본부"), Set.of(), Set.of())
+                .entries();
+
+        // then
+        assertThat(줄(entries, 개발).attributes()).containsExactly(
+                new AttributeChange("displayName", "개발", "개발본부"),
+                new AttributeChange("assignedParent", null, "HQ"));
+    }
+
+    @Test
+    @DisplayName("지정 상위가 여러 번 바뀌면 처음의 이전과 마지막의 이후를 비교하고, 같으면 줄이 없다")
+    void 지정_상위는_처음_이전과_마지막_이후() {
+        // when
+        List<AuditEntry> 바뀜 = new AuditChanges().assignedParent("DEV", "OLD", "MID").assignedParent("DEV", "MID", "HQ").entries();
+        List<AuditEntry> 그대로 = new AuditChanges().assignedParent("DEV", "HQ", "MID").assignedParent("DEV", "MID", "HQ").entries();
+
+        // then
+        assertThat(줄(바뀜, 개발).attributes()).containsExactly(new AttributeChange("assignedParent", "OLD", "HQ"));
+        assertThat(그대로).isEmpty();
+    }
+
+    @Test
     @DisplayName("전체 교체가 변경마다 알리는 것을 받아 같은 규칙으로 적는다")
     void 전체_교체의_알림을_받는다() {
         // given

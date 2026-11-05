@@ -24,22 +24,24 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * 요청 하나 동안 보는 <b>튜플 그래프</b> — 하위 조직 멤버 줄에서 <b>OpenFGA 에 없는</b> 보류 연결을 뺀 것(설계 2026-10-03 §4.1). 순환 검사(§4.2)와 보류 판단(§4.3)을 한다.
+ * 요청 하나 동안 보는 <b>튜플 그래프</b> — <b>원천 연결</b>(하위 조직 멤버 줄 ∪ 운영자가 둔 지정 연결)에서 <b>OpenFGA 에 없는</b> 보류 연결을 뺀 것(설계 2026-10-03
+ * §4.1, 2026-11-04 H6). 순환 검사(§4.2)와 보류 판단(§4.3)을 한다. 같은 쌍은 한 연결이다.
  *
- * <p><b>왜 튜플 그래프인가.</b> 순환이라 쓰지 않은 연결도 멤버 줄은 남는다 — 멤버십은 IdP 가 보낸 사실이다. 그래서 멤버 줄의 그래프에는 순환이 있고 OpenFGA 에는
- * 없다. 멤버 줄로 순환을 보면 이미 보류한 연결을 지나는 경로 때문에 멀쩡한 새 연결까지 버린다.
+ * <p><b>왜 튜플 그래프인가.</b> 순환이라 쓰지 않은 연결도 원천은 남는다 — 멤버십은 IdP 가 보낸 사실이고, 지정은 운영자가 둔 사실이다. 그래서 원천 연결의 그래프에는
+ * 순환이 있고 OpenFGA 에는 없다. 원천으로 순환을 보면 이미 보류한 연결을 지나는 경로 때문에 멀쩡한 새 연결까지 버린다.
  *
  * <p><b>보류 목록에 있어도 OpenFGA 에 튜플이 있으면 그래프에 있는 연결이다.</b> 튜플을 쓴 뒤 목록에서 빼기 전에 멈추거나 빼기가 실패하면 그런 줄이 남는다. 이 줄을
  * 그래프에서 빼면 실제로 있는 경로를 못 보고, 그 경로를 지나는 순환을 닫는 연결을 쓰게 된다. 그래서 {@link #보류()} 가 목록을 읽은 직후 한 번 Check 해
  * OpenFGA 에 있는 줄을 목록에서 걷어 {@link #이미_있던_보류()} 에 따로 둔다 — 호출한 쪽이 저장된 목록에서도 뺀다.
  *
  * <p><b>위로 올라간다(점검 P2).</b> 새 연결 P ⊃ c 는 c 가 P 자신이거나 P 의 조상이면 순환이다. 조상은 보통 조직도 깊이 × 다중 부모 수라, 자손 수천 개를
- * 훑던 옛 검사보다 훨씬 적게 읽는다. 펼친 조직 수가 {@value #MAX_EXPANSIONS} 를 넘으면 {@link GroupGraphTooLargeException} 이다.
+ * 훑던 옛 검사보다 훨씬 적게 읽는다. 조직마다의 부모는 IdP 부모(소속 줄) ∪ 지정 상위 − 보류 목록이다(설계 2026-11-04 §5.4). 펼친 조직 수가
+ * {@value #MAX_EXPANSIONS} 를 넘으면 {@link GroupGraphTooLargeException} 이다.
  *
  * <p>요청 하나에 하나 만든다. 보류 목록과 조직마다의 부모 목록을 요청 안에서 한 번만 읽는다 — 요청 안에서는 락이 상태를 고정한다. 요청 안에서 보류한 연결(목록에
  * 넣는다)과 되살린 연결(목록에서 뺀다)은 같은 요청의 뒤 검사에 반영된다.
  *
- * <p><b>받아들인 새 연결은 그래프에 넣지 않는다.</b> {@link #거른다} 가 거르는 연결은 모두 초점 조직을 언급한다 — 부모 쪽 연결(X ⊃ 초점)은 이미 저장된 멤버 줄이라
+ * <p><b>받아들인 새 연결은 그래프에 넣지 않는다.</b> {@link #거른다} 가 거르는 연결은 모두 초점 조직을 언급한다 — 부모 쪽 연결(X ⊃ 초점)은 이미 저장된 원천 연결이라
  * 그래프에 있고, 자식 쪽 연결(초점 ⊃ c)은 초점에서 위로 걷는 길에 나타날 수 없다. 그래서 커밋 전 그래프로 걸어도 답이 정확하다. 이 전제가 깨지는 호출자(초점이 여럿인
  * 일괄 요청 등)가 생기면 받아들인 연결을 그래프에 넣어야 한다.
  */
@@ -162,7 +164,7 @@ final class OrgGraph {
      *
      * <p>순서: 자식이 초점 조직인 연결(상위 조직이 먼저 적어 둔 연결)을 먼저, 그다음 나머지. 각각 아이디 순.
      *
-     * <p>받아들인 새 연결은 같은 요청의 뒤 검사에 그래프로 넣지 않는다 — 보류한 연결과 되살린 연결만 반영한다. 거르는 연결이 모두 초점 조직을 언급해(부모 쪽은 이미 저장된 멤버 줄,
+     * <p>받아들인 새 연결은 같은 요청의 뒤 검사에 그래프로 넣지 않는다 — 보류한 연결과 되살린 연결만 반영한다. 거르는 연결이 모두 초점 조직을 언급해(부모 쪽은 이미 저장된 원천 연결,
      * 자식 쪽은 초점에서 위로 걷는 길에 없다) 커밋 전 그래프로 걸어도 답이 같기 때문이다. 초점이 여럿인 호출자가 생기면 받아들인 연결을 넣어야 한다.
      */
     Mono<거른결과> 거른다(Set<RelationTuple> actual, Set<RelationTuple> after, String focus) {
@@ -199,23 +201,27 @@ final class OrgGraph {
         });
     }
 
-    /** 튜플 그래프에서 {@code id} 의 부모들 — 소속 줄(강한 일관성)에서 보류 연결을 뺀다. 요청 안에서 조직마다 한 번만 읽고, 읽을 때마다 예산을 쓴다. */
+    /**
+     * 튜플 그래프에서 {@code id} 의 부모들 — 원천 연결의 부모(소속 줄의 부모 ∪ 지정 상위, 둘 다 강한 일관성)에서 보류 연결을 뺀다(설계 2026-11-04 §5.4).
+     * 요청 안에서 조직마다 한 번만 읽고, 읽을 때마다 예산을 쓴다 — 두 읽기를 함께 해도 조직 하나에 예산 하나다.
+     */
     private Mono<List<String>> 튜플_그래프의_부모들(String id, Set<GroupEdge> cut) {
         Set<String> cached = 부모들.get(id);
-        Mono<Set<String>> 멤버_줄의_부모들;
+        Mono<Set<String>> 원천_부모들;
         if (cached != null) {
-            멤버_줄의_부모들 = Mono.just(cached);
+            원천_부모들 = Mono.just(cached);
         } else {
             if (budget-- <= 0) {
                 return Mono.error(new GroupGraphTooLargeException(
                         "조직 계층이 너무 크다 — 순환 검사가 %d개 조직을 넘겼습니다: %s".formatted(MAX_EXPANSIONS, id)));
             }
-            멤버_줄의_부모들 = state.findGroupIdsContaining(MemberRef.group(id))
+            // 두 읽기를 함께 보내고 순서는 지킨다(소속 줄의 부모 먼저) — 같은 쌍은 한 부모다
+            원천_부모들 = Flux.mergeSequential(state.findGroupIdsContaining(MemberRef.group(id)), state.findAssignedParent(id))
                     .collect(Collectors.toCollection(LinkedHashSet::new))
                     .<Set<String>>map(set -> set)
                     .doOnNext(set -> 부모들.put(id, set));
         }
-        return 멤버_줄의_부모들.map(parents -> parents.stream()
+        return 원천_부모들.map(parents -> parents.stream()
                 .filter(parent -> !cut.contains(new GroupEdge(parent, id)))
                 .toList());
     }

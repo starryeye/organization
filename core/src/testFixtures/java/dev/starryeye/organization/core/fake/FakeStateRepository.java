@@ -16,6 +16,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -67,6 +68,15 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     /** 보류 목록(설계 2026-10-03 §4.1). {@link #replaceWith} 는 건드리지 않는다 — 실제 저장소도 그렇다. */
     public final Set<GroupEdge> cutEdges = new LinkedHashSet<>();
+
+    /**
+     * 지정 연결(설계 2026-11-04 §4) — 하위 조직 → 상위 조직. 조직의 멤버({@link DirectoryGroup#members})와 따로 둔다. {@link #deleteGroup} 은 그 조직이
+     * 하위이거나 상위인 줄을 지우고, {@link #replaceWith} 는 끝에서 조직이 없는 쪽이 낀 줄을 지운다(wipe).
+     */
+    public final Map<String, String> assignedParents = new LinkedHashMap<>();
+
+    /** {@link #saveAssignedParent} 가 받은 {@code [orgCode, parentOrgCode, previousParentOrgCode]}(이전이 없으면 null) — 넘긴 이전 값을 단언한다. */
+    public final List<List<String>> saveAssignedParentCalls = new ArrayList<>();
 
     /**
      * 유일 값 표지판(설계 2026-10-14 §3) — 차지·넘겨받기로 적은 것. 직원·조직 지도에 바로 심은 것은 여기 적지 않아도 지금 값의 표지판을
@@ -187,6 +197,7 @@ public class FakeStateRepository implements DirectoryStateRepository {
         return Mono.fromRunnable(() -> {
             deleteGroupCalls.add(groupId);
             groups.remove(groupId);
+            assignedParents.entrySet().removeIf(줄 -> groupId.equals(줄.getKey()) || groupId.equals(줄.getValue()));
             MemberRef 이조직 = MemberRef.group(groupId);
             groups.replaceAll((id, group) -> {
                 if (!group.members().contains(이조직)) {
@@ -225,6 +236,35 @@ public class FakeStateRepository implements DirectoryStateRepository {
             findMemberRefsCalls.add(groupId);
             return Flux.fromIterable(membersOf(groupId));
         });
+    }
+
+    @Override
+    public Mono<String> findAssignedParent(String orgCode) {
+        return Mono.defer(() -> Mono.justOrEmpty(assignedParents.get(orgCode)));
+    }
+
+    /** 아이디 오름차순 — 실제 저장소의 정렬키 순서와 같다. */
+    @Override
+    public Flux<String> findAssignedChildren(String orgCode) {
+        return Flux.defer(() -> Flux.fromIterable(assignedParents.entrySet().stream()
+                .filter(줄 -> orgCode.equals(줄.getValue()))
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList()));
+    }
+
+    @Override
+    public Mono<Void> saveAssignedParent(String orgCode, String parentOrgCode, String previousParentOrgCode) {
+        return Mono.fromRunnable(() -> {
+            saveAssignedParentCalls.add(Arrays.asList(orgCode, parentOrgCode, previousParentOrgCode));
+            assignedParents.put(orgCode, parentOrgCode);
+        });
+    }
+
+    /** 정본이 {@code parentOrgCode} 를 가리킬 때만 지운다 — 실제 저장소의 조건부 삭제와 같다. */
+    @Override
+    public Mono<Void> deleteAssignedParent(String orgCode, String parentOrgCode) {
+        return Mono.fromRunnable(() -> assignedParents.remove(orgCode, parentOrgCode));
     }
 
     /** 헤더를 읽지 않는다 — {@link #saveUser(DirectoryUser)} 와 같은 이유로 포트 default 를 덮는다. */
@@ -450,6 +490,8 @@ public class FakeStateRepository implements DirectoryStateRepository {
             groups.clear();
             users.putAll(snapshot.users());
             groups.putAll(snapshot.groups());
+            // 조직이 사라졌으면 그 조직이 끼인 지정 연결도 사라진다 — 실제 저장소는 사라진 조직을 deleteGroup 으로 지운다(wipe, 설계 2026-11-04 H10)
+            assignedParents.entrySet().removeIf(줄 -> !groups.containsKey(줄.getKey()) || !groups.containsKey(줄.getValue()));
             return Mono.just(new DirectoryChanges(직원변경, 조직변경));
         });
     }
@@ -458,10 +500,17 @@ public class FakeStateRepository implements DirectoryStateRepository {
         return new GroupHeader(group.id(), group.externalId(), group.displayName());
     }
 
+    /** 지정 연결을 (상위, 하위) 쌍으로. */
+    private Set<GroupEdge> assignedEdges() {
+        Set<GroupEdge> edges = new LinkedHashSet<>();
+        assignedParents.forEach((child, parent) -> edges.add(new GroupEdge(parent, child)));
+        return edges;
+    }
+
     @Override
     public Mono<DirectorySnapshot> loadAll() {
         return Mono.defer(() -> loadAllFailure != null
                 ? Mono.error(loadAllFailure)
-                : Mono.just(new DirectorySnapshot(users, groups)));
+                : Mono.just(new DirectorySnapshot(users, groups, assignedEdges())));
     }
 }

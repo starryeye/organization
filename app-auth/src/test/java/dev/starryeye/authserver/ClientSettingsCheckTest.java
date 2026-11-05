@@ -172,7 +172,7 @@ class ClientSettingsCheckTest {
     @Test
     @DisplayName("prod 가 아닌 이름의 프로필(production)에 https 발급자를 주면 개발 클라이언트 때문에 기동을 멈춘다 — 부트의 환경 변수로 발급자만 바꾼 경우")
     void prod_가_아닌_프로필에_https_발급자를_주면_개발_클라이언트_때문에_멈춘다() {
-        // given — production 은 prod 가 아니라 auth-server.yml 의 !prod 문서(개발 클라이언트 다섯)가 그대로 올라온다. 발급자는 부트 자신의 속성
+        // given — production 은 prod 가 아니라 auth-server.yml 의 !prod 문서(개발 클라이언트 여섯)가 그대로 올라온다. 발급자는 부트 자신의 속성
         // (SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_ISSUER 와 같은 것)으로 준다
         var 인자 = List.of(
                 "--spring.profiles.active=production",

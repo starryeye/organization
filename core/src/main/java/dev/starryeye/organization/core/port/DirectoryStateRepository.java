@@ -84,6 +84,10 @@ public interface DirectoryStateRepository {
      * 설계 2026-10-09 §3.2), 이 조직의 소속 줄과 멤버들의 소속 줄을 그다음, META 를 맨 마지막에(설계 2026-10-02 §4.1). 멤버는 호출자가
      * 이미 읽은 것을 받는다 — 조직 파티션을 다시 훑지 않는다.
      *
+     * <p><b>지정 연결도 지운다(설계 2026-11-04 §4, H9).</b> META 를 지우기 전에, 이 조직을 상위로 지정한 하위 조직들의 정본(그 정본이 이 조직을 가리킬
+     * 때만 — 낡은 역색인이 가리키는 하위 조직의 정본은 남긴다)과 이 조직 파티션의 역색인들, 이 조직의 지정 상위 정본과 그 상위 파티션의 역색인을 이
+     * 순서로 지운다. 지정 연결의 지우기는 멤버 줄·소속 줄과 따로 읽어, 이 조직의 {@code members} 가 비어 있어도 마저 지운다.
+     *
      * <p><b>META 가 맨 마지막이다.</b> 중간에 멈추면(오류·리스 상실) 조직이 남아, 같은 삭제를 다시 부르면 남은 것을 마저 지운다. 멤버 줄을 소속 줄보다
      * 먼저 지운다 — 소속 줄만 남는 방향으로만 어긋난다(강한 소속 조회 설계 §5). 중간에 멈추면 이미 멤버 줄을 지운 멤버의 소속 줄은 다시 지워도
      * 찾지 못해 남을 수 있다 — 소속 줄만 남는 안전한 방향이라 역참조(멤버 줄로 확인)와 권한에는 영향이 없고 저장 공간만 남는다.
@@ -109,6 +113,31 @@ public interface DirectoryStateRepository {
     Flux<MemberRef> findMemberRefs(String groupId);
 
     /**
+     * 운영자가 이 조직에 지정한 상위 조직 id(설계 2026-11-04 §4). 없으면 빈 Mono. 하위 조직 파티션의 정본 하나를 GetItem 으로 읽는다. 강한 일관성.
+     * 지정 연결은 조직의 SCIM 표현(멤버 줄·{@code updatedAt})에 속하지 않는다 — 멤버 줄과 따로 저장한다.
+     */
+    Mono<String> findAssignedParent(String orgCode);
+
+    /**
+     * 이 조직을 상위로 지정한 하위 조직 id — <b>역색인을 정본과 맞춘 것만</b>(하위 조직마다 정본 GetItem 하나), 아이디 오름차순. 중간에 멈춘 쓰기가
+     * 남긴 낡은 역색인(정본이 없거나 다른 상위를 가리킴)은 거른다. 강한 일관성.
+     */
+    Flux<String> findAssignedChildren(String orgCode);
+
+    /**
+     * 지정 상위를 {@code parentOrgCode} 로 둔다. {@code previousParentOrgCode} 는 부르는 쪽이 락 안에서 읽은 지금 값이다(없으면 null) — 저장소가
+     * 다시 읽지 않는다. <b>순서: 새 역색인 → 정본 → (바뀌었으면) 옛 역색인 지우기.</b> 중간에 멈추면 남는 것은 정본과 맞지 않는 역색인뿐이고
+     * {@link #findAssignedChildren} 이 거른다(설계 2026-11-04 §4).
+     */
+    Mono<Void> saveAssignedParent(String orgCode, String parentOrgCode, String previousParentOrgCode);
+
+    /**
+     * 지정 상위를 없앤다. 정본이 {@code parentOrgCode} 를 가리킬 때만 정본을 지우고(조건부 — 다른 상위를 가리키면 정본은 두고, 이미 없어도 오류가
+     * 아니다), 역색인은 늘 지운다. <b>순서: 정본 → 역색인.</b>
+     */
+    Mono<Void> deleteAssignedParent(String orgCode, String parentOrgCode);
+
+    /**
      * 멤버 줄을 {@code added} 만큼 넣고 {@code removed} 만큼 빼고 META 를 {@code after} 로 맞춘다. {@link #saveGroup} 과 같은 규칙이다 —
      * 넣을 때는 소속 줄 먼저, 뺄 때는 멤버 줄 먼저, META 는 이름이나 멤버가 바뀌었을 때만 {@code updatedAt} 을 찍는다. 부르는 쪽이
      * {@code added} 가 지금 멤버가 아니고 {@code removed} 가 지금 멤버라는 것을 확인했다고 본다(락 안에서 {@link #findMembers} 로).
@@ -125,8 +154,8 @@ public interface DirectoryStateRepository {
     }
 
     /**
-     * 보류 목록 — 순환이라 튜플을 쓰지 않은 하위 조직 연결(설계 2026-10-03 §4.1). 멤버 줄은 따로 남아 있다. 보통 비어 있다. 강한 일관성.
-     * "튜플 그래프 = 멤버 줄의 하위 조직 연결 − 보류 목록(OpenFGA 에 없는 줄)"이다.
+     * 보류 목록 — 순환이라 튜플을 쓰지 않은 하위 조직 연결(설계 2026-10-03 §4.1). 멤버 줄(또는 지정 연결)은 따로 남아 있다. 보통 비어 있다. 강한 일관성.
+     * "튜플 그래프 = 원천 연결(멤버 줄의 하위 조직 연결 ∪ 지정 연결) − 보류 목록(OpenFGA 에 없는 줄)"이다(설계 2026-11-04 H6).
      */
     Flux<GroupEdge> findCutEdges();
 
@@ -171,8 +200,15 @@ public interface DirectoryStateRepository {
      * {@link #replaceWith(DirectorySnapshot)} 와 같되, 직원·조직 하나의 저장·삭제가 끝날 때마다 그 변경으로 {@code 변경마다} 를 부른다(설계 2026-10-15
      * §4). 도중에 실패해도 끝난 변경은 이미 알린 뒤다 — 실패한 회차의 조직도 변경도 이력에 남는다. 직원·조직 하나의 저장이 도중에 실패하면 이미 쓴 그 일부는
      * 알리지 않는다(§8). 다 끝나면 알린 것 전부를 돌려준다. 여러 스레드에서 부를 수 있다.
+     *
+     * <p>지정 연결은 {@code snapshot.assignedEdges()} 로 쓰지 않는다 — {@link #saveAssignedParent} 로만 쓴다. 스냅샷에 없는 조직은 {@link #deleteGroup}
+     * 으로 지우므로 그 조직이 끼인 지정 연결도 함께 지워진다(SCIM wipe 는 빈 스냅샷이라 지정 연결이 모두 지워진다, 설계 2026-11-04 H10).
      */
     Mono<DirectoryChanges> replaceWith(DirectorySnapshot snapshot, DirectoryChanges.Listener 변경마다);
 
+    /**
+     * 직원·조직 전부와 지정 연결을 읽는다. 지정 연결은 {@link DirectorySnapshot#assignedEdges()} 에 싣는다 — 조직 파티션을 읽을 때 함께 얻으므로
+     * 조직당 읽기를 더하지 않는다(설계 2026-11-04 §4).
+     */
     Mono<DirectorySnapshot> loadAll();
 }

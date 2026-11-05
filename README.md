@@ -85,6 +85,10 @@ type group
 `Check(user:kim, member, group:DEV001)`은 `kim`을 `DEV001`에 명시적으로 넣지 않아도 참이다.
 이것이 이 인가 모델이 존재하는 이유다. (읽기 쉽도록 이름으로 적었다 — 실제 튜플의 `user:`·`group:` 뒤에는 아래의 불변 id가 온다.)
 
+**`child`(하위 조직 연결)의 원천은 둘이다.** 디렉터리가 준 하위 조직 — LDAP 은 디렉터리의 계층, SCIM 은 IdP 가 조직의 멤버로 보낸 하위 조직 — 과
+운영자가 지정한 연결(SCIM 배포만 — 아래 SCIM 절의 "조직 계층은 지정으로")이다. 둘 다 같은 `child(하위, 상위)` 튜플이 되고, 같은 쌍이면 한 줄이며,
+한쪽 원천이 사라져도 다른 쪽이 남아 있으면 튜플은 남는다. 문서대로라면 IdP 가 그룹 안의 그룹을 보내지 않는 배포(Entra·Okta)에서는 지정이 롤업의 유일한 원천이다.
+
 **조직명은 튜플에 절대 넣지 않는다.** 조직명은 개편 때마다 바뀌지만 튜플은 그 시점의 사실을
 영구히 기록하는 것이 아니라 지금 참인 관계를 표현하는 것이라, 이름이 바뀔 때마다 튜플을 다시
 쓰는 것은 사고를 부른다. 튜플의 식별자는 **직원의 불변 id와 조직의 불변 id뿐**이다. 조직명은 DynamoDB의
@@ -117,7 +121,7 @@ type group
 | `admin-api` | 관리 조회 API(직원·조직·변경 이력·정확 조회)와 관리 API 예외 처리기 — 두 앱이 함께 쓴다 |
 | `web-security` | 두 앱의 리소스 서버 보안 — 경로별 범위, 표면에 맞춘 401·403·503, 행위자 웹 필터(아래 "인증") |
 | `app-ldap` | LDAP 동기화 인스턴스 (8081) |
-| `app-scim` | SCIM 수신 인스턴스 (8082) |
+| `app-scim` | SCIM 수신 인스턴스 (8082) — 조직 계층 지정 API(아래 "관리 API")도 여기에 있다 |
 | `app-auth` | 인가 서버 (9000) — client credentials 로 JWT 를 발급한다. 이 앱만 서블릿(Spring MVC)이다 |
 
 의존 방향은 항상 `app-*` → 어댑터(`storage-dynamodb`/`authz-openfga`/`connector-*`/`web-security`) → `core`다.
@@ -228,9 +232,13 @@ python3 docker/scim/replay.py          # 터미널 3 — 기본 http://localhost
 | `GET /admin/employees/lookup`·`GET /admin/organizations/lookup` | `directory.lookup` 또는 `admin.read` |
 | 그 밖의 `GET /admin/**` — 조회·변경 이력·실행 기록 | `admin.read` |
 | `POST /admin/sync/**` | `admin.sync`. `force=true`·`mode=wipe` 는 `admin.destructive` 도 |
+| `PUT`·`DELETE /admin/organizations/{orgCode}/parent` — 조직의 지정 상위(app-scim) | `admin.hierarchy` |
 | `/actuator/health`·`/actuator/health/liveness`·`/actuator/health/readiness` | 없음 — 상태만. 세부는 `actuator` 가 있을 때만 |
 | 그 밖의 `/actuator/**`(`info`·`metrics`·`prometheus`) | `actuator` |
 | 나머지 | 거절 — 토큰이 통과하면 403, 없으면 401 |
+
+`admin.hierarchy` 는 계층을 바꾸는 범위다 — 하위 조직 전체의 롤업 권한이 생기거나 사라지므로 읽기·동기화와 가른다. 지정할 조직의 `orgCode` 를 찾으려면
+`admin.read` 도 필요하다(위처럼 범위 하나가 다른 범위를 품지 않는다). app-ldap 에는 이 경로가 없어 범위가 있어도 404 다.
 
 **로컬 클라이언트.** `auth-server.yml` 의 prod 가 아닌 프로필에만 있다(운영 클라이언트는 아래 "운영 배포"). 비밀은 `<id>-secret` 이다.
 발급자를 `https://` 로 바꾸면 이 클라이언트들로는 app-auth 가 뜨지 않는다(아래 "운영 배포"의 app-auth).
@@ -240,6 +248,7 @@ python3 docker/scim/replay.py          # 터미널 3 — 기본 http://localhost
 | `scim-idp` | `scim` | 60분 | IdP — `replay.py` 가 쓴다 |
 | `ops` | `admin.read admin.sync` | 10분 | 운영 도구 |
 | `ops-break-glass` | `admin.read admin.sync admin.destructive` | 10분 | 비상 — `force=true`·`mode=wipe` |
+| `org-chart` | `admin.read admin.hierarchy` | 10분 | 조직도 도구·스크립트 — 조직의 지정 상위를 두고 없앤다(app-scim, 아래 "조직 계층 지정") |
 | `asking-app` | `directory.lookup` | 10분 | 권한을 묻는 앱 — 정확 조회 둘만 |
 | `prometheus` | `actuator` | 10분 | 스크레이프 |
 
@@ -366,7 +375,7 @@ SCOPE_actuator` — 범위가 다른 토큰도 상태만 받는다). 주소·테
 | `spring.security.oauth2.authorizationserver.issuer` | `http://localhost:9000` | `${AUTH_ISSUER}` | 발급자. 두 앱의 `issuer-uri`(`AUTH_ISSUER_URI`)와 같은 값이고, 키 목록은 `<발급자>/oauth2/jwks`(`AUTH_JWK_SET_URI`)다 |
 | `auth.require-https` | `false` | `true` | 발급자가 `https://` 가 아니면 멈춘다 |
 | `auth.require-hashed-secrets` | `false` | `true` | `{bcrypt}` 해시가 아닌 클라이언트 비밀이 있으면 멈춘다 — 평문은 클라이언트(IdP·운영 도구) 쪽에만 둔다 |
-| `spring.security.oauth2.authorizationserver.client.<이름>.*` | 개발 클라이언트 다섯(`{noop}` 비밀, 위 "인증") | 없음 — 운영 설정이 준다 | 아래 예. 토큰 수명이 365일을 넘으면 멈춘다(로컬도). 발급자가 `https://` 면 `{bcrypt}` 가 아닌 비밀도 멈춘다(아래) |
+| `spring.security.oauth2.authorizationserver.client.<이름>.*` | 개발 클라이언트 여섯(`{noop}` 비밀, 위 "인증") | 없음 — 운영 설정이 준다 | 아래 예. 토큰 수명이 365일을 넘으면 멈춘다(로컬도). 발급자가 `https://` 면 `{bcrypt}` 가 아닌 비밀도 멈춘다(아래) |
 
 ```yaml
 spring:
@@ -390,7 +399,7 @@ spring:
   해시로 토큰을 받는다. `-b` 는 비밀을 명령줄로 받으므로 셸 기록에 남는다 — 기록에서 지운다. `htpasswd` 는 Apache 의 도구다(macOS 기본,
   리눅스는 `apache2-utils`·`httpd-tools`).
 - **발급자가 `https://` 면 `{bcrypt}` 가 아닌 비밀로는 뜨지 않는다** — `auth.require-hashed-secrets` 와 상관없이(`ClientSettingsCheck`).
-  프로필 이름이 `prod` 가 아니면(예 `production`) 개발 클라이언트(공개 `{noop}` 비밀, `ops-break-glass` 는 `admin.destructive` 까지)가 그대로 남는다.
+  프로필 이름이 `prod` 가 아니면(예 `production`) 개발 클라이언트(공개 `{noop}` 비밀, `ops-break-glass` 는 `admin.destructive` 까지, `org-chart` 는 `admin.hierarchy` 까지)가 그대로 남는다.
   거기에 발급자만 부트의 속성·환경 변수(`SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_ISSUER`)로 https 를 주면 그 클라이언트들이 진짜 토큰을 낸다 — 그래서
   `발급자가 https:// 인데 클라이언트 <id> 의 비밀이 {bcrypt} 해시가 아니다 — {noop} 비밀(개발 클라이언트)은 http 발급자(로컬)에서만 받는다` 로 멈춘다.
   스킴은 대소문자를 가리지 않는다(`HTTPS://` 도 같다).
@@ -451,8 +460,10 @@ spring:
 
 | 요청 | 설명 |
 |---|---|
-| `POST /admin/sync/rebuild?mode=tuples` | 재적재를 건다 — **현재상태(DynamoDB)가 요구하는 튜플을 전부 쓰고, 장부를 훑어 요구하지 않는 줄을 지운다.** 조직도는 건드리지 않는다 |
-| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 **조직도까지 전부 지운다.** 되돌릴 수 없다 — `admin.destructive` 범위가 더 있어야 한다. 아래 경고 참고 |
+| `POST /admin/sync/rebuild?mode=tuples` | 재적재를 건다 — **현재상태(DynamoDB)가 요구하는 튜플을 전부 쓰고, 장부를 훑어 요구하지 않는 줄을 지운다.** 조직도는 건드리지 않는다 — 지정 연결도 그대로 두고 튜플에 싣는다 |
+| `POST /admin/sync/rebuild?mode=wipe&confirm=<테이블명>` | 장부를 비운 뒤 **조직도까지 전부 지운다**(지정한 조직 계층도). 되돌릴 수 없다 — `admin.destructive` 범위가 더 있어야 한다. 아래 경고 참고 |
+| `PUT /admin/organizations/{orgCode}/parent` | 조직의 지정 상위를 본문 `{"parentOrgCode": "<상위 orgCode>"}` 로 둔다 — 204. 이미 있으면 바꾼다. `admin.hierarchy` 범위. 아래 "조직 계층 지정" |
+| `DELETE /admin/organizations/{orgCode}/parent` | 조직의 지정 상위를 없앤다 — 204. `admin.hierarchy` 범위 |
 | `GET /admin/sync/runs?limit=20` | 최근 실행 이력 (재적재 + 하루 1회 아카이빙) |
 | `GET /admin/sync/runs/{runId}` | 실행 기록 하나. 없으면 404 |
 
@@ -472,10 +483,10 @@ app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 �
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다 | 그 사유 |
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다. 지정 API 는 본문 오류, 없는 조직·상위 조직, 순환 판정이 조직 1만 개를 넘은 경우(아래 "조직 계층 지정") | 그 사유 |
 | 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이다 | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
-| 409 | 락 경합 — 다른 작업이 락을 쥐고 있다. 정확 조회에 여럿이 일치한다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등). 정확 조회는 `<N>명이 일치한다 — externalId 로 찾는다`·`<N>개가 일치한다` |
-| 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패 | `일시 장애 — 잠시 뒤 다시 시도한다` |
+| 409 | 락 경합 — 다른 작업이 락을 쥐고 있다. 정확 조회에 여럿이 일치한다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등). 정확 조회는 `<N>명이 일치한다 — externalId 로 찾는다`·`<N>개가 일치한다`. 지정 API 는 순환이다 — **락 경합은 409 가 아니라 503 이다**(아래 "조직 계층 지정") |
+| 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패. 지정 API 는 락 경합·리스 상실·부분 실패도 여기다 | `일시 장애 — 잠시 뒤 다시 시도한다`. 지정 API 의 락 경합·부분 실패는 그 사유 |
 | 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 가고 응답에 싣지 않는다 |
 
 ### 재적재·수동 동기화 (두 앱 공통)
@@ -591,9 +602,75 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 **감사 이력은 지우지 않는다.** 스냅샷과 실행 이력은 그대로 남는다. 사고 뒤에 무슨 일이
 있었는지 볼 유일한 기록이기 때문이다.
 
+**운영자가 지정한 조직 계층(`PUT …/parent`)은 모두 지워진다.** wipe 가 조직을 지우기 때문이다. IdP 가 다시 프로비저닝하면 조직의 `orgCode`(서버가 발급한 UUID)가
+새로 발급되므로 옛 `orgCode` 에 걸린 지정은 뜻이 없다(`mode=tuples` 는 지정을 그대로 둔다). 그래서 **IdP 재프로비저닝이 끝난 다음 지정을 다시 건다** — 그때까지
+롤업이 없다. 순서는 아래 "조직 계층 지정"의 2·3 이다.
+
 `sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 사람 소속이 하나도 없는 그림(예: 필터가 아무도
 고르지 못해 0건)을 주면 데이터 오류로 `FAILED` 이고 `force=true` 로도 넘기지 못한다(LDAP 절). 일부가 크게 빠진 그림은 삭제 가드가 `ABORTED`로 막고,
 `force=true`로 사람이 확인한 뒤 우회할 수 있다.
+
+### 조직 계층 지정 (app-scim)
+
+Entra·Okta 로 붙인 SCIM 배포는 IdP 가 조직을 평평하게만 보내 `child` 튜플이 없다(아래 SCIM 절의 "조직 계층은 지정으로"). 운영자가 조직마다 상위 조직 하나를
+정해 그 계층을 채운다. **app-scim 에만 있다.** 설계: `docs/superpowers/specs/2026-11-04-scim-org-hierarchy-design.md`.
+
+| 요청 | 결과 |
+|---|---|
+| `PUT /admin/organizations/{orgCode}/parent` `{"parentOrgCode": "P"}` | 204. 지정 상위를 P 로 둔다. 이미 다른 상위가 있으면 바꾼다 — 옛 연결 지우기와 새 연결 쓰기가 한 요청이라 중간 상태가 없다 |
+| 같은 P 로 다시 PUT | 204. 지정은 그대로고 바뀐 것이 없으면 이력도 없다. 줄이 OpenFGA 에 없으면(어긋남) 쓴다 |
+| `DELETE /admin/organizations/{orgCode}/parent` | 204. 지정이 없었으면 아무것도 하지 않고 204 다 |
+| 본문이 없거나 `parentOrgCode` 가 문자열이 아니거나 공백뿐이다 | 400 `parentOrgCode 가 필요하다` |
+| `orgCode` 의 조직이 없다(PUT·DELETE) | 404 `조직이 없다: <orgCode>` |
+| `parentOrgCode` 의 조직이 없다 | 404 `상위 조직이 없다: <parentOrgCode>` |
+| 순환이다 — P 가 그 조직 자신이거나 그 조직의 하위다. 같은 P 의 지정이 이미 있어도 보류 중이면 같다 | 409 `<parentOrgCode> 를 <orgCode> 의 상위로 두면 순환이 된다`. 아무것도 바꾸지 않는다 |
+| 순환을 판정하느라 펼친 조직이 1만 개를 넘었다 | 400 — 다시 보내도 같다 |
+| 락을 제때 못 잡았다, 리스를 잃었다, OpenFGA·DynamoDB 가 일시 실패했다, 튜플 일부만 반영됐다 | 503 + `Retry-After`. 지정은 저장하지 않았다 — **같은 요청을 성공할 때까지 다시 보낸다**(아래). 일부만 반영됐으면 남은 줄만 반영한다 |
+| 토큰 없음 / `admin.hierarchy` 없음 | 401 / 403(위 "인증") |
+
+오류 본문은 이 API 의 다른 오류처럼 problem details 다. 503 의 `detail` 은 락 경합이면 쥔 쪽을 가리키는 사유(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등)이고,
+일부 반영이면 `일부 튜플 적용에 실패했다 — 잠시 뒤 다시 보낸다: <orgCode>`, 그 밖의 일시 장애는 `일시 장애 — 잠시 뒤 다시 시도한다` 다. `Retry-After` 는
+SCIM 쓰기와 같은 값이다 — 쥔 쪽이 다른 SCIM 쓰기·지정 요청이면 2초, 재적재·동기화면 60초, 그 밖은 10초.
+
+**503 이면 다른 값을 걸기 전에 같은 요청을 성공할 때까지 다시 보낸다.** 요청이 OpenFGA 에 줄을 쓴 뒤 저장에서 실패하면(또는 일부만 반영되면) 저장된 지정과 장부가
+어긋난다 — 조직 C 의 지정이 A 였고 `PUT C→B` 가 `child(C,B)` 를 쓴 뒤 503 이면, 저장된 값은 여전히 A 다. 이때 **다른 값**(`PUT C→D`)이나 `DELETE` 를 보내면 전 그림이
+저장된 옛 값(A)을 싣기 때문에 `child(C,B)` 가 지울 후보에 들지 않고 영구히 남는다(재적재 `mode=tuples` 만 지운다). 같은 요청(`PUT C→B`)을 다시 보내면 줄이 이미 있어 쓰기
+없이 지정만 저장하고 어긋남이 끝난다. 그러니 스크립트는 503 이면 `Retry-After` 뒤에 **같은 요청**을 다시 보내고, 끝내 성공하지 못하면 `mode=tuples` 로 장부를 맞춘다.
+
+**락 경합이 409 가 아니라 503 인 까닭.** 이 API 의 `POST /admin/sync/**` 는 락 경합을 409 로 낸다 — 그것은 작업을 시작하는 요청이라 "이미 다른 작업이 돈다" 는 뜻이다.
+지정은 SCIM 쓰기와 같은 락·OpenFGA Check 기준선·diff·이력을 거치는 **쓰기 요청**이고, 거기서 락 예외는 대기 초과·리스 상실까지 묶은 "잠시 뒤 다시" 다.
+409 는 순환(영구 거절)이 쓴다 — 락 경합까지 409 면 스크립트가 고쳐야 할 요청과 다시 보낼 요청을 가르지 못한다. 규칙은 하나다: 쓰기 요청은 503, 작업 시작은 409.
+판정은 락 안에서 한다 — 존재 확인·순환 판정·쓰기 사이에 다른 SCIM 쓰기가 끼지 않는다.
+
+**운영자가 쓰는 순서.**
+
+1. 조직도의 원천(HRIS 내보내기 등)에서 (하위, 상위) 쌍을 얻는다. 이 서버는 원천을 읽지 않는다 — 조직도와 IdP 그룹을 짝짓는 것은 운영자의 몫이고, 짝이 틀리면 권한이 틀린다.
+2. 각 조직의 `orgCode` 를 찾는다 — `GET /admin/organizations/lookup?externalId=`(Entra 는 `objectId` 를 `externalId` 로 보낸다 — 매핑을 바꿨다면 그 값), 또는
+   `GET /admin/organizations?displayName=`(Okta 는 조직에 `externalId` 를 보내지 않는다 — 접두사 검색이라 이름이 더 긴 조직도 함께 나오므로 이름이 정확히 같은 줄을 고른다).
+3. 조직마다 `PUT …/parent` 를 부른다. 뿌리 조직(상위가 없다)은 `DELETE …/parent` 로 지정이 없게 한다.
+4. 멱등이라 매일 전체를 다시 걸어도 상태는 바뀐 것만 움직인다(비용은 요청마다 든다 — 바뀐 것이 없는 PUT 도 전역 쓰기 락을 잡고 몇 번 읽고 Check 한다. 조직 수만큼 락을 잡았다 놓으며
+   IdP 쓰기와 줄을 선다). 스크립트는 속도를 조절하거나, 조직 상세(`assignedParentOrgCode`)로 먼저 비교해 바뀐 것만 보낸다. 반영되지 않는 지정(순환 등)은 409 로 드러난다. `mode=wipe` 뒤에는 IdP 재프로비저닝이 끝난 다음 `orgCode` 를 다시 찾아 건다.
+
+```bash
+# 로컬 예 — org-chart(admin.read admin.hierarchy)로 토큰을 받는다. 운영은 운영 설정이 준 클라이언트와 https 주소다
+TOKEN=$(curl -s -u org-chart:org-chart-secret -d grant_type=client_credentials http://localhost:9000/oauth2/token | jq -r .access_token)
+# 하위(팀)와 상위(본부)의 orgCode — IdP 가 externalId 를 보내면 정확 조회, 아니면 표시명 검색
+TEAM=$(curl -s -H "Authorization: Bearer $TOKEN" 'localhost:8082/admin/organizations/lookup?externalId=<팀 그룹의 objectId>' | jq -r .orgCode)
+DIV=$(curl -s -G -H "Authorization: Bearer $TOKEN" --data-urlencode 'displayName=개발본부' localhost:8082/admin/organizations | jq -r '.items[0].orgCode')
+# 팀의 상위를 본부로 — 204
+curl -i -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"parentOrgCode\":\"$DIV\"}" "localhost:8082/admin/organizations/$TEAM/parent"
+# 지정을 없앤다 — 204
+curl -i -X DELETE -H "Authorization: Bearer $TOKEN" "localhost:8082/admin/organizations/$TEAM/parent"
+```
+
+스크립트 자체는 제공하지 않는다 — 원천이 회사마다 다르다. 한 조직에 지정 상위는 하나다(조직도는 나무다). 상위를 여럿 두는 매트릭스 조직은 지정으로 못 하고, 표준대로 중첩 그룹을 보내는 SCIM 클라이언트로는 표현된다.
+
+**조직 상세에서 본다.** `GET /admin/organizations/{orgCode}` 의 `assignedParentOrgCode` 는 운영자가 이 조직에 지정한 상위의 `orgCode` 이고, 지정이 없으면 `null` 이다
+(칸은 늘 있다). 상위 계층(`ancestors`)·직속 하위 조직(`childOrganizations`)과 직원 상세의 상위 계층은 IdP 가 보낸 연결과 지정 연결의 합집합이다. 줄마다 `openFgaCheck` 는
+실제 판정이라, 재적재가 순환 때문에 자른 지정 연결은 거기서 false 로 보인다(아래 SCIM 절의 "중첩 조직과 순환").
+
+**이력.** 지정 요청은 변경 이력에 원인 `HIERARCHY_REQUEST`, 행위자 `client:<sub>` 로 남는다(아래 "변경 이력"). 기록은 하위 조직의 이력에 간다 — 속성 `assignedParent`
+(`before`·`after` 는 상위의 `orgCode`, 없으면 `null`)가 남고 튜플 부여·회수도 함께 남는다. 바뀐 것이 없는 요청은 기록하지 않는다. 지정 요청은 `SyncRun` 도 남기지 않는다 — SCIM 쓰기와 같다.
 
 ### 조회 API
 
@@ -607,10 +684,10 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 | `GET /admin/employees?userName=` | 계정명 접두사로 직원 검색 |
 | `GET /admin/employees?displayName=` | 표시명 접두사로 직원 검색 |
 | `GET /admin/employees?externalId=` | `externalId`가 정확히 같은 직원 검색 |
-| `GET /admin/employees/{employeeId}` | 직원 상세 — 직속 소속과 상위 계층 전부, 각 줄에 실제 판정 포함 |
+| `GET /admin/employees/{employeeId}` | 직원 상세 — 직속 소속과 상위 계층 전부(지정 연결 포함), 각 줄에 실제 판정 포함 |
 | `GET /admin/organizations?displayName=` | 표시명 접두사로 조직 검색 |
 | `GET /admin/organizations?externalId=` | `externalId`가 정확히 같은 조직 검색 |
-| `GET /admin/organizations/{orgCode}` | 조직 상세 — 상위 계층, 직속 하위 조직, 직속 소속 직원 첫 페이지 |
+| `GET /admin/organizations/{orgCode}` | 조직 상세 — 지정 상위(`assignedParentOrgCode`, 없으면 `null`), 상위 계층, 직속 하위 조직, 직속 소속 직원 첫 페이지. 계층은 IdP 연결과 지정 연결을 합친다("조직 계층 지정") |
 | `GET /admin/organizations/{orgCode}/members` | 조직의 직속 소속 직원 목록 (커서 페이징) |
 | `GET /admin/employees/{employeeId}/history` | 직원의 변경 이력 — 최신순, `limit`(기본 20, 최대 100)·`cursor`. 아래 "변경 이력" |
 | `GET /admin/organizations/{orgCode}/history` | 조직의 변경 이력 — 같은 규칙 |
@@ -729,13 +806,16 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - **한 줄은 대상 하나 × 사건 하나다.** 사건은 동기화·재적재 회차 하나, 또는 SCIM 요청 하나다.
 - **원인(`cause`).**
   - `source` 는 `LDAP`·`SCIM` 이다.
-  - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(지난 회차가 장부·스냅샷을 기록하다 멈춘 뒤의 동기화. 기준선이 없어 훑어 맞춘 첫 회차는 `SYNC` 그대로다)·`SCIM_REQUEST` 다.
-  - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청이면 로그의 traceId 다.
-  - `actor` 는 변경을 일으킨 쪽이다 — 토큰으로 온 요청(SCIM 쓰기, 관리 API 로 건 회차)은 `client:<sub>`(`sub` 는 클라이언트 id), 예약 LDAP 동기화는
+  - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(지난 회차가 장부·스냅샷을 기록하다 멈춘 뒤의 동기화. 기준선이 없어 훑어 맞춘 첫 회차는 `SYNC` 그대로다)·`SCIM_REQUEST`·
+    `HIERARCHY_REQUEST`(관리 API 의 지정 요청 — `source` 는 `SCIM`) 다.
+  - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청·지정 요청이면 로그의 traceId 다.
+  - `actor` 는 변경을 일으킨 쪽이다 — 토큰으로 온 요청(SCIM 쓰기, 지정 요청, 관리 API 로 건 회차)은 `client:<sub>`(`sub` 는 클라이언트 id), 예약 LDAP 동기화는
     `system:scheduler`, SCIM 아카이빙과 그 남은 회수 지우기는 `system:archive`. 찾지 못하면 `system:unknown` 이고 WARN 을 남긴다 — 이 칸이 생기기 전의 줄도 이 값이다.
 - **조직도 변경.**
   - `created`·`deleted`.
-  - 바뀐 속성(`attributes`): 직원은 `externalId`·`userName`·`displayName`·`email`·`active`·`name.*`, 조직은 `externalId`·`displayName`.
+  - 바뀐 속성(`attributes`): 직원은 `externalId`·`userName`·`displayName`·`email`·`active`·`name.*`, 조직은 `externalId`·`displayName`·`assignedParent`.
+    `assignedParent` 는 운영자가 지정한 상위(`orgCode`)의 이전·이후다 — 없으면 `null`. 지정 요청이 하위 조직의 이력에 남기고, IdP 가 조직을 지워 지정 연결이 사라지면
+    그 SCIM 요청이 연결마다 하위 조직의 이력에 `assignedParent` P → `null` 로 남긴다(지운 조직 자신의 지정 상위는 지운 조직의 줄에).
   - 들어간·나간 조직(`joined`·`left`).
   - 조직 줄만 멤버 들어옴·나감(`membersAdded`·`membersRemoved` — `count` 와 `items`).
 - **권한 변경.** 이 대상이 user 쪽인 튜플 중 실제로 쓴 것(`granted`)과 지운 것(`revoked`)이다.
@@ -1135,15 +1215,22 @@ URN 접두(`urn:ietf:params:scim:schemas:core:2.0:User:`, 대소문자 무시)�
 
 **중첩 조직과 순환.** 조직 A 의 멤버로 조직 B 를 넣는 연결이 순환을 닫으면(B 가 A 자신이거나 A 의 상위 조직이면) 그 연결의
 멤버십은 저장하지만 OpenFGA 튜플은 쓰지 않고 **보류 목록**(`CYCLE_CUT` 파티션)에 적는다. 연결마다 경고 로그가 한 줄 남는다. 순환 검사는
-새 연결의 부모에서 **위로** 올라가며 튜플 그래프 — 멤버 줄의 하위 조직 연결에서 "보류 목록 중 OpenFGA 에 없는 줄"을 뺀 것 —
-를 본다. **먼저 저장된 연결이 이긴다.** 새 연결이 순환을 닫으면 새 연결이 보류되고, 조직 id 순서와는 상관이 없다.
+새 연결의 부모에서 **위로** 올라가며 튜플 그래프 — 멤버 줄의 하위 조직 연결과 운영자의 지정 연결에서 "보류 목록 중 OpenFGA 에 없는 줄"을 뺀 것 —
+를 본다. **먼저 저장된 연결이 이긴다.** 새 연결이 순환을 닫으면 새 연결이 보류되고, 조직 id 순서와는 상관이 없다. 이 규칙은 지정 연결에도 같다.
 
-하위 조직 연결을 지운 요청(조직 PATCH·PUT 의 하위 조직 빼기, 조직 삭제)은 커밋한 뒤 같은 락 안에서 보류 목록을 다시 본다. 순환이
+- **IdP 가 보낸 연결이 지정 연결과 순환을 닫으면** 그 IdP 연결이 보류된다 — 먼저 저장된 지정이 이긴다.
+- **관리 API 의 지정은 보류하지 않고 거절한다.** 순환을 닫으면 409 이고 아무것도 바꾸지 않는다(자기 자신을 상위로 지정하는 것도 순환이다). 이미 같은 상위로 지정돼
+  있어도 그 연결이 보류 중이면 409 다 — 409 는 늘 "이 요청 뒤에도 그 상위가 순환 때문에 반영되지 않는다" 이다(아래 "조직 계층은 지정으로", 관리 API 절의 "조직 계층 지정").
+- **재적재가 지정 연결을 자를 수 있다.** 재적재는 보류 목록을 처음부터 다시 정하므로 순환을 끊는 DFS 가 IdP 연결 대신 지정 연결을 자를 수도 있다. 자른 지정 연결은 IdP 연결과
+  똑같이 보류 목록에 들어가고, 순환이 풀리면 돌아온다.
+
+하위 조직 연결을 지운 요청(조직 PATCH·PUT 의 하위 조직 빼기, 조직 삭제)과 지정을 옮기거나 없앤 요청(`PUT`·`DELETE …/parent`)은 커밋한 뒤 같은 락 안에서 보류 목록을 다시 본다. 순환이
 풀린 연결은 튜플을 쓰고 목록에서 뺀다(INFO 로그) — 본부 ⊃ A ⊃ B 에서 B 를 A 위로 올리는 개편이 `PATCH B add A` → `PATCH A
-remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. 멤버 줄이 없는 보류 줄은 지운다. 다시 보기가 실패해도 원래 요청은 성공하고,
+remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. **원천이 없는 보류 줄은 지운다 — 원천은 상위 조직의 멤버 줄 또는 하위 조직의 지정 연결이다.** 다시 보기가 실패해도 원래 요청은 성공하고,
 목록은 다음 지우기 요청이나 재적재가 다시 본다. SCIM 재적재(`mode=tuples`)는 보류 목록을 처음부터 다시 정한다 — 어느 연결이
 남을지가 바뀔 수 있다. `mode=wipe` 는 목록도 비운다. 순환을 검사하려고 펼친 조직이 1만 개를 넘는 요청(조직 계층이 너무 큼)은
-400 `invalidValue` 다. 설계: `docs/superpowers/specs/2026-10-03-read-cost-org-graph-design.md`.
+400 `invalidValue` 다(관리 API 의 지정은 400). 설계: `docs/superpowers/specs/2026-10-03-read-cost-org-graph-design.md`,
+`docs/superpowers/specs/2026-11-04-scim-org-hierarchy-design.md`.
 
 **오류 응답.** 모든 오류는 SCIM Error(`schemas`·`status`·`scimType`·`detail`, RFC 7644 §3.12)로 나간다 — 라우트 밖 요청과 Content-Type
 불일치처럼 WebFlux 가 정한 오류도 같다. IdP 가 재시도할지 고쳐 보낼지는 상태 코드가 정한다.
@@ -1209,6 +1296,37 @@ SCIM push 요청은 `SyncRun`에 기록하지 않는다. 요청 단위로 남기
 organization-scim`을 적는다. 다른 이름을 쓰려면 설정으로 덮어쓰되, app-ldap이 쓰는
 테이블·store와는 항상 다르게 유지해야 한다 — 같은 이름을 막는 실행 시점 검사는 없다.
 
+### 조직 계층은 지정으로
+
+**Entra·Okta 는 그룹 안의 그룹을 보내지 않는다.** `child` 튜플 — 하위 조직 소속이 상위 조직의 `member` 가 되는 롤업 — 은 IdP 가 조직의 멤버로 조직을 넣어 보내야
+생긴다(IdP 쪽 `child` 는 조직 멤버 가운데 GROUP 타입에서만 나온다 — 원천은 둘이고, 하나가 운영자의 지정이다). 그런데 문서가 말하는 두 IdP 의 동작은 이렇다.
+
+- **Entra ID** 는 앱에 할당한 그룹의 직속 멤버인 사용자만 읽어 프로비저닝한다고 적는다 —
+  [Microsoft Learn 의 Databricks SCIM 문서](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/scim/aad)와
+  [Snowflake 문서](https://docs.snowflake.com/en/user-guide/scim-azure.html).
+- **Okta** 그룹에는 중첩이 없고 Group Push 는 평평한 멤버십만 보낸다.
+
+**실제 Entra·Okta 테넌트로 확인하지 않았다.** 근거는 IdP 문서이고(설계 2026-11-04 §1.1·§12), 종단 시험의 IdP 는 시험이 보내는 SCIM 요청이다.
+문서대로라면 이 둘로 붙인 배포에는 `child` 튜플이 하나도 없다 — "하위 조직 소속이면 상위 조직의 member" 라는 약속이 거짓이 되고, 하위 조직에만 속한 직원에게 상위 조직 Check 는 늘 false 다.
+
+**그래서 계층은 운영자가 지정 API 로 준다.** 조직마다 상위 조직 하나를 `PUT /admin/organizations/{orgCode}/parent` 로 지정하고(관리 API 절의 "조직 계층 지정"),
+그 연결을 **지정 연결**이라 부른다. 표준대로 그룹 안의 그룹을 보내는 SCIM 클라이언트는 그대로 된다 — 둘이 섞인다.
+
+- **계층 = IdP 가 보낸 하위 조직 멤버 ∪ 지정 연결.** 같은 `child` 튜플이다. 같은 쌍이면 한 줄이고, 한쪽이 빠져도 다른 쪽이 남아 있으면 튜플은 남는다 —
+  지정을 없애도 IdP 가 같은 쌍을 멤버로 보냈으면 줄은 남고, IdP 가 멤버에서 빼도 지정이 받치면 줄은 남는다(멤버 행은 지우고 튜플은 그대로이므로 회수도 아니다).
+- **지정은 IdP 의 것이 아니다.** 조직의 멤버 행과 따로 저장한다(조직 파티션의 `ASSIGNED_PARENT` 줄, 상위 쪽 역색인은 `ASSIGNED_CHILD#<하위>`). 그래서 `GET /Groups` 의
+  `members` 에 나오지 않고, 조직의 `meta.lastModified` 를 움직이지 않고, IdP 의 PUT(멤버 전체 교체)·PATCH 가 바꾸거나 지우지 못한다 — IdP 가 자기 그룹을
+  다시 써도 섞어 둔 연결이 조용히 사라지지 않는다.
+- **IdP 가 조직을 지우면** 그 조직이 끼인 지정 연결 — 그 조직의 지정 상위, 그 조직을 상위로 지정한 하위 조직들과의 연결 — 의 튜플을 함께 지우고 지정도 지운다. 없는
+  조직을 거쳐 롤업이 남지 않는다. 하위 조직들은 지정 상위가 없어진다 — 다시 붙이는 것은 운영자의 다음 지정이다. 튜플을 일부만 지웠으면 못 지운 줄의 지정은 남기고
+  조직도 남긴 채 503 이라, IdP 가 같은 DELETE 를 다시 보내면 남은 줄을 마저 지운다.
+- **재적재(`mode=tuples`)와 아카이빙은 지정 연결을 있어야 할 튜플에 싣는다.** 지정은 조직도의 일부라 재적재가 건드리지 않는다. `mode=wipe` 는 조직과 함께 지정도 모두
+  지운다 — IdP 재프로비저닝으로 `orgCode` 가 바뀌므로 그 뒤에 다시 건다(위 "⚠️ `mode=wipe`는 되돌릴 수 없다").
+- **순환은 먼저 저장된 연결이 이긴다.** 지정 API 는 순환을 닫는 지정을 409 로 거절하고, IdP 가 보낸 연결이 닫으면 보류한다(위 "중첩 조직과 순환", 관리 API 절의 "조직 계층 지정").
+- **지정은 SCIM 쓰기와 같은 길로 반영한다.** 같은 변경 락, OpenFGA Check 기준선, diff, 변경 이력이다. 동시에 온 SCIM 쓰기와 순서가 섞이지 않는다(아래 "app-scim 여러 대 띄우기").
+
+LDAP 배포는 그대로다 — 계층을 디렉터리가 준다. 배포 하나엔 커넥터 하나라 지정 API 는 app-scim 에만 둔다.
+
 ### 여러 대 띄우기 — 작업은 한 번에 하나, 하루 한 번 작업은 한 번만
 
 **두 앱 모두 여러 대를 띄울 수 있다.** 동기화·재적재는 DynamoDB 조건부 쓰기 락 하나(`LOCK#MUTATION`, 앱마다 테이블이 다르다)를 잡은
@@ -1232,7 +1350,7 @@ organization-scim`을 적는다. 다른 이름을 쓰려면 설정으로 덮어�
 
 **`app-scim`은 여러 인스턴스를 액티브-액티브로 띄울 수 있다.** IdP가 여러 인스턴스로 요청을
 분산해도 안전하도록, SCIM 쓰기 하나(`createUser`/`changeUser`/`removeUser`/`createGroup`/`changeGroup`/`removeGroup`)와
-재적재(`POST /admin/sync/rebuild`)는 **같은 DynamoDB 조건부 쓰기 전역 락(`LOCK#MUTATION`)**을 잡은 뒤에만
+관리 API 의 지정 요청(`assignParent`/`clearParent`), 재적재(`POST /admin/sync/rebuild`)는 **같은 DynamoDB 조건부 쓰기 전역 락(`LOCK#MUTATION`)**을 잡은 뒤에만
 진행한다. 인스턴스가 몇 대든, 그리고 그 인스턴스가 SCIM 쓰기든 재적재든, 서로 겹치지 않고
 직렬화된다 — 인메모리 락(예전의 `MutationGate`)은 인스턴스 하나 안에서만 유효해 여러 대를
 띄우는 순간 조용히 뚫렸는데, 이 락은 저장소를 공유하므로 그렇지 않다.
@@ -1246,7 +1364,7 @@ organization-scim`을 적는다. 다른 이름을 쓰려면 설정으로 덮어�
 
 | | 락을 못 잡았을 때 |
 |---|---|
-| SCIM 쓰기 | 서버 안에서 온 순서대로 줄을 서고, 차례가 된 요청 하나만 락을 시도한다. 다른 서버가 쥐었으면 짧고 무작위한 간격(10ms 에서 두 배씩 100ms 까지, full jitter)으로 다시 시도한다. `lock-acquire-timeout` 안에 못 잡으면 503. 쥔 쪽이 재적재·동기화면 다시 시도하지 않고 바로 503(`Retry-After` 60초) |
+| SCIM 쓰기(관리 API 의 지정 요청도 같다) | 서버 안에서 온 순서대로 줄을 서고, 차례가 된 요청 하나만 락을 시도한다. 다른 서버가 쥐었으면 짧고 무작위한 간격(10ms 에서 두 배씩 100ms 까지, full jitter)으로 다시 시도한다. `lock-acquire-timeout` 안에 못 잡으면 503. 쥔 쪽이 재적재·동기화면 다시 시도하지 않고 바로 503(`Retry-After` 60초) |
 | 재적재 | 재시도 없이 즉시 409 |
 
 SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는 락과 경합하므로, 잠깐 기다려보는
@@ -1264,7 +1382,7 @@ SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는
 | 설정 | 의미 |
 |---|---|
 | `dynamodb.lock-ttl` (기본 30초) | 락 리스 길이. SCIM 쓰기 p99보다 한참 길어야 한다 — 짧으면 아직 일하는 중인데 만료돼 다른 인스턴스가 가져간다. 두 경로 모두에 적용된다. 만료는 각 서버의 시계로 판단하므로 서버 시계를 NTP 로 맞춘다 — 어긋남은 TTL − 2×갱신 주기(기본 10초)보다 작아야 한다 — 그보다 크면 남의 락을 가져갈 수 있다 |
-| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊는다 — 스로틀로 매달린 시도 하나가 한도를 다 먹지 않게. 끊긴 시도는 결과를 모르므로 기다리지 않고 같은 토큰으로 다시 시도하고(서버에서 잡혔으면 그대로 다시 얻는다), 결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다. 끊긴 시도로 한도에 닿았거나 저장소 오류로 포기하면 쥔 쪽을 모르므로 `Retry-After` 는 기본 10초다. 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
+| `dynamodb.lock-acquire-timeout` (기본 3초) | **SCIM 쓰기 경로(관리 API 의 지정 요청 포함)에만 적용된다.** 락 획득 대기 한도 — 서버 안 줄에서 기다린 시간과 다른 서버와 겨룬 시간이 모두 든다. 넘으면 503을 돌려주고(`Retry-After` 는 쥔 쪽이 SCIM 쓰기면 2초, 재적재·동기화면 재시도 없이 바로 60초) IdP가 재시도한다(재시도 시점에는 락이 풀린 상태 위에서 처리된다). 획득 시도 하나는 `min(남은 한도, 1초)`(하한 200ms)에서 끊는다 — 스로틀로 매달린 시도 하나가 한도를 다 먹지 않게. 끊긴 시도는 결과를 모르므로 기다리지 않고 같은 토큰으로 다시 시도하고(서버에서 잡혔으면 그대로 다시 얻는다), 결과를 모르는 시도를 남긴 채 포기하면 그 토큰으로 반납을 한 번 보낸다. 끊긴 시도로 한도에 닿았거나 저장소 오류로 포기하면 쥔 쪽을 모르므로 `Retry-After` 는 기본 10초다. 재적재는 이 설정을 전혀 보지 않는다 — 재시도 자체가 없어 즉시 409다 |
 | `dynamodb.lock-renew-interval` (기본 10초) | 락을 쥔 동안 리스를 갱신하는 주기 — SCIM 쓰기·재적재·동기화 모두. TTL보다 충분히 짧아야 한다. 갱신이 일시 오류(스로틀·네트워크)로 실패하면 짧게 쉬며 다시 시도하고, 마지막으로 성공한 갱신을 보낸 때에서 주기 두 번 안에 성공하지 못할 때만 멈춘다(만료가 보낸 때 + TTL 이라 TTL 전 여유는 늘 TTL − 2×주기다). 남이 가져간 것이 확인되면(토큰 조건 실패) 곧바로 멈춘다 |
 
 **큰 변경도 락을 지키며 끝까지 간다.** 10만 명 조직 삭제처럼 오래 걸리는 SCIM 쓰기는 락을 쥔 동안 리스를 `lock-renew-interval`마다
@@ -1272,9 +1390,9 @@ SCIM 쓰기는 기계(IdP)가 자주 보내고 밀리초 단위로 짧게 쥐는
 다시 확인하고(바뀐 튜플이 없어도), 확인이 실패하면 저장하지 않고 503이다 — 오래 멈춘 요청이 다른 인스턴스가 저장한 비활성화를 덮지 않는다.
 IdP가 연결을 끊어도 그 변경은 커밋까지 마치고 락을 반납한다. 락 획득 응답을 잃어 SDK가 같은 요청을 다시 보내도 자기 락에 막히지 않는다.
 
-**조직 삭제는 계산하지 않는다.** 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직은 아이디만 읽는다. 그 조직을 언급하는 튜플을 Check 없이
+**조직 삭제는 계산하지 않는다.** 조직 파티션을 한 번 읽어 멤버를 얻고, 상위 조직과 지정 연결(그 조직의 지정 상위, 그 조직을 상위로 지정한 하위 조직들)은 아이디만 읽는다. 그 조직을 언급하는 튜플을 Check 없이
 "없으면 무시"로 지우고, DynamoDB는 묶어서(25개씩) 지우며 조직 META를 맨 마지막에 지운다 — 중간에 멈춰도 IdP의 DELETE 재시도가 남은 것을
-마저 지운다. 멤버 전원 빼기·빈 교체도 빠지는 멤버는 Check·직원 읽기 없이 지운다.
+마저 지운다. 일부만 지웠으면 줄을 지운 지정 연결의 아이템만 지우고 못 지운 것은 남긴다 — 재시도가 그것을 다시 읽어 남은 줄을 지운다. 멤버 전원 빼기·빈 교체도 빠지는 멤버는 Check·직원 읽기 없이 지운다.
 
 **OpenFGA 요청은 동시에 보내되, 쓰기는 같은 단계 안에서만 동시에 보낸다.** Check·Write 묶음을 `openfga.request-concurrency`(기본 4)만큼 동시에 보낸다 —
 Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재적재·LDAP
@@ -1447,13 +1565,17 @@ Docker가 필요하다. DynamoDB Local과 OpenFGA는 Testcontainers로, LDAP은 
 이유 그 자체다. `app-ldap`의 `AdminQuerySmokeTest`는 같은 공유 모듈이 app-ldap 컨텍스트에서도
 자동설정으로 잡히는지만 확인한다.
 
+**조직 계층 지정(설계 2026-11-04)은 끝단 시험 하나가 본다.** `app-scim` 의 `ScimHierarchyEndToEndTest` 는 IdP 가 평평한 조직만 보낸 뒤 지정을 걸면 상위 조직 Check 가
+참인지, SCIM 에는 지정이 보이지 않고 이력에 `HIERARCHY_REQUEST` 가 남는지, IdP 의 멤버 전체 교체·튜플 재적재·상위 조직 삭제·지정 없애기·`mode=wipe` 를 지나는 동안
+지정이 지켜지거나 정리되는지, 관리 API 의 400·404·409 를 본다. 락 경합의 503 + `Retry-After` 는 `OrganizationHierarchyControllerTest` 가 본다.
+
 **회수 수렴(설계 2026-10-20)은 끝단 시험 둘이 본다.** `app-ldap` 의 `LdapRevocationConvergenceEndToEndTest` 는 줄이 이미 들어 있는 store 와 새 테이블로 첫 동기화를 걸어 목표 밖의 줄(Check)이
 지워지고 "기준선 없음" 메모와 직원별 이력이 남는지, 1,200바이트 `description` 조직이 있어도 동기화가 두 번 모두 성공하고 조직 상세가 200 인지 본다. `app-scim` 의
 `ScimRevocationConvergenceEndToEndTest` 는 비활성 직원에게 `direct_member` 줄을 직접 다시 써 두고 하루 아카이빙(빈 호출)이 그 줄을 지우는지(Check), 기록 메시지와 `scim.archive.drift`·
 `scim.archive.drift.observed` 게이지가 맞는지 본다.
 
 **앱 시험도 보안 필터를 운영과 같은 구성으로 탄다(설계 2026-10-28 §8).** 바뀌는 것은 키를 어디서 받느냐뿐이다. 두 앱의 test 프로필(`test.auth.fixed-key: true`)은
-web-security testFixtures 의 시험 키로 검증하고(발급자 `https://auth.test`), 실행 중인 서버에 묶인 `WebTestClient` 는 여섯 범위를 모두 가진 `test-client`
+web-security testFixtures 의 시험 키로 검증하고(발급자 `https://auth.test`), 실행 중인 서버에 묶인 `WebTestClient` 는 일곱 범위를 모두 가진 `test-client`
 토큰을 기본 머리로 싣는다 — 그 요청의 행위자는 `client:test-client` 다. 범위·만료·발급자를 바꾼 토큰은 `TestTokens.발급한다`, 다른 키로 서명한 토큰은
 `TestTokens.다른_키로_발급한다` 로 만든다. 시험 OpenFGA 는 키 `test-openfga-key` 로 뜬다(`Containers.openFga()`). 진짜 app-auth 가 발급한 토큰은 app-scim 의
 `RealAuthServerEndToEndTest` 가 본다 — 같은 JVM 에 app-auth 를 띄워 SCIM 쓰기와 관리 API 가 통과하고 행위자가 남는지, 키를 바꿔 다시 띄우면 옛 토큰이 401 인지.

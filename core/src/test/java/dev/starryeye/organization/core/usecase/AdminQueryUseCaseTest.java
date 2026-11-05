@@ -261,6 +261,130 @@ class AdminQueryUseCaseTest {
     }
 
     @Test
+    @DisplayName("조직 상세는 운영자가 지정한 상위를 싣는다 — 지정이 없으면 null 이다(설계 2026-11-04 H11)")
+    void 조직_상세는_지정_상위를_싣는다() {
+        // given — C 의 지정 상위는 P, D 는 지정이 없다
+        state.saveGroup(조직("P")).block();
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("D")).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var 지정한_조직 = useCase.organizationDetail("C", 20).block();
+        var 지정이_없는_조직 = useCase.organizationDetail("D", 20).block();
+
+        // then
+        assertThat(지정한_조직.assignedParentOrgCode()).isEqualTo("P");
+        assertThat(지정이_없는_조직.assignedParentOrgCode()).isNull();
+    }
+
+    @Test
+    @DisplayName("지정 상위도 상위 계층에 나오고, 그 위로 IdP 의 계층을 이어 올라간다")
+    void 지정_상위도_상위_계층에_나온다() {
+        // given — C → P(지정), R ⊇ P(IdP)
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("P")).block();
+        state.saveGroup(조직("R", MemberRef.group("P"))).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var detail = useCase.organizationDetail("C", 20).block();
+
+        // then
+        assertThat(detail.ancestors()).extracting("orgCode").containsExactly("P", "R");
+    }
+
+    @Test
+    @DisplayName("지정 하위도 직속 하위 조직에 나오고, IdP 의 하위와 아이디 순으로 섞인다")
+    void 지정_하위도_직속_하위_조직에_나온다() {
+        // given — C → P(지정), P ⊇ D(IdP)
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("D")).block();
+        state.saveGroup(조직("P", MemberRef.group("D"))).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var detail = useCase.organizationDetail("P", 20).block();
+
+        // then
+        assertThat(detail.childOrganizations()).extracting("orgCode").containsExactly("C", "D");
+        assertThat(detail.childOrganizations()).extracting("displayName").containsExactly("C-조직", "D-조직");
+    }
+
+    @Test
+    @DisplayName("직속 하위 조직은 IdP 쪽과 지정 쪽이 번갈아 있어도 아이디 오름차순 하나로 나온다")
+    void 직속_하위_조직은_두_원천이_섞여도_아이디_순이다() {
+        // given — IdP 의 하위 B, D 와 지정 하위 A, C
+        for (String 코드 : List.of("A", "B", "C", "D")) {
+            state.saveGroup(조직(코드)).block();
+        }
+        state.saveGroup(조직("P", MemberRef.group("B"), MemberRef.group("D"))).block();
+        state.assignedParents.put("A", "P");
+        state.assignedParents.put("C", "P");
+
+        // when
+        var detail = useCase.organizationDetail("P", 20).block();
+
+        // then
+        assertThat(detail.childOrganizations()).extracting("orgCode").containsExactly("A", "B", "C", "D");
+    }
+
+    @Test
+    @DisplayName("같은 쌍이 IdP 멤버이면서 지정이기도 하면 상위 계층과 직속 하위에 한 번씩만 나온다")
+    void 같은_쌍이_멤버와_지정_둘_다여도_한_번만_나온다() {
+        // given — P ⊇ C(IdP) 이면서 C → P(지정)
+        state.saveGroup(조직("C")).block();
+        state.saveGroup(조직("P", MemberRef.group("C"))).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var 하위 = useCase.organizationDetail("C", 20).block();
+        var 상위 = useCase.organizationDetail("P", 20).block();
+
+        // then
+        assertThat(하위.ancestors()).extracting("orgCode").containsExactly("P");
+        assertThat(상위.childOrganizations()).extracting("orgCode").containsExactly("C");
+    }
+
+    @Test
+    @DisplayName("직원 상세의 롤업은 지정 상위로도 올라간다")
+    void 직원_상세의_롤업이_지정_상위로_올라간다() {
+        // given — kim ∈ C, C → P(지정)
+        state.saveUser(직원("kim", true)).block();
+        state.saveGroup(조직("C", MemberRef.user("kim"))).block();
+        state.saveGroup(조직("P")).block();
+        state.assignedParents.put("C", "P");
+
+        // when
+        var detail = useCase.employeeDetail("kim").block();
+
+        // then — 직속 C 와 롤업 P
+        assertThat(detail.paths()).extracting(AccessPath::orgCode).containsExactly("C", "P");
+        assertThat(detail.paths()).filteredOn(p -> p.orgCode().equals("P"))
+                .extracting(AccessPath::via).containsExactly(AccessPath.ROLLUP);
+        assertThat(detail.truncated()).isFalse();
+    }
+
+    @Test
+    @DisplayName("지정 하위가 상한을 넘어도 직속 하위 조직은 상한만큼만 읽고 자른다")
+    void 지정_하위도_상한을_지킨다() {
+        // given — 하위 조직이 모두 지정으로 달린 조직
+        state.saveGroup(조직("BIG")).block();
+        for (int i = 0; i < AdminQueryUseCase.MAX_PATHS + 10; i++) {
+            state.saveGroup(조직("C" + i)).block();
+            state.assignedParents.put("C" + i, "BIG");
+        }
+        search.findGroupSummaryCalls.clear();
+
+        // when
+        var detail = useCase.organizationDetail("BIG", 20).block();
+
+        // then
+        assertThat(detail.childOrganizations()).hasSize(AdminQueryUseCase.MAX_PATHS);
+        assertThat(search.findGroupSummaryCalls).hasSize(AdminQueryUseCase.MAX_PATHS);
+    }
+
+    @Test
     @DisplayName("계층 순회는 이름표만 읽고 다른 조직의 멤버 목록은 읽지 않는다")
     void 순회는_멤버_목록을_읽지_않는다() {
         // given — ROOT ⊇ DEV001 ⊇ DEV002 ⊇ {kim, DEV003}

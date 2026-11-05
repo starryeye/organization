@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.DirectoryChanges;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.MemberType;
@@ -150,7 +151,8 @@ public class ScimRebuildUseCase {
 
     /**
      * 지울 후보가 가리키는 대상 중 GSI 열거에서 빠진 것을 본 테이블에서 강한 일관성으로 다시 읽어 조직도에 넣는다(설계 2026-10-13 §4.3).
-     * 다시 읽은 조직의 멤버 중 조직도에 없는 직원도 함께 읽는다 — 장부에 아직 줄이 없는 새 멤버다. 빠진 것이 없거나 다시 읽어도 없으면 받은 조직도를
+     * 다시 읽은 조직의 멤버 중 조직도에 없는 직원도 함께 읽는다 — 장부에 아직 줄이 없는 새 멤버다. 다시 읽은 조직 자신의 지정 상위도 읽어 싣는다
+     * ({@code findGroup} 은 멤버만 주고, 열거는 이 조직의 파티션을 읽지 않아 {@code loadAll} 에도 없다 — 설계 2026-11-04 §5.6). 빠진 것이 없거나 다시 읽어도 없으면 받은 조직도를
      * 그대로 준다(같은 객체) — 평소에는 읽기가 없다.
      */
     private Mono<DirectorySnapshot> 열거를_보강한다(DirectorySnapshot directory, Set<RelationTuple> stale) {
@@ -178,7 +180,12 @@ public class ScimRebuildUseCase {
                     Mono<Map<String, DirectoryUser>> users = 읽을_직원.isEmpty()
                             ? Mono.just(Map.of())
                             : state.findUsers(읽을_직원).collectMap(DirectoryUser::id);
-                    return users.map(found -> {
+                    // 다시 읽은 조직 자신의 지정 상위 — findGroup 은 멤버만 주고, 열거는 이 조직의 파티션을 읽지 않아 loadAll 에도 없다
+                    Mono<Set<GroupEdge>> 지정_연결 = Flux.fromIterable(groups.keySet())
+                            .flatMap(id -> state.findAssignedParent(id).map(parent -> new GroupEdge(parent, id)), 보강_동시성)
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
+                    return Mono.zip(users, 지정_연결).map(both -> {
+                        Map<String, DirectoryUser> found = both.getT1();
                         if (groups.isEmpty() && found.isEmpty()) {
                             return directory;
                         }
@@ -188,7 +195,10 @@ public class ScimRebuildUseCase {
                         직원들.putAll(found);
                         Map<String, DirectoryGroup> 조직들 = new LinkedHashMap<>(directory.groups());
                         조직들.putAll(groups);
-                        return new DirectorySnapshot(직원들, 조직들);
+                        // 지정 연결은 열거로 읽은 것에 다시 읽은 조직의 것을 더해 싣는다 — 빠뜨리면 다시 만든 조직도가 그 줄을 "없어야 할 줄" 로 지운다
+                        Set<GroupEdge> 지정 = new LinkedHashSet<>(directory.assignedEdges());
+                        지정.addAll(both.getT2());
+                        return new DirectorySnapshot(직원들, 조직들, 지정);
                     });
                 });
     }

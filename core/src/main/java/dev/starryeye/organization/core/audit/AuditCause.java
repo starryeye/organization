@@ -29,7 +29,17 @@ public record AuditCause(SyncSource source, AuditKind kind, String id, String ac
      * 온 두 요청이 한 줄을 덮어쓰지 않아야 한다.
      */
     public static AuditCause scimRequest(String traceId, String actor) {
-        String id = traceId == null || traceId.isBlank() ? UUID.randomUUID().toString() : traceId;
-        return new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, id, actor);
+        return new AuditCause(SyncSource.SCIM, AuditKind.SCIM_REQUEST, 요청_아이디(traceId), actor);
+    }
+
+    /**
+     * 관리 API 의 지정 요청 하나(설계 2026-11-04 H7) — SCIM 배포의 요청이라 원천은 SCIM 이고, 아이디는 {@link #scimRequest} 와 같은 규칙이다.
+     */
+    public static AuditCause hierarchyRequest(String traceId, String actor) {
+        return new AuditCause(SyncSource.SCIM, AuditKind.HIERARCHY_REQUEST, 요청_아이디(traceId), actor);
+    }
+
+    private static String 요청_아이디(String traceId) {
+        return traceId == null || traceId.isBlank() ? UUID.randomUUID().toString() : traceId;
     }
 }

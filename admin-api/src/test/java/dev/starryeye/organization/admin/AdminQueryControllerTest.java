@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -359,6 +360,42 @@ class AdminQueryControllerTest {
                 .expectBody()
                 .jsonPath("$.orgCode").isEqualTo("DEV002")
                 .jsonPath("$.ancestors[0].orgCode").isEqualTo("DEV001");
+    }
+
+    @Test
+    @DisplayName("조직 상세에 운영자가 지정한 상위가 assignedParentOrgCode 로 나오고, 상위 계층·직속 하위도 지정 연결을 합친다")
+    void 조직_상세에_지정_상위가_나온다() {
+        // given — C → P(지정), P ⊇ D(IdP)
+        state.saveGroup(new DirectoryGroup("C", "c", "하위팀", Set.of())).block();
+        state.saveGroup(new DirectoryGroup("D", "d", "다른팀", Set.of())).block();
+        state.saveGroup(new DirectoryGroup("P", "p", "상위본부", Set.of(MemberRef.group("D")))).block();
+        state.assignedParents.put("C", "P");
+
+        // when, then
+        client.get().uri("/admin/organizations/C")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.assignedParentOrgCode").isEqualTo("P")
+                .jsonPath("$.ancestors[0].orgCode").isEqualTo("P");
+        client.get().uri("/admin/organizations/P")
+                .exchange().expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.childOrganizations[0].orgCode").isEqualTo("C")
+                .jsonPath("$.childOrganizations[1].orgCode").isEqualTo("D");
+    }
+
+    @Test
+    @DisplayName("지정한 상위가 없으면 assignedParentOrgCode 칸이 null 로 나온다 — 칸 자체는 있다")
+    void 지정_상위가_없으면_칸이_null이다() {
+        // given
+        state.saveGroup(new DirectoryGroup("DEV002", "x", "백엔드팀", Set.of())).block();
+
+        // when, then
+        client.get().uri("/admin/organizations/DEV002")
+                .exchange().expectStatus().isOk()
+                .expectBody(Map.class)
+                .value(body -> assertThat(body).containsKey("assignedParentOrgCode")
+                        .containsEntry("assignedParentOrgCode", null));
     }
 
     @Test

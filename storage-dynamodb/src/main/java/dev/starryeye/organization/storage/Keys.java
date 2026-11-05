@@ -78,6 +78,13 @@ public final class Keys {
     public static final String GROUP_PREFIX = "GROUP#";
     public static final String MEMBER_PREFIX = "MEMBER#";
     public static final String BELONGS_TO_PREFIX = "BELONGS_TO#";
+    /**
+     * 지정 연결의 정본 정렬키(설계 2026-11-04 §4) — 하위 조직 파티션에 하나다. 정렬키가 하나라 지정 상위가 하나임을 저장소가 지킨다. 접두가 아니라 값
+     * 하나이고 {@link #ASSIGNED_CHILD_PREFIX} 로 시작하지 않아, 역색인을 {@code begins_with} 로 읽을 때 섞이지 않는다.
+     */
+    public static final String ASSIGNED_PARENT = "ASSIGNED_PARENT";
+    /** 지정 연결의 역색인 정렬키 접두사 — 상위 조직 파티션에 하위 조직마다 하나다. {@code MEMBER#}·{@code BELONGS_TO#} 와 겹치지 않는다. */
+    public static final String ASSIGNED_CHILD_PREFIX = "ASSIGNED_CHILD#";
     public static final String SNAPSHOT_PREFIX = "SNAPSHOT#";
     public static final String TUPLE_PREFIX = "TUPLE#";
     /** 튜플 스냅샷 본문 묶음의 정렬키 접두사(설계 2026-10-09 §3.1). */
@@ -304,6 +311,25 @@ public final class Keys {
             throw new IllegalArgumentException("소속 정렬키가 아니다: " + sk);
         }
         return sk.substring(BELONGS_TO_PREFIX.length() + GROUP_PREFIX.length());
+    }
+
+    /**
+     * 상위 조직 파티션에 적는 지정 연결 역색인의 정렬키. <b>{@code MEMBER#} 로 시작하지 않는 것이 핵심이다</b> — 조직 파티션을 읽는 {@code toGroup} 이
+     * {@code MEMBER#} 로 멤버를 고르므로, 지정 연결이 SCIM 멤버로 보이면 IdP 의 멤버 교체가 그것을 지우려 한다(설계 2026-11-04 H3).
+     */
+    public static String assignedChildSk(String childId) {
+        return ASSIGNED_CHILD_PREFIX + childId;
+    }
+
+    public static boolean isAssignedChildSk(String sk) {
+        return sk.startsWith(ASSIGNED_CHILD_PREFIX);
+    }
+
+    public static String parseAssignedChildSk(String sk) {
+        if (sk == null || !sk.startsWith(ASSIGNED_CHILD_PREFIX)) {
+            throw new IllegalArgumentException("지정 하위 정렬키가 아니다: " + sk);
+        }
+        return sk.substring(ASSIGNED_CHILD_PREFIX.length());
     }
 
     /** 멤버 자신의 파티션키. 직원은 {@code USER#}, 하위 조직은 {@code GROUP#} 이다. */
