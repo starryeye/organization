@@ -329,7 +329,6 @@ scrape_configs:
 | `dynamodb.table-name` | 없음 | `organization`(app-ldap)·`organization-scim`(app-scim) | 로컬 값 | 비면 기동을 멈춘다 |
 | `dynamodb.create-table-on-startup` | `false` | `true` | `false` | 테이블이 없을 때 만든다. 꺼져 있으면 `DynamoDB 테이블 <name> 이 없다 — 처음 설치라면 dynamodb.create-table-on-startup=true 로 한 번 띄우거나 미리 만든다` 로 멈춘다 |
 | `dynamodb.require-protection` | `false` | `false` | `true` | 만들 때 삭제 보호와 PITR 을 켠다(PITR 은 2분 안에서 다시 시도하고, 못 켜면 `테이블은 만들었으나 PITR 을 켜지 못했다 — 콘솔·CLI 로 켠 뒤 다시 띄운다`). 있는 테이블은 둘 다 켜져 있어야 하고, 아니면 꺼진 것을 적어 멈춘다 |
-| `sync.id-from-external-id`(app-scim) | `false` | — | — | SCIM POST 의 `id` 를 `externalId` 에서 정한다(UUIDv5). 운영 권장은 IdP 가 `externalId` 에 영구 식별자(Entra `objectId`)를 싣는지 확인한 뒤 `true` — 위 SCIM 절. 값의 성질은 서버가 판정하지 못해 prod 검사는 없다 |
 | `dynamodb.api-call-attempt-timeout` | 10초 | — | — | SDK 시도 한 번의 한도 — 매달린 연결을 끊는다 |
 | `dynamodb.api-call-timeout` | 60초 | — | — | SDK 재시도를 포함한 호출 하나의 한도 |
 | `openfga.store-name` | 없음 | `organization`·`organization-scim` | 로컬 값 | 비면 기동을 멈춘다 |
@@ -343,6 +342,7 @@ scrape_configs:
 | `openfga.api-token` | 없음 | `local-openfga-key` | `${OPENFGA_API_TOKEN}` | OpenFGA 사전 공유 키 — 모든 호출에 `Authorization: Bearer` 로 싣는다. 눈에 보이는 ASCII 만 받는다(끝에 줄바꿈이 붙어도 멈춘다). 기동 때 OpenFGA 가 401·403 이면 멈춘다 |
 | `openfga.require-api-token` | `false` | — | `true` | 키가 비었거나 풀리지 않은 자리표시자면 `openfga.require-api-token 인데 openfga.api-token 이 비었거나 풀리지 않은 자리표시자다 — 환경 변수 OPENFGA_API_TOKEN 을 준다` 로 멈춘다 |
 | `openfga.require-tls` | `false` | — | `true` | `openfga.api-url` 이 `https://` 가 아니면 멈춘다 — 키가 평문으로 다니지 않는다 |
+| `sync.id-from-external-id`(app-scim) | `false` | — | — | SCIM POST 의 `id` 를 `externalId` 에서 정한다(UUIDv5). 운영 권장은 IdP 가 `externalId` 에 영구 식별자(Entra `objectId`)를 싣는지 확인한 뒤 `true` — 위 SCIM 절. 값의 성질은 서버가 판정하지 못해 prod 검사는 없다 |
 
 - **PITR 로 복원한 테이블**이면 기동 때 WARN 을 한 번 남긴다: `PITR 로 복원한 테이블이다 — 장부보다 낡은 기준선일 수 있어 재적재를 권한다(SCIM 은 mode=tuples)`. 자동으로 재적재하지는 않는다.
 - **PITR 복원과 SCIM `id`.** 복원 시점 뒤에 발급한 `id` 는 복원본에 없다. `sync.id-from-external-id=true` 면 IdP 가 프로비저닝을 다시 시작할 때 POST 한 리소스가 **같은 `id`** 를 받는다(복원본에 있는 것은 IdP 가 `externalId` 로 찾아 PATCH — 이름이 바뀌었어도 POST 하면 409 라 갈라지지 않는다). 약속은 "같은 `id`" 까지다 — 복원 시점 뒤의 소속은 IdP 가 멤버십을 다시 보낸 뒤에야 조직도와 맞는다. 그래서 복원 시점 뒤에 지운·바꾼 것을 고치고, IdP 가 멤버십까지 다시 보냈는지 확인한 뒤 **맨 마지막에 `mode=tuples`** 를 건다(먼저 걸면 아직 멤버십이 없는 줄을 지운다). 꺼져 있으면 새 `id` 를 받는다. 프로비저닝을 다시 시작했을 때 Entra 가 이미 있는 조직의 멤버를 다시 보내는지는 확인하지 않았다.
@@ -1268,7 +1268,7 @@ remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. **원천
 
 **500 은 분류되지 않은 예외에만 남는다.** 재시도하면 낫는 실패는 503, 요청이 틀렸으면 4xx 이고, 어느 쪽도 아닌 예외만 500 과 ERROR 로그다 — 대개 버그지만,
 같은 이름 store 가 둘이라 멈춘 것처럼 다시 보내도 같은 OpenFGA·DynamoDB 오류도 여기 온다. 이 분류기는 관리 API 도 함께 쓴다. 튜플 일부만
-반영된 **부분 실패도 503** 이다 — 상태는 이미 커밋됐지만 IdP 가 같은 요청을 다시 보내면 같은 최종 상태를 목표로 다시 계산해 나머지를 반영한다. 단 **저장하지 못한 새 조직 POST** 는 다르다 — 조직을 저장하지 않으므로, 그 요청이 쓴 줄과 결과를 모르는 줄을 "없으면 무시" 로 지운 뒤 503 을 낸다(재시도가 같은 `id`·다른 멤버로 와도 줄이 새지 않게). 되지우기가 실패하면 WARN 을 남기고 줄은 `mode=tuples` 까지 남는다(리스를 잃었으면 지우지 않고 WARN 없이 리스 상실 503 이다). 오류로 끝난 요청(차단기 중단·리스 상실·커밋 오류)은 되지우지 않는다. 다만
+반영된 **부분 실패도 503** 이다 — 상태는 이미 커밋됐지만 IdP 가 같은 요청을 다시 보내면 같은 최종 상태를 목표로 다시 계산해 나머지를 반영한다. 단 **저장하지 못한 새 조직 POST** 는 다르다 — 조직을 저장하지 않으므로, 그 요청이 쓴 줄과 결과를 모르는 줄을 "없으면 무시" 로 지운 뒤 503 을 낸다(재시도가 같은 `id`·다른 멤버로 와도 줄이 새지 않게). 되지우기가 실패하면 WARN 을 남기고 줄은 `mode=tuples` 까지 남는다(리스를 잃었으면 지우지 않고 되지우기 WARN 없이 — 리스 상실 WARN `변경 락 리스를 잃었다: 쓰기 직전 리스 재확인 실패` 와 503 이다). 오류로 끝난 요청(차단기 중단·리스 상실·커밋 오류)은 되지우지 않는다. `sync.id-from-external-id=true` 에서는 되지우지 못한 새 조직 POST 가 같은 id 의 재시도에서 빠진 멤버의 롤업 권한을 `mode=tuples` 까지 남긴다. 다만
 IdP 가 503 과 `Retry-After` 를 어떻게 다루는지는 문서·추정이다(Entra 는 개별 오류를 다음 주기에 재시도한다고 문서화했고, Okta 의 5xx 반응은 문서에 없다).
 AWS SDK(`SdkClientException`·스로틀링·5xx·SDK 가 재시도 가능하다고 표시한 것)와
 OpenFGA SDK(`FgaError.isRetryable()` — 429, 501 을 뺀 5xx)의 예외는 각 SDK 가 정한 재시도 분류를 따라 알아본다. 그 밖에 원인 사슬에
