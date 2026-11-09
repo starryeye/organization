@@ -17,6 +17,7 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 저장하지 못한 새 조직 POST 가 쓴 줄과 결과를 모르는 줄을 되지운다(설계 2026-11-05 I11).
@@ -25,13 +26,15 @@ class IncrementalSyncNewGroupUndoTest {
 
     private FakeStateRepository state;
     private FakeTupleWriter writer;
+    private FakeMutationLock lock;
     private IncrementalSyncUseCase useCase;
 
     @BeforeEach
     void 준비한다() {
         state = new FakeStateRepository();
         writer = new FakeTupleWriter();
-        useCase = new IncrementalSyncUseCase(state, writer, new FakeTupleChecker(), new FakeMutationLock(),
+        lock = new FakeMutationLock();
+        useCase = new IncrementalSyncUseCase(state, writer, new FakeTupleChecker(), lock,
                 Duration.ZERO, IncrementalSyncUseCase.DriftObserver.NOOP, LockObserver.NOOP);
         for (String id : new String[]{"u-1", "u-2", "u-3"}) {
             useCase.createUser(new DirectoryUser(id, null, id + "@corp.com", id, null, true)).block();
@@ -101,6 +104,9 @@ class IncrementalSyncNewGroupUndoTest {
         assertThat(결과.result().fullyApplied()).isFalse();
         assertThat(state.groups).doesNotContainKey("g-new");
         assertThat(writer.stored).contains(dm("u-1"));
+        var 마지막 = writer.appliedDeltas.get(writer.appliedDeltas.size() - 1);
+        assertThat(마지막.toWrite()).isEmpty();
+        assertThat(마지막.toDelete()).contains(dm("u-1"));
     }
 
     @Test
@@ -116,6 +122,29 @@ class IncrementalSyncNewGroupUndoTest {
         // then
         assertThat(결과.result().fullyApplied()).isFalse();
         assertThat(state.groups).doesNotContainKey("g-new");
+        assertThat(writer.stored).doesNotContain(dm("u-1"));
+    }
+
+    @Test
+    @DisplayName("되지우기 전에 리스를 잃으면 지우지 않고 리스 상실로 끝난다")
+    void 되지우기_전에_리스를_잃으면_지우지_않고_리스_상실로_끝난다() {
+        // given — 본 쓰기 뒤의 커밋 직전 확인은 통과하고, 그다음 되지우기 직전 확인부터 잃는다
+        writer.failFor(t -> {
+            if (t.equals(dm("u-2"))) {
+                lock.failRenewAfterAttempt = lock.renewAttempted.get() + 1;
+                return true;
+            }
+            return false;
+        });
+
+        // when
+        var 만든다 = useCase.createGroup(새_조직("u-1", "u-2"));
+
+        // then
+        assertThatThrownBy(만든다::block).isInstanceOf(LockUnavailableException.class);
+        assertThat(writer.appliedDeltas.stream().filter(d -> d.toWrite().isEmpty())).isEmpty();
+        assertThat(state.groups).doesNotContainKey("g-new");
+        assertThat(writer.stored).contains(dm("u-1"));
     }
 
     @Test

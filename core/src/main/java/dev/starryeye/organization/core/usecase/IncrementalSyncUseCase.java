@@ -461,9 +461,10 @@ public class IncrementalSyncUseCase {
      *
      * <p>부분 실패 시에는 요청된 멤버 목록을 그대로 저장하지 않는다. 실제로 튜플이 반영된
      * 멤버만 추가되고, 실제로 튜플이 지워진 멤버만 제외된다({@link #reconcileGroupMembers}).
-     * 다만 <b>아직 없던 조직</b>은 하나라도 실패하면 레코드 자체를 만들지 않는다. 만들어 두면
+     * 다만 <b>아직 없던 조직</b>은 하나라도 실패하면 레코드 자체를 만들지 않는다 — 그리고 그 요청이
+     * 쓴 줄을 되지운다({@link #새_조직이_쓴_줄을_되지운다}). 만들어 두면
      * 다음 diff 의 "이전"에 부모의 child 엣지가 이미 포함돼 그 엣지를 영원히 다시 쓰지 못한다
-     * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다). 그리고 그 요청이 쓴 줄을 되지운다({@link #새_조직이_쓴_줄을_되지운다}).
+     * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
         return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(이름표(group)).or(() -> KeyValueLimits.overMembers(group.members())))
@@ -510,7 +511,8 @@ public class IncrementalSyncUseCase {
      * 사람의 줄이 남아 있으면 새 그림의 후보에 없어 영영 지워지지 않는다. 확정 실패한 줄은 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은
      * 불확실 줄을 지워도 안전하다.
      *
-     * <p><b>요청을 실패시키지 않는다.</b> 오류(리스 확인 포함)나 지우기 실패는 경고만 남기고 끝낸다 — 요청의 결과(부분 반영, 503)는 그대로다. 오류로 끝난 요청(차단기 중단·리스
+     * <p><b>요청을 실패시키지 않는다 — 리스 상실만 빼고.</b> 지우기의 오류나 실패는 경고만 남기고 끝낸다 — 요청의 결과(부분 반영, 503)는 그대로다. 리스 확인이 실패하면
+     * ({@link LockUnavailableException}) 그대로 내보낸다 — 리스 없이 보류 목록과 표지판을 쓰지 않는다는 {@link #반영하고_커밋한다} 와 같은 까닭이다(상태는 같은 503). 오류로 끝난 요청(차단기 중단·리스
      * 상실·커밋 오류)은 커밋 자리에 오지 않아 덮지 않고, 보류 목록도 되지우지 않는다. 남은 줄은 재적재(mode=tuples)가 지운다. 로그에 externalId 를 싣지 않는다.
      */
     private Mono<Void> 새_조직이_쓴_줄을_되지운다(String groupId, TupleWriteResult result, LockLease lease, AuditChanges 기록) {
@@ -527,7 +529,7 @@ public class IncrementalSyncUseCase {
                                 groupId, 지움.failures().size());
                     }
                 })
-                .onErrorResume(error -> {
+                .onErrorResume(error -> !(error instanceof LockUnavailableException), error -> {
                     log.warn("저장하지 못한 새 조직 '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
                             groupId, 지울것.size(), error);
                     return Mono.empty();
