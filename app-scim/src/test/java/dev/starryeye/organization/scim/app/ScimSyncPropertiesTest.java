@@ -30,6 +30,13 @@ class ScimSyncPropertiesTest {
     }
 
     @Test
+    @DisplayName("id 는 기본으로 externalId 에서 정하지 않는다")
+    void id_는_기본으로_externalId_에서_정하지_않는다() {
+        // given, when, then
+        assertThat(new ScimSyncProperties().isIdFromExternalId()).isFalse();
+    }
+
+    @Test
     @DisplayName("만료 스냅샷 정리는 하루 창(04~08시) 안에서 매시 시도한다")
     void 정리는_하루_창_안에서_매시_시도한다() {
         // given, when

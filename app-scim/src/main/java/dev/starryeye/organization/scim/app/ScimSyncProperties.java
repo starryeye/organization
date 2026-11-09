@@ -38,4 +38,11 @@ public class ScimSyncProperties {
      * 푼다). 하루 1회 표지의 임대는 잡은 때 + 이 기한 + 5분이다.
      */
     private Duration jobTimeout = Duration.ofMinutes(30);
+
+    /**
+     * 켜면 {@code externalId} 가 있는 SCIM POST 의 id 를 그 값에서 정한다(설계 2026-11-05 I1). 그래서 wipe 나 기록 유실 뒤 같은 본문을 다시 보내도 같은 id 가
+     * 나온다. {@code externalId} 가 IdP 의 영구 식별자일 때만 켠다 — Entra 는 직원 매핑을 {@code objectId} → {@code externalId} 로 바꾼 뒤(기본
+     * {@code mailNickname} 은 다시 쓰일 수 있다), 매칭 속성을 {@code externalId} 우선순위 1 로 둔다(I2). 켜기 전에 만든 리소스는 이관하지 않는다(I7).
+     */
+    private boolean idFromExternalId = false;
 }

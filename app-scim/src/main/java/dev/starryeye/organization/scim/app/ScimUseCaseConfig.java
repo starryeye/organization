@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
 import dev.starryeye.organization.core.usecase.ScimRebuildUseCase;
 import dev.starryeye.organization.core.usecase.SnapshotArchiveUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
+import dev.starryeye.organization.scim.ScimIds;
 import dev.starryeye.organization.storage.DynamoDbProperties;
 import io.micrometer.context.ContextSnapshot;
 import io.micrometer.context.ContextSnapshotFactory;
@@ -39,6 +40,19 @@ public class ScimUseCaseConfig {
     @Bean
     public ScimSyncProperties scimSyncProperties() {
         return new ScimSyncProperties();
+    }
+
+    /**
+     * POST 의 후보 id 를 만드는 방법(설계 2026-11-05 §3.2). 켜면 {@code externalId} 에서 정하고, 끄면(기본) 무작위다.
+     * {@code ScimConfig} 의 두 핸들러가 이 빈을 받는다.
+     */
+    @Bean
+    public ScimIds scimIds(ScimSyncProperties properties) {
+        if (properties.isIdFromExternalId()) {
+            log.info("SCIM POST 의 id 를 externalId 에서 정한다(sync.id-from-external-id=true) — externalId 가 IdP 의 영구 식별자여야 한다");
+            return ScimIds.fromExternalId();
+        }
+        return ScimIds.random();
     }
 
     @Bean
