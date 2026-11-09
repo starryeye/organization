@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: ed0b5e3 (scim-hierarchy, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 00934eb (scim-id-durability, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -525,7 +525,7 @@ curl -G -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/organizat
 
 - GSI3 로 후보를 찾고(`findGroupIdsByExternalId`) 이름표를 강한 일관성으로 다시 읽어 `externalId` 가 같은 것만 센다(`findGroupHeader`). 조직 검색의 `externalId` 와 같은 길이다([4.1](#41-검색)).
 - SCIM 은 조직 `externalId` 를 [표지판](02-용어집.md#표지판)으로 유일하게 지키고 LDAP 은 DN 이라 409 는 드물다. `externalId` 없이 만든 SCIM 조직은 이 길로 찾지 못한다.
-- **SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 다.** [초기화](02-용어집.md#초기화)(`mode=wipe`) 뒤 IdP 가 다시 프로비저닝하면 모든 `orgCode`·`employeeId` 가 새로 발급된다. 앱이 저장해 둔 값은 이 조회로 다시 찾는다([12 — `mode=wipe`](12-장애와-복구.md#84-scim-modewipe--post-adminsyncrebuildmodewipeconfirm테이블명)). LDAP 배포의 `orgCode` 는 디렉터리의 불변 id 라 바뀌지 않는다.
+- **SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 다.** [초기화](02-용어집.md#초기화)(`mode=wipe`) 뒤 IdP 가 다시 프로비저닝하면 기본(`sync.id-from-external-id` 꺼짐)에서는 모든 `orgCode`·`employeeId` 가 새로 발급된다. 켜져 있으면 `externalId` 가 있던 직원·조직은 같은 id 를 다시 받는다. 앱이 저장해 둔 값은 이 조회로 다시 찾는다([12 — `mode=wipe`](12-장애와-복구.md#84-scim-modewipe--post-adminsyncrebuildmodewipeconfirm테이블명)). LDAP 배포의 `orgCode` 는 디렉터리의 불변 id 라 바뀌지 않는다.
 
 ### `userName` 으로 찾을 때 알아야 할 것
 

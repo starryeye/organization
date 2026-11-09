@@ -1,6 +1,6 @@
 # SCIM
 
-> 기준 커밋: ed0b5e3 (scim-hierarchy, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 00934eb (scim-id-durability, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)(식별자·표지판·책갈피·키 한도)
 
 app-scim 은 IdP(Okta, Microsoft Entra ID 등)가 보내는 SCIM 2.0 요청을 받아 [장부](02-용어집.md#장부)와 [현재상태](02-용어집.md#현재상태)에 반영한다. 이 문서는 그 모든 동작을 다룬다. 엔드포인트와 인증, 리소스 모양, 조회와 필터, PATCH 해석, 쓰기 한 건의 흐름, 오류 응답, 예시, IdP 별 메모 순이다.
@@ -62,11 +62,15 @@ flowchart LR
 
 ### 1.3 id 는 서버가 발급한다
 
-- 직원·조직 POST 마다 `UUID.randomUUID().toString()` 으로 새 [불변 id](02-용어집.md#불변-id)를 만든다(`ScimUserHandler.create`, `ScimGroupHandler.create`). 요청 본문의 `id` 는 무시한다.
+- 직원·조직 POST 마다 새 [불변 id](02-용어집.md#불변-id)를 정한다. 처리기(`ScimUserHandler.create`, `ScimGroupHandler.create`)가 `ScimIds` 로 **후보**를 만들고, **최종 id 는 락 안의 유스케이스**(`IncrementalSyncUseCase.createUser`·`createGroup`)가 정한다. 응답의 `id`·`Location` 은 정해진 id 다. 요청 본문의 `id` 는 무시한다.
+  - **꺼짐(기본).** 후보는 무작위 UUID(v4)다.
+  - **켜짐(`sync.id-from-external-id=true`).** `externalId` 가 비지 않았으면 후보는 RFC 9562 UUIDv5 — 고정 네임스페이스에 `"User:" + externalId`(조직은 `"Group:"`)를 얹는다(UTF-8, 대소문자 그대로). 같은 `externalId` 는 `mode=wipe`·복구 뒤에도 같은 id 가 된다. `externalId` 가 없거나 비었거나 공백뿐이면 무작위다.
+  - **락 안의 검사**(키 한도 → 후보 → 표지판 순). 후보 id 가 비어 있으면 그대로 쓴다. 이미 있고 같은 `externalId` 면 409 `uniqueness`("같은 externalId 의 직원이 이미 있다: <id>", 조직은 "…조직이…")이고 아무것도 쓰지 않는다. 이미 있지만 `externalId` 가 다르면 무작위 UUID 로 만들고 INFO 로그를 남긴다(값은 싣지 않는다). 조직의 후보 검사는 헤더만 읽는다. 무작위 후보도 같은 검사를 지난다(GetItem 하나).
+  - 켜는 조건은 `externalId` 가 IdP 의 영구 식별자라는 것이다 — Entra 는 직원 매핑 `objectId` → `externalId` 와 매칭 속성 `externalId` 우선순위 1, Okta 는 앱이 Okta 사용자 id 를 싣는 경우. 서버는 값의 성질을 모른다. 벤더 동작은 문서 근거이고 테넌트로 확인하지 않았다. 켜기 전에 만든 리소스는 이관하지 않는다([13 — 2.1](13-한계와-알려진-문제.md#21-scim-id-의-내구성)).
 - PUT·PATCH·DELETE 는 경로의 `id` 가 정본이다. 본문의 `id`·`userName`·`externalId` 가 달라도 리소스를 옮기지 않는다.
 - 이 `id` 가 튜플에 실리고, 관리 API 는 이것을 [employeeId](02-용어집.md#employeeid)·[orgCode](02-용어집.md#orgcode)라 부른다.
 - IdP 는 응답으로 받은 `id` 를 저장해 이후 요청의 경로와 조직의 `members[].value` 에 쓴다. 그래서 IdP 는 아직 받지 못한 `id` 를 가리킬 수 없다. 직원과 조직을 먼저 만든 뒤 멤버를 PATCH 하는 순서가 된다.
-- 지운 직원과 같은 `userName` 으로 다시 만들어도 새 `id` 라, 옛 `id` 에 남은 권한을 물려받지 않는다.
+- 기본(꺼짐)에서는 지운 직원과 같은 `userName` 으로 다시 만들어도 새 `id` 라, 옛 `id` 에 남은 권한을 물려받지 않는다. 켜면 같은 `externalId` 만 같은 `id` 를 받는다.
 
 ---
 
@@ -223,7 +227,7 @@ Content-Type: application/scim+json
 
 | SCIM 속성 | POST·PUT 에서 저장하는 법 | 응답 |
 |---|---|---|
-| `id` | 본문 값 무시. POST 는 새 UUID, PUT 은 경로 | 그대로 |
+| `id` | 본문 값 무시. POST 는 정한 UUID(후보는 `ScimIds`, 최종은 락 안 — §1.3), PUT 은 경로 | 그대로 |
 | `userName` | 필수. 없거나 공백뿐이면 400 `invalidSyntax` "userName 은 필수입니다"(`ScimMapper.toDirectoryUser`). 원본 그대로 저장 | 그대로 |
 | `externalId` | 그대로. 없으면 비운다 | 있으면 싣는다 |
 | `displayName` | 비어 있으면 `name.formatted`, 그것도 비면 `userName` 을 쓴다 | 그대로 |
@@ -264,7 +268,7 @@ Content-Type: application/scim+json
 
 | SCIM 속성 | 저장하는 법 | 응답 |
 |---|---|---|
-| `id` | 본문 값 무시. POST 는 새 UUID, PUT 은 경로 | 그대로 |
+| `id` | 본문 값 무시. POST 는 정한 UUID(후보는 `ScimIds`, 최종은 락 안 — §1.3), PUT 은 경로 | 그대로 |
 | `externalId` | 그대로. 비어 있지 않으면 다른 조직과 겹칠 수 없다([§6.4](#64-표지판--username-과-조직-externalid)) | 있으면 싣는다 |
 | `displayName` | 그대로. 필수가 아니다 | 있으면 싣는다 |
 | `members[].value` | [정규화](02-용어집.md#정규화)(`IdNormalizer.normalize`)한 id. 없거나 공백이면 400 `invalidSyntax` "members 원소에 value 가 없습니다" | `value` |
@@ -709,7 +713,7 @@ SCIM 이 유일하게 지키는 값은 둘이다. 직원 `userName`(대소문자
 
 - 409 문구: "이미 같은 userName 을 쓰는 직원이 있습니다: userName=<값>, id=<주인 id>", "이미 같은 externalId 를 쓰는 조직이 있습니다: externalId=<값>, id=<주인 id>".
 - 503 의 응답 문구는 일반 문구다("일시적으로 처리할 수 없습니다 — 2초 뒤 다시 보내 주세요").
-- 같은 직원·조직의 PUT·PATCH·DELETE 재시도는 "주인이 나" 라 곧바로 통과한다. POST 재시도는 새 id 라 30초까지 기다릴 수 있다.
+- 같은 직원·조직의 PUT·PATCH·DELETE 재시도는 "주인이 나" 라 곧바로 통과한다. POST 재시도는 (기본 꺼짐에서) 새 id 라 30초까지 기다릴 수 있다 — 켜면 같은 `externalId` 는 같은 후보라 "주인이 나" 로 통과하거나, 이미 저장됐으면 409 다.
 
 **정리**(`IncrementalSyncUseCase.표지판을_정리한다`). 정리는 결과를 바꾸지 않는다.
 
@@ -959,7 +963,7 @@ WebFlux 가 정한 그 밖의 상태(`ResponseStatusException`, 예: 406)는 그
 
 503 의 `detail` 은 우리가 쓴 문구뿐이다. 예외 메시지에는 OpenFGA 서버 메시지, 라이브러리 예외 문자열, 락을 쥔 쪽의 용도가 들어 있다 — 응답으로 내보내지 않는다. 원인은 서버 로그(WARN "SCIM 요청이 일시 장애로 실패했다 — 503, Retry-After N초")에만 남는다. 부분 실패의 503 만 우리가 만든 `ScimException` 이라 문구에 id 가 있다.
 
-영구히 거절되는 튜플이 섞인 부분 실패도 지금은 503 이라 IdP 가 되풀이할 수 있다. 서버가 발급한 UUID 아래에서는 OpenFGA 가 거절할 id 가 거의 없다.
+영구히 거절되는 튜플이 섞인 부분 실패도 지금은 503 이라 IdP 가 되풀이할 수 있다. 서버가 정한 UUID 아래에서는 OpenFGA 가 거절할 id 가 거의 없다.
 
 ### 7.4 번역 순서
 
@@ -996,7 +1000,7 @@ Content-Type: application/scim+json
  "emails":[{"value":"gd.hong@example.com","primary":true}],"active":true}
 ```
 
-1. 핸들러가 새 id `U1` 을 만든다.
+1. 핸들러가 후보 id `U1` 을 만든다(꺼짐이면 무작위). 락 안에서 후보 `U1` 이 비어 있음을 확인해 그대로 정한다.
 2. 락 → 키 한도 → `userName` 표지판 `UNIQUE#USERNAME` / `gd.hong` 을 `U1` 이 차지한다.
 3. 최소 그림: `U1` 이 속한 조직을 역참조한다 — 없다. 후보가 없어 OpenFGA 를 부르지 않는다. 델타가 빈다.
 4. 커밋 직전 리스 확인 → `saveUser` 로 직원 META 를 쓴다(`createdAt`·`updatedAt` 같은 값).

@@ -94,7 +94,7 @@ type group
 쓰는 것은 사고를 부른다. 튜플의 식별자는 **직원의 불변 id와 조직의 불변 id뿐**이다. 조직명은 DynamoDB의
 현재상태에만 보관되고, 조회가 필요하면 거기서 가져온다.
 
-**불변 id는 이름에서 만들지 않는다.** SCIM은 이 서버가 직원·조직 POST 때 발급하는 UUID(`UUID.randomUUID()` — IdP 가 정하지 않는다), LDAP은 디렉터리
+**불변 id는 이름에서 만들지 않는다.** SCIM은 이 서버가 직원·조직 POST 때 발급하는 UUID(기본은 무작위 v4 — IdP 가 정하지 않는다. `sync.id-from-external-id=true` 로 켜면 IdP 의 영구 식별자인 `externalId` 에서 정한 UUIDv5 이고, 이름이 아니라 그 식별자에서 만든다), LDAP은 디렉터리
 서버가 엔트리마다 만들어 두는 `entryUUID`(AD는 `objectGUID`)다. 계정명이나 조직명이 바뀌어도 id는 그대로라 튜플이 바뀌지 않고, 지운 직원의 이름을 새 입사자가
 쓰더라도 옛 id로 남은 권한을 물려받지 않는다. 대신 **권한을 묻는 앱은 로그인한 사용자를 우리 id로 바꿔야 한다** — 아래 "조회 API"의
 정확 조회(`/admin/employees/lookup`·`/admin/organizations/lookup`)로 찾는다. 튜플이 UUID 라 OpenFGA 를 직접 열어 보면 읽기 어렵다 — 누구의 튜플인지는 관리 API 로 본다.
@@ -329,6 +329,7 @@ scrape_configs:
 | `dynamodb.table-name` | 없음 | `organization`(app-ldap)·`organization-scim`(app-scim) | 로컬 값 | 비면 기동을 멈춘다 |
 | `dynamodb.create-table-on-startup` | `false` | `true` | `false` | 테이블이 없을 때 만든다. 꺼져 있으면 `DynamoDB 테이블 <name> 이 없다 — 처음 설치라면 dynamodb.create-table-on-startup=true 로 한 번 띄우거나 미리 만든다` 로 멈춘다 |
 | `dynamodb.require-protection` | `false` | `false` | `true` | 만들 때 삭제 보호와 PITR 을 켠다(PITR 은 2분 안에서 다시 시도하고, 못 켜면 `테이블은 만들었으나 PITR 을 켜지 못했다 — 콘솔·CLI 로 켠 뒤 다시 띄운다`). 있는 테이블은 둘 다 켜져 있어야 하고, 아니면 꺼진 것을 적어 멈춘다 |
+| `sync.id-from-external-id`(app-scim) | `false` | — | — | SCIM POST 의 `id` 를 `externalId` 에서 정한다(UUIDv5). 운영 권장은 IdP 가 `externalId` 에 영구 식별자(Entra `objectId`)를 싣는지 확인한 뒤 `true` — 위 SCIM 절. 값의 성질은 서버가 판정하지 못해 prod 검사는 없다 |
 | `dynamodb.api-call-attempt-timeout` | 10초 | — | — | SDK 시도 한 번의 한도 — 매달린 연결을 끊는다 |
 | `dynamodb.api-call-timeout` | 60초 | — | — | SDK 재시도를 포함한 호출 하나의 한도 |
 | `openfga.store-name` | 없음 | `organization`·`organization-scim` | 로컬 값 | 비면 기동을 멈춘다 |
@@ -344,6 +345,7 @@ scrape_configs:
 | `openfga.require-tls` | `false` | — | `true` | `openfga.api-url` 이 `https://` 가 아니면 멈춘다 — 키가 평문으로 다니지 않는다 |
 
 - **PITR 로 복원한 테이블**이면 기동 때 WARN 을 한 번 남긴다: `PITR 로 복원한 테이블이다 — 장부보다 낡은 기준선일 수 있어 재적재를 권한다(SCIM 은 mode=tuples)`. 자동으로 재적재하지는 않는다.
+- **PITR 복원과 SCIM `id`.** 복원 시점 뒤에 발급한 `id` 는 복원본에 없다. `sync.id-from-external-id=true` 면 IdP 가 프로비저닝을 다시 시작할 때 POST 한 리소스가 **같은 `id`** 를 받는다(복원본에 있는 것은 IdP 가 `externalId` 로 찾아 PATCH — 이름이 바뀌었어도 POST 하면 409 라 갈라지지 않는다). 약속은 "같은 `id`" 까지다 — 복원 시점 뒤의 소속은 IdP 가 멤버십을 다시 보낸 뒤에야 조직도와 맞는다. 그래서 복원 시점 뒤에 지운·바꾼 것을 고치고, IdP 가 멤버십까지 다시 보냈는지 확인한 뒤 **맨 마지막에 `mode=tuples`** 를 건다(먼저 걸면 아직 멤버십이 없는 줄을 지운다). 꺼져 있으면 새 `id` 를 받는다. 프로비저닝을 다시 시작했을 때 Entra 가 이미 있는 조직의 멤버를 다시 보내는지는 확인하지 않았다.
 - **`ldaps://` 는 JVM 트러스트스토어로 연다.** 사설 CA 가 서명한 인증서면 `-Djavax.net.ssl.trustStore=<트러스트스토어 파일>` 로 넘긴다.
 - **두 앱이 같은 테이블·store 를 쓰는 것을 막는 실행 시점 검사는 없다.** 이름을 서로 다르게 적는 것은 배포의 몫이다(아래 SCIM 절).
 - **cron·기한의 기본값은 속성 클래스(`SyncProperties`·`ScimSyncProperties`)에만 있다** — yml 에는 덮어쓸 때만 적는다. `-` 는 그 작업을 끈다. 하루 1회 작업의
@@ -603,7 +605,7 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 있었는지 볼 유일한 기록이기 때문이다.
 
 **운영자가 지정한 조직 계층(`PUT …/parent`)은 모두 지워진다.** wipe 가 조직을 지우기 때문이다. IdP 가 다시 프로비저닝하면 조직의 `orgCode`(서버가 발급한 UUID)가
-새로 발급되므로 옛 `orgCode` 에 걸린 지정은 뜻이 없다(`mode=tuples` 는 지정을 그대로 둔다). 그래서 **IdP 재프로비저닝이 끝난 다음 지정을 다시 건다** — 그때까지
+새로 발급되므로 옛 `orgCode` 에 걸린 지정은 뜻이 없다(`mode=tuples` 는 지정을 그대로 둔다). `sync.id-from-external-id=true` 면 재프로비저닝이 같은 `orgCode` 를 다시 만든다 — 지정 스크립트를 다시 돌리면 같은 `orgCode` 로 걸린다(지정 자체는 여전히 지워진다). 그래서 **IdP 재프로비저닝이 끝난 다음 지정을 다시 건다** — 그때까지
 롤업이 없다. 순서는 아래 "조직 계층 지정"의 2·3 이다.
 
 `sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 사람 소속이 하나도 없는 그림(예: 필터가 아무도
@@ -741,7 +743,7 @@ displayName  홍길동
 둘 중 정확히 하나를 준다(아니면 400). 하나면 200 이고 비활성 직원도 그대로 준다 — 앱이 `active` 를 본다. 없으면 404 `일치하는 직원이 없다`, 여럿이면 409
 `<N>명이 일치한다 — externalId 로 찾는다` 이고 목록은 싣지 않는다 — LDAP 의 `userName` 은 유일하지 않을 수 있고, 직원 `externalId` 는 어느 쪽도 유일하게
 지키지 않는다. 조직은 `GET /admin/organizations/lookup?externalId=` 로 `orgCode` 를 얻는다 — 404 `일치하는 조직이 없다`, 409 `<N>개가 일치한다`(SCIM 은 조직
-`externalId` 를 유일하게 지키므로 LDAP 에서만 날 수 있다). SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 라 `mode=wipe` 뒤에 바뀐다 — 다시 찾는다.
+`externalId` 를 유일하게 지키므로 LDAP 에서만 날 수 있다). SCIM 배포의 `orgCode` 는 서버가 발급한 UUID 라 `mode=wipe` 뒤에 바뀐다(`sync.id-from-external-id=true` 면 같은 `externalId` 로 다시 프로비저닝된 조직은 같은 `orgCode` 를 받는다) — 바뀌었을 수 있으면 다시 찾는다.
 그다음 `Check(user:<employeeId>, member, group:<orgCode>)`로 묻는다.
 
 요청마다 전원을 읽지 않는다 — 인덱스 한 번이다. `externalId` 는 GSI3 후보를 본 테이블에서 다시 읽고(아래 `?externalId=` 와 같다 — 방금 만든 리소스는 잠깐 404),
@@ -1161,13 +1163,24 @@ WebFlux 기본 한도(256KB, 멤버 약 7천 명)를 넘으면 받지 못하고 
   아니다(User `groups` 를 내보내지 않는다). 이 기능 전에 만든 아이템에는 `created` 가 없고 다음 변경 시각이 생성 시각으로 들어간다 — 운영 배포 전이라
   이관하지 않는다(테이블을 다시 만든다). `meta.lastModified` 로 거르는 필터는 받지 않는다(400). 설계: `docs/superpowers/specs/2026-10-09-updated-at-export-design.md`.
 
-**`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 무작위 UUID(v4, 소문자 하이픈)를 새로 만들어 응답으로 돌려주고,
+**`id` 는 서버가 발급한다**(RFC 7643 §3.1). 직원·조직 POST 마다 후보 UUID(소문자 하이픈)를 만들고, 락 안에서 그 후보를 확인해 정한 `id` 를 응답으로 돌려주며,
 요청 본문의 `id` 는 무시한다. IdP 는 이 `id` 를 저장해 PATCH·PUT·DELETE 의 경로와 조직의 `members[].value` 에 쓴다. PUT 도 경로의 `id` 가
 기준이다. 이 `id` 가 곧 `employeeId`·`orgCode` 이고 튜플에 실린다. 그래서 지운 직원과 같은 `userName` 으로 다시 만들어도 새 `id` 라 옛 `id` 로
-남은 권한을 물려받지 않고, 이름을 바꾼 직원의 옛 `userName` 을 새 입사자가 쓸 수 있다. **IdP 는 아직 받지 못한 `id` 를 알 수 없다** — 그래서
+남은 권한을 물려받지 않고(기본), 이름을 바꾼 직원의 옛 `userName` 을 새 입사자가 쓸 수 있다. **IdP 는 아직 받지 못한 `id` 를 알 수 없다** — 그래서
 실제로는 자기가 만들어 `id` 를 받은 리소스만 가리키고, 조직도 직원도 먼저 만든 뒤에 멤버를 PATCH 하는 순서가 된다(서버가 모르는 `id` 를 멤버로
-받으면 막지는 않는다 — 멤버 줄만 저장하고, 그 직원이 실제로 있기 전에는 튜플을 만들지 않는다. 아래 `members[].value` 문단). 조직의 `externalId`(IdP 가 정하는 값)는 속성으로만
+받으면 막지는 않는다 — 멤버 줄만 저장하고, 그 직원이 실제로 있기 전에는 튜플을 만들지 않는다. 아래 `members[].value` 문단). 조직의 `externalId`(IdP 가 정하는 값)는 기본(꺼짐)에서는 속성으로만
 남고 id 를 만들지 않는다.
+
+**`sync.id-from-external-id`(app-scim, 기본 `false`) — 복구 뒤에도 같은 `id` 를 받게 하는 설정.** 후보는 `ScimIds` 가 만든다. 꺼져 있거나 `externalId` 가 없으면(null·빈 값·공백뿐)
+무작위 UUID(v4) — 지금까지와 같다. 켜면 `externalId` 가 있는 POST 의 후보는 RFC 9562 이름 기반 UUID(v5)다 — 고정 네임스페이스(`628efe45-04dd-4c33-82e2-f2d612044e98`, 영구 고정:
+바꾸면 이후의 모든 후보가 달라진다)에 이름 `"User:" + externalId`(조직은 `"Group:" + externalId`, UTF-8, 대소문자 그대로)를 얹는다. IdP 가 같은 리소스를 다시 POST 하면
+같은 `id` 가 나온다. **최종 `id` 는 락 안에서 정한다** — 후보 `id` 가 비어 있으면 그대로 쓴다. 이미 있고 같은 `externalId` 면 **409 `uniqueness`**(`같은 externalId 의 직원이 이미 있다: <id>`,
+조직은 `…조직이…`)이고 아무것도 쓰지 않는다 — IdP 는 `externalId` 로 찾아 PATCH 해야 한다(Entra 는 매칭 속성 `externalId` 를 우선순위 1 로 두면 처음부터 그렇게 한다).
+이미 있지만 `externalId` 가 다르면(만든 뒤 바뀜) 무작위 UUID 로 만들고 INFO 로그 한 줄을 남긴다(값은 싣지 않는다). 무작위 후보도 같은 검사를 지난다(POST 마다 GetItem 하나).
+**`externalId` 가 IdP 의 영구 식별자일 때만 켠다.** Entra 는 직원 매핑 `objectId` → `externalId`(기본 `mailNickname` 은 바뀌고 다시 쓰일 수 있다 — 켠 채 wipe 하면 같은 별명을 받은
+새 사람이 옛사람의 `id` 를 받는다), 조직은 기본이 `objectId` 라 대부분 그대로, Okta 는 앱이 Okta 사용자 id 를 `externalId` 로 싣는 경우에만(조직 Group Push 는 싣지 않는다). 서버는
+값의 성질을 판정하지 못한다. 켜면 기동 때 INFO 한 줄을 남긴다. 켜기 전에 만든 리소스는 무작위 `id` 그대로이고 이관하지 않는다. `externalId` 가 없는 리소스는 보존되지 않는다.
+벤더 동작은 문서 근거이고 실제 테넌트로 확인하지 않았다. LDAP 은 바뀌지 않는다(디렉터리의 `entryUUID`). 설계: `docs/superpowers/specs/2026-11-05-scim-id-durability-design.md`.
 
 **`userName` 은 POST·PUT·PATCH 모두에서 대소문자를 무시하고 유일하다**(RFC 7643 `uniqueness: server`, `caseExact: false`). 겹치면
 409 `uniqueness` 다. **조직은 `externalId` 가 비어 있지 않고 다른 조직과 같으면 409 `uniqueness` 다** — POST 는 물론, `externalId` 를 바꾸는
@@ -1255,7 +1268,7 @@ remove B` 순서로 와도 둘째 요청 뒤에 롤업이 돌아온다. **원천
 
 **500 은 분류되지 않은 예외에만 남는다.** 재시도하면 낫는 실패는 503, 요청이 틀렸으면 4xx 이고, 어느 쪽도 아닌 예외만 500 과 ERROR 로그다 — 대개 버그지만,
 같은 이름 store 가 둘이라 멈춘 것처럼 다시 보내도 같은 OpenFGA·DynamoDB 오류도 여기 온다. 이 분류기는 관리 API 도 함께 쓴다. 튜플 일부만
-반영된 **부분 실패도 503** 이다 — 상태는 이미 커밋됐지만 IdP 가 같은 요청을 다시 보내면 같은 최종 상태를 목표로 다시 계산해 나머지를 반영한다. 다만
+반영된 **부분 실패도 503** 이다 — 상태는 이미 커밋됐지만 IdP 가 같은 요청을 다시 보내면 같은 최종 상태를 목표로 다시 계산해 나머지를 반영한다. 단 **저장하지 못한 새 조직 POST** 는 다르다 — 조직을 저장하지 않으므로, 그 요청이 쓴 줄과 결과를 모르는 줄을 "없으면 무시" 로 지운 뒤 503 을 낸다(재시도가 같은 `id`·다른 멤버로 와도 줄이 새지 않게). 되지우기가 실패하면 WARN 을 남기고 줄은 `mode=tuples` 까지 남는다. 오류로 끝난 요청(차단기 중단·리스 상실·커밋 오류)은 되지우지 않는다. 다만
 IdP 가 503 과 `Retry-After` 를 어떻게 다루는지는 문서·추정이다(Entra 는 개별 오류를 다음 주기에 재시도한다고 문서화했고, Okta 의 5xx 반응은 문서에 없다).
 AWS SDK(`SdkClientException`·스로틀링·5xx·SDK 가 재시도 가능하다고 표시한 것)와
 OpenFGA SDK(`FgaError.isRetryable()` — 429, 501 을 뺀 5xx)의 예외는 각 SDK 가 정한 재시도 분류를 따라 알아본다. 그 밖에 원인 사슬에
