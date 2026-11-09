@@ -227,7 +227,7 @@ class IncrementalSyncReadScopeTest {
 
     @Test
     @DisplayName("직원 생성은 후보 id 를 한 번만 읽고(설계 2026-11-05 I3), 변경도 한 번만 읽는다(점검 S28)")
-    void 직원_생성은_읽지_않고_변경은_한_번만_읽는다() {
+    void 직원_생성은_후보를_한_번_읽고_변경은_한_번만_읽는다() {
         // given
         state.findUserCalls.clear();
 

@@ -128,6 +128,8 @@ class IncrementalSyncCreateIdTest {
     void 조직_후보에_같은_externalId_의_조직이_있으면_409다() {
         // given
         useCase.createGroup(조직("g-1", "DEV001", "개발본부")).block();
+        int 전 = writer.appliedDeltas.size();
+        state.findGroupCalls.clear();
 
         // when
         var 다시 = useCase.createGroup(조직("g-1", "DEV001", "덮어쓴 조직"));
@@ -136,6 +138,8 @@ class IncrementalSyncCreateIdTest {
         assertThatThrownBy(다시::block).isInstanceOf(DirectoryConflictException.class)
                 .hasMessage("같은 externalId 의 조직이 이미 있다: g-1");
         assertThat(state.groups.get("g-1").displayName()).isEqualTo("개발본부");
+        assertThat(writer.appliedDeltas).hasSize(전);
+        assertThat(state.findGroupCalls).doesNotContain("g-1");
     }
 
     @Test

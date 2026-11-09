@@ -86,6 +86,29 @@ class IncrementalSyncAuditTest {
     }
 
     @Test
+    @DisplayName("저장하지 못한 새 조직 POST 의 이력은 쓴 줄의 부여와 회수가 함께 남고 조직 줄은 없다")
+    void 저장하지_못한_새_조직_POST_의_이력은_쓴_줄의_부여와_회수가_함께_남고_조직_줄은_없다() {
+        // given — dm(u-2) 쓰기가 실패하면 새 조직은 저장되지 않고, 되지우기가 dm(u-1) 을 지운다
+        MemberRef 첫째 = MemberRef.user("u-1");
+        MemberRef 둘째 = MemberRef.user("u-2");
+        state.saveUser(직원("u-1", true)).block();
+        state.saveUser(직원("u-2", true)).block();
+        RelationTuple 첫째의_튜플 = RelationTuple.directMember("u-1", "g-new");
+        writer.failFor(tuple -> tuple.equals(RelationTuple.directMember("u-2", "g-new")));
+
+        // when
+        var 결과 = useCase.createGroup(new DirectoryGroup("g-new", "grp-new", "새 조직", Set.of(첫째, 둘째))).block();
+
+        // then
+        assertThat(결과.result().fullyApplied()).isFalse();
+        assertThat(state.groups).doesNotContainKey("g-new");
+        AuditEntry 첫째의_줄 = auditLog.lastOf(첫째);
+        assertThat(첫째의_줄.granted()).containsExactly(첫째의_튜플);
+        assertThat(첫째의_줄.revoked()).containsExactly(첫째의_튜플);
+        assertThat(auditLog.entriesOf(MemberRef.group("g-new"))).isEmpty();
+    }
+
+    @Test
     @DisplayName("직원을 바꾸면 바뀐 속성의 이전과 이후를 남긴다")
     void 직원_변경() {
         // given

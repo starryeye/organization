@@ -153,4 +153,35 @@ class ScimIdIssueTest {
         client.get().uri("/scim/v2/Users/" + 직원_id).exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.userName").isEqualTo("kim");
     }
+
+    private static String 조직_본문(String externalId, String displayName) {
+        return "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],\"externalId\":\"" + externalId
+                + "\",\"displayName\":\"" + displayName + "\"}";
+    }
+
+    @Test
+    @DisplayName("조직 후보에서 물러서면 정한 id 로 답한다")
+    void 조직_후보에서_물러서면_정한_id_로_답한다() {
+        // given — 조직 A 가 후보 id 를 쓰고 있지만 externalId 는 다른 값으로 바뀌었다
+        var client = 클라이언트(ScimIds.fromExternalId());
+        client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(조직_본문("00u1abcd", "조직 A"))
+                .exchange().expectStatus().isCreated();
+        client.put().uri("/scim/v2/Groups/" + 조직_id).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(조직_본문("00u9zzzz", "조직 A"))
+                .exchange().expectStatus().isOk();
+
+        // when
+        var result = client.post().uri("/scim/v2/Groups").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(조직_본문("00u1abcd", "조직 B"))
+                .exchange().expectStatus().isCreated().expectBody(Map.class).returnResult();
+
+        // then
+        Object id = result.getResponseBody().get("id");
+        v4_이다(id);
+        assertThat(id).isNotEqualTo(조직_id);
+        assertThat(result.getResponseHeaders().getLocation().toString()).endsWith("/scim/v2/Groups/" + id);
+        client.get().uri("/scim/v2/Groups/" + 조직_id).exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.displayName").isEqualTo("조직 A");
+    }
 }
