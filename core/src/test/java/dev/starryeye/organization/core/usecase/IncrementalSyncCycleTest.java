@@ -131,7 +131,7 @@ class IncrementalSyncCycleTest {
         state.groups.put("B", 조직("B", MemberRef.group("A")));
 
         // when — A 를 만들며 B 를 하위 조직으로 넣는다
-        var result = useCase.createGroup(조직("A", MemberRef.group("B"))).block();
+        var result = useCase.createGroup(조직("A", MemberRef.group("B"))).block().result();
 
         // then — "A 는 B 의 하위"가 남고 "B 는 A 의 하위"가 보류된다
         assertThat(result.fullyApplied()).isTrue();
@@ -146,7 +146,7 @@ class IncrementalSyncCycleTest {
         state.groups.put("A", 조직("A", MemberRef.group("Z")));
 
         // when
-        var result = useCase.createGroup(조직("Z", MemberRef.group("A"))).block();
+        var result = useCase.createGroup(조직("Z", MemberRef.group("A"))).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();

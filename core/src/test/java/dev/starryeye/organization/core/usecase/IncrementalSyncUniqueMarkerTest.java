@@ -109,7 +109,7 @@ class IncrementalSyncUniqueMarkerTest {
         writer.failFor(tuple -> true);
 
         // when
-        var 처음 = useCase.createUser(직원("u-1", "kim")).block();
+        var 처음 = useCase.createUser(직원("u-1", "kim")).block().result();
 
         // then
         assertThat(처음.fullyApplied()).isFalse();
@@ -118,7 +118,7 @@ class IncrementalSyncUniqueMarkerTest {
 
         // when — IdP 의 재시도는 새 UUID 다
         writer.failFor(tuple -> false);
-        var 다시 = useCase.createUser(직원("u-2", "kim")).block();
+        var 다시 = useCase.createUser(직원("u-2", "kim")).block().result();
 
         // then
         assertThat(다시.fullyApplied()).isTrue();

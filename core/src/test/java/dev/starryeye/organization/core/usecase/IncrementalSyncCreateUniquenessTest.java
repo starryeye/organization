@@ -78,7 +78,7 @@ class IncrementalSyncCreateUniquenessTest {
         useCase.removeUser("u-1").block();
 
         // when
-        var result = useCase.createUser(직원("u-2", "kim@corp.com")).block();
+        var result = useCase.createUser(직원("u-2", "kim@corp.com")).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();
@@ -93,7 +93,7 @@ class IncrementalSyncCreateUniquenessTest {
         useCase.changeUser("u-1", user -> user.withUserName("new@corp.com")).block();
 
         // when
-        var result = useCase.createUser(직원("u-2", "old@corp.com")).block();
+        var result = useCase.createUser(직원("u-2", "old@corp.com")).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();
@@ -108,8 +108,8 @@ class IncrementalSyncCreateUniquenessTest {
 
         // when
         var 다시 = useCase.createGroup(new DirectoryGroup("g-2", "DEV001", "개발본부", Set.of()));
-        var 없음1 = useCase.createGroup(new DirectoryGroup("g-3", null, "이름만", Set.of())).block();
-        var 없음2 = useCase.createGroup(new DirectoryGroup("g-4", null, "이름만", Set.of())).block();
+        var 없음1 = useCase.createGroup(new DirectoryGroup("g-3", null, "이름만", Set.of())).block().result();
+        var 없음2 = useCase.createGroup(new DirectoryGroup("g-4", null, "이름만", Set.of())).block().result();
 
         // then
         assertThatThrownBy(다시::block).isInstanceOf(DirectoryConflictException.class).hasMessageContaining("externalId");

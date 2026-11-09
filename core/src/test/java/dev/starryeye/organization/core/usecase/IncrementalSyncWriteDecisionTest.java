@@ -84,7 +84,7 @@ class IncrementalSyncWriteDecisionTest {
     @DisplayName("직원 생성 — 겹치지 않으면 만든다")
     void 겹치지_않으면_만든다() {
         // when
-        var result = useCase.createUser(직원("park", "park", true)).block();
+        var result = useCase.createUser(직원("park", "park", true)).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();
@@ -153,7 +153,7 @@ class IncrementalSyncWriteDecisionTest {
         낡은_표지판을_적는다(UniqueKind.GROUP_EXTERNAL_ID, "cn=NEW", "ghost");
 
         // when
-        var result = useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block();
+        var result = useCase.createGroup(new DirectoryGroup("NEW", "cn=NEW", "새 조직", Set.of())).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();
@@ -260,7 +260,7 @@ class IncrementalSyncWriteDecisionTest {
         assertThat(state.groups).doesNotContainKey("DEV009");
 
         var result = useCase.createGroup(new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀",
-                Set.of(MemberRef.user("kim")))).block();
+                Set.of(MemberRef.user("kim")))).block().result();
         assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.written).contains(RelationTuple.directMember("kim", "DEV002"));
     }

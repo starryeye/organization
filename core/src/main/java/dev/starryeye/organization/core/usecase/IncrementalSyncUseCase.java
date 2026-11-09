@@ -369,20 +369,48 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 직원 생성(POST). {@code userName} 의 표지판을 <b>락 안에서, OpenFGA 쓰기 전에</b> 차지한다(설계 2026-10-14 §4.2) — 겹치면 409, 다른 쓰기가
-     * 아직 저장하지 않은 값이면 503 이다. 아이디는 서버가 발급한 UUID 라 겹칠 일이 없어 보지 않는다(설계 2026-10-04 §3.2) — 지운 직원의 아이디가
-     * 다시 쓰이지 않아 남은 권한을 물려받지 않는다(점검 M7).
+     * 직원 생성(POST). {@code user.id()} 는 <b>후보</b>다 — 락 안에서 그 id 의 직원을 읽어 정한다(설계 2026-11-05 I3): 없으면 후보 그대로,
+     * 같은 {@code externalId} 면 {@link DirectoryConflictException}(409), 다르면(남의 id 와 겹친 것이다) 무작위 UUID 로 물러선다. 정한 id 는
+     * {@link CreateResult} 로 돌려준다. {@code externalId} 가 없거나 공백이면 같은 리소스라 할 수 없어({@link #같은_externalId}) 후보가 차 있으면 늘 무작위다.
+     * 결정적 id 면 지운 직원의 id 가 같은 {@code externalId} 에 다시 쓰인다 — 설계의 전제에서 같은 사람이다(I4). 삭제가 일부 실패해 기록이
+     * 비활성으로 남아 있으면 같은 {@code externalId} 의 POST 는 409 다.
      *
-     * <p>생성에는 "자기 자신"이 없다 — 표지판의 주인이 이 아이디여도 그 직원이 그 이름을 쥐고 있으면 409 다(같은 아이디로 다시 온 POST 가 기존 직원을
-     * 덮어쓰지 않는다). 끝나면 표지판을 정리한다({@link #표지판을_정리한다}).
+     * <p>그다음 {@code userName} 의 표지판을 <b>락 안에서, OpenFGA 쓰기 전에</b> 차지한다(설계 2026-10-14 §4.2) — 겹치면 409, 다른 쓰기가
+     * 아직 저장하지 않은 값이면 503 이다. 생성에는 "자기 자신"이 없다 — 표지판의 주인이 이 아이디여도 그 직원이 그 이름을 쥐고 있으면 409 다.
+     * 끝나면 표지판을 정리한다({@link #표지판을_정리한다}).
      *
-     * <p>표지판보다 먼저 키에 들어갈 값(userName·displayName·externalId)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
+     * <p>순서는 한도 → 후보 → 표지판이다. 표지판보다 먼저 키에 들어갈 값(userName·displayName·externalId)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
      */
-    public Mono<IncrementalSyncResult> createUser(DirectoryUser user) {
+    public Mono<CreateResult> createUser(DirectoryUser user) {
+        AtomicReference<String> 정한_id = new AtomicReference<>(user.id());
         return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(user))
-                .then(표지판().차지한다(UniqueKind.USER_NAME, user.userName(), user.id()))
-                .then(Mono.defer(() -> 표지판을_정리한다(upsertUserInternal(user, Optional.empty(), lease, 기록),
-                        UniqueKind.USER_NAME, user.id(), List.of(), 값들(user.userName())))));
+                .then(직원_id를_정한다(user))
+                .flatMap(정한 -> {
+                    정한_id.set(정한.id());
+                    return 표지판().차지한다(UniqueKind.USER_NAME, 정한.userName(), 정한.id())
+                            .then(Mono.defer(() -> 표지판을_정리한다(upsertUserInternal(정한, Optional.empty(), lease, 기록),
+                                    UniqueKind.USER_NAME, 정한.id(), List.of(), 값들(정한.userName()))));
+                }))
+                .map(result -> new CreateResult(정한_id.get(), result));
+    }
+
+    /** 후보 id 의 직원을 읽어 정한 직원을 낸다 — 없으면 후보 그대로, 같은 externalId 면 409, 다르면 무작위 id(설계 2026-11-05 I3). */
+    private Mono<DirectoryUser> 직원_id를_정한다(DirectoryUser 후보) {
+        return state.findUser(후보.id())
+                .map(있는 -> {
+                    if (같은_externalId(있는.externalId(), 후보.externalId())) {
+                        throw new DirectoryConflictException("같은 externalId 의 직원이 이미 있다: " + 후보.id());
+                    }
+                    String 새_id = UUID.randomUUID().toString();
+                    log.info("SCIM 생성 후보 id 가 다른 직원의 것이라 무작위 id 로 물러선다 — 리소스 직원, 후보 {}, 정한 {}", 후보.id(), 새_id);
+                    return 후보.withId(새_id);
+                })
+                .defaultIfEmpty(후보);
+    }
+
+    /** 저장본과 요청의 externalId 가 같은 리소스를 가리키는가 — 둘 다 공백이 아니고 대소문자까지 같을 때만(설계 2026-11-05 I3). */
+    static boolean 같은_externalId(String 저장본, String 요청) {
+        return 저장본 != null && 요청 != null && !저장본.isBlank() && !요청.isBlank() && 저장본.equals(요청);
     }
 
     /**
@@ -478,17 +506,41 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 조직 생성(POST). {@code externalId} 가 있으면 그 표지판을 <b>락 안에서</b> 차지한다(설계 2026-10-14 §4.3). 겹치면 {@link DirectoryConflictException}.
-     * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다 — 같은 아이디·같은 {@code externalId} 로 다시 온 POST 도 409 이고 기존 조직을 덮어쓰지 않는다.
-     * RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의 재시도가 같은 조직을 둘 만들지 않게 막는다(설계 2026-10-04 §3.2).
+     * 조직 생성(POST). {@code group.id()} 는 <b>후보</b>다 — 락 안에서 그 id 의 조직 <b>헤더만</b> 읽어(파티션은 읽지 않는다) 정한다(설계 2026-11-05 I3):
+     * 없으면 후보 그대로, 같은 {@code externalId} 면 {@link DirectoryConflictException}(409), 다르면 무작위 UUID 로 물러선다. 정한 id 는
+     * {@link CreateResult} 로 돌려준다. 결정적 id 면 지운 조직의 id 가 같은 {@code externalId} 에 다시 쓰인다(I4).
      *
-     * <p>표지판보다 먼저 키에 들어갈 값(displayName·externalId·멤버 아이디)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
+     * <p>그다음 {@code externalId} 가 있으면 그 표지판을 <b>락 안에서</b> 차지한다(설계 2026-10-14 §4.3). 겹치면 {@link DirectoryConflictException}.
+     * 생성에는 "자기 자신"이 없어 이미 있는 조직을 하나도 빼지 않는다. RFC 핵심 스키마에는 조직의 유일 속성이 없지만, 응답을 잃은 POST 의 재시도가
+     * 같은 조직을 둘 만들지 않게 막는다(설계 2026-10-04 §3.2).
+     *
+     * <p>순서는 한도 → 후보 → 표지판이다. 표지판보다 먼저 키에 들어갈 값(displayName·externalId·멤버 아이디)의 한도를 본다 — 넘으면 {@link ValueTooLongException} 이고 아무것도 쓰지 않는다({@link #한도를_본다}).
      */
-    public Mono<IncrementalSyncResult> createGroup(DirectoryGroup group) {
+    public Mono<CreateResult> createGroup(DirectoryGroup group) {
+        AtomicReference<String> 정한_id = new AtomicReference<>(group.id());
         return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(이름표(group)).or(() -> KeyValueLimits.overMembers(group.members())))
-                .then(표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, group.externalId(), group.id()))
-                .then(Mono.defer(() -> 표지판을_정리한다(upsertGroupInternal(group, lease, 기록),
-                        UniqueKind.GROUP_EXTERNAL_ID, group.id(), List.of(), 값들(group.externalId())))));
+                .then(조직_id를_정한다(group))
+                .flatMap(정한 -> {
+                    정한_id.set(정한.id());
+                    return 표지판().차지한다(UniqueKind.GROUP_EXTERNAL_ID, 정한.externalId(), 정한.id())
+                            .then(Mono.defer(() -> 표지판을_정리한다(upsertGroupInternal(정한, lease, 기록),
+                                    UniqueKind.GROUP_EXTERNAL_ID, 정한.id(), List.of(), 값들(정한.externalId()))));
+                }))
+                .map(result -> new CreateResult(정한_id.get(), result));
+    }
+
+    /** {@link #직원_id를_정한다} 의 조직판 — 헤더만 읽는다. */
+    private Mono<DirectoryGroup> 조직_id를_정한다(DirectoryGroup 후보) {
+        return state.findGroupHeader(후보.id())
+                .map(있는 -> {
+                    if (같은_externalId(있는.externalId(), 후보.externalId())) {
+                        throw new DirectoryConflictException("같은 externalId 의 조직이 이미 있다: " + 후보.id());
+                    }
+                    String 새_id = UUID.randomUUID().toString();
+                    log.info("SCIM 생성 후보 id 가 다른 조직의 것이라 무작위 id 로 물러선다 — 리소스 조직, 후보 {}, 정한 {}", 후보.id(), 새_id);
+                    return new DirectoryGroup(새_id, 후보.externalId(), 후보.displayName(), 후보.members());
+                })
+                .defaultIfEmpty(후보);
     }
 
     /**

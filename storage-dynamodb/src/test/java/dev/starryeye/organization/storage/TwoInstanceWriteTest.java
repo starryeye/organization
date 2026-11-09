@@ -5,6 +5,7 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.TemporaryFailureException;
+import dev.starryeye.organization.core.usecase.CreateResult;
 import dev.starryeye.organization.core.usecase.DirectoryConflictException;
 import dev.starryeye.organization.core.usecase.IncrementalSyncResult;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase;
@@ -121,7 +122,7 @@ class TwoInstanceWriteTest extends DynamoDbTestSupport {
                 .flatMap(i -> 인스턴스들.get(i).createUser(new DirectoryUser("u-" + i, null, 이름들.get(i), "김", null, true))
                         .retryWhen(Retry.fixedDelay(10, Duration.ofMillis(200))
                                 .filter(e -> e instanceof TemporaryFailureException))
-                        .<Object>map(r -> r)
+                        .<Object>map(CreateResult::result)
                         .onErrorResume(e -> Mono.just(e))
                         .subscribeOn(Schedulers.boundedElastic()))
                 .collectList()

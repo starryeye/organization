@@ -346,7 +346,7 @@ class IncrementalSyncAuditTest {
         auditLog.failWith = new IllegalStateException("DynamoDB 장애");
 
         // when
-        IncrementalSyncResult result = useCase.createUser(직원("kim", true)).block();
+        IncrementalSyncResult result = useCase.createUser(직원("kim", true)).block().result();
 
         // then
         assertThat(result.fullyApplied()).isTrue();

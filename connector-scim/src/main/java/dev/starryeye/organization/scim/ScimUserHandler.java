@@ -48,7 +48,7 @@ public class ScimUserHandler {
                 .map(scim -> ScimMapper.toDirectoryUser(scim, UUID.randomUUID().toString()))
                 // userName 중복은 락 안에서 확인한다(SCIM 쓰기 락 설계 §4)
                 .flatMap(user -> sync.createUser(user)
-                        .flatMap(result -> respond(HttpStatus.CREATED, user.id(), result, projection))));
+                        .flatMap(created -> respond(HttpStatus.CREATED, created.id(), created.result(), projection))));
     }
 
     public Mono<ServerResponse> get(ServerRequest request) {

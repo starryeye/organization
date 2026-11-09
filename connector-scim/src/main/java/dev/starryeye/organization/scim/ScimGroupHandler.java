@@ -42,7 +42,7 @@ public class ScimGroupHandler {
                 .flatMap(scim -> ScimMapper.toDirectoryGroup(scim, UUID.randomUUID().toString(), memberTypes))
                 // 같은 externalId 의 조직이 이미 있는지는 락 안에서 확인한다(SCIM 쓰기 락 설계 §3)
                 .flatMap(group -> sync.createGroup(group)
-                        .flatMap(result -> respond(HttpStatus.CREATED, group.id(), result, projection))));
+                        .flatMap(created -> respond(HttpStatus.CREATED, created.id(), created.result(), projection))));
     }
 
     public Mono<ServerResponse> get(ServerRequest request) {

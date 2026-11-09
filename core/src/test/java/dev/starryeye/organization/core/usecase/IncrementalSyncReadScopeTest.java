@@ -215,7 +215,7 @@ class IncrementalSyncReadScopeTest {
         state.findUsersCalls.clear();
 
         // when
-        var result = useCase.createGroup(new DirectoryGroup("LATE", "ou=late", "늦게 온 조직", Set.of())).block(Duration.ofSeconds(10));
+        var result = useCase.createGroup(new DirectoryGroup("LATE", "ou=late", "늦게 온 조직", Set.of())).block(Duration.ofSeconds(10)).result();
 
         // then — 늦게 도착한 조직의 상위 연결은 지금처럼 쓰인다
         assertThat(result.fullyApplied()).isTrue();
@@ -226,7 +226,7 @@ class IncrementalSyncReadScopeTest {
     }
 
     @Test
-    @DisplayName("직원 생성은 직원 META 를 읽지 않고(서버가 발급한 아이디라 겹침을 보지 않는다), 변경은 한 번만 읽는다(점검 S28)")
+    @DisplayName("직원 생성은 후보 id 를 한 번만 읽고(설계 2026-11-05 I3), 변경도 한 번만 읽는다(점검 S28)")
     void 직원_생성은_읽지_않고_변경은_한_번만_읽는다() {
         // given
         state.findUserCalls.clear();
@@ -238,7 +238,8 @@ class IncrementalSyncReadScopeTest {
         useCase.changeUser("park", user -> user.withDisplayName("박 님")).block(Duration.ofSeconds(10));
 
         // then
-        assertThat(생성때).isEmpty();
+        // 생성은 후보 id 의 직원을 락 안에서 한 번 읽는다 — 후보 검사다(설계 2026-11-05 I3)
+        assertThat(생성때).containsExactly("park");
         assertThat(state.findUserCalls).containsExactly("park");
     }
 }
