@@ -17,11 +17,16 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 @Configuration
 public class ScimConfig {
 
-    /** 받아서 버린 속성을 알릴 관찰자가 있으면 단다 — app-scim 의 메트릭(설계 2026-10-06 §3.3). 없으면 아무 일도 하지 않는다. */
+    /**
+     * 받아서 버린 속성을 알릴 관찰자가 있으면 단다 — app-scim 의 메트릭(설계 2026-10-06 §3.3). 없으면 아무 일도 하지 않는다.
+     * {@link ScimIds} 빈이 없으면 무작위 id 다(지금 동작) — app-scim 이 {@code sync.id-from-external-id} 로 올린다(설계 2026-11-05 I1).
+     */
     @Bean
     public ScimUserHandler scimUserHandler(DirectoryQueryRepository query, IncrementalSyncUseCase sync,
-                                           ObjectProvider<IgnoredAttributeObserver> ignoredAttributes) {
-        return new ScimUserHandler(query, sync, ignoredAttributes.getIfAvailable(() -> IgnoredAttributeObserver.NOOP));
+                                           ObjectProvider<IgnoredAttributeObserver> ignoredAttributes,
+                                           ObjectProvider<ScimIds> ids) {
+        return new ScimUserHandler(query, sync, ignoredAttributes.getIfAvailable(() -> IgnoredAttributeObserver.NOOP),
+                ids.getIfAvailable(ScimIds::random));
     }
 
     @Bean
@@ -31,8 +36,9 @@ public class ScimConfig {
 
     @Bean
     public ScimGroupHandler scimGroupHandler(DirectoryStateRepository state, DirectoryQueryRepository query,
-                                             IncrementalSyncUseCase sync, MemberTypeResolver memberTypes) {
-        return new ScimGroupHandler(state, query, sync, memberTypes);
+                                             IncrementalSyncUseCase sync, MemberTypeResolver memberTypes,
+                                             ObjectProvider<ScimIds> ids) {
+        return new ScimGroupHandler(state, query, sync, memberTypes, ids.getIfAvailable(ScimIds::random));
     }
 
     @Bean
