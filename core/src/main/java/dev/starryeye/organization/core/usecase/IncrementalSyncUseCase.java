@@ -463,7 +463,7 @@ public class IncrementalSyncUseCase {
      * 멤버만 추가되고, 실제로 튜플이 지워진 멤버만 제외된다({@link #reconcileGroupMembers}).
      * 다만 <b>아직 없던 조직</b>은 하나라도 실패하면 레코드 자체를 만들지 않는다. 만들어 두면
      * 다음 diff 의 "이전"에 부모의 child 엣지가 이미 포함돼 그 엣지를 영원히 다시 쓰지 못한다
-     * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
+     * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다). 그리고 그 요청이 쓴 줄을 되지운다({@link #새_조직이_쓴_줄을_되지운다}).
      */
     public Mono<IncrementalSyncResult> upsertGroup(DirectoryGroup group) {
         return withLock((lease, 기록) -> 한도를_본다(KeyValueLimits.over(이름표(group)).or(() -> KeyValueLimits.overMembers(group.members())))
@@ -488,7 +488,7 @@ public class IncrementalSyncUseCase {
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         if (existing.isEmpty() && result.hasFailure()) {
-                            return Mono.empty();
+                            return 새_조직이_쓴_줄을_되지운다(group.id(), result, lease, 기록);
                         }
                         DirectoryGroup reconciled = reconcileGroupMembers(
                                 existingOrEmpty, group, beforeTuples, afterTuples, result);
@@ -503,6 +503,36 @@ public class IncrementalSyncUseCase {
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit);
                 }));
+    }
+
+    /**
+     * 저장하지 못한 새 조직이 이 요청에서 쓴 줄과 결과를 모르는 줄을 지운다(설계 2026-11-05 I11). 결정적 id 의 재시도는 같은 id 로 다시 오는데, 그 사이 멤버에서 빠진
+     * 사람의 줄이 남아 있으면 새 그림의 후보에 없어 영영 지워지지 않는다. 확정 실패한 줄은 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은
+     * 불확실 줄을 지워도 안전하다.
+     *
+     * <p><b>요청을 실패시키지 않는다.</b> 오류(리스 확인 포함)나 지우기 실패는 경고만 남기고 끝낸다 — 요청의 결과(부분 반영, 503)는 그대로다. 오류로 끝난 요청(차단기 중단·리스
+     * 상실·커밋 오류)은 커밋 자리에 오지 않아 덮지 않고, 보류 목록도 되지우지 않는다. 남은 줄은 재적재(mode=tuples)가 지운다. 로그에 externalId 를 싣지 않는다.
+     */
+    private Mono<Void> 새_조직이_쓴_줄을_되지운다(String groupId, TupleWriteResult result, LockLease lease, AuditChanges 기록) {
+        Set<RelationTuple> 지울것 = new LinkedHashSet<>(result.written());
+        지울것.addAll(result.uncertain());
+        if (지울것.isEmpty()) {
+            return Mono.empty();
+        }
+        return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
+                .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(), 지울것), 기록::tuples)))
+                .doOnNext(지움 -> {
+                    if (지움.hasFailure()) {
+                        log.warn("저장하지 못한 새 조직 '{}' 의 줄을 {}개 지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                                groupId, 지움.failures().size());
+                    }
+                })
+                .onErrorResume(error -> {
+                    log.warn("저장하지 못한 새 조직 '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                            groupId, 지울것.size(), error);
+                    return Mono.empty();
+                })
+                .then();
     }
 
     /**
