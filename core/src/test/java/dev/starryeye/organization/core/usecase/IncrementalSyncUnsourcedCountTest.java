@@ -34,13 +34,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 끝났는데 보냈을 수 있는 부여 줄 가운데 요구하지 않는 줄이 있거나(U5 a), 되지우기가 실패한(U5 b) 요청이다. 원천이 있는 줄만 남긴 요청, 보내지 않은 요청,
  * 조직 쪽이 아닌 쓰기는 세지 않는다.
  *
- * <p>Check 는 가짜 writer 의 장부를 본다. "쓰는 도중 리스 상실" 은 갱신 주기를 20ms 로 줄이고 쓰는 사이 갱신을 실패시켜 만든다 — 쓰기는 1초 걸리게 해
+ * <p>Check 는 가짜 writer 의 장부를 본다. "쓰는 도중 리스 상실" 은 갱신 주기를 100ms 로 줄이고 쓰는 사이 갱신을 실패시켜 만든다 — 쓰기는 1초 걸리게 해
  * 리스 상실이 먼저 온다({@link IncrementalSyncLeaseTest} 의 수법).
  */
 class IncrementalSyncUnsourcedCountTest {
 
     private static final Duration 기본_갱신_주기 = Duration.ofSeconds(10);
-    private static final Duration 짧은_갱신_주기 = Duration.ofMillis(20);
+    private static final Duration 짧은_갱신_주기 = Duration.ofMillis(100);
     private static final Duration 늦춤 = Duration.ofSeconds(1);
     private static final Duration 기다림 = Duration.ofSeconds(5);
 

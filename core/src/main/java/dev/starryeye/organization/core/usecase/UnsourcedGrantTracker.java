@@ -75,7 +75,7 @@ final class UnsourcedGrantTracker {
 
     /** 결과에 실패가 없으면 빈 집합. 아니면 요구하지 않는 (쓴 줄 ∪ 결과를 모르는 줄). */
     synchronized Set<RelationTuple> 되지울것(TupleWriteResult result) {
-        if (!result.hasFailure()) {
+        if (꺼짐() || !result.hasFailure()) {
             return Set.of();
         }
         Set<RelationTuple> 줄들 = new HashSet<>(result.written());
@@ -110,11 +110,17 @@ final class UnsourcedGrantTracker {
 
     /** 본 쓰기가 값이나 오류로 끝났다. */
     synchronized void 쓰기가_끝났다() {
+        if (꺼짐()) {
+            return;
+        }
         쓰기_끝 = true;
     }
 
     /** 조직 쪽 {@code Commit} 이 끝났다. 이 뒤의 끝남·취소는 세지 않는다. */
     synchronized void 커밋을_마쳤다() {
+        if (꺼짐()) {
+            return;
+        }
         커밋_마침 = true;
     }
 
