@@ -128,6 +128,8 @@ import java.util.stream.Stream;
  * 다시 잡지 못한다 — 재시도가 diff 할 "이전" 자체가 이미 목표값으로 오염됐기 때문이다.
  * 그래서 멤버십 커밋은 반드시 {@code TupleWriteResult} 를 보고 실제로 반영된 만큼만 상태에
  * 남긴다({@link #diffAndApply}, {@link #reconcileGroupMembers}).
+ * 저장하지 않은 것의 줄은 반대로 장부에 남을 수 있다 — 원천이 없어 하루 아카이빙도 다음 쓰기도 지우지 못한다. 그래서 조직 쪽 커밋(새 조직·기존 조직·지정)은
+ * 이 요청이 썼거나 결과를 모르는 부여 줄 가운데 <b>커밋한 뒤의 상태가 요구하지 않는 줄</b>을 되지운다(설계 2026-11-11 U1, {@link #원천_없는_줄을_되지운다}).
  *
  * <p><b>직원의 {@code active} 는 예외다 — 요청값을 저장한다(설계 2026-10-20 §6.1·§6.2).</b> 기준선이 Check 라 저장된 {@code active} 가 재시도의 "이전"을
  * 오염시키지 않는다(델타는 Check 결과와 목표의 차이다). OpenFGA 단계가 오류로 끝나도 저장하고, 지우지 못한 직원은 비활성으로 남긴다 —
@@ -173,19 +175,24 @@ public class IncrementalSyncUseCase {
      * ({@link #센다}). 막지 않고 보이게만 한다(§17.4).
      */
     private final RevocationObserver revocationObserver;
+    /**
+     * 원천 없는 부여 줄을 남겼을 수 있는 조직 쪽 쓰기를 센다 — {@code scim.writes.unsourced}(설계 2026-11-11 U5). 조직 쪽 쓰기마다 만드는 추적기
+     * ({@link UnsourcedGrantTracker})에 넘긴다.
+     */
+    private final UnsourcedGrantObserver unsourcedGrantObserver;
     /** 서버 안의 SCIM 쓰기 줄(설계 2026-10-07 §3.1) — 이 유스케이스 하나, 곧 서버 하나에 하나다. */
     private final LocalWriteQueue 줄 = new LocalWriteQueue();
     /** 다른 서버가 쥔 락을 다시 시도하는 간격(§3.2). */
     private final AcquireBackoff 백오프 = AcquireBackoff.무작위로();
 
-    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
+    /** 갱신 주기를 {@link #DEFAULT_RENEW_INTERVAL} 로 둔다 — 테스트용. 운영 결선은 13인자 생성자로 {@code dynamodb.lock-renew-interval} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, DriftObserver driftObserver,
                                   LockObserver lockObserver) {
         this(state, writer, checker, lock, acquireTimeout, DEFAULT_RENEW_INTERVAL, driftObserver, lockObserver);
     }
 
-    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 이력과 traceId 를 넘긴다. */
+    /** 이력을 남기지 않는다 — 이력과 무관한 테스트가 쓴다. 운영 결선은 13인자 생성자로 이력과 traceId 를 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver) {
@@ -193,7 +200,7 @@ public class IncrementalSyncUseCase {
                 AuditRecorder.NONE, TraceIds.NONE);
     }
 
-    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 12인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
+    /** 표지판 넘겨받기 기준을 {@link #DEFAULT_LOCK_TTL} 로 둔다 — 테스트용. 운영 결선은 13인자 생성자로 {@code dynamodb.lock-ttl} 을 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver,
@@ -202,13 +209,26 @@ public class IncrementalSyncUseCase {
                 DEFAULT_LOCK_TTL);
     }
 
-    /** 회수를 세지 않는다({@link RevocationObserver#NOOP}) — 회수 지표와 무관한 테스트가 쓴다. 운영 결선은 12인자 생성자로 지표를 넘긴다. */
+    /** 회수를 세지 않는다({@link RevocationObserver#NOOP}) — 회수 지표와 무관한 테스트가 쓴다. 운영 결선은 13인자 생성자로 지표를 넘긴다. */
     public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
                                   MutationLock lock, Duration acquireTimeout, Duration renewInterval,
                                   DriftObserver driftObserver, LockObserver lockObserver,
                                   AuditRecorder audit, TraceIds traceIds, Duration lockTtl) {
         this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
                 lockTtl, RevocationObserver.NOOP);
+    }
+
+    /**
+     * 원천 없는 줄을 세지 않는다({@link UnsourcedGrantObserver#NOOP}) — 그 지표와 무관한 테스트가 쓴다. 운영 결선은 13인자 생성자로 지표를 넘긴다
+     * (설계 2026-11-11 U5).
+     */
+    public IncrementalSyncUseCase(DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleChecker checker,
+                                  MutationLock lock, Duration acquireTimeout, Duration renewInterval,
+                                  DriftObserver driftObserver, LockObserver lockObserver,
+                                  AuditRecorder audit, TraceIds traceIds, Duration lockTtl,
+                                  RevocationObserver revocationObserver) {
+        this(state, writer, checker, lock, acquireTimeout, renewInterval, driftObserver, lockObserver, audit, traceIds,
+                lockTtl, revocationObserver, UnsourcedGrantObserver.NOOP);
     }
 
     /**
@@ -290,7 +310,8 @@ public class IncrementalSyncUseCase {
                 return 직원을_저장한다(existing.orElse(null), user, 기록);
             };
 
-            Mono<IncrementalSyncResult> 반영 = diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, 기록, commit);
+            Mono<IncrementalSyncResult> 반영 = diffAndApply(before, after, RelationTuple.userRef(user.id()), Set.of(), lease, 기록, commit,
+                    UnsourcedGrantTracker.없음());
             return existing.map(저장본 -> 오류여도_의도를_저장한다(반영, 커밋에_닿았다, 저장본, user, lease, 기록))
                     .orElse(반영);
         });
@@ -320,7 +341,7 @@ public class IncrementalSyncUseCase {
             // 상태는 바꾸지 않는다 — 커밋할 것이 없다
             Commit 커밋하지_않는다 = (result, beforeTuples, afterTuples) -> Mono.empty();
             return diffAndApply(그림, 그림, RelationTuple.userRef(저장본.id()), Set.of(), lease, 기록, 커밋하지_않는다, true, 거름 -> {
-            });
+            }, UnsourcedGrantTracker.없음());
         });
     }
 
@@ -460,9 +481,10 @@ public class IncrementalSyncUseCase {
      * 스냅샷에서도 튜플 기여가 0 이므로 같은 문제가 없다 — 확인함.)
      *
      * <p>부분 실패 시에는 요청된 멤버 목록을 그대로 저장하지 않는다. 실제로 튜플이 반영된
-     * 멤버만 추가되고, 실제로 튜플이 지워진 멤버만 제외된다({@link #reconcileGroupMembers}).
+     * 멤버만 추가되고, 실제로 튜플이 지워진 멤버만 제외된다({@link #reconcileGroupMembers}). 저장한 뒤 결과를 모르는 넣기의 줄을 되지운다
+     * ({@link #원천_없는_줄을_되지운다}, 설계 2026-11-11 U2).
      * 다만 <b>아직 없던 조직</b>은 하나라도 실패하면 레코드 자체를 만들지 않는다 — 그리고 그 요청이
-     * 쓴 줄을 되지운다({@link #새_조직이_쓴_줄을_되지운다}). 만들어 두면
+     * 쓴 줄을 되지운다({@link #원천_없는_줄을_되지운다}). 만들어 두면
      * 다음 diff 의 "이전"에 부모의 child 엣지가 이미 포함돼 그 엣지를 영원히 다시 쓰지 못한다
      * ({@link #removeUser} 가 실패 시 직원 레코드를 지우지 않는 것과 같은 이유다).
      */
@@ -486,38 +508,51 @@ public class IncrementalSyncUseCase {
 
                     DirectoryGroup existingOrEmpty = existing.orElseGet(() -> new DirectoryGroup(
                             group.id(), group.externalId(), group.displayName(), Set.of()));
+                    UnsourcedGrantTracker 추적 = UnsourcedGrantTracker.조직(group.id(), unsourcedGrantObserver);
 
                     Commit commit = (result, beforeTuples, afterTuples) -> {
                         if (existing.isEmpty() && result.hasFailure()) {
-                            return 새_조직이_쓴_줄을_되지운다(group.id(), result, lease, 기록);
+                            return 원천_없는_줄을_되지운다(group.id(), "저장하지 못한 새 조직", result, 추적, lease, 기록);
                         }
                         DirectoryGroup reconciled = reconcileGroupMembers(
                                 existingOrEmpty, group, beforeTuples, afterTuples, result);
                         Set<MemberRef> 뺀것 = 차집합(existingOrEmpty.members(), reconciled.members());
+                        // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4)
+                        Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(
+                                차집합(차집합(group.members(), existingOrEmpty.members()), reconciled.members()), group.id());
                         return Mono.defer(() -> state.saveGroup(reconciled))
+                                .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
                                 .then(남긴다(() -> 기록.group(existing.map(IncrementalSyncUseCase::이름표).orElse(null),
                                         이름표(reconciled),
                                         차집합(reconciled.members(), existingOrEmpty.members()),
                                         뺀것)))
-                                .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)));
+                                .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)))
+                                .then(Mono.defer(() -> 원천_없는_줄을_되지운다(group.id(), "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
                     };
 
-                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit);
+                    return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit, 추적);
                 }));
     }
 
     /**
-     * 저장하지 못한 새 조직이 이 요청에서 쓴 줄과 결과를 모르는 줄을 지운다(설계 2026-11-05 I11). 결정적 id 의 재시도는 같은 id 로 다시 오는데, 그 사이 멤버에서 빠진
-     * 사람의 줄이 남아 있으면 새 그림의 후보에 없어 영영 지워지지 않는다. 확정 실패한 줄은 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은
-     * 불확실 줄을 지워도 안전하다.
+     * 조직 쪽 커밋이 이 요청에서 쓴 줄과 결과를 모르는 줄 가운데 <b>커밋한 뒤의 상태가 요구하지 않는 줄</b>을 지운다(설계 2026-11-11 U1·U4). 그 줄은 원천이
+     * 없어 하루 아카이빙도 다음 쓰기도 지우지 못한다 — 같은 요청이 다시 오지 않고 다른 값(다른 멤버 목록, 다른 상위)이 오면 후보에서 빠져 재적재까지 남는다.
+     * 부르는 곳은 셋이다 — 새 조직의 실패({@link #createGroup}, 설계 2026-11-05 I11), 기존 조직의 저장 뒤({@link #changeGroup}, U2 — 시험 전용
+     * {@link #upsertGroup} 의 기존 조직 갈래도), 지정의 실패({@link #assignParent}·{@link #clearParent}, U3).
+     *
+     * <p>지울 줄은 추적기가 정한다({@link UnsourcedGrantTracker#되지울것}). 결과에 실패가 없으면 없다. 저장하지 않는 커밋은 변경 전 상태가 요구하는 줄을 빼고,
+     * 저장하는 커밋은 저장하지 못한 넣기의 줄만 남긴다 — 원래 멤버의 어긋남을 고쳐 쓴 줄, 빼지 못한 멤버의 줄, 지정의 옛 연결은 지우지 않는다. 확정 실패한 줄은
+     * 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은 불확실 줄을 지워도 안전하다.
      *
      * <p><b>요청을 실패시키지 않는다 — 리스 상실만 빼고.</b> 지우기의 오류나 실패는 경고만 남기고 끝낸다 — 요청의 결과(부분 반영, 503)는 그대로다. 리스 확인이 실패하면
      * ({@link LockUnavailableException}) 그대로 내보낸다 — 리스 없이 보류 목록과 표지판을 쓰지 않는다는 {@link #반영하고_커밋한다} 와 같은 까닭이다(상태는 같은 503). 오류로 끝난 요청(차단기 중단·리스
      * 상실·커밋 오류)은 커밋 자리에 오지 않아 덮지 않고, 보류 목록도 되지우지 않는다. 남은 줄은 재적재(mode=tuples)가 지운다. 로그에 externalId 를 싣지 않는다.
+     *
+     * @param 대상 경고 문구의 주어 — {@code 저장하지 못한 새 조직}·{@code 넣기를 저장하지 못한 조직}·{@code 지정을 저장하지 못한 조직}
      */
-    private Mono<Void> 새_조직이_쓴_줄을_되지운다(String groupId, TupleWriteResult result, LockLease lease, AuditChanges 기록) {
-        Set<RelationTuple> 지울것 = new LinkedHashSet<>(result.written());
-        지울것.addAll(result.uncertain());
+    private Mono<Void> 원천_없는_줄을_되지운다(String groupId, String 대상, TupleWriteResult result, UnsourcedGrantTracker 추적,
+                                       LockLease lease, AuditChanges 기록) {
+        Set<RelationTuple> 지울것 = 추적.되지울것(result);
         if (지울것.isEmpty()) {
             return Mono.empty();
         }
@@ -525,16 +560,23 @@ public class IncrementalSyncUseCase {
                 .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(), 지울것), 기록::tuples)))
                 .doOnNext(지움 -> {
                     if (지움.hasFailure()) {
-                        log.warn("저장하지 못한 새 조직 '{}' 의 줄을 {}개 지우지 못했다 — 재적재(mode=tuples)가 지운다",
-                                groupId, 지움.failures().size());
+                        log.warn("{} '{}' 의 줄을 {}개 지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                                대상, groupId, 지움.failures().size());
                     }
                 })
                 .onErrorResume(error -> !(error instanceof LockUnavailableException), error -> {
-                    log.warn("저장하지 못한 새 조직 '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
-                            groupId, 지울것.size(), error);
+                    log.warn("{} '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                            대상, groupId, 지울것.size(), error);
                     return Mono.empty();
                 })
                 .then();
+    }
+
+    /** 멤버마다의 줄 — 직원은 {@code direct_member}, 하위 조직은 {@code child} 다({@link #tupleFor}). */
+    private static Set<RelationTuple> 멤버의_줄(Set<MemberRef> members, String groupId) {
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        members.forEach(member -> tuples.add(tupleFor(member, groupId)));
+        return tuples;
     }
 
     /**
@@ -593,6 +635,10 @@ public class IncrementalSyncUseCase {
      * <p>빠지는 멤버의 줄은 Check·직원 읽기 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2) — 멤버 전원 빼기·빈 교체가 조직 크기만큼 읽지 않는다.
      * 단 빠지는 하위 조직의 지정 상위가 이 조직이면 그 줄은 지정 연결이 받치므로 지우지 않고 멤버 행만 뺀다 — 빠지는 하위 조직마다 지정 상위를 읽는다(설계 2026-11-04 §5.3).
      *
+     * <p><b>결과를 모르는 넣기는 저장하지 않고 되지운다(설계 2026-11-11 U2).</b> 이름표와 반영된 멤버를 저장한 뒤 그 넣기의 줄을 지운다
+     * ({@link #원천_없는_줄을_되지운다}) — 응답은 지금처럼 503(부분 반영)이다. 장부와 상태가 함께 "멤버 아님" 이라 IdP 가 같은 요청을 다시 보내든 다른 목록을
+     * 보내든 맞는다. 결과를 모르는 빼기는 멤버로 남기고 그 줄도 다시 지우지 않는다 — 저장된 멤버 행이 요구한다.
+     *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
      *
      * <p>{@code externalId} 가 바뀌면 새 값의 표지판을 먼저 차지하고(겹치면 아무것도 쓰지 않고 409), 커밋 뒤 옛 것을 놓는다(설계 2026-10-14 §4.3).
@@ -617,14 +663,20 @@ public class IncrementalSyncUseCase {
                         DirectoryGroup 그림_전 = new DirectoryGroup(groupId, header.externalId(), header.displayName(),
                                 차집합(전후.전(), 빠질것));
                         DirectoryGroup 후 = new DirectoryGroup(groupId, 바뀐헤더.externalId(), 바뀐헤더.displayName(), 전후.후());
+                        UnsourcedGrantTracker 추적 = UnsourcedGrantTracker.조직(groupId, unsourcedGrantObserver);
 
                         Commit commit = (result, beforeTuples, afterTuples) -> {
                             DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
                             Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
                             Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
+                            // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4)
+                            Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(
+                                    차집합(차집합(후.members(), 전.members()), reconciled.members()), groupId);
                             return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것))
+                                    .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
                                     .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)))
-                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)));
+                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)))
+                                    .then(Mono.defer(() -> 원천_없는_줄을_되지운다(groupId, "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
                         };
 
                         boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
@@ -639,7 +691,7 @@ public class IncrementalSyncUseCase {
                                             .map(member -> tupleFor(member, groupId))
                                             .collect(Collectors.toCollection(LinkedHashSet::new));
                                     return diffAndApply(snapshotOfGroups(Set.of(그림_전)), snapshotOfGroups(Set.of(후)),
-                                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, 기록, commit);
+                                            RelationTuple.groupRef(groupId), 확인없이_지울것, lease, 기록, commit, 추적);
                                 })
                                 .flatMap(result -> 하위_조직을_뺀다
                                         ? 보류를_다시_본다(lease, 기록).thenReturn(result)
@@ -760,7 +812,8 @@ public class IncrementalSyncUseCase {
 
                     return 표지판을_정리한다(
                             오류여도_의도를_저장한다(
-                                    diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit),
+                                    diffAndApply(before, after, RelationTuple.userRef(userId), Set.of(), lease, 기록, commit,
+                                            UnsourcedGrantTracker.없음()),
                                     커밋에_닿았다, user, 비활성, lease, 기록),
                             UniqueKind.USER_NAME, userId, 값들(user.userName()), 값들(user.userName()));
                 }));
@@ -877,7 +930,10 @@ public class IncrementalSyncUseCase {
      * 그 줄을 남길 것에서 뺐는가로 본다 — 상위가 이 조직의 하위인 경우와 같은 상위의 지정이 보류 중인 경우가 모두 여기 걸린다(보류 중인 줄은 판정이 새로 보류하지
      * 않아 {@code 새로_보류} 로는 알 수 없다). 걷기 예산을 넘으면 {@link GroupGraphTooLargeException} 이다.
      *
-     * <p>줄 반영이 하나라도 실패하면 지정을 저장하지 않는다 — 다시 보내면 Check 기준선이 남은 것만 반영한다. 옛 지정을 바꿨으면 끝에서 보류 목록을 다시 본다(§5.5).
+     * <p>줄 반영이 하나라도 실패하면 지정을 저장하지 않는다 — 다시 보내면 Check 기준선이 남은 것만 반영한다. 지정을 저장하지 않으면 그 요청이 쓴(또는 결과를 모르는)
+     * 새 연결 줄을 되지운다 — 저장된 옛 지정이 요구하지 않아 원천이 없다(설계 2026-11-11 U3, {@link #원천_없는_줄을_되지운다}). 그래서 다른 상위를 걸어도 그 줄이
+     * 남지 않는다. 옛 연결 지우기의 결과를 모르는 줄과 같은 상위로 다시 건 요청의 줄은 저장된 지정이 요구해 지우지 않는다. 되지운 뒤에도 응답은 503 이다.
+     * 옛 지정을 바꿨으면 끝에서 보류 목록을 다시 본다(§5.5).
      */
     public Mono<IncrementalSyncResult> assignParent(String orgCode, String parentOrgCode) {
         return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode).flatMap(하위 -> {
@@ -914,7 +970,8 @@ public class IncrementalSyncUseCase {
 
     /**
      * 지정 상위를 {@code 이전} 에서 {@code 이후} 로 바꾼다 — null 은 지정 없음이다. 전 그림은 옛 지정을, 후 그림은 새 지정을 싣고 diff 가 바뀐 줄만 쓰고 지운다.
-     * 새 지정이 있으면 순환 판정이 그 줄을 남겼는지 쓰기 전에 본다. 커밋은 줄을 다 반영했고 지정이 바뀔 때만 저장하고 이력에 더한다.
+     * 새 지정이 있으면 순환 판정이 그 줄을 남겼는지 쓰기 전에 본다. 커밋은 줄을 다 반영했고 지정이 바뀔 때만 저장하고 이력에 더한다. 반영에 실패가 있으면
+     * 저장하지 않고 그 요청이 쓴 줄을 되지운다(설계 2026-11-11 U3) — 같은 상위여도 같은 길이고, 그때는 되지울 줄이 없다(U4).
      */
     private Mono<IncrementalSyncResult> 지정을_바꾼다(GroupHeader 하위, GroupHeader 이전, GroupHeader 이후,
                                                 LockLease lease, AuditChanges 기록) {
@@ -922,14 +979,20 @@ public class IncrementalSyncUseCase {
         String 이전_id = 이전 == null ? null : 이전.id();
         String 이후_id = 이후 == null ? null : 이후.id();
         boolean 바뀐다 = !Objects.equals(이전_id, 이후_id);
+        UnsourcedGrantTracker 추적 = UnsourcedGrantTracker.조직(하위_id, unsourcedGrantObserver);
         Commit commit = (result, beforeTuples, afterTuples) -> {
-            if (result.hasFailure() || !바뀐다) {
+            if (result.hasFailure()) {
+                return 원천_없는_줄을_되지운다(하위_id, "지정을 저장하지 못한 조직", result, 추적, lease, 기록);
+            }
+            if (!바뀐다) {
                 return Mono.empty();
             }
             Mono<Void> 저장 = 이후_id == null
                     ? state.deleteAssignedParent(하위_id, 이전_id)
                     : state.saveAssignedParent(하위_id, 이후_id, 이전_id);
-            return 저장.then(남긴다(() -> 기록.assignedParent(하위_id, 이전_id, 이후_id)));
+            // 지정의 저장에는 넣기가 없다 — 저장한 뒤의 상태가 요구하지 않는 줄이 없다
+            return 저장.then(Mono.fromRunnable(() -> 추적.저장했다(Set.of())))
+                    .then(남긴다(() -> 기록.assignedParent(하위_id, 이전_id, 이후_id)));
         };
         Consumer<OrgGraph.거른결과> 순환이면_거절한다 = 거름 -> {
             if (이후_id != null && !거름.남길것().contains(RelationTuple.child(하위_id, 이후_id))) {
@@ -939,7 +1002,7 @@ public class IncrementalSyncUseCase {
         return 지정_그림(하위, Stream.of(이전, 이후).filter(Objects::nonNull).distinct().toList())
                 .flatMap(그림 -> diffAndApply(Mono.just(그림.withAssignedEdges(연결(이전_id, 하위_id))),
                         Mono.just(그림.withAssignedEdges(연결(이후_id, 하위_id))),
-                        RelationTuple.groupRef(하위_id), Set.of(), lease, 기록, commit, false, 순환이면_거절한다))
+                        RelationTuple.groupRef(하위_id), Set.of(), lease, 기록, commit, false, 순환이면_거절한다, 추적))
                 .flatMap(result -> 이전_id != null && 바뀐다
                         ? 보류를_다시_본다(lease, 기록).thenReturn(result)
                         : Mono.just(result));
@@ -1261,9 +1324,10 @@ public class IncrementalSyncUseCase {
                                                       Set<RelationTuple> 확인없이_지울것,
                                                       LockLease lease,
                                                       AuditChanges 기록,
-                                                      Commit commit) {
+                                                      Commit commit,
+                                                      UnsourcedGrantTracker 추적) {
         return diffAndApply(beforeMono, afterMono, focus, 확인없이_지울것, lease, 기록, commit, false, 거름 -> {
-        });
+        }, 추적);
     }
 
     /**
@@ -1301,6 +1365,8 @@ public class IncrementalSyncUseCase {
      *                 {@link DriftObserver} 는 부르지 않는다(아카이빙 게이지가 같은 줄을 센다).
      * @param 쓰기전_확인 순환 판정({@link OrgGraph#거른다}) 직후·반영 전에 그 결과로 부른다. 던지면 OpenFGA·상태·보류 목록 어디에도 쓰지 않고 그 오류로
      *                 끝난다 — 관리 API 의 지정이 순환을 거절한다({@link #assignParent}).
+     * @param 추적 조직 쪽 쓰기의 원천 없는 줄 추적기(설계 2026-11-11 U4) — 변경 전 상태가 요구하는 줄({@code 있어야했던것})을 알린다. 조직 쪽이 아니면
+     *           {@link UnsourcedGrantTracker#없음()} 이다.
      */
     private Mono<IncrementalSyncResult> diffAndApply(Mono<DirectorySnapshot> beforeMono,
                                                       Mono<DirectorySnapshot> afterMono,
@@ -1310,7 +1376,8 @@ public class IncrementalSyncUseCase {
                                                       AuditChanges 기록,
                                                       Commit commit,
                                                       boolean 지우기만,
-                                                      Consumer<OrgGraph.거른결과> 쓰기전_확인) {
+                                                      Consumer<OrgGraph.거른결과> 쓰기전_확인,
+                                                      UnsourcedGrantTracker 추적) {
         return Mono.zip(beforeMono, afterMono).flatMap(both -> {
             DirectorySnapshot beforeSnapshot = both.getT1();
             DirectorySnapshot afterSnapshot = both.getT2();
@@ -1321,6 +1388,8 @@ public class IncrementalSyncUseCase {
             Set<RelationTuple> candidates = mentioning(모든후보, focus);
             // 순환을 버리지 않은 목표 — 순환 판단은 OrgGraph 가 튜플 그래프로 한다(설계 2026-10-03 §4.3)
             Set<RelationTuple> 있어야했던것 = mentioning(순환을_버리지_않고(beforeSnapshot), focus);
+            // 저장하지 않는 커밋의 되지우기는 이 줄을 빼고 지운다 — 변경 전 상태가 요구한다(설계 2026-11-11 U4)
+            추적.요구한다(있어야했던것);
             Set<RelationTuple> 원하는것 = mentioning(순환을_버리지_않고(afterSnapshot), focus);
             OrgGraph 그래프 = new OrgGraph(state, checker);
 

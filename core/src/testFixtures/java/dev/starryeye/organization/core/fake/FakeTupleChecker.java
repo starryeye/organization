@@ -19,8 +19,20 @@ import java.util.function.Predicate;
  */
 public class FakeTupleChecker implements RelationTupleChecker {
 
-    public final Set<RelationTuple> allowed = new LinkedHashSet<>();
+    public final Set<RelationTuple> allowed;
     public final List<RelationTuple> checked = new ArrayList<>();
+
+    public FakeTupleChecker() {
+        this(new LinkedHashSet<>());
+    }
+
+    /**
+     * {@code 장부} 를 {@link #allowed} 로 그대로 쓴다. 가짜 writer 의 장부({@link FakeTupleWriter#stored})를 넘기면 Check 가 그 장부를 본다 —
+     * 재시도가 앞 요청이 남긴 줄을 보는 시험에 쓴다.
+     */
+    public FakeTupleChecker(Set<RelationTuple> 장부) {
+        this.allowed = 장부;
+    }
 
     /** 동시에 열려 있던 Check 의 최대 개수. 직렬 호출과 병렬 호출을 구분하는 데 쓴다. */
     public final AtomicInteger maxInFlight = new AtomicInteger();
