@@ -544,7 +544,8 @@ public class IncrementalSyncUseCase {
      * 저장하는 커밋은 저장하지 못한 넣기의 줄만 남긴다 — 원래 멤버의 어긋남을 고쳐 쓴 줄, 빼지 못한 멤버의 줄, 지정의 옛 연결은 지우지 않는다. 확정 실패한 줄은
      * 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은 불확실 줄을 지워도 안전하다.
      *
-     * <p><b>요청을 실패시키지 않는다 — 리스 상실만 빼고.</b> 지우기의 오류나 실패는 경고만 남기고 끝낸다 — 요청의 결과(부분 반영, 503)는 그대로다. 리스 확인이 실패하면
+     * <p><b>요청을 실패시키지 않는다 — 리스 상실만 빼고.</b> 지우기의 오류나 실패는 경고를 남기고 추적기에 세게 한 뒤 끝낸다(설계 2026-11-11 U5 b) — 요청의
+     * 결과(부분 반영, 503)는 그대로다. 리스 확인이 실패하면
      * ({@link LockUnavailableException}) 그대로 내보낸다 — 리스 없이 보류 목록과 표지판을 쓰지 않는다는 {@link #반영하고_커밋한다} 와 같은 까닭이다(상태는 같은 503). 오류로 끝난 요청(차단기 중단·리스
      * 상실·커밋 오류)은 커밋 자리에 오지 않아 덮지 않고, 보류 목록도 되지우지 않는다. 남은 줄은 재적재(mode=tuples)가 지운다. 로그에 externalId 를 싣지 않는다.
      *
@@ -552,24 +553,31 @@ public class IncrementalSyncUseCase {
      */
     private Mono<Void> 원천_없는_줄을_되지운다(String groupId, String 대상, TupleWriteResult result, UnsourcedGrantTracker 추적,
                                        LockLease lease, AuditChanges 기록) {
-        Set<RelationTuple> 지울것 = 추적.되지울것(result);
-        if (지울것.isEmpty()) {
-            return Mono.empty();
-        }
-        return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
-                .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(), 지울것), 기록::tuples)))
-                .doOnNext(지움 -> {
-                    if (지움.hasFailure()) {
-                        log.warn("{} '{}' 의 줄을 {}개 지우지 못했다 — 재적재(mode=tuples)가 지운다",
-                                대상, groupId, 지움.failures().size());
-                    }
-                })
-                .onErrorResume(error -> !(error instanceof LockUnavailableException), error -> {
-                    log.warn("{} '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
-                            대상, groupId, 지울것.size(), error);
-                    return Mono.empty();
-                })
-                .then();
+        // 구독할 때 정한다 — 저장하는 커밋은 저장 성공(추적.저장했다) 뒤에 구독한다
+        return Mono.defer(() -> {
+            Set<RelationTuple> 지울것 = 추적.되지울것(result);
+            if (지울것.isEmpty()) {
+                return Mono.empty();
+            }
+            return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
+                    .then(Mono.defer(() -> writer.apply(new TupleDelta(Set.of(), 지울것), 기록::tuples)))
+                    .doOnNext(지움 -> {
+                        if (지움.hasFailure()) {
+                            log.warn("{} '{}' 의 줄을 {}개 지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                                    대상, groupId, 지움.failures().size());
+                            // 되지우기 결과에 실패가 담겼다 — 센다(설계 2026-11-11 U5 b)
+                            추적.되지우기가_실패했다();
+                        }
+                    })
+                    .onErrorResume(error -> !(error instanceof LockUnavailableException), error -> {
+                        log.warn("{} '{}' 의 줄 {}개를 되지우지 못했다 — 재적재(mode=tuples)가 지운다",
+                                대상, groupId, 지울것.size(), error);
+                        // 리스 상실이 아닌 오류다 — 센다(설계 2026-11-11 U5 b). 리스 상실은 그대로 나가 커밋 자리를 마치지 못한 끝남, 곧 U5 (a) 로 본다
+                        추적.되지우기가_실패했다();
+                        return Mono.empty();
+                    })
+                    .then();
+        });
     }
 
     /** 멤버마다의 줄 — 직원은 {@code direct_member}, 하위 조직은 {@code child} 다({@link #tupleFor}). */
@@ -850,6 +858,7 @@ public class IncrementalSyncUseCase {
                                     || group.members().stream().anyMatch(member -> member.type() == MemberType.GROUP);
                             return 표지판을_정리한다(
                                     반영하고_커밋한다(TupleDelta.deleteOnly(조직을_언급하는_튜플(group, parentIds, 지정)), lease, 기록,
+                                            UnsourcedGrantTracker.없음(),
                                             result -> 조직_삭제를_커밋한다(group, parentIds, 지정, result, 기록))
                                             .flatMap(result -> 연결을_지운다
                                                     ? 보류를_다시_본다(lease, 기록).thenReturn(result)
@@ -1359,6 +1368,10 @@ public class IncrementalSyncUseCase {
      *
      * <p>보류 목록은 커밋 앞뒤로 맞춘다(설계 2026-10-03 §4.4) — {@link #보류와_함께_커밋한다} 참고.
      *
+     * <p><b>원천 없는 줄 추적기</b>(설계 2026-11-11 U4·U5)에 변경 전 상태가 요구하는 줄을 알리고, {@code commit} 이 끝나면 커밋 자리를 마쳤다고 알린다 —
+     * 저장·이력·회수 셈·되지우기가 그 안에서 돈다. 추적기는 {@link #반영하고_커밋한다} 의 본 쓰기만 보고, 커밋 자리를 마친 뒤의 끝남(뒤쪽 보류 목록 정리의
+     * 실패 등)은 세지 않는다 — 그때는 저장과 되지우기가 끝나 남은 부여 줄에 원천이 있다. 앞쪽 보류 쓰기의 실패는 커밋 전이라 U5 (a) 로 본다.
+     *
      * @param 확인없이_지울것 Check 없이 지울 줄(빠지는 멤버). 드리프트 지표는 이 줄을 재지 않는다.
      * @param 기록 이 요청의 변경 모음 — 반영한 튜플을 더한다
      * @param 지우기만 켜면 델타의 쓰기를 버리고 지우기만 반영한다 — {@link #revokeLeftovers}. 후보·기준선·목표는 그대로다. 어긋남은 로그에만 남기고
@@ -1417,8 +1430,12 @@ public class IncrementalSyncUseCase {
                     Set<RelationTuple> after = 거름.남길것();
                     TupleDelta 전체 = TupleDiff.between(actual, after);
                     TupleDelta 계산 = 지우기만 ? TupleDelta.deleteOnly(전체.toDelete()) : 전체;
+                    // 커밋 자리(저장·이력·회수 셈·되지우기)를 마친 때를 추적기에 알린다 — 뒤쪽 보류 목록 정리 전이다(설계 2026-11-11 U5)
+                    Commit 마치면_알린다 = (result, beforeTuples, afterTuples) -> commit.apply(result, beforeTuples, afterTuples)
+                            .then(Mono.fromRunnable(추적::커밋을_마쳤다));
                     if (확인없이_지울것.isEmpty()) {
-                        return 반영하고_커밋한다(계산, lease, 기록, result -> 보류와_함께_커밋한다(거름, result, actual, after, commit));
+                        return 반영하고_커밋한다(계산, lease, 기록, 추적,
+                                result -> 보류와_함께_커밋한다(거름, result, actual, after, 마치면_알린다));
                     }
                     // 빠지는 멤버의 줄은 Check 없이 "없으면 무시"로 지운다(설계 2026-10-02 §4.2). 커밋의 재조정은 그 줄이 있었다고 본다 —
                     // 지우기가 실패한 멤버만 남는다.
@@ -1426,8 +1443,8 @@ public class IncrementalSyncUseCase {
                     지울것.addAll(확인없이_지울것);
                     Set<RelationTuple> 있다고_볼것 = new LinkedHashSet<>(actual);
                     있다고_볼것.addAll(확인없이_지울것);
-                    return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease, 기록,
-                            result -> 보류와_함께_커밋한다(거름, result, 있다고_볼것, after, commit));
+                    return 반영하고_커밋한다(new TupleDelta(계산.toWrite(), 지울것), lease, 기록, 추적,
+                            result -> 보류와_함께_커밋한다(거름, result, 있다고_볼것, after, 마치면_알린다));
                 });
             }));
         });
@@ -1460,8 +1477,14 @@ public class IncrementalSyncUseCase {
      *
      * <p>OpenFGA 묶음이 끝날 때마다 실제로 쓰고 지운 줄을 {@code 기록} 에 더한다(설계 2026-10-15 §6) — 뒤의 리스 확인·커밋이 실패해도 OpenFGA 에 쓴 줄은
      * 이력에 남는다.
+     *
+     * <p><b>추적기는 이 본 쓰기만 본다</b>(설계 2026-11-11 U5·U6). 묶음 알림을 추적기에도 넘기고, 쓰기가 값이나 오류로 끝난 때를 적는다. 이 갈래가 오류나
+     * 취소(리스 상실은 {@link LeaseKeeper} 가 하던 일을 취소한다)로 끝나면 추적기에 알린다 — 커밋 자리를 마치기 전이면 보냈을 수 있는 부여 줄 가운데
+     * 요구하지 않는 줄이 있을 때 센다. 커밋 자리를 마친 뒤의 끝남(뒤쪽 보류 목록 정리의 실패 등)은 세지 않는다. 쓰기 직전 확인이 실패하면 쓰기가 시작되지
+     * 않아 세지 않는다. 빈 델타는 보낸 줄이 없어 알리지 않는다. 조직 쪽이 아니면 {@link UnsourcedGrantTracker#없음()} 이다.
      */
     private Mono<IncrementalSyncResult> 반영하고_커밋한다(TupleDelta delta, LockLease lease, AuditChanges 기록,
+                                                   UnsourcedGrantTracker 추적,
                                                    Function<TupleWriteResult, Mono<Void>> 커밋) {
         if (delta.isEmpty()) {
             return 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
@@ -1469,10 +1492,14 @@ public class IncrementalSyncUseCase {
                     .thenReturn(IncrementalSyncResult.noChange());
         }
         return 리스를_확인한다(lease, "쓰기 직전 리스 재확인 실패")
-                .then(Mono.defer(() -> writer.apply(delta, 기록::tuples)))
+                .then(Mono.defer(() -> writer.apply(delta, 추적.묶음마다(delta, 기록::tuples)))
+                        .doOnSuccess(r -> 추적.쓰기가_끝났다())
+                        .doOnError(e -> 추적.쓰기가_끝났다()))
                 .flatMap(result -> 리스를_확인한다(lease, "커밋 직전 리스 재확인 실패")
                         .then(Mono.defer(() -> 커밋.apply(result)))
-                        .thenReturn(IncrementalSyncResult.of(result)));
+                        .thenReturn(IncrementalSyncResult.of(result)))
+                .doOnError(추적::오류로_끝났다)
+                .doOnCancel(추적::취소됐다);
     }
 
     /** 리스를 확인(갱신)한다. 실패하면 {@link LockUnavailableException} — 저장소 장애도 503 으로 옮긴다(획득과 같은 이유). */

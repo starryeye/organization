@@ -35,6 +35,13 @@ public class FakeTupleWriter implements RelationTupleWriter {
     /** 쓰기 응답을 늦춘다. 긴 작업을 흉내내는 데 쓴다. */
     public Duration delay = Duration.ZERO;
 
+    /**
+     * 반영한 뒤 묶음을 알리기 전에 늦춘다. 0 이 아니면 반영({@link #stored}·{@link #written}·{@link #deleted})은 곧바로 하고, 이만큼 뒤에 묶음을 알린 다음
+     * 지금의 결과({@link #abortWhen}·{@link #delay} 포함)를 낸다. 그 사이 취소되면 반영은 됐는데 알려 오지 않은 묶음이 된다(설계 2026-11-11 §11).
+     * {@link #onApply} 의 훅이 돈 뒤에 읽는다 — 훅이 그 부름의 값을 정할 수 있다. 0 이면 늦추지 않는다.
+     */
+    public Duration delayBeforeReport = Duration.ZERO;
+
     /** 이 조건에 걸리는 튜플은 적용에 실패한 것으로 처리한다 */
     private Predicate<RelationTuple> failWhen = tuple -> false;
     private Predicate<RelationTuple> lostResponseWhen = tuple -> false;
@@ -68,7 +75,8 @@ public class FakeTupleWriter implements RelationTupleWriter {
 
     /**
      * 델타 전체를 묶음 하나로 보고, 반영하자마자 알린 뒤 결과를 낸다(설계 2026-10-15 §4). {@link #delay} 는 알린 뒤에 늦춘다 — 묶음은 끝났는데 전체 응답이
-     * 늦는 사이 취소돼도 반영한 것은 이미 알린 뒤다. {@link #abortWhen} 에 걸리면 반영한 것을 알린 뒤 멈춘다.
+     * 늦는 사이 취소돼도 반영한 것은 이미 알린 뒤다. {@link #abortWhen} 에 걸리면 반영한 것을 알린 뒤 멈춘다. {@link #delayBeforeReport} 는 반영과 알림
+     * 사이를 늦춘다.
      */
     @Override
     public Mono<TupleWriteResult> apply(TupleDelta delta, Consumer<TupleWriteResult> 묶음마다) {
@@ -108,6 +116,14 @@ public class FakeTupleWriter implements RelationTupleWriter {
             }
         }
         TupleWriteResult applied = new TupleWriteResult(written, deleted, failures);
+        Duration 알리기_전 = delayBeforeReport;
+        if (알리기_전.isZero()) {
+            return 알리고_낸다(delta, applied, 묶음마다);
+        }
+        return Mono.delay(알리기_전).then(Mono.defer(() -> 알리고_낸다(delta, applied, 묶음마다)));
+    }
+
+    private Mono<TupleWriteResult> 알리고_낸다(TupleDelta delta, TupleWriteResult applied, Consumer<TupleWriteResult> 묶음마다) {
         묶음마다.accept(applied);
         Mono<TupleWriteResult> result = abortWhen.test(delta)
                 ? Mono.error(new TupleWriteAbortedException("테스트용 차단 — 연속 실패로 멈췄다", applied))
