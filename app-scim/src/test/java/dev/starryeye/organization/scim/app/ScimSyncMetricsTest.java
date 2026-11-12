@@ -185,4 +185,20 @@ class ScimSyncMetricsTest {
         assertThat(registry.get("scim.revocations").tag("kind", "delete_group").counter().count()).isEqualTo(4);
         assertThat(registry.find("scim.revocations").counters()).hasSize(4);
     }
+
+    @Test
+    @DisplayName("원천 없는 줄 카운터는 남기기 전부터 태그 없이 0 으로 있다 — 기동 직후의 첫 증가도 1시간 증가량에 잡힌다")
+    void 원천_없는_줄_카운터는_남기기_전부터_0_으로_있다() {
+        assertThat(registry.find("scim.writes.unsourced").counters()).hasSize(1);
+        assertThat(registry.get("scim.writes.unsourced").counter().getId().getTags()).isEmpty();
+        assertThat(registry.get("scim.writes.unsourced").counter().count()).isZero();
+    }
+
+    @Test
+    @DisplayName("원천 없는 줄을 남긴 요청을 알리면 하나씩 오른다(설계 2026-11-11 U5)")
+    void 원천_없는_줄을_남긴_요청을_센다() {
+        metrics.leftUnsourced();
+        metrics.leftUnsourced();
+        assertThat(registry.get("scim.writes.unsourced").counter().count()).isEqualTo(2);
+    }
 }

@@ -98,7 +98,7 @@ public class ScimUseCaseConfig {
                                                           TraceIds traceIds) {
         return new IncrementalSyncUseCase(state, writer, checker, lock,
                 dynamoDb.getLockAcquireTimeout(), dynamoDb.getLockRenewInterval(), metrics, metrics,
-                auditRecorder, traceIds, dynamoDb.getLockTtl(), metrics);
+                auditRecorder, traceIds, dynamoDb.getLockTtl(), metrics, metrics);
     }
 
     /**

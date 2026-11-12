@@ -4,7 +4,9 @@ import dev.starryeye.organization.core.usecase.ArchiveDriftObserver;
 import dev.starryeye.organization.core.usecase.IncrementalSyncUseCase.DriftObserver;
 import dev.starryeye.organization.core.usecase.LockObserver;
 import dev.starryeye.organization.core.usecase.RevocationObserver;
+import dev.starryeye.organization.core.usecase.UnsourcedGrantObserver;
 import dev.starryeye.organization.scim.IgnoredAttributeObserver;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <tr><td>{@code scim.archive.drift}</td><td>Gauge</td><td>{@code kind} = extra / missing</td></tr>
  *   <tr><td>{@code scim.archive.drift.observed}</td><td>Gauge</td><td>–</td></tr>
  *   <tr><td>{@code scim.revocations}</td><td>Counter</td><td>{@code kind} = deactivate / delete_user / remove_member / delete_group</td></tr>
+ *   <tr><td>{@code scim.writes.unsourced}</td><td>Counter</td><td>–</td></tr>
  * </table>
  *
  * <p><b>어긋남.</b> Check 기준선을 넣으면 "있어야 했던 것"과 "진짜 있는 것"을 둘 다 갖게 된다.
@@ -49,10 +52,13 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p><b>회수.</b> SCIM 쓰기가 커밋한 회수를 종류별로 센다({@link RevocationObserver}, 설계 2026-10-27 §8). 대량 회수를 막지 않고 보이게만 한다(§17.4) —
  * 1시간 증가량이 평소보다 크게 늘면 경보를 울린다. 카운터 넷은 기동 때 0 으로 만들어 둔다 — Prometheus {@code increase()} 는 새 계열의 첫 값을 증가로
  * 세지 않으므로, 첫 회수 때 만들면 기동 직후의 첫 대량 회수가 증가량 0 으로 보인다.
+ *
+ * <p><b>원천 없는 줄.</b> 조직 쪽 쓰기가 저장된 상태가 요구하지 않는 부여 줄을 남겼을 수 있는 요청을 한 번씩 센다({@link UnsourcedGrantObserver}, 설계 2026-11-11 U5).
+ * 태그가 없는 카운터 하나이고, 기동 때 0 으로 만든다 — 까닭은 회수 카운터와 같다(첫 계열의 첫 값은 {@code increase()} 가 증가로 세지 않는다).
  */
 @Slf4j
 public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, LockObserver, IgnoredAttributeObserver,
-        RevocationObserver {
+        RevocationObserver, UnsourcedGrantObserver {
 
     private static final String DRIFT_DESCRIPTION =
             "마지막 아카이빙의 어긋남 줄 수 — kind=extra 는 장부에 있지만 상태가 요구하지 않는 줄(끝나지 않은 회수), kind=missing 은 상태가 요구하지만 장부에 없는 줄. "
@@ -60,6 +66,7 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
 
     private final MeterRegistry registry;
     private final Clock clock;
+    private final Counter unsourced;
     /** 게이지가 약한 참조로 읽으므로 여기서 쥔다 — 놓으면 값이 사라진다. */
     private final AtomicLong archiveExtra = new AtomicLong();
     private final AtomicLong archiveMissing = new AtomicLong();
@@ -88,6 +95,10 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
         for (Kind kind : Kind.values()) {
             registry.counter("scim.revocations", "kind", kind.tag());
         }
+        // 원천 없는 줄 카운터도 같은 까닭으로 기동 때 0 으로 만들어 필드에 쥔다
+        unsourced = Counter.builder("scim.writes.unsourced")
+                .description("조직 쪽 쓰기가 원천 없는 줄(저장된 상태가 요구하지 않는 부여 줄)을 남겼을 수 있는 요청 수 — 오르면 WARN 의 조직을 보고, 같은 요청이 성공하지 않았으면 재적재(mode=tuples)")
+                .register(registry);
     }
 
     /** 쓰기 요청이 본 어긋남 — 카운터에 쌓는다. 아래 {@code long} 짝({@link ArchiveDriftObserver})과 다르다. */
@@ -135,5 +146,11 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
         if (count > 0) {
             registry.counter("scim.revocations", "kind", kind.tag()).increment(count);
         }
+    }
+
+    /** 원천 없는 줄을 남겼을 수 있는 요청 — 코어가 요청마다 많아야 한 번 알린다. */
+    @Override
+    public void leftUnsourced() {
+        unsourced.increment();
     }
 }
