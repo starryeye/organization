@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: f3c9a6b (unsourced-grants, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 53abdd9 (lockless-noop-assignment, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -276,8 +276,8 @@ Entra·Okta 로 붙인 SCIM 배포는 IdP 가 조직을 평평하게만 보내 `
 | 요청 | 결과 |
 |---|---|
 | `PUT /admin/organizations/{orgCode}/parent` 본문 `{"parentOrgCode": "P"}` | 204. 지정 상위를 P 로 둔다. 이미 다른 상위가 있으면 바꾼다 — 옛 연결 지우기와 새 연결 쓰기가 한 요청이라 중간 상태가 없다 |
-| 같은 P 로 다시 PUT | 204. 지정은 그대로고 바뀐 것이 없으면 이력도 없다. 줄이 OpenFGA 에 없으면(어긋남) 쓴다 |
-| `DELETE /admin/organizations/{orgCode}/parent` | 204. 지정이 없었으면 아무것도 하지 않고 204 다 |
+| 같은 P 로 다시 PUT | 204. 지정은 그대로고 바뀐 것이 없으면 이력도 없다. 줄이 OpenFGA 에 있으면 [지정의 앞 확인](02-용어집.md#지정의-앞-확인)이 락 없이 끝낸다. 줄이 없으면(어긋남) 락 안에서 쓴다 |
+| `DELETE /admin/organizations/{orgCode}/parent` | 204. 지정이 없었으면 아무것도 하지 않고 204 다 — 앞 확인이 락 없이 끝낸다 |
 | 본문이 없거나 `parentOrgCode` 가 문자열이 아니거나 공백뿐이다 | 400 `parentOrgCode 가 필요하다` |
 | `orgCode` 의 조직이 없다(PUT·DELETE) | 404 `조직이 없다: <orgCode>` |
 | `parentOrgCode` 의 조직이 없다 | 404 `상위 조직이 없다: <parentOrgCode>` |
@@ -308,7 +308,7 @@ Entra·Okta 로 붙인 SCIM 배포는 IdP 가 조직을 평평하게만 보내 `
 1. 조직도의 원천(HRIS 내보내기 등)에서 (하위, 상위) 쌍을 얻는다. 이 서버는 원천을 읽지 않는다 — 조직도와 IdP 그룹을 짝짓는 것은 운영자의 몫이고, 짝이 틀리면 권한이 틀린다.
 2. 각 조직의 `orgCode` 를 찾는다 — [정확 조회](#82-조직-정확-조회) `GET /admin/organizations/lookup?externalId=`(Entra 는 `objectId` 를 `externalId` 로 보낸다 — 매핑을 바꿨다면 그 값), 또는 검색 `GET /admin/organizations?displayName=`(Okta 는 조직에 `externalId` 를 보내지 않는다 — 접두사 검색이라 이름이 더 긴 조직도 함께 나오므로 이름이 정확히 같은 줄을 고른다). 둘 다 `admin.read` 로 부른다.
 3. 조직마다 `PUT …/parent` 를 부른다. 뿌리 조직(상위가 없다)은 `DELETE …/parent` 로 지정이 없게 한다.
-4. 멱등이라 매일 전체를 다시 걸어도 상태는 바뀐 것만 움직인다(비용은 요청마다 든다 — 바뀐 것이 없는 PUT 도 전역 쓰기 락을 잡고 몇 번 읽고 Check 한다. 조직 수만큼 락을 잡았다 놓으며 IdP 쓰기와 줄을 선다). 스크립트는 속도를 조절하거나, 조직 상세(`assignedParentOrgCode`)로 먼저 비교해 바뀐 것만 보낸다([11 — 9.8](11-운영.md#98-조직-계층-지정-스크립트의-클라이언트)). 반영되지 않는 지정(순환 등)은 409 로 드러난다. `mode=wipe` 뒤에는 IdP 재프로비저닝이 끝난 다음 `orgCode` 를 다시 찾아 건다([12 — 8.4](12-장애와-복구.md#84-scim-modewipe--post-adminsyncrebuildmodewipeconfirm테이블명)).
+4. 멱등이라 매일 전체를 다시 걸어도 상태는 바뀐 것만 움직인다. 바뀐 것이 없는 요청은 [지정의 앞 확인](02-용어집.md#지정의-앞-확인)이 전역 쓰기 락 없이 끝낸다 — PUT 은 읽기 셋과 Check 하나, DELETE 는 읽기 둘이다. 빠진 줄이 있으면 락 안에서 고친다. 그래서 먼저 비교할 까닭이 없다. 다만 동시에 많이 보내지 말고 차례로(또는 작은 동시성으로) 보낸다([11 — 9.8](11-운영.md#98-조직-계층-지정-스크립트의-클라이언트), [설계](../superpowers/specs/2026-11-13-lockless-noop-assignment-design.md)). 반영되지 않는 지정(순환 등)은 409 로 드러난다. `mode=wipe` 뒤에는 IdP 재프로비저닝이 끝난 다음 `orgCode` 를 다시 찾아 건다([12 — 8.4](12-장애와-복구.md#84-scim-modewipe--post-adminsyncrebuildmodewipeconfirm테이블명)).
 
 ```bash
 # 로컬 예 — org-chart(admin.read admin.hierarchy)로 토큰을 받는다. 운영은 운영 설정이 준 클라이언트와 https 주소다([11 — 9.8](11-운영.md#98-조직-계층-지정-스크립트의-클라이언트))

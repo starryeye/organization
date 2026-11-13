@@ -620,8 +620,8 @@ Entra·Okta 로 붙인 SCIM 배포는 IdP 가 조직을 평평하게만 보내 `
 | 요청 | 결과 |
 |---|---|
 | `PUT /admin/organizations/{orgCode}/parent` `{"parentOrgCode": "P"}` | 204. 지정 상위를 P 로 둔다. 이미 다른 상위가 있으면 바꾼다 — 옛 연결 지우기와 새 연결 쓰기가 한 요청이라 중간 상태가 없다 |
-| 같은 P 로 다시 PUT | 204. 지정은 그대로고 바뀐 것이 없으면 이력도 없다. 줄이 OpenFGA 에 없으면(어긋남) 쓴다 |
-| `DELETE /admin/organizations/{orgCode}/parent` | 204. 지정이 없었으면 아무것도 하지 않고 204 다 |
+| 같은 P 로 다시 PUT | 204. 지정은 그대로고 바뀐 것이 없으면 이력도 없다. 줄이 OpenFGA 에 있으면 **락 없이** 끝난다(읽기 셋과 Check 하나). 줄이 없으면(어긋남) 락 안에서 쓴다 |
+| `DELETE /admin/organizations/{orgCode}/parent` | 204. 지정이 없었으면 아무것도 하지 않고 204 다 — 락 없이 끝난다(읽기 둘) |
 | 본문이 없거나 `parentOrgCode` 가 문자열이 아니거나 공백뿐이다 | 400 `parentOrgCode 가 필요하다` |
 | `orgCode` 의 조직이 없다(PUT·DELETE) | 404 `조직이 없다: <orgCode>` |
 | `parentOrgCode` 의 조직이 없다 | 404 `상위 조직이 없다: <parentOrgCode>` |
@@ -654,8 +654,10 @@ SCIM 쓰기와 같은 값이다 — 쥔 쪽이 다른 SCIM 쓰기·지정 요청
 2. 각 조직의 `orgCode` 를 찾는다 — `GET /admin/organizations/lookup?externalId=`(Entra 는 `objectId` 를 `externalId` 로 보낸다 — 매핑을 바꿨다면 그 값), 또는
    `GET /admin/organizations?displayName=`(Okta 는 조직에 `externalId` 를 보내지 않는다 — 접두사 검색이라 이름이 더 긴 조직도 함께 나오므로 이름이 정확히 같은 줄을 고른다).
 3. 조직마다 `PUT …/parent` 를 부른다. 뿌리 조직(상위가 없다)은 `DELETE …/parent` 로 지정이 없게 한다.
-4. 멱등이라 매일 전체를 다시 걸어도 상태는 바뀐 것만 움직인다(비용은 요청마다 든다 — 바뀐 것이 없는 PUT 도 전역 쓰기 락을 잡고 몇 번 읽고 Check 한다. 조직 수만큼 락을 잡았다 놓으며
-   IdP 쓰기와 줄을 선다). 스크립트는 속도를 조절하거나, 조직 상세(`assignedParentOrgCode`)로 먼저 비교해 바뀐 것만 보낸다. 반영되지 않는 지정(순환 등)은 409 로 드러난다. `mode=wipe` 뒤에는 IdP 재프로비저닝이 끝난 다음 `orgCode` 를 다시 찾아 건다.
+4. 멱등이라 매일 전체를 다시 걸어도 상태는 바뀐 것만 움직인다. 바뀐 것이 없는 요청(같은 상위로 다시 건 PUT, 지정이 없는 조직의 DELETE)은 전역 쓰기 락을 잡지 않는다 —
+   락 없이 읽기 셋(DELETE 는 둘)과 Check 하나(PUT)로 204 라 IdP 쓰기와 줄을 서지 않는다. 줄이 빠졌으면 Check 가 거짓이라 락 안에서 고친다. 그래서 먼저 비교해 같은 값을 건너뛸 까닭이 없다 —
+   건너뛰면 빠진 줄 복구도 건너뛴다. 다만 동시에 많이 보내지 말고 차례로(또는 작은 동시성으로) 보낸다. 락이 더는 요청을 한 줄로 세워 늦추지 않아, 한꺼번에 보내면 그 Check 가
+   IdP 쓰기와 같은 OpenFGA 에 몰린다([설계](docs/superpowers/specs/2026-11-13-lockless-noop-assignment-design.md) §3.5). 반영되지 않는 지정(순환 등)은 409 로 드러난다. `mode=wipe` 뒤에는 IdP 재프로비저닝이 끝난 다음 `orgCode` 를 다시 찾아 건다.
 
 ```bash
 # 로컬 예 — org-chart(admin.read admin.hierarchy)로 토큰을 받는다. 운영은 운영 설정이 준 클라이언트와 https 주소다
@@ -1378,7 +1380,7 @@ LDAP 배포는 그대로다 — 계층을 디렉터리가 준다. 배포 하나�
 **`app-scim`은 여러 인스턴스를 액티브-액티브로 띄울 수 있다.** IdP가 여러 인스턴스로 요청을
 분산해도 안전하도록, SCIM 쓰기 하나(`createUser`/`changeUser`/`removeUser`/`createGroup`/`changeGroup`/`removeGroup`)와
 관리 API 의 지정 요청(`assignParent`/`clearParent`), 재적재(`POST /admin/sync/rebuild`)는 **같은 DynamoDB 조건부 쓰기 전역 락(`LOCK#MUTATION`)**을 잡은 뒤에만
-진행한다. 인스턴스가 몇 대든, 그리고 그 인스턴스가 SCIM 쓰기든 재적재든, 서로 겹치지 않고
+진행한다(지정 요청 가운데 바뀐 것이 없는 것은 락 앞의 읽기만으로 끝나 락을 잡지 않는다). 인스턴스가 몇 대든, 그리고 그 인스턴스가 SCIM 쓰기든 재적재든, 서로 겹치지 않고
 직렬화된다 — 인메모리 락(예전의 `MutationGate`)은 인스턴스 하나 안에서만 유효해 여러 대를
 띄우는 순간 조용히 뚫렸는데, 이 락은 저장소를 공유하므로 그렇지 않다.
 
