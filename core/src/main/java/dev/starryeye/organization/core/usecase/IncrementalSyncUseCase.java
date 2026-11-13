@@ -115,7 +115,7 @@ import java.util.stream.Stream;
  * 알 필요가 없고, 만드는 모양은 멤버십의 두 가지({@code direct_member}·{@code child})뿐이다. 조직 삭제는 그 조직이 끼인 지정 연결의
  * {@code child} 줄도 넣고, PATCH·PUT 은 지정 연결이 받치는 하위 조직의 줄을 뺀다(설계 2026-11-04 §5.3·§5.6).
  *
- * <p>관리 API 의 지정 상위 두기·없애기({@link #assignParent}·{@link #clearParent})도 같은 락·Check 기준선·diff·이력으로 반영한다(설계 2026-11-04 H7).
+ * <p>관리 API 의 지정 상위 두기·없애기({@link #assignParent}·{@link #clearParent})도 같은 락·Check 기준선·diff·이력으로 반영한다(설계 2026-11-04 H7). 바뀐 것이 없으면 락 없이 끝난다(설계 2026-11-13 L1~L5).
  *
  * <p>이 유스케이스는 회차 기록({@code SyncRun})을 남기지 않는다. SCIM 은 요청 단위라 요청마다 회차를 열면 동기화 이력이 폭증한다. 변경 이력은
  * 요청마다 남긴다 — 요청의 traceId 를 원인으로, 락을 반납한 뒤·응답 전에 쓴다({@link #withLock}, 설계 2026-10-10 §4.2·§4.4).
@@ -954,8 +954,36 @@ public class IncrementalSyncUseCase {
      * 새 연결 줄을 되지운다 — 저장된 옛 지정이 요구하지 않아 원천이 없다(설계 2026-11-11 U3, {@link #원천_없는_줄을_되지운다}). 그래서 다른 상위를 걸어도 그 줄이
      * 남지 않는다. 옛 연결 지우기의 결과를 모르는 줄과 같은 상위로 다시 건 요청의 줄은 저장된 지정이 요구해 지우지 않는다. 되지운 뒤에도 응답은 503 이다.
      * 옛 지정을 바꿨으면 끝에서 보류 목록을 다시 본다(§5.5).
+     *
+     * <p><b>앞 확인</b>(설계 2026-11-13 L1~L5) — 락을 잡기 전에 "이미 그렇다"만 본다. 대상 조직이 있고, 저장된 지정이 {@code parentOrgCode} 이고, 그 상위 조직이
+     * 있고, OpenFGA 에 {@code child(orgCode, parentOrgCode)} 줄이 있으면 락 없이 {@link IncrementalSyncResult#noChange()} 로 끝난다. 그 밖(거절, 바꾸기,
+     * 빠진 줄 쓰기)과 앞 확인의 읽기·Check 오류는 아래 락 안의 길이 처음부터 판정한다 — 앞 확인이 읽은 값은 넘기지 않는다. 락 없이 읽어도 되는 까닭은 앞 확인이 아무것도
+     * 쓰지 않고, 읽기가 모두 강한 일관성이며, 저장된 값을 먼저 읽고 Check 를 마지막에 하기 때문이다(§3.3).
      */
     public Mono<IncrementalSyncResult> assignParent(String orgCode, String parentOrgCode) {
+        return 이미_지정돼_있다(orgCode, parentOrgCode).flatMap(이미 -> 이미
+                ? Mono.just(IncrementalSyncResult.noChange())
+                : 락_안에서_지정한다(orgCode, parentOrgCode));
+    }
+
+    /**
+     * 앞 확인 — 읽기 순서가 설계 L4 다. 대상 이름표와 저장된 지정을 읽고, 지정이 {@code parentOrgCode} 일 때만 상위 이름표를 읽고, 그 이름표가 있을 때만 Check 한다.
+     * 빈 값과 오류는 모두 거짓이다(L5).
+     */
+    private Mono<Boolean> 이미_지정돼_있다(String orgCode, String parentOrgCode) {
+        return Mono.zip(state.findGroupHeader(orgCode), state.findAssignedParent(orgCode))
+                .filter(읽음 -> parentOrgCode.equals(읽음.getT2()))
+                .flatMap(읽음 -> state.findGroupHeader(parentOrgCode))
+                .flatMap(상위 -> checker.check(RelationTuple.child(orgCode, parentOrgCode)))
+                .defaultIfEmpty(false)
+                .onErrorResume(e -> {
+                    log.debug("지정 앞 확인이 실패했다 — 락 안의 길로 간다: 조직 {}", orgCode, e);
+                    return Mono.just(false);
+                });
+    }
+
+    /** 지금의 {@link #assignParent} 본문 — 락 안에서 존재 확인·순환 판정·쓰기를 한다. */
+    private Mono<IncrementalSyncResult> 락_안에서_지정한다(String orgCode, String parentOrgCode) {
         return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode).flatMap(하위 -> {
             if (orgCode.equals(parentOrgCode)) {
                 return Mono.error(new HierarchyRejectedException(HierarchyRejectedException.Reason.CYCLE, orgCode, parentOrgCode));
@@ -971,8 +999,29 @@ public class IncrementalSyncUseCase {
     /**
      * 관리 API 의 지정 없애기(설계 2026-11-04 H1, §3.1). 지정이 없으면 아무것도 하지 않는다. 대상 조직이 없으면 빈 {@code Mono} 다. IdP 가 보낸 멤버 행이
      * 같은 쌍을 받치면 줄은 남기고 지정만 지운다(§5.3). 끝에서 보류 목록을 다시 본다 — 지정이 막던 IdP 연결이 돌아올 수 있다(§5.5). 그 밖은 {@link #assignParent} 와 같다.
+     *
+     * <p><b>앞 확인</b>(설계 2026-11-13 L2) — 대상 조직이 있는데 지금 지정이 없으면(저장된 지정이 없거나 가리키는 조직이 없다) 락 없이
+     * {@link IncrementalSyncResult#noChange()} 로 끝난다. 락 안의 길도 이때 아무것도 쓰지 않는다. 그 밖과 앞 확인의 오류는 락 안의 길이다.
      */
     public Mono<IncrementalSyncResult> clearParent(String orgCode) {
+        return 지정이_없다(orgCode).flatMap(없다 -> 없다
+                ? Mono.just(IncrementalSyncResult.noChange())
+                : 락_안에서_없앤다(orgCode));
+    }
+
+    /** 앞 확인 — 대상 조직이 있고 {@link #지금_지정} 이 빈 값이다. 빈 값(대상 없음)과 오류는 거짓이다(L5). */
+    private Mono<Boolean> 지정이_없다(String orgCode) {
+        return state.findGroupHeader(orgCode)
+                .flatMap(하위 -> 지금_지정(orgCode).hasElement().map(있다 -> !있다))
+                .defaultIfEmpty(false)
+                .onErrorResume(e -> {
+                    log.debug("지정 앞 확인이 실패했다 — 락 안의 길로 간다: 조직 {}", orgCode, e);
+                    return Mono.just(false);
+                });
+    }
+
+    /** 지금의 {@link #clearParent} 본문 — 락 안에서 지정을 없앤다. */
+    private Mono<IncrementalSyncResult> 락_안에서_없앤다(String orgCode) {
         return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode)
                 .flatMap(하위 -> 지금_지정(orgCode)
                         .flatMap(이전 -> 지정을_바꾼다(하위, 이전, null, lease, 기록))

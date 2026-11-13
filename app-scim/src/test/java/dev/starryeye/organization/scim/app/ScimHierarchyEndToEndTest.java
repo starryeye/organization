@@ -7,6 +7,7 @@ import dev.starryeye.organization.admin.fixture.SyncJobClient;
 import dev.starryeye.organization.authz.StoreBootstrapper;
 import dev.starryeye.organization.core.fixture.Containers;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
+import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.scim.fixture.ScimIdBook;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -16,6 +17,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -25,6 +28,7 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Duration;
 import java.util.List;
 
 import static dev.starryeye.organization.scim.app.CreatedIds.만든_아이디;
@@ -71,6 +75,7 @@ class ScimHierarchyEndToEndTest {
     @Autowired WebTestClient client;
     @Autowired StoreBootstrapper bootstrapper;
     @Autowired DirectoryStateRepository state;
+    @Autowired MutationLock lock;
 
     private boolean check(String user, String relation, String object) {
         try {
@@ -323,6 +328,33 @@ class ScimHierarchyEndToEndTest {
 
     @Test
     @Order(9)
+    @DisplayName("재적재가 락을 쥔 동안에도 바뀐 것 없는 지정과 지정 없는 조직의 DELETE 는 204 이고, 바꾸는 지정은 503 이다")
+    void 재적재가_락을_쥔_동안에도_바뀐_것_없는_지정은_204_다() {
+        // given — TEAM 을 DIV4 에 건다
+        빈_조직을_만든다("DIV4", "전략본부4");
+        빈_조직을_만든다("DIV5", "전략본부5");
+        지정한다(서버("TEAM"), 서버("DIV4")).exchange().expectStatus().isNoContent();
+        var lease = lock.acquireOnce(MutationLock.LockPurpose.REBUILD).block(Duration.ofSeconds(10));
+        try {
+            // when, then — 바뀐 것이 없으면 락을 기다리지 않는다
+            지정한다(서버("TEAM"), 서버("DIV4")).exchange().expectStatus().isNoContent();
+            client.delete().uri("/admin/organizations/{orgCode}/parent", 서버("DIV4")).exchange()
+                    .expectStatus().isNoContent();
+            // 바꾸는 지정은 지금처럼 락을 기다리지 않고 503 이다(쥔 쪽이 재적재라 60초)
+            지정한다(서버("TEAM"), 서버("DIV5")).exchange()
+                    .expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                    .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "60");
+        } finally {
+            lock.release(lease).block(Duration.ofSeconds(10));
+        }
+
+        // when, then — 락이 풀리면 바꾸는 지정도 된다
+        지정한다(서버("TEAM"), 서버("DIV5")).exchange().expectStatus().isNoContent();
+        assertThat(state.findAssignedParent(서버("TEAM")).blockOptional()).contains(서버("DIV5"));
+    }
+
+    @Test
+    @Order(10)
     @DisplayName("wipe 는 지정을 모두 지운다")
     void wipe_는_지정을_모두_지운다() {
         // given — 다시 지정한다

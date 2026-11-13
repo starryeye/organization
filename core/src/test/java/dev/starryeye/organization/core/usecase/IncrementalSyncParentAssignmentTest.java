@@ -15,6 +15,7 @@ import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.port.MutationLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -28,6 +29,7 @@ import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
@@ -128,6 +130,7 @@ class IncrementalSyncParentAssignmentTest {
 
         // then
         assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.acquired).hasValue(1);
         assertThat(writer.written).containsExactly(RelationTuple.child("C", "P"));
         assertThat(auditLog.lastOf(하위).attributes()).extracting(AttributeChange::name).doesNotContain("assignedParent");
     }
@@ -182,6 +185,7 @@ class IncrementalSyncParentAssignmentTest {
         // then
         assertThat(result.fullyApplied()).isTrue();
         assertThat(writer.deleted).contains(RelationTuple.child("C", "P0"));
+        assertThat(lock.acquired).hasValue(1);
         assertThat(state.assignedParents).isEmpty();
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
                 .isEqualTo(AuditCause.hierarchyRequest("trace-1", "client:org-chart")));
@@ -377,5 +381,129 @@ class IncrementalSyncParentAssignmentTest {
         assertThat(auditLog.lastOf(MemberRef.group("G")).attributes())
                 .containsExactly(new AttributeChange("assignedParent", "P", null));
         assertThat(auditLog.entriesOf(하위)).flatExtracting(AuditEntry::attributes).isEmpty();
+    }
+
+    @Test
+    @DisplayName("같은 상위로 다시 지정하고 줄도 있으면 락을 시도하지 않고 끝난다 — Check 는 그 줄 하나다")
+    void 같은_지정이고_줄이_있으면_락_없이_끝난다() {
+        // given
+        state.assignedParents.put("C", "P");
+        checker.allowed.add(RelationTuple.child("C", "P"));
+
+        // when
+        IncrementalSyncResult result = 지정한다("C", "P");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.시도한_토큰).isEmpty();
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(auditLog.events).isEmpty();
+        assertThat(checker.checked).containsExactly(RelationTuple.child("C", "P"));
+    }
+
+    @Test
+    @DisplayName("다른 요청이 락을 쥔 동안에도 바뀐 것 없는 지정은 기다리지 않고 끝난다")
+    void 다른_요청이_락을_쥔_동안에도_같은_지정은_끝난다() {
+        // given — 획득 한도가 0 이라 락을 시도하면 곧바로 LockUnavailableException 이다
+        state.assignedParents.put("C", "P");
+        checker.allowed.add(RelationTuple.child("C", "P"));
+        lock.acquire(MutationLock.LockPurpose.WRITE, "다른-요청", null).block();
+
+        // when
+        IncrementalSyncResult result = 지정한다("C", "P");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.시도한_토큰).containsExactly("다른-요청");
+    }
+
+    @Test
+    @DisplayName("다른 상위로 바꾸는 요청은 앞 확인에서 Check 하지 않고 락 안으로 간다")
+    void 다른_상위면_앞_확인이_Check_하지_않는다() {
+        // given
+        state.assignedParents.put("C", "P0");
+        checker.allowed.add(RelationTuple.child("C", "P0"));
+
+        // when
+        지정한다("C", "P");
+
+        // then — 락 안의 Check 기준선이 child(C,P) 를 한 번 본다. 앞 확인이 보면 두 번이다
+        assertThat(lock.acquired).hasValue(1);
+        assertThat(checker.checked).containsOnlyOnce(RelationTuple.child("C", "P"));
+    }
+
+    @Test
+    @DisplayName("지정이 없는 조직을 가리키면 앞 확인이 넘기고 지금처럼 상위 없음으로 거절한다")
+    void 지정이_없는_조직을_가리키면_지금처럼_거절한다() {
+        // given
+        state.assignedParents.put("C", "GONE");
+        checker.allowed.add(RelationTuple.child("C", "GONE"));
+
+        // when
+        HierarchyRejectedException 거절 = 거절("C", "GONE");
+
+        // then
+        assertThat(거절.reason()).isEqualTo(HierarchyRejectedException.Reason.PARENT_NOT_FOUND);
+        assertThat(lock.acquired).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("앞 확인의 Check 가 실패하면 락 안에서 지금처럼 끝낸다")
+    void 앞_확인의_Check_가_실패하면_락_안에서_끝낸다() {
+        // given — 첫 Check 만 실패한다
+        state.assignedParents.put("C", "P");
+        checker.allowed.add(RelationTuple.child("C", "P"));
+        AtomicBoolean 처음 = new AtomicBoolean(true);
+        checker.failFor(tuple -> 처음.getAndSet(false));
+
+        // when
+        IncrementalSyncResult result = 지정한다("C", "P");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.acquired).hasValue(1);
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    @Test
+    @DisplayName("앞 확인의 지정 읽기가 실패하면 락 안에서 지금처럼 끝낸다")
+    void 앞_확인의_지정_읽기가_실패하면_락_안에서_끝낸다() {
+        // given
+        state.assignedParents.put("C", "P");
+        checker.allowed.add(RelationTuple.child("C", "P"));
+        state.findAssignedParentFailsOnce.add("C");
+
+        // when
+        IncrementalSyncResult result = 지정한다("C", "P");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.acquired).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("지정이 없는 조직의 지정을 없애면 락을 시도하지 않고 끝난다")
+    void 지정이_없으면_없애기는_락_없이_끝난다() {
+        // when
+        IncrementalSyncResult result = 없앤다("C");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.시도한_토큰).isEmpty();
+    }
+
+    @Test
+    @DisplayName("지정이 없는 조직을 가리키면 없애기는 락 없이 끝나고 그 지정 줄은 지금처럼 그대로다")
+    void 지정이_없는_조직을_가리키면_없애기는_락_없이_끝난다() {
+        // given
+        state.assignedParents.put("C", "GONE");
+
+        // when
+        IncrementalSyncResult result = 없앤다("C");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.시도한_토큰).isEmpty();
+        assertThat(state.assignedParents).containsEntry("C", "GONE");
     }
 }
