@@ -967,8 +967,8 @@ public class IncrementalSyncUseCase {
     }
 
     /**
-     * 앞 확인 — 읽기 순서가 설계 L4 다. 대상 이름표와 저장된 지정을 읽고, 지정이 {@code parentOrgCode} 일 때만 상위 이름표를 읽고, 그 이름표가 있을 때만 Check 한다.
-     * 빈 값과 오류는 모두 거짓이다(L5).
+     * 앞 확인 — 읽기 순서가 설계 2026-11-13 L4 다. 대상 이름표와 저장된 지정을 읽고, 지정이 {@code parentOrgCode} 일 때만 상위 이름표를 읽고, 그 이름표가 있을 때만 Check 한다.
+     * 빈 값과 오류는 모두 거짓이다(설계 2026-11-13 L5).
      */
     private Mono<Boolean> 이미_지정돼_있다(String orgCode, String parentOrgCode) {
         return Mono.zip(state.findGroupHeader(orgCode), state.findAssignedParent(orgCode))
@@ -1009,7 +1009,7 @@ public class IncrementalSyncUseCase {
                 : 락_안에서_없앤다(orgCode));
     }
 
-    /** 앞 확인 — 대상 조직이 있고 {@link #지금_지정} 이 빈 값이다. 빈 값(대상 없음)과 오류는 거짓이다(L5). */
+    /** 앞 확인 — 대상 조직이 있고 {@link #지금_지정} 이 빈 값이다. 빈 값(대상 없음)과 오류는 거짓이다(설계 2026-11-13 L5). */
     private Mono<Boolean> 지정이_없다(String orgCode) {
         return state.findGroupHeader(orgCode)
                 .flatMap(하위 -> 지금_지정(orgCode).hasElement().map(있다 -> !있다))

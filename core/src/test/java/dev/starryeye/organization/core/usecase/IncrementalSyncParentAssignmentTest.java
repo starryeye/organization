@@ -331,6 +331,18 @@ class IncrementalSyncParentAssignmentTest {
     }
 
     @Test
+    @DisplayName("대상 조직이 없는데 저장된 지정이 남아 있어도 앞 확인이 넘기고 빈 결과다 — 락 안에서 지금처럼 끝난다")
+    void 대상_조직이_없고_지정이_남아_있으면_앞_확인이_넘기고_빈_결과다() {
+        // given — NONE 의 이름표는 없는데 지정과 줄은 남아 있다
+        state.assignedParents.put("NONE", "P");
+        checker.allowed.add(RelationTuple.child("NONE", "P"));
+
+        // when, then
+        assertThat(운영자가(useCase.assignParent("NONE", "P")).blockOptional()).isEmpty();
+        assertThat(lock.acquired).hasValue(1);
+    }
+
+    @Test
     @DisplayName("줄 쓰기가 실패하면 지정을 저장하지 않는다 — 다시 보내면 된다")
     void 쓰기가_실패하면_저장을_바꾸지_않는다() {
         // given
