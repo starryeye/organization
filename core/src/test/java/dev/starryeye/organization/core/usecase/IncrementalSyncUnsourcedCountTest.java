@@ -127,6 +127,24 @@ class IncrementalSyncUnsourcedCountTest {
     // ---- 센다 ----
 
     @Test
+    @DisplayName("저장하지 못한 하위 조직 넣기의 지정을 읽지 못하면 저장하지 않고 그 오류로 끝나며 센다")
+    void 저장하지_못한_하위_조직_넣기의_지정을_읽지_못하면_센다() {
+        // given — G 에 D 를 넣는 PATCH 가 child(D,G) 의 응답을 잃는다. 커밋이 D 의 지정을 읽다가 실패한다
+        writer.lostResponseFor(본_쓰기의(child("D", "G")));
+        state.findAssignedParentFailsOnce.add("D");
+
+        // when
+        var 요청 = IdP_로(useCase.changeGroup("G", GroupChange.delta().adding(Set.of(MemberRef.group("D")))));
+
+        // then
+        assertThatThrownBy(요청::block).hasMessageContaining("지정 읽기 실패");
+        assertThat(state.findAssignedParentCalls).contains("D");
+        assertThat(state.groups.get("G").members()).containsExactly(MemberRef.user("u-1"));
+        assertThat(writer.stored).contains(child("D", "G"));
+        assertThat(남긴_요청).hasValue(1);
+    }
+
+    @Test
     @DisplayName("새 조직의 되지우기 결과에 실패가 담기면 센다")
     void 새_조직의_되지우기_결과에_실패가_담기면_센다() {
         // given — 본 쓰기의 dm(u-2,g-new) 가 확정 실패하고, 되지우기의 지우기도 실패한다

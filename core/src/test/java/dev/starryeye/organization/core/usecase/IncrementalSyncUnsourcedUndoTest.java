@@ -210,6 +210,49 @@ class IncrementalSyncUnsourcedUndoTest {
     }
 
     @Test
+    @DisplayName("하위 조직을 넣는 PATCH 가 결과를 몰라도 그 하위 조직의 지정 상위가 이 조직이면 연결 줄을 지우지 않는다 — 저장된 지정이 요구한다")
+    void 지정이_받치는_하위_조직_넣기는_결과를_몰라도_줄을_지우지_않는다() {
+        // given — 장부에서 child(C,A) 가 빠져 있다(어긋남). A 에 C 를 넣는 PATCH 가 그 줄을 쓰는데 응답을 잃는다
+        writer.stored.remove(child("C", "A"));
+        writer.lostResponseFor(본_쓰기의(child("C", "A")));
+
+        // when
+        var 결과 = useCase.changeGroup("A", 넣는다(MemberRef.group("C"))).block();
+
+        // then
+        assertThat(결과.fullyApplied()).isFalse();
+        assertThat(state.groups.get("A").members()).doesNotContain(MemberRef.group("C"));
+        assertThat(writer.stored).contains(child("C", "A"));
+    }
+
+    @Test
+    @DisplayName("기존 조직 upsertGroup 도 지정이 받치는 하위 조직의 연결 줄을 지우지 않는다")
+    void 기존_조직_upsertGroup_도_지정이_받치는_하위_조직의_줄을_지우지_않는다() {
+        // given — 위와 같다
+        writer.stored.remove(child("C", "A"));
+        writer.lostResponseFor(본_쓰기의(child("C", "A")));
+
+        // when
+        var 결과 = useCase.upsertGroup(new DirectoryGroup("A", "grp-a", "A", Set.of(MemberRef.group("C")))).block();
+
+        // then
+        assertThat(결과.fullyApplied()).isFalse();
+        assertThat(state.groups.get("A").members()).doesNotContain(MemberRef.group("C"));
+        assertThat(writer.stored).contains(child("C", "A"));
+    }
+
+    @Test
+    @DisplayName("하위 조직 넣기가 모두 저장되면 그 하위 조직의 지정을 읽지 않는다 — 실패 경로에서만 읽는다")
+    void 넣기가_모두_저장되면_하위_조직의_지정을_읽지_않는다() {
+        // when
+        var 결과 = useCase.changeGroup("G", 넣는다(MemberRef.group("S"))).block();
+
+        // then — 순환 걷기는 G 와 그 조상의 지정을 읽는다. 넣은 S 의 지정은 읽지 않는다
+        assertThat(결과.fullyApplied()).isTrue();
+        assertThat(state.findAssignedParentCalls).doesNotContain("S");
+    }
+
+    @Test
     @DisplayName("되지우기 직전 리스를 잃으면 지우지 않고 리스 상실로 끝난다 — 조직은 이미 저장돼 있다")
     void 되지우기_직전_리스를_잃으면_지우지_않고_리스_상실로_끝난다_조직은_이미_저장돼_있다() {
         // given — 본 쓰기 뒤의 커밋 직전 확인은 통과하고, 그다음 되지우기 직전 확인부터 잃는다

@@ -517,17 +517,21 @@ public class IncrementalSyncUseCase {
                         DirectoryGroup reconciled = reconcileGroupMembers(
                                 existingOrEmpty, group, beforeTuples, afterTuples, result);
                         Set<MemberRef> 뺀것 = 차집합(existingOrEmpty.members(), reconciled.members());
-                        // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4)
-                        Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(
-                                차집합(차집합(group.members(), existingOrEmpty.members()), reconciled.members()), group.id());
-                        return Mono.defer(() -> state.saveGroup(reconciled))
-                                .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
-                                .then(남긴다(() -> 기록.group(existing.map(IncrementalSyncUseCase::이름표).orElse(null),
-                                        이름표(reconciled),
-                                        차집합(reconciled.members(), existingOrEmpty.members()),
-                                        뺀것)))
-                                .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)))
-                                .then(Mono.defer(() -> 원천_없는_줄을_되지운다(group.id(), "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
+                        // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4).
+                        // 다만 지정 상위가 이 조직인 하위 조직의 줄은 저장된 지정이 요구한다 — 저장하기 전에 읽어 되지울 줄에서 뺀다.
+                        // 읽기가 실패하면 저장하지 않고 그 오류로 끝난다(설계 2026-11-13 L8)
+                        Set<MemberRef> 저장하지_못한_넣기 = 차집합(차집합(group.members(), existingOrEmpty.members()), reconciled.members());
+                        return 지정이_받치는_하위(group.id(), 저장하지_못한_넣기).flatMap(받치는것 -> {
+                            Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(차집합(저장하지_못한_넣기, 받치는것), group.id());
+                            return Mono.defer(() -> state.saveGroup(reconciled))
+                                    .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
+                                    .then(남긴다(() -> 기록.group(existing.map(IncrementalSyncUseCase::이름표).orElse(null),
+                                            이름표(reconciled),
+                                            차집합(reconciled.members(), existingOrEmpty.members()),
+                                            뺀것)))
+                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺀것)))
+                                    .then(Mono.defer(() -> 원천_없는_줄을_되지운다(group.id(), "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
+                        });
                     };
 
                     return diffAndApply(before, after, RelationTuple.groupRef(group.id()), Set.of(), lease, 기록, commit, 추적);
@@ -677,14 +681,18 @@ public class IncrementalSyncUseCase {
                             DirectoryGroup reconciled = reconcileGroupMembers(전, 후, beforeTuples, afterTuples, result);
                             Set<MemberRef> 넣을것 = 차집합(reconciled.members(), 전.members());
                             Set<MemberRef> 뺄것 = 차집합(전.members(), reconciled.members());
-                            // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4)
-                            Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(
-                                    차집합(차집합(후.members(), 전.members()), reconciled.members()), groupId);
-                            return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것))
-                                    .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
-                                    .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)))
-                                    .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)))
-                                    .then(Mono.defer(() -> 원천_없는_줄을_되지운다(groupId, "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
+                            // 넣으려던 멤버 가운데 재조정이 저장하지 않은 것 — 그 줄은 저장된 상태가 요구하지 않는다(설계 2026-11-11 U2·U4).
+                            // 다만 지정 상위가 이 조직인 하위 조직의 줄은 저장된 지정이 요구한다 — 저장하기 전에 읽어 되지울 줄에서 뺀다.
+                            // 읽기가 실패하면 저장하지 않고 그 오류로 끝난다(설계 2026-11-13 L8)
+                            Set<MemberRef> 저장하지_못한_넣기 = 차집합(차집합(후.members(), 전.members()), reconciled.members());
+                            return 지정이_받치는_하위(groupId, 저장하지_못한_넣기).flatMap(받치는것 -> {
+                                Set<RelationTuple> 저장하지_못한_넣기의_줄 = 멤버의_줄(차집합(저장하지_못한_넣기, 받치는것), groupId);
+                                return Mono.defer(() -> state.saveGroupChange(header, 바뀐헤더, 넣을것, 뺄것))
+                                        .then(Mono.fromRunnable(() -> 추적.저장했다(저장하지_못한_넣기의_줄)))
+                                        .then(남긴다(() -> 기록.group(header, 바뀐헤더, 넣을것, 뺄것)))
+                                        .then(센다(RevocationObserver.Kind.REMOVE_MEMBER, 직원_수(뺄것)))
+                                        .then(Mono.defer(() -> 원천_없는_줄을_되지운다(groupId, "넣기를 저장하지 못한 조직", result, 추적, lease, 기록)));
+                            });
                         };
 
                         boolean 하위_조직을_뺀다 = 빠질것.stream().anyMatch(member -> member.type() == MemberType.GROUP);
@@ -752,9 +760,12 @@ public class IncrementalSyncUseCase {
                 .<Predicate<String>>map(조직 -> 조직::contains);
     }
 
-    /** 빠지는 멤버 중 지정 상위가 이 조직인 하위 조직 — 하위 조직마다 지정 상위를 하나씩 읽는다(락 안, 강한 일관성). 직원은 읽지 않는다. */
-    private Mono<Set<MemberRef>> 지정이_받치는_하위(String groupId, Set<MemberRef> 빠질것) {
-        return Flux.fromIterable(빠질것)
+    /**
+     * 멤버(빠지는 멤버, 저장하지 못한 넣기) 중 지정 상위가 이 조직인 하위 조직 — 하위 조직마다 지정 상위를 하나씩 읽는다(락 안, 강한 일관성). 직원은
+     * 읽지 않는다. 그 하위 조직의 줄은 저장된 지정이 요구하므로 지우지 않는다(설계 2026-11-04 §5.3, 2026-11-13 L8).
+     */
+    private Mono<Set<MemberRef>> 지정이_받치는_하위(String groupId, Set<MemberRef> 멤버) {
+        return Flux.fromIterable(멤버)
                 .filter(member -> member.type() == MemberType.GROUP)
                 .flatMap(member -> state.findAssignedParent(member.id())
                         .filter(groupId::equals)

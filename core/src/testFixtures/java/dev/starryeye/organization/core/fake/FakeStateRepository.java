@@ -23,8 +23,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class FakeStateRepository implements DirectoryStateRepository {
+
+    /** {@link #findAssignedParent} 가 받은 조직 id — 읽은 차례대로. 읽기가 동시에 일어날 수 있어 동시 접근에 안전한 목록이다. */
+    public final List<String> findAssignedParentCalls = new CopyOnWriteArrayList<>();
+    /** 여기 든 조직의 다음 {@link #findAssignedParent} 는 {@code IllegalStateException} 으로 끝나고, 그 조직을 집합에서 뺀다. */
+    public final Set<String> findAssignedParentFailsOnce = ConcurrentHashMap.newKeySet();
 
     public final Map<String, DirectoryUser> users = new LinkedHashMap<>();
     public final Map<String, DirectoryGroup> groups = new LinkedHashMap<>();
@@ -240,7 +247,13 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<String> findAssignedParent(String orgCode) {
-        return Mono.defer(() -> Mono.justOrEmpty(assignedParents.get(orgCode)));
+        return Mono.defer(() -> {
+            findAssignedParentCalls.add(orgCode);
+            if (findAssignedParentFailsOnce.remove(orgCode)) {
+                return Mono.error(new IllegalStateException("지정 읽기 실패(테스트)"));
+            }
+            return Mono.justOrEmpty(assignedParents.get(orgCode));
+        });
     }
 
     /** 아이디 오름차순 — 실제 저장소의 정렬키 순서와 같다. */
