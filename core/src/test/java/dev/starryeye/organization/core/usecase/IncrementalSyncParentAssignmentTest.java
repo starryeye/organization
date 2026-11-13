@@ -494,6 +494,23 @@ class IncrementalSyncParentAssignmentTest {
     }
 
     @Test
+    @DisplayName("앞 확인의 지정 읽기가 실패하면 지정 없애기도 락 안에서 지금처럼 끝낸다")
+    void 앞_확인의_지정_읽기가_실패하면_없애기도_락_안에서_끝낸다() {
+        // given
+        state.assignedParents.put("C", "P0");
+        checker.allowed.add(RelationTuple.child("C", "P0"));
+        state.findAssignedParentFailsOnce.add("C");
+
+        // when
+        IncrementalSyncResult result = 없앤다("C");
+
+        // then
+        assertThat(result.fullyApplied()).isTrue();
+        assertThat(lock.acquired).hasValue(1);
+        assertThat(state.assignedParents).isEmpty();
+    }
+
+    @Test
     @DisplayName("지정이 없는 조직의 지정을 없애면 락을 시도하지 않고 끝난다")
     void 지정이_없으면_없애기는_락_없이_끝난다() {
         // when

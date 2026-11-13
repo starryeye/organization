@@ -140,6 +140,7 @@ class IncrementalSyncUnsourcedCountTest {
         // then
         assertThatThrownBy(요청::block).hasMessageContaining("지정 읽기 실패");
         assertThat(state.findAssignedParentCalls).contains("D");
+        assertThat(state.쓴순서).doesNotContain("saveGroupChange:G");
         assertThat(state.groups.get("G").members()).containsExactly(MemberRef.user("u-1"));
         assertThat(writer.stored).contains(child("D", "G"));
         assertThat(남긴_요청).hasValue(1);

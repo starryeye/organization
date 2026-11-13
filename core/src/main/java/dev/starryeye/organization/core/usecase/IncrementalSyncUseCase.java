@@ -545,7 +545,8 @@ public class IncrementalSyncUseCase {
      * {@link #upsertGroup} 의 기존 조직 갈래도), 지정의 실패({@link #assignParent}·{@link #clearParent}, U3).
      *
      * <p>지울 줄은 추적기가 정한다({@link UnsourcedGrantTracker#되지울것}). 결과에 실패가 없으면 없다. 저장하지 않는 커밋은 변경 전 상태가 요구하는 줄을 빼고,
-     * 저장하는 커밋은 저장하지 못한 넣기의 줄만 남긴다 — 원래 멤버의 어긋남을 고쳐 쓴 줄, 빼지 못한 멤버의 줄, 지정의 옛 연결은 지우지 않는다. 확정 실패한 줄은
+     * 저장하는 커밋은 저장하지 못한 넣기의 줄만 남긴다 — 다만 지정 상위가 이 조직인 하위 조직의 줄은 저장된 지정이 요구하므로 뺀다(설계 2026-11-13 L8).
+     * 원래 멤버의 어긋남을 고쳐 쓴 줄, 빼지 못한 멤버의 줄, 지정의 옛 연결도 지우지 않는다. 확정 실패한 줄은
      * 쓰이지 않았으니 지울 것이 아니다. 지우기는 "없으면 무시"라 쓰이지 않은 불확실 줄을 지워도 안전하다.
      *
      * <p><b>요청을 실패시키지 않는다 — 리스 상실만 빼고.</b> 지우기의 오류나 실패는 경고를 남기고 추적기에 세게 한 뒤 끝낸다(설계 2026-11-11 U5 b) — 요청의
@@ -648,7 +649,7 @@ public class IncrementalSyncUseCase {
      * 단 빠지는 하위 조직의 지정 상위가 이 조직이면 그 줄은 지정 연결이 받치므로 지우지 않고 멤버 행만 뺀다 — 빠지는 하위 조직마다 지정 상위를 읽는다(설계 2026-11-04 §5.3).
      *
      * <p><b>결과를 모르는 넣기는 저장하지 않고 되지운다(설계 2026-11-11 U2).</b> 이름표와 반영된 멤버를 저장한 뒤 그 넣기의 줄을 지운다
-     * ({@link #원천_없는_줄을_되지운다}) — 응답은 지금처럼 503(부분 반영)이다. 장부와 상태가 함께 "멤버 아님" 이라 IdP 가 같은 요청을 다시 보내든 다른 목록을
+     * ({@link #원천_없는_줄을_되지운다}) — 다만 지정 상위가 이 조직인 하위 조직의 줄은 저장된 지정이 요구하므로 되지우지 않는다(설계 2026-11-13 L8). 응답은 지금처럼 503(부분 반영)이다. 장부와 상태가 함께 "멤버 아님" 이라 IdP 가 같은 요청을 다시 보내든 다른 목록을
      * 보내든 맞는다. 결과를 모르는 빼기는 멤버로 남기고 그 줄도 다시 지우지 않는다 — 저장된 멤버 행이 요구한다.
      *
      * <p>하위 조직 연결을 지우면 끝에서 보류 목록을 다시 본다(설계 2026-10-03 §4.5).
@@ -941,7 +942,7 @@ public class IncrementalSyncUseCase {
 
     /**
      * 관리 API 의 지정 — 조직 {@code orgCode} 의 지정 상위를 {@code parentOrgCode} 로 둔다(설계 2026-11-04 H1·H4, §3.1). 이전 지정이 있으면 바꾸기다 — 옛
-     * 연결 지우기와 새 연결 쓰기가 한 요청이다. 대상 조직이 없으면 빈 {@code Mono} 다. 존재 확인·순환 판정·쓰기가 모두 락 안이다.
+     * 연결 지우기와 새 연결 쓰기가 한 요청이다. 대상 조직이 없으면 빈 {@code Mono} 다. 판정(존재 확인·순환)과 쓰기는 락 안이고, "이미 그렇다" 만 락 앞에서 본다(아래 앞 확인).
      *
      * <p>SCIM 쓰기와 같은 길이다(H7) — 같은 락, Check 기준선, diff, 이력. 이력의 원인은 {@link AuditCause#hierarchyRequest} 이고, 하위 조직의 줄에 지정 상위
      * 이전 → 이후를 남긴다. 같은 상위로 다시 지정하면 지정은 그대로이고 줄이 OpenFGA 에 없을 때만 쓴다 — 바뀐 것이 없으면 이력도 없다.
@@ -958,7 +959,7 @@ public class IncrementalSyncUseCase {
      * <p><b>앞 확인</b>(설계 2026-11-13 L1~L5) — 락을 잡기 전에 "이미 그렇다"만 본다. 대상 조직이 있고, 저장된 지정이 {@code parentOrgCode} 이고, 그 상위 조직이
      * 있고, OpenFGA 에 {@code child(orgCode, parentOrgCode)} 줄이 있으면 락 없이 {@link IncrementalSyncResult#noChange()} 로 끝난다. 그 밖(거절, 바꾸기,
      * 빠진 줄 쓰기)과 앞 확인의 읽기·Check 오류는 아래 락 안의 길이 처음부터 판정한다 — 앞 확인이 읽은 값은 넘기지 않는다. 락 없이 읽어도 되는 까닭은 앞 확인이 아무것도
-     * 쓰지 않고, 읽기가 모두 강한 일관성이며, 저장된 값을 먼저 읽고 Check 를 마지막에 하기 때문이다(§3.3).
+     * 쓰지 않고, 읽기가 모두 강한 일관성이며, 저장된 값을 먼저 읽고 Check 를 마지막에 하기 때문이다(설계 2026-11-13 §3.3).
      */
     public Mono<IncrementalSyncResult> assignParent(String orgCode, String parentOrgCode) {
         return 이미_지정돼_있다(orgCode, parentOrgCode).flatMap(이미 -> 이미
@@ -982,7 +983,7 @@ public class IncrementalSyncUseCase {
                 });
     }
 
-    /** 지금의 {@link #assignParent} 본문 — 락 안에서 존재 확인·순환 판정·쓰기를 한다. */
+    /** 앞 확인이 넘긴 요청의 락 안 길 — 존재 확인·순환 판정·쓰기. */
     private Mono<IncrementalSyncResult> 락_안에서_지정한다(String orgCode, String parentOrgCode) {
         return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode).flatMap(하위 -> {
             if (orgCode.equals(parentOrgCode)) {
@@ -1020,7 +1021,7 @@ public class IncrementalSyncUseCase {
                 });
     }
 
-    /** 지금의 {@link #clearParent} 본문 — 락 안에서 지정을 없앤다. */
+    /** 앞 확인이 넘긴 요청의 락 안 길 — 존재 확인과 지정 없애기. */
     private Mono<IncrementalSyncResult> 락_안에서_없앤다(String orgCode) {
         return withLock(this::지정_요청, (lease, 기록) -> state.findGroupHeader(orgCode)
                 .flatMap(하위 -> 지금_지정(orgCode)
