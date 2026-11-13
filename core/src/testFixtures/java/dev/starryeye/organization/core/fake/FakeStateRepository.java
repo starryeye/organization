@@ -94,6 +94,12 @@ public class FakeStateRepository implements DirectoryStateRepository {
     /** 설정하면 {@link #releaseUnique} 가 이 예외로 끝난다 — 놓기 실패를 흉내 낸다. */
     public volatile RuntimeException failReleaseUnique;
 
+    /** 설정하면 {@link #changeCutEdges} 가 넣을 줄이 있을 때 아무것도 바꾸지 않고 이 예외로 끝난다 — 앞쪽 보류 쓰기 실패를 흉내 낸다. */
+    public volatile RuntimeException failCutEdgesAdding;
+
+    /** 설정하면 {@link #changeCutEdges} 가 뺄 줄이 있을 때 아무것도 바꾸지 않고 이 예외로 끝난다 — 뒤쪽 보류 목록 정리 실패를 흉내 낸다. */
+    public volatile RuntimeException failCutEdgesRemoving;
+
     /** 설정하면 {@link #replaceCutEdges} 가 이 예외로 끝난다 — 보류 목록 저장 실패를 흉내 낸다. */
     public volatile RuntimeException failReplaceCutEdges;
 
@@ -312,15 +318,23 @@ public class FakeStateRepository implements DirectoryStateRepository {
 
     @Override
     public Mono<Void> changeCutEdges(Set<GroupEdge> added, Set<GroupEdge> removed) {
-        return Mono.fromRunnable(() -> {
-            if (!added.isEmpty()) {
-                쓴순서.add("보류+");
+        return Mono.defer(() -> {
+            if (failCutEdgesAdding != null && !added.isEmpty()) {
+                return Mono.error(failCutEdgesAdding);
             }
-            if (!removed.isEmpty()) {
-                쓴순서.add("보류-");
+            if (failCutEdgesRemoving != null && !removed.isEmpty()) {
+                return Mono.error(failCutEdgesRemoving);
             }
-            cutEdges.addAll(added);
-            cutEdges.removeAll(removed);
+            return Mono.fromRunnable(() -> {
+                if (!added.isEmpty()) {
+                    쓴순서.add("보류+");
+                }
+                if (!removed.isEmpty()) {
+                    쓴순서.add("보류-");
+                }
+                cutEdges.addAll(added);
+                cutEdges.removeAll(removed);
+            });
         });
     }
 

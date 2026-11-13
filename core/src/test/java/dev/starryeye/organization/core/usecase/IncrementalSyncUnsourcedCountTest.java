@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.GroupChange;
+import dev.starryeye.organization.core.model.GroupEdge;
 import dev.starryeye.organization.core.model.GroupHeader;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.RelationTuple;
@@ -467,6 +468,44 @@ class IncrementalSyncUnsourcedCountTest {
 
         // then
         assertThatThrownBy(지운다::block).isInstanceOf(IllegalStateException.class).hasMessage("저장 실패(테스트)");
+        assertThat(남긴_요청).hasValue(0);
+    }
+
+    @Test
+    @DisplayName("앞쪽 보류 쓰기가 실패하면 센다 — 커밋 자리 전이다")
+    void 앞쪽_보류_쓰기가_실패하면_센다() {
+        // given — C 의 상위는 A 라 C 에 A 를 넣으면 순환이고 새로 보류한다. u-2 의 줄은 그 전에 쓴다
+        state.failCutEdgesAdding = new IllegalStateException("보류 쓰기 실패(테스트)");
+
+        // when
+        var 요청 = IdP_로(useCase.changeGroup("C",
+                GroupChange.delta().adding(Set.of(MemberRef.user("u-2"), MemberRef.group("A")))));
+
+        // then
+        assertThatThrownBy(요청::block).hasMessageContaining("보류 쓰기 실패");
+        assertThat(writer.stored).contains(dm("u-2", "C"));
+        assertThat(state.cutEdges).isEmpty();
+        assertThat(남긴_요청).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("커밋과 되지우기를 마친 뒤 뒤쪽 보류 목록 정리가 실패하면 세지 않는다")
+    void 뒤쪽_보류_목록_정리가_실패하면_세지_않는다() {
+        // given — 보류 목록에 장부에 이미 있는 줄 A ⊃ C 가 남아 있다. G 에 D 를 넣어 하위 조직 연결이 생기면 목록을 읽고 그 줄을 뺄 것에 넣는다.
+        //         u-2 의 넣기는 응답을 잃어 저장하지 않고 되지운다 — 경계를 옮기면 이 줄 때문에 센다
+        state.cutEdges.add(new GroupEdge("A", "C"));
+        writer.lostResponseFor(본_쓰기의(dm("u-2", "G")));
+        state.failCutEdgesRemoving = new IllegalStateException("보류 정리 실패(테스트)");
+
+        // when
+        var 요청 = IdP_로(useCase.changeGroup("G",
+                GroupChange.delta().adding(Set.of(MemberRef.user("u-2"), MemberRef.group("D")))));
+
+        // then
+        assertThatThrownBy(요청::block).hasMessageContaining("보류 정리 실패");
+        assertThat(state.groups.get("G").members()).contains(MemberRef.group("D")).doesNotContain(MemberRef.user("u-2"));
+        assertThat(writer.stored).doesNotContain(dm("u-2", "G"));
+        assertThat(state.cutEdges).contains(new GroupEdge("A", "C"));
         assertThat(남긴_요청).hasValue(0);
     }
 
