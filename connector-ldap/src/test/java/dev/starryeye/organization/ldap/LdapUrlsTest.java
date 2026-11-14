@@ -17,9 +17,21 @@ class LdapUrlsTest {
     @Test
     @DisplayName("주소 부분은 스킴과 권한만 소문자로 남긴다")
     void 주소_부분은_스킴과_권한만_소문자로_남긴다() {
-        assertThat(LdapUrls.주소_부분("ldap://127.0.0.1:1234/dc=example,dc=com")).isEqualTo("ldap://127.0.0.1:1234");
-        assertThat(LdapUrls.주소_부분("LDAPS://DC1:636/")).isEqualTo("ldaps://dc1:636");
-        assertThat(LdapUrls.주소_부분("ldap://[::1]:389")).isEqualTo("ldap://[::1]:389");
+        assertThat(LdapUrls.주소_부분("ldap://127.0.0.1:1234/dc=example,dc=com")).contains("ldap://127.0.0.1:1234");
+        assertThat(LdapUrls.주소_부분("LDAPS://DC1:636/")).contains("ldaps://dc1:636");
+        assertThat(LdapUrls.주소_부분("ldap://[::1]:389")).contains("ldap://[::1]:389");
+    }
+
+    @Test
+    @DisplayName("읽을 수 없는 주소는 던지지 않고 비어 있다 — 진단이 읽기를 실패시키거나 커넥션을 새게 하지 않는다")
+    void 읽을_수_없는_주소는_던지지_않고_비어_있다() {
+        assertThat(LdapUrls.주소_부분("ldap://bad host:389")).isEmpty();
+        assertThat(LdapUrls.주소_부분("dc1")).isEmpty();
+        assertThat(LdapUrls.붙은_주소(환경이_있는_컨텍스트("ldap://bad host:389"))).isEmpty();
+
+        var source = new org.springframework.ldap.core.support.LdapContextSource();
+        source.setUrls(new String[]{"ldap://bad host:389"});
+        assertThat(LdapUrls.첫_주소(source)).isEmpty();
     }
 
     @Test

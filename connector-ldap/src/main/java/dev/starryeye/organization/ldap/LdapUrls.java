@@ -21,10 +21,20 @@ public final class LdapUrls {
     private LdapUrls() {
     }
 
-    /** {@code 스킴://권한} 만 소문자로 남긴다 — 베이스 DN 경로와 대소문자 차이를 비교에서 뺀다. */
-    public static String 주소_부분(String url) {
-        URI uri = URI.create(url.strip());
-        return (uri.getScheme() + "://" + uri.getRawAuthority()).toLowerCase(Locale.ROOT);
+    /**
+     * {@code 스킴://권한} 만 소문자로 남긴다 — 베이스 DN 경로와 대소문자 차이를 비교에서 뺀다. 읽을 수 없는 주소(문법 오류, 스킴·권한 없음)는 비어 있다 —
+     * 이 값은 진단용이라 던져서 읽기를 실패시키지 않는다.
+     */
+    public static Optional<String> 주소_부분(String url) {
+        try {
+            URI uri = URI.create(url.strip());
+            if (uri.getScheme() == null || uri.getRawAuthority() == null) {
+                return Optional.empty();
+            }
+            return Optional.of((uri.getScheme() + "://" + uri.getRawAuthority()).toLowerCase(Locale.ROOT));
+        } catch (RuntimeException e) {
+            return Optional.empty();
+        }
     }
 
     /** 커넥션이 붙은 주소. 환경에 없거나 덮어쓰이지 않은 목록(공백이 든 값)이거나 읽을 수 없으면 비어 있다. */
@@ -33,10 +43,10 @@ public final class LdapUrls {
             var env = ctx.getEnvironment();
             Object value = env == null ? null : env.get(Context.PROVIDER_URL);
             if (value instanceof String url && !url.isBlank() && url.strip().indexOf(' ') < 0) {
-                return Optional.of(주소_부분(url));
+                return 주소_부분(url);
             }
             return Optional.empty();
-        } catch (NamingException e) {
+        } catch (NamingException | RuntimeException e) {
             return Optional.empty();
         }
     }
@@ -44,7 +54,7 @@ public final class LdapUrls {
     /** 컨텍스트 소스에 설정된 첫 주소. */
     public static Optional<String> 첫_주소(ContextSource source) {
         if (source instanceof AbstractContextSource abstractSource && abstractSource.getUrls().length > 0) {
-            return Optional.of(주소_부분(abstractSource.getUrls()[0]));
+            return 주소_부분(abstractSource.getUrls()[0]);
         }
         return Optional.empty();
     }

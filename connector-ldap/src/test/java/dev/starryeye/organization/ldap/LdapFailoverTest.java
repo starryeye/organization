@@ -155,7 +155,7 @@ class LdapFailoverTest {
         try {
             // F7 이 기대는 JDK provider 동작: 접속한 URL 로 java.naming.provider.url 을 덮어쓴다 (목록 전체가 아니라 붙은 주소 하나)
             assertThat(ctx.getEnvironment().get(Context.PROVIDER_URL)).asString().doesNotContain(" ").isEqualTo(주소B + "/" + BASE_DN);
-            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B));
+            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B).orElseThrow());
         } finally {
             ctx.close();
         }
@@ -170,7 +170,7 @@ class LdapFailoverTest {
 
         DirContext ctx = contextSource.getReadOnlyContext();
         try {
-            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B));
+            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B).orElseThrow());
         } finally {
             ctx.close();
         }
@@ -188,8 +188,8 @@ class LdapFailoverTest {
         var 경고들 = 경고들();
         assertThat(경고들).hasSizeGreaterThanOrEqualTo(2);
         assertThat(경고들).allSatisfy(메시지 -> assertThat(메시지)
-                .contains(LdapUrls.주소_부분(주소B))
-                .contains(LdapUrls.주소_부분(닫힌)));
+                .contains(LdapUrls.주소_부분(주소B).orElseThrow())
+                .contains(LdapUrls.주소_부분(닫힌).orElseThrow()));
     }
 
     @Test

@@ -296,7 +296,7 @@ class LdapHealthIndicatorTest {
 
         assertThat(health.getStatus()).isEqualTo(Status.UP);
         assertThat(health.getDetails())
-                .containsEntry("connectedUrl", LdapUrls.주소_부분(주소들.get(1)))
+                .containsEntry("connectedUrl", LdapUrls.주소_부분(주소들.get(1)).orElseThrow())
                 .containsEntry("urls", 주소들);
     }
 
