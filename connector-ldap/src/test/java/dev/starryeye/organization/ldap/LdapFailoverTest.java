@@ -6,9 +6,11 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
+import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchRequest;
 import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSimpleBindRequest;
 import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
 import com.unboundid.ldap.sdk.LDAPException;
+import com.unboundid.ldap.sdk.ResultCode;
 import com.unboundid.ldif.LDIFReader;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
@@ -77,16 +79,21 @@ class LdapFailoverTest {
 
     private final ListAppender<ILoggingEvent> 로그 = new ListAppender<>();
     private final Logger 템플릿_로거 = (Logger) LoggerFactory.getLogger(LdapTemplates.class);
+    private final ListAppender<ILoggingEvent> 원천_로그 = new ListAppender<>();
+    private final Logger 원천_로거 = (Logger) LoggerFactory.getLogger(LdapDirectorySnapshotSource.class);
 
     @BeforeEach
     void 로그를_붙인다() {
         로그.start();
         템플릿_로거.addAppender(로그);
+        원천_로그.start();
+        원천_로거.addAppender(원천_로그);
     }
 
     @AfterEach
     void 서버를_내린다() {
         템플릿_로거.detachAppender(로그);
+        원천_로거.detachAppender(원천_로그);
         서버들.forEach(서버 -> 서버.shutDown(true));
     }
 
@@ -202,6 +209,73 @@ class LdapFailoverTest {
         assertThat(경고들()).isEmpty();
     }
 
+    @Test
+    @DisplayName("첫 주소가 바인드는 받고 검색을 실패시키면 재시도가 둘째 주소부터 읽는다")
+    void 첫_주소가_바인드는_받고_검색을_실패시키면_재시도가_둘째_주소부터_읽는다() throws Exception {
+        var A바인드 = new 바인드를_센다();
+        var A검색 = new 검색을_바쁘게_거절한다();
+        var A = 서버(BIND_PASSWORD, A바인드, A검색);
+        var B = 서버(BIND_PASSWORD);
+        var properties = 설정(List.of(EmbeddedLdapListener.접속_주소(A), EmbeddedLdapListener.접속_주소(B)));
+        properties.setMaxRetries(3);
+
+        DirectorySnapshot 그림 = 그림을_읽는다(properties);
+
+        assertThat(그림.users()).containsOnlyKeys("kim");
+        assertThat(그림.groups()).containsOnlyKeys("DEV001");
+        assertThat(A검색.횟수()).as("재시도는 둘째 주소부터라 A 는 검색을 한 번만 받는다").isEqualTo(1);
+        assertThat(A바인드.횟수()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("다음 회차는 다시 설정 순서부터다")
+    void 다음_회차는_다시_설정_순서부터다() throws Exception {
+        var A바인드 = new 바인드를_센다();
+        var A = 서버(BIND_PASSWORD, A바인드, new 검색을_바쁘게_거절한다());
+        var B = 서버(BIND_PASSWORD);
+        var properties = 설정(List.of(EmbeddedLdapListener.접속_주소(A), EmbeddedLdapListener.접속_주소(B)));
+        properties.setMaxRetries(3);
+        var source = 원천을_만든다(properties);
+
+        source.fetchAll().block(Duration.ofSeconds(30));
+        DirectorySnapshot 둘째 = source.fetchAll().block(Duration.ofSeconds(30));
+
+        assertThat(둘째.users()).containsOnlyKeys("kim");
+        assertThat(A바인드.횟수()).as("다음 회차는 시도 수를 이어 세지 않고 설정 순서(A)부터 다시 시작한다").isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("다음 주소부터 읽는 재시도는 시작 주소를 WARN 에 적는다")
+    void 다음_주소부터_읽는_재시도는_시작_주소를_WARN_에_적는다() throws Exception {
+        var A = 서버(BIND_PASSWORD, new 검색을_바쁘게_거절한다());
+        var B = 서버(BIND_PASSWORD);
+        var 주소B = EmbeddedLdapListener.접속_주소(B);
+        var properties = 설정(List.of(EmbeddedLdapListener.접속_주소(A), 주소B));
+        properties.setMaxRetries(3);
+
+        그림을_읽는다(properties);
+
+        var 시작_경고들 = 원천_로그.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(메시지 -> 메시지.contains("다음 주소부터"))
+                .toList();
+        assertThat(시작_경고들).hasSize(1);
+        assertThat(시작_경고들.get(0)).contains(LdapUrls.주소_부분(주소B).orElseThrow());
+    }
+
+    @Test
+    @DisplayName("모든 주소가 거절하면 재시도를 다 쓰고 마지막 실패를 던진다")
+    void 모든_주소가_거절하면_재시도를_다_쓰고_마지막_실패를_던진다() throws Exception {
+        var properties = 설정(List.of(SilentLdapServer.닫힌_주소(), SilentLdapServer.닫힌_주소()));
+        properties.setMaxRetries(2);
+        var source = 원천을_만든다(properties);
+
+        assertThatThrownBy(() -> source.fetchAll().block(Duration.ofSeconds(30)))
+                .as("마지막 실패를 그대로 던진다 — RetryExhaustedException 이 아니다")
+                .matches(e -> !reactor.core.Exceptions.isRetryExhausted(e));
+    }
+
     private List<String> 경고들() {
         return 로그.list.stream()
                 .filter(e -> e.getLevel() == Level.WARN)
@@ -254,6 +328,22 @@ class LdapFailoverTest {
         server.startListening();
         서버들.add(server);
         return server;
+    }
+
+    /** 검색마다 BUSY 로 거절하고 받은 검색 수를 센다 — 바인드는 받고 검색에서 실패하는 DC. */
+    private static final class 검색을_바쁘게_거절한다 extends InMemoryOperationInterceptor {
+
+        private final AtomicInteger 수 = new AtomicInteger();
+
+        @Override
+        public void processSearchRequest(InMemoryInterceptedSearchRequest request) throws LDAPException {
+            수.incrementAndGet();
+            throw new LDAPException(ResultCode.BUSY, "바쁘다(시험)");
+        }
+
+        int 횟수() {
+            return 수.get();
+        }
     }
 
     /** 서버가 받은 바인드 요청 수. */

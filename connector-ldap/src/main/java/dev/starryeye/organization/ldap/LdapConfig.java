@@ -14,6 +14,7 @@ import org.springframework.ldap.core.support.LdapContextSource;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -103,10 +104,18 @@ public class LdapConfig {
 
     @Bean
     public LdapContextSource ldapContextSource(LdapProperties properties) {
+        return 컨텍스트_소스(properties, properties.getUrls());
+    }
+
+    /**
+     * {@link #ldapContextSource} 와 같은 설정(검사·베이스·자격·JNDI 환경)에 주소 목록만 {@code urls} 인 컨텍스트 소스. {@code afterPropertiesSet()} 은 부르지
+     * 않는다 — 빈은 스프링이 부른다.
+     */
+    static LdapContextSource 컨텍스트_소스(LdapProperties properties, List<String> urls) {
         설정을_검사한다(properties);
         LdapContextSource contextSource = new LdapContextSource();
         // 주소 목록은 JNDI 에 그대로 넘긴다 — 새 커넥션마다 앞에서부터 시도해 연결·접속 실패면 다음 주소로 간다(설계 2026-11-14 F2)
-        contextSource.setUrls(properties.getUrls().toArray(String[]::new));
+        contextSource.setUrls(urls.toArray(String[]::new));
         contextSource.setBase(properties.getBaseDn());
         contextSource.setUserDn(properties.getBindDn());
         contextSource.setPassword(properties.getBindPassword());
@@ -174,6 +183,22 @@ public class LdapConfig {
     @Bean
     public LdapDirectorySnapshotSource ldapDirectorySnapshotSource(
             LdapTemplate template, LdapMappingStrategy strategy, LdapProperties properties) {
-        return new LdapDirectorySnapshotSource(template, strategy, properties);
+        return new LdapDirectorySnapshotSource(시작_주소별_템플릿(properties, template), strategy, properties);
+    }
+
+    /**
+     * 재시도 k 번째가 쓸 템플릿들(설계 2026-11-14 F6). {@code [첫_템플릿, k = 1 … n-1 번째 주소부터 돈 목록의 템플릿]} — 주소가 하나면 {@code [첫_템플릿]}.
+     * 돌린 컨텍스트 소스는 스프링 빈이 아니라 여기서 {@code afterPropertiesSet()} 을 부른다. 상태 점검은 설정 순서의 {@code ldapContextSource} 빈을 그대로 쓴다.
+     */
+    static List<LdapTemplate> 시작_주소별_템플릿(LdapProperties properties, LdapTemplate 첫_템플릿) {
+        List<String> 주소들 = properties.getUrls();
+        List<LdapTemplate> 템플릿들 = new ArrayList<>();
+        템플릿들.add(첫_템플릿);
+        for (int k = 1; k < 주소들.size(); k++) {
+            LdapContextSource 소스 = 컨텍스트_소스(properties, LdapUrls.돌린다(주소들, k));
+            소스.afterPropertiesSet();
+            템플릿들.add(LdapTemplates.configured(소스));
+        }
+        return List.copyOf(템플릿들);
     }
 }

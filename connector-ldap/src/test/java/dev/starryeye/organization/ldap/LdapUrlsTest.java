@@ -15,6 +15,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LdapUrlsTest {
 
     @Test
+    @DisplayName("돌린다는 k 번째부터 돈다")
+    void 돌린다는_k_번째부터_돈다() {
+        var 주소들 = java.util.List.of("a", "b", "c");
+
+        assertThat(LdapUrls.돌린다(주소들, 0)).containsExactly("a", "b", "c");
+        assertThat(LdapUrls.돌린다(주소들, 1)).containsExactly("b", "c", "a");
+        assertThat(LdapUrls.돌린다(주소들, 4)).containsExactly("b", "c", "a");
+        assertThat(LdapUrls.돌린다(java.util.List.of("a"), 3)).containsExactly("a");
+    }
+
+    @Test
     @DisplayName("주소 부분은 스킴과 권한만 소문자로 남긴다")
     void 주소_부분은_스킴과_권한만_소문자로_남긴다() {
         assertThat(LdapUrls.주소_부분("ldap://127.0.0.1:1234/dc=example,dc=com")).contains("ldap://127.0.0.1:1234");

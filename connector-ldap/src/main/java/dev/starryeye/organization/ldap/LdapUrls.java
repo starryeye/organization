@@ -7,6 +7,9 @@ import javax.naming.Context;
 import javax.naming.NamingException;
 import javax.naming.directory.DirContext;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -49,6 +52,19 @@ public final class LdapUrls {
         } catch (NamingException | RuntimeException e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * 주소 목록을 {@code k % n} 번째부터 돌린다(불변). 재시도 k 번째는 이 목록으로 읽어, 바인드는 받고 검색에서 실패한 DC 를 넘긴다 — JNDI 는 바인드 뒤의
+     * 실패를 다음 주소로 넘기지 않는다(설계 2026-11-14 F6). 빈 목록은 그대로다.
+     */
+    public static List<String> 돌린다(List<String> urls, int k) {
+        if (urls.isEmpty()) {
+            return List.of();
+        }
+        List<String> 돌린 = new ArrayList<>(urls);
+        Collections.rotate(돌린, -Math.floorMod(k, urls.size()));
+        return List.copyOf(돌린);
     }
 
     /** 컨텍스트 소스에 설정된 첫 주소. */
