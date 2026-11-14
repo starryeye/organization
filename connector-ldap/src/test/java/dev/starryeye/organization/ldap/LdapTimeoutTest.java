@@ -1,17 +1,14 @@
 package dev.starryeye.organization.ldap;
 
+import dev.starryeye.organization.ldap.fixture.SilentLdapServer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -60,25 +57,10 @@ class LdapTimeoutTest {
     @Test
     @DisplayName("인증(bind) 응답이 없으면 connect-timeout 으로 끝나고 다시 읽는다")
     void 인증_응답이_없으면_연결_타임아웃으로_끝난다() throws IOException {
-        // 127.0.0.1 에만 뜬다 — 모든 주소에 뜨면 127.0.0.1 전용 리스너(IntelliJ 등)와 포트를 함께 쓸 수 있고, 그쪽이 접속을 받아 닫으면
-        // 타임아웃이 아닌 다른 실패가 난다(EmbeddedLdapListener 와 같은 이유)
-        try (ServerSocket 침묵하는_서버 = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
-            // given — 접속은 받아 두기만 하고 아무것도 쓰지 않는다
-            List<Socket> 받은_접속 = new CopyOnWriteArrayList<>();
-            Thread 받기 = new Thread(() -> {
-                try {
-                    while (true) {
-                        받은_접속.add(침묵하는_서버.accept());
-                    }
-                } catch (IOException ignored) {
-                    // 테스트가 끝나 서버 소켓이 닫혔다
-                }
-            });
-            받기.setDaemon(true);
-            받기.start();
-
+        // given — 접속은 받아 두기만 하고 아무것도 쓰지 않는 서버(127.0.0.1 에만 뜬다. 이유는 SilentLdapServer 에)
+        try (SilentLdapServer 침묵하는_서버 = SilentLdapServer.연다()) {
             LdapProperties properties = new LdapProperties();
-            properties.setUrl("ldap://127.0.0.1:" + 침묵하는_서버.getLocalPort());
+            properties.setUrls(List.of(침묵하는_서버.접속_주소()));
             properties.setBindDn("cn=admin,dc=example,dc=com");
             properties.setBindPassword("password");
             // bindDn 을 쓰면 컨텍스트 생성이 곧 동기 bind 다 — JNDI LDAP provider 는 그 응답
@@ -99,17 +81,11 @@ class LdapTimeoutTest {
                     config.ldapMappingStrategy(properties, Clock.systemUTC()),
                     properties);
 
-            try {
-                // when, then — connect-timeout(1초)이 끊는다. read-timeout(60초)이 대신
-                // 걸렸다면 20초 안에 이 예외가 나오지 않는다.
-                assertThatThrownBy(() -> source.fetchAll().block(Duration.ofSeconds(20)))
-                        .hasStackTraceContaining("timeout used: 1000 ms");
-                assertThat(받은_접속).as("최초 1회 + 재시도 1회 — 시도마다 연결 하나").hasSize(2);
-            } finally {
-                for (Socket socket : 받은_접속) {
-                    socket.close();
-                }
-            }
+            // when, then — connect-timeout(1초)이 끊는다. read-timeout(60초)이 대신
+            // 걸렸다면 20초 안에 이 예외가 나오지 않는다.
+            assertThatThrownBy(() -> source.fetchAll().block(Duration.ofSeconds(20)))
+                    .hasStackTraceContaining("timeout used: 1000 ms");
+            assertThat(침묵하는_서버.받은_접속_수()).as("최초 1회 + 재시도 1회 — 시도마다 연결 하나").isEqualTo(2);
         }
     }
 }

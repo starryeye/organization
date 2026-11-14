@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -34,7 +35,7 @@ class LdapHealthIndicatorTest {
 
     private static LdapProperties 설정() {
         var properties = new LdapProperties();
-        properties.setUrl("ldap://localhost:1389");
+        properties.setUrls(List.of("ldap://localhost:1389"));
         properties.setBaseDn("dc=example,dc=com");
         properties.setStrategy("group-of-names");
         return properties;
@@ -146,7 +147,7 @@ class LdapHealthIndicatorTest {
         assertThat(health).isNotNull();
         assertThat(health.getStatus()).isEqualTo(Status.UP);
         assertThat(health.getDetails())
-                .containsEntry("url", "ldap://localhost:1389")
+                .containsEntry("urls", List.of("ldap://localhost:1389"))
                 .containsEntry("baseDn", "dc=example,dc=com")
                 .containsEntry("strategy", "group-of-names");
         // 검색이 아니라 바인드만 한다 — 디렉터리 크기와 무관한 비용이어야 한다

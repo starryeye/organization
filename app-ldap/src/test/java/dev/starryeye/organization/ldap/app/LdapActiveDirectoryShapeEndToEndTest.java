@@ -81,7 +81,7 @@ class LdapActiveDirectoryShapeEndToEndTest {
                 new ByteArrayInputStream(ldif().getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         // AD 의 사람 필터와 그룹 필터 — 프로필은 inetOrgPerson/groupOfNames 라서 이 디렉터리를 읽지 못한다
         registry.add("ldap.group-of-names.user-filter", () -> "(&(objectCategory=person)(objectClass=user))");
         registry.add("ldap.group-of-names.group-filter", () -> "(objectClass=group)");

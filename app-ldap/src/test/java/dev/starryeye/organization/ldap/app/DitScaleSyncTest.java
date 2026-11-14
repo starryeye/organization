@@ -88,7 +88,7 @@ class DitScaleSyncTest {
                 renderer.render(기대).getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         registry.add("ldap.strategy", () -> "dit");
         registry.add("ldap.dit.root-dn", renderer::rootDn);
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);

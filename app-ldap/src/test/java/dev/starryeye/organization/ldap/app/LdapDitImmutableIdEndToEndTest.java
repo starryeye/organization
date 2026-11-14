@@ -89,7 +89,7 @@ class LdapDitImmutableIdEndToEndTest {
                 new ByteArrayInputStream(ldif().getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         registry.add("ldap.strategy", () -> "dit");
         // 프로필이 못박은 이름 기반 id 를 운영 기본값으로 되돌린다
         registry.add("ldap.dit.group-id-attribute", () -> "entryUUID");

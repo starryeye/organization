@@ -91,7 +91,7 @@ class LdapScaleScenarioTest {
         LDAP.startListening();
         디렉터리 = new LdapDirectory(LDAP, BASE_DN);
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 

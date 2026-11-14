@@ -84,7 +84,7 @@ class AdminQueryScaleTest {
                 new LdifRenderer(BASE_DN).render(기대).getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);
     }
 

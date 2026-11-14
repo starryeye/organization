@@ -97,7 +97,7 @@ class TraceCorrelationTest {
                 new ByteArrayInputStream(LDIF.getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         registry.add("openfga.api-url",
                 () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
         registry.add("dynamodb.endpoint",

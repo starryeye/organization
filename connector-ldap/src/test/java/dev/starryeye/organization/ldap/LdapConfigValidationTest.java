@@ -7,6 +7,7 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -93,21 +94,67 @@ class LdapConfigValidationTest {
         assertThatCode(() -> LdapConfig.설정을_검사한다(properties)).doesNotThrowAnyException();
     }
 
+    private static final String 주소_모양_문구 =
+            "ldap.urls 의 주소는 ldap://호스트[:포트] 또는 ldaps://호스트[:포트] 다 — 검색 베이스는 ldap.base-dn 에 준다(받은 값: %s)";
+
     @Test
-    @DisplayName("TLS 를 요구하면 ldaps:// 만 받는다 — StartTLS 는 지원하지 않는다")
-    void TLS_를_요구하면_ldaps_만_받는다() {
-        // given
-        var 평문 = 설정();
-        평문.setRequireTls(true);
-        평문.setUrl("ldap://ldap.example.com:389");
+    @DisplayName("주소 목록이 비었거나 빈 항목이 있으면 멈춘다")
+    void 주소_목록이_비었거나_빈_항목이_있으면_멈춘다() {
+        var 빈_목록 = 설정();
+        빈_목록.setUrls(List.of());
+        var 빈_항목 = 설정();
+        빈_항목.setUrls(List.of("ldap://dc1:389", " "));
+
+        assertThatThrownBy(() -> LdapConfig.설정을_검사한다(빈_목록))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("ldap.urls 가 비었다 — LDAP 주소를 하나 이상 준다");
+        assertThatThrownBy(() -> LdapConfig.설정을_검사한다(빈_항목))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("ldap.urls 의 주소는 ldap://호스트[:포트] 또는 ldaps://호스트[:포트] 다 — 검색 베이스는 ldap.base-dn 에 준다(받은 값:  )");
+    }
+
+    @Test
+    @DisplayName("주소 모양이 틀리면 멈춘다 — 스킴·호스트·경로·질의")
+    void 주소_모양이_틀리면_멈춘다() {
+        // 깨뜨릴 변경: 모양 검사를 빼거나 첫 주소만 보면 이 시험이 깨진다(틀린 주소를 둘째 자리에도 둔다)
+        for (String 틀린 : List.of("http://dc1:389", "ldap://", "ldap://dc1:389/dc=example,dc=com", "ldap://dc1:389?x", "dc1:389")) {
+            var 첫째 = 설정();
+            첫째.setUrls(List.of(틀린));
+            var 둘째 = 설정();
+            둘째.setUrls(List.of("ldap://dc1:389", 틀린));
+
+            assertThatThrownBy(() -> LdapConfig.설정을_검사한다(첫째))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(주소_모양_문구.formatted(틀린));
+            assertThatThrownBy(() -> LdapConfig.설정을_검사한다(둘째))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(주소_모양_문구.formatted(틀린));
+        }
+    }
+
+    @Test
+    @DisplayName("주소 모양이 맞으면 받는다 — 포트 없음·끝 슬래시·대문자 스킴·IPv6·밑줄 호스트")
+    void 주소_모양이_맞으면_받는다() {
+        var properties = 설정();
+        properties.setUrls(List.of("ldap://dc1", "ldap://dc1:389/", "LDAPS://DC1:636", "ldap://[::1]:389", "ldap://dc_1.corp:389"));
+
+        assertThatCode(() -> LdapConfig.설정을_검사한다(properties)).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("TLS 를 요구하면 모든 주소가 ldaps:// 여야 한다 — StartTLS 는 지원하지 않는다")
+    void TLS_를_요구하면_모든_주소가_ldaps_여야_한다() {
+        // 깨뜨릴 변경: 첫 주소만 보면 둘째의 평문 주소를 놓친다
+        var 평문_섞임 = 설정();
+        평문_섞임.setRequireTls(true);
+        평문_섞임.setUrls(List.of("ldaps://dc1:636", "ldap://dc2:389"));
         var 암호화 = 설정();
         암호화.setRequireTls(true);
-        암호화.setUrl("ldaps://ldap.example.com:636");
+        암호화.setUrls(List.of("ldaps://dc1:636", "LDAPS://dc2:636"));
 
-        // when, then
-        assertThatThrownBy(() -> LdapConfig.설정을_검사한다(평문))
+        assertThatThrownBy(() -> LdapConfig.설정을_검사한다(평문_섞임))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessage("ldap.require-tls 인데 ldap.url 이 ldaps:// 가 아니다 — StartTLS 는 지원하지 않는다");
+                .hasMessage("ldap.require-tls 인데 ldap.urls 에 ldaps:// 가 아닌 주소가 있다 — StartTLS 는 지원하지 않는다(받은 값: ldap://dc2:389)");
         assertThatCode(() -> LdapConfig.설정을_검사한다(암호화)).doesNotThrowAnyException();
     }
 
@@ -116,7 +163,7 @@ class LdapConfigValidationTest {
     void TLS_요구는_기본이_꺼져_있다() {
         // given
         var properties = 설정();
-        properties.setUrl("ldap://localhost:1389");
+        properties.setUrls(List.of("ldap://localhost:1389"));
 
         // when, then
         assertThatCode(() -> LdapConfig.설정을_검사한다(properties)).doesNotThrowAnyException();

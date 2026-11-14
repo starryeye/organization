@@ -15,6 +15,7 @@ import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
@@ -61,7 +62,7 @@ class LdapReadTimeoutDuringPagingTest {
 
         try {
             LdapProperties properties = new LdapProperties();
-            properties.setUrl(EmbeddedLdapListener.접속_주소(server));
+            properties.setUrls(List.of(EmbeddedLdapListener.접속_주소(server)));
             properties.setBaseDn(BASE_DN);
             properties.setBindDn(BIND_DN);
             properties.setBindPassword(BIND_PASSWORD);

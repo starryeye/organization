@@ -11,8 +11,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.LdapContextSource;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Clock;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -29,7 +32,9 @@ public class LdapConfig {
      *   <li><b>바인드 비밀번호.</b> 부트의 {@code @ConfigurationProperties} 바인딩은 풀리지 않은 자리표시자를 무시하고 {@code "${LDAP_BIND_PASSWORD}"}
      *       문자열을 그대로 넣는다. 그 값으로 바인드하면 계정 잠금만 부르므로, 바인드 DN 이 있는데 비밀번호가 비었거나 <code>&#36;&#123;</code> 로 시작하면 멈춘다.
      *       바인드 DN 이 없는 익명 바인드는 비밀번호를 보지 않는다.
-     *   <li><b>TLS.</b> {@code ldap.require-tls} 인데 {@code ldap.url} 이 {@code ldaps://} 가 아니면 멈춘다.
+     *   <li><b>주소 목록.</b> {@code ldap.urls} 가 비었거나, 주소 하나라도 모양이 틀리면 멈춘다 — 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)가 아니거나,
+     *       호스트가 없거나, 경로({@code /} 하나는 허용)·질의·조각이 있는 경우다. 검색 베이스는 주소가 아니라 {@code ldap.base-dn} 에 준다(설계 2026-11-14 F3).
+     *   <li><b>TLS.</b> {@code ldap.require-tls} 인데 {@code ldap.urls} 에 {@code ldaps://} 가 아닌 주소가 하나라도 있으면 멈춘다(설계 2026-11-14 F4).
      * </ul>
      */
     static void 설정을_검사한다(LdapProperties properties) {
@@ -45,17 +50,63 @@ public class LdapConfig {
             throw new IllegalStateException("ldap.bind-dn 이 있는데 ldap.bind-password 가 비었거나 풀리지 않은 자리표시자다"
                     + " — 환경 변수 LDAP_BIND_PASSWORD 를 준다");
         }
-        String 주소 = properties.getUrl();
-        if (properties.isRequireTls() && (주소 == null || !주소.startsWith("ldaps://"))) {
-            throw new IllegalStateException("ldap.require-tls 인데 ldap.url 이 ldaps:// 가 아니다 — StartTLS 는 지원하지 않는다");
+        List<String> 주소들 = properties.getUrls();
+        if (주소들 == null || 주소들.isEmpty()) {
+            throw new IllegalStateException("ldap.urls 가 비었다 — LDAP 주소를 하나 이상 준다");
         }
+        for (String 주소 : 주소들) {
+            if (!주소_모양이_맞다(주소)) {
+                throw new IllegalStateException(
+                        "ldap.urls 의 주소는 ldap://호스트[:포트] 또는 ldaps://호스트[:포트] 다 — 검색 베이스는 ldap.base-dn 에 준다(받은 값: %s)"
+                                .formatted(주소));
+            }
+        }
+        if (properties.isRequireTls()) {
+            for (String 주소 : 주소들) {
+                if (!"ldaps".equalsIgnoreCase(스킴(주소))) {
+                    throw new IllegalStateException(
+                            "ldap.require-tls 인데 ldap.urls 에 ldaps:// 가 아닌 주소가 있다 — StartTLS 는 지원하지 않는다(받은 값: %s)"
+                                    .formatted(주소));
+                }
+            }
+        }
+    }
+
+    /** 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)이고 호스트가 있으며 경로·질의·조각이 없다(경로는 비거나 {@code /}). */
+    private static boolean 주소_모양이_맞다(String 주소) {
+        if (주소 == null || 주소.isBlank()) {
+            return false;
+        }
+        URI uri;
+        try {
+            uri = new URI(주소.trim());
+        } catch (URISyntaxException e) {
+            return false;
+        }
+        String 스킴 = uri.getScheme();
+        if (스킴 == null || (!"ldap".equalsIgnoreCase(스킴) && !"ldaps".equalsIgnoreCase(스킴))) {
+            return false;
+        }
+        // getHost() 는 밑줄 든 호스트(dc_1.corp)에서 null 이라 쓰지 않는다 — 권한부가 있는지만 본다
+        String 권한 = uri.getRawAuthority();
+        if (권한 == null || 권한.isBlank()) {
+            return false;
+        }
+        String 경로 = uri.getRawPath();
+        return (경로 == null || 경로.isEmpty() || "/".equals(경로)) && uri.getRawQuery() == null && uri.getRawFragment() == null;
+    }
+
+    private static String 스킴(String 주소) {
+        int 끝 = 주소.indexOf("://");
+        return 끝 < 0 ? "" : 주소.substring(0, 끝).trim();
     }
 
     @Bean
     public LdapContextSource ldapContextSource(LdapProperties properties) {
         설정을_검사한다(properties);
         LdapContextSource contextSource = new LdapContextSource();
-        contextSource.setUrl(properties.getUrl());
+        // 주소 목록은 JNDI 에 그대로 넘긴다 — 새 커넥션마다 앞에서부터 시도해 연결·접속 실패면 다음 주소로 간다(설계 2026-11-14 F2)
+        contextSource.setUrls(properties.getUrls().toArray(String[]::new));
         contextSource.setBase(properties.getBaseDn());
         contextSource.setUserDn(properties.getBindDn());
         contextSource.setPassword(properties.getBindPassword());

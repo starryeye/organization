@@ -36,7 +36,8 @@ sync:
     max-deletes: 5000
 
 ldap:
-  url: ldap://localhost:1389
+  urls:
+    - ldap://localhost:1389
   base-dn: dc=example,dc=com
   bind-dn: cn=admin,dc=example,dc=com
   bind-password: adminpassword

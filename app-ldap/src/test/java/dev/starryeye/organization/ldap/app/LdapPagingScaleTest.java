@@ -76,7 +76,7 @@ class LdapPagingScaleTest {
                 new LdifRenderer(BASE_DN).render(최초).getBytes(StandardCharsets.UTF_8))));
         LDAP.startListening();
 
-        registry.add("ldap.url", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
         // 페이징을 끈다 — 0 이하면 단일 검색으로 처리한다
         registry.add("ldap.page-size", () -> 0);
         ScaleContainers.주소를_등록한다(registry::add, OPENFGA, DYNAMODB);

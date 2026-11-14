@@ -5,13 +5,22 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.List;
 
 @Getter
 @Setter
 @ConfigurationProperties("ldap")
 public class LdapProperties {
 
-    private String url = "ldap://localhost:1389";
+    /**
+     * LDAP 서버(도메인 컨트롤러) 주소 목록 — {@code ldap://호스트[:포트]} 또는 {@code ldaps://호스트[:포트]}(설계 2026-11-14 F1~F4). 환경 변수로는
+     * 쉼표로 잇는다({@code LDAP_URLS=ldaps://dc1:636,ldaps://dc2:636}).
+     *
+     * <p>목록 순서가 선호 순서다. JNDI 가 새 커넥션마다 앞에서부터 시도해 연결이 거절되거나 접속 한도를 넘기면 다음 주소로 넘어간다 — 그래서 한 대가 죽어도
+     * 다른 한 대로 읽는다. <b>인증 실패(바인드 49)는 넘기지 않는다</b>(JNDI 자체 동작): 같은 자격증명이 다른 서버에서도 틀릴 것이고, 넘기면 계정 잠금만 부른다.
+     * 주소에 검색 베이스를 붙이지 않는다 — 베이스는 {@link #baseDn} 에 준다. 주소 하나만 주면 예전과 똑같이 동작한다.
+     */
+    private List<String> urls = List.of("ldap://localhost:1389");
     private String baseDn = "dc=example,dc=com";
     private String bindDn;
     private String bindPassword;
@@ -57,7 +66,7 @@ public class LdapProperties {
     private String strategy = "group-of-names";
 
     /**
-     * 켜면 {@link #url} 이 {@code ldaps://} 가 아닐 때 기동을 멈춘다 — 평문 LDAP 으로 바인드 자격증명과 디렉터리 전체가 오가지 않게 한다(운영은 켠다).
+     * 켜면 {@link #urls} 에 {@code ldaps://} 가 아닌 주소가 있을 때 기동을 멈춘다 — 평문 LDAP 으로 바인드 자격증명과 디렉터리 전체가 오가지 않게 한다(운영은 켠다).
      * {@code ldaps://} 는 JNDI 가 JVM 트러스트스토어로 연다 — 사설 CA 는 {@code -Djavax.net.ssl.trustStore} 로 넘긴다. StartTLS 는 지원하지 않는다.
      */
     private boolean requireTls = false;

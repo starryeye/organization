@@ -10,6 +10,7 @@ import org.springframework.ldap.core.support.LdapContextSource;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * UnboundID in-memory LDAP 서버. 도커 없이 밀리초 단위로 뜬다.
@@ -109,7 +110,7 @@ public abstract class EmbeddedLdapSupport {
      * 접속 정보를 {@code properties} 에 채운다.
      */
     protected LdapTemplate LdapConfig로_만든_템플릿(LdapProperties properties) throws Exception {
-        properties.setUrl(EmbeddedLdapListener.접속_주소(server));
+        properties.setUrls(List.of(EmbeddedLdapListener.접속_주소(server)));
         properties.setBindDn(BIND_DN);
         properties.setBindPassword(BIND_PASSWORD);
         LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);

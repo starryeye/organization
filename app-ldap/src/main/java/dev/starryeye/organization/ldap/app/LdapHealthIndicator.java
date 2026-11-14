@@ -86,7 +86,7 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(ignored -> 마지막_인증실패.set(null))
                 .map(ignored -> Health.up()
-                        .withDetail("url", properties.getUrl())
+                        .withDetail("urls", properties.getUrls())
                         .withDetail("baseDn", properties.getBaseDn())
                         .withDetail("strategy", properties.getStrategy())
                         .build())
