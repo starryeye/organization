@@ -26,6 +26,7 @@ sync:
     enabled: true
     threshold-ratio: 0.3
     min-baseline: 10
+    max-deletes: 5000
 
 ldap:
   base-dn: dc=example,dc=com

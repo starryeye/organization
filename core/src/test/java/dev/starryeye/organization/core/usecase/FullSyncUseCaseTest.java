@@ -63,8 +63,12 @@ class FullSyncUseCaseTest {
     }
 
     private FullSyncUseCase 유스케이스() {
+        return 유스케이스(DeletionGuardPolicy.defaults());
+    }
+
+    private FullSyncUseCase 유스케이스(DeletionGuardPolicy 정책) {
         return new FullSyncUseCase(source, snapshots, state, writer, scanner,
-                new DeletionGuard(DeletionGuardPolicy.defaults()),
+                new DeletionGuard(정책),
                 new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
@@ -1103,5 +1107,91 @@ class FullSyncUseCaseTest {
         assertThat(snapshots.saved.get(0).tuples()).containsExactlyInAnyOrderElementsOf(남은_장부);
         assertThat(snapshots.saved.get(0).uncertain()).isEmpty();
         assertThat(state.users).isEmpty();
+    }
+
+    // ---------- 절대 수 상한 (설계 2026-11-13 G4) ----------
+
+    private void 기준_100줄에서_10줄이_빠진다(int 상한) {
+        useCase = 유스케이스(new DeletionGuardPolicy(true, 0.3, 10, 상한));
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(100, "DEV002"))).block();
+        source.willReturn(조직도(직원들(0, 90), "DEV002"));
+    }
+
+    // 깨뜨릴 변경: 비교 경로가 주입받은 가드가 아닌 다른 판정을 부르기
+    @Test
+    @DisplayName("스냅샷 비교 경로는 비율 아래라도 지울 줄이 상한을 넘으면 중단한다")
+    void 비교_경로는_비율_아래라도_상한을_넘으면_중단한다() {
+        // given — 기준 100줄에서 10줄(10%)이 빠지고 상한은 5
+        기준_100줄에서_10줄이_빠진다(5);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message())
+                .contains("삭제 대상 10건(기준 스냅샷 100건의 10.0%)이 상한 5건을 초과했습니다")
+                .doesNotContain("임계치");
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(snapshots.saved).hasSize(1);
+    }
+
+    // 깨뜨릴 변경: FORCED 가 가드를 건너뛰지 않기
+    @Test
+    @DisplayName("FORCED 면 비교 경로가 상한을 넘어도 지운다")
+    void 강제면_비교_경로가_상한을_넘어도_지운다() {
+        // given
+        기준_100줄에서_10줄이_빠진다(5);
+
+        // when
+        var run = 동기화한다(SyncTrigger.FORCED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.deletedCount()).isEqualTo(10);
+    }
+
+    // 깨뜨릴 변경: 재판정에서 상한을 빼기
+    @Test
+    @DisplayName("상한으로 걸려도 비활성 회수가 상한 아래면 그것만 반영한다")
+    void 상한으로_걸려도_비활성_회수가_상한_아래면_그것만_반영한다() {
+        // given — 기준 100줄, 지울 12줄(12%) 중 비활성 2줄, 상한 5
+        useCase = 유스케이스(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(100, "DEV002"))).block();
+        source.willReturn(조직도(직원들(2, 90), Set.of("user0", "user1"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message())
+                .contains("비활성 회수 2건만 반영하고 나머지 지우기 10건·쓰기 0건은 보류")
+                .contains(" / 삭제 대상 12건(기준 스냅샷 100건의 12.0%)이 상한 5건을 초과했습니다");
+        assertThat(run.deletedCount()).isEqualTo(2);
+        assertThat(writer.appliedDeltas).hasSize(1);
+        assertThat(writer.appliedDeltas.get(0).toDelete()).containsExactlyInAnyOrder(
+                RelationTuple.directMember("user0", "DEV002"), RelationTuple.directMember("user1", "DEV002"));
+    }
+
+    // 깨뜨릴 변경: 장부 맞추기 경로가 주입받은 가드가 아닌 다른 판정을 부르기
+    @Test
+    @DisplayName("장부 맞추기(기준선 없음)도 상한을 본다")
+    void 장부_맞추기도_상한을_본다() {
+        // given — 기준선 없음. 훑은 장부 20줄 중 5줄(25%)을 지워야 하고 상한은 3
+        useCase = 유스케이스(new DeletionGuardPolicy(true, 0.3, 10, 3));
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(직원들(0, 15), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message())
+                .contains("기준선 없음")
+                .contains("삭제 대상 5건(훑은 장부 20건의 25.0%)이 상한 3건을 초과했습니다");
+        assertThat(writer.deleted).isEmpty();
+        assertThat(writer.stored).hasSize(20);
     }
 }

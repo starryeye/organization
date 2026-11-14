@@ -49,5 +49,11 @@ public class SyncProperties {
         private boolean enabled = true;
         private double thresholdRatio = 0.3;
         private int minBaseline = 10;
+
+        /**
+         * 한 회차에 지울 튜플 줄 수의 상한. 넘으면 비율과 상관없이 걸린다(같으면 통과). {@code 0} 이하면 보지 않는다. 10만 명 규모의
+         * 평소 변동보다 훨씬 크고 비율 30% 보다 훨씬 작은 수다(설계 2026-11-13 G1·G2).
+         */
+        private int maxDeletes = 5000;
     }
 }

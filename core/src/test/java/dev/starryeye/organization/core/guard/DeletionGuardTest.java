@@ -93,10 +93,10 @@ class DeletionGuardTest {
     }
 
     @Test
-    @DisplayName("가드를 비활성화하면 전건 삭제도 그대로 진행한다")
+    @DisplayName("가드를 비활성화하면 전건 삭제도 그대로 진행한다 — 상한도 보지 않는다")
     void 비활성화하면_통과한다() {
         // given
-        var guard = new DeletionGuard(new DeletionGuardPolicy(false, 0.3, 10));
+        var guard = new DeletionGuard(new DeletionGuardPolicy(false, 0.3, 10, 5));
         var baseline = 튜플들(100);
 
         // when
@@ -209,5 +209,127 @@ class DeletionGuardTest {
         assertThat(decision.aborted()).isTrue();
         assertThat(decision.partial()).isFalse();
         assertThat(decision.revocationsOnly()).isEmpty();
+    }
+
+    // ---------- 절대 수 상한 (설계 2026-11-13 G1~G5) ----------
+
+    // 깨뜨릴 변경: 상한 비교를 >= 로 바꾸기, 상한 판정을 지우기
+    @Test
+    @DisplayName("지울 줄이 상한과 같으면 통과하고, 하나 넘으면 비율이 임계치 아래여도 중단한다")
+    void 상한과_같으면_통과하고_하나_넘으면_중단한다() {
+        // given — 기준 100건, 상한 5
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        var baseline = 튜플들(100);
+        // when
+        var 같음 = guard.evaluate(앞에서(baseline, 5), Set.of(), baseline.size(), "기준 스냅샷");
+        var 넘음 = guard.evaluate(앞에서(baseline, 6), Set.of(), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(같음.aborted()).isFalse();
+        assertThat(넘음.aborted()).isTrue();
+        assertThat(넘음.message()).isEqualTo(
+                "삭제 대상 6건(기준 스냅샷 100건의 6.0%)이 상한 5건을 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+    }
+
+    // 깨뜨릴 변경: 상한 판정을 min-baseline 미만 이른 반환 뒤에 두기
+    @Test
+    @DisplayName("기준이 최소 기준 미만이어도 상한은 본다 — 비율은 보지 않는다")
+    void 기준이_최소_기준_미만이어도_상한은_본다() {
+        // given
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 3));
+        // when
+        var 넘음 = guard.evaluate(4, 9, "훑은 장부");
+        var 같음 = guard.evaluate(3, 9, "훑은 장부");
+        // then
+        assertThat(넘음.aborted()).isTrue();
+        assertThat(넘음.message()).contains("훑은 장부 9건").contains("상한 3건").doesNotContain("임계치");
+        assertThat(같음.aborted()).isFalse();
+    }
+
+    // 깨뜨릴 변경: 상한이 0 이하일 때 "모두 넘음"으로 보기(maxDeletes > 0 조건 빼기)
+    @Test
+    @DisplayName("상한이 0 이하면 상한을 보지 않는다")
+    void 상한이_0_이하면_상한을_보지_않는다() {
+        // given
+        var 영 = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 0));
+        var 음수 = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, -1));
+        // when, then
+        assertThat(영.evaluate(20, 100, "기준 스냅샷").aborted()).isFalse();
+        assertThat(음수.evaluate(20, 100, "기준 스냅샷").aborted()).isFalse();
+    }
+
+    // 깨뜨릴 변경: 문구에서 둘 다 넘은 경우를 한쪽만 적기
+    @Test
+    @DisplayName("비율과 상한을 모두 넘으면 문구에 둘 다 적는다")
+    void 비율과_상한을_모두_넘으면_문구에_둘_다_적는다() {
+        // given
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 40), Set.of(), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.message()).isEqualTo(
+                "삭제 대상 40건(기준 스냅샷 100건의 40.0%)이 임계치 30.0%와 상한 5건을 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+    }
+
+    // 깨뜨릴 변경: 비율만 넘은 문구를 바꾸기
+    @Test
+    @DisplayName("비율만 넘으면 문구가 지금과 같다")
+    void 비율만_넘으면_문구가_지금과_같다() {
+        // given
+        var guard = new DeletionGuard(DeletionGuardPolicy.defaults());
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 68), Set.of(), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.message()).isEqualTo(
+                "삭제 대상 68건(기준 스냅샷 100건의 68.0%)이 임계치 30.0%를 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+    }
+
+    // 깨뜨릴 변경: 비활성 회수 재판정에서 상한을 빼기
+    @Test
+    @DisplayName("비활성 회수의 재판정도 상한을 본다 — 비활성 부분이 상한을 넘으면 전부 보류한다")
+    void 비활성_회수의_재판정도_상한을_본다() {
+        // given — 기준 100건, 지울 20건(20%), 비활성 8건(8%) — 둘 다 비율 아래, 상한 5 위
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 20), 앞에서(baseline, 8), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.aborted()).isTrue();
+        assertThat(decision.partial()).isFalse();
+        assertThat(decision.revocationsOnly()).isEmpty();
+        assertThat(decision.message()).contains("삭제 대상 20건").contains("상한 5건");
+    }
+
+    // 깨뜨릴 변경: 비활성 부분 재판정을 상한 없이 하기, 또는 부분 반영을 없애기
+    @Test
+    @DisplayName("비활성 부분이 상한 아래면 그것만 반영한다")
+    void 비활성_부분이_상한_아래면_그것만_반영한다() {
+        // given
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 20), 앞에서(baseline, 4), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.aborted()).isTrue();
+        assertThat(decision.partial()).isTrue();
+        assertThat(decision.revocationsOnly()).containsExactlyInAnyOrderElementsOf(앞에서(baseline, 4));
+        assertThat(decision.message()).contains("삭제 대상 20건").contains("상한 5건");
+    }
+
+    // 깨뜨릴 변경: defaults() 의 상한을 0 으로 두기
+    @Test
+    @DisplayName("기본 정책의 상한은 5000줄이다")
+    void 기본_정책의_상한은_5000줄이다() {
+        // given
+        var guard = new DeletionGuard(DeletionGuardPolicy.defaults());
+        // when
+        var 같음 = guard.evaluate(5000, 200_000, "기준 스냅샷");
+        var 넘음 = guard.evaluate(5001, 200_000, "기준 스냅샷");
+        // then
+        assertThat(DeletionGuardPolicy.defaults()).isEqualTo(new DeletionGuardPolicy(true, 0.3, 10, 5000));
+        assertThat(같음.aborted()).isFalse();
+        assertThat(넘음.aborted()).isTrue();
+        assertThat(넘음.message()).contains("상한 5000건").doesNotContain("임계치");
     }
 }

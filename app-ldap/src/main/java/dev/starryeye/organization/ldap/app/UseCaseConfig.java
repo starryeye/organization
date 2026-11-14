@@ -40,7 +40,7 @@ public class UseCaseConfig {
     public DeletionGuard deletionGuard(SyncProperties properties) {
         var config = properties.getDeletionGuard();
         return new DeletionGuard(new DeletionGuardPolicy(
-                config.isEnabled(), config.getThresholdRatio(), config.getMinBaseline()));
+                config.isEnabled(), config.getThresholdRatio(), config.getMinBaseline(), config.getMaxDeletes()));
     }
 
     /**
