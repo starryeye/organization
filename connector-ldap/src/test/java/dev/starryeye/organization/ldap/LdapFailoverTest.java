@@ -233,7 +233,9 @@ class LdapFailoverTest {
         var A바인드 = new 바인드를_센다();
         var A = 서버(BIND_PASSWORD, A바인드, new 검색을_바쁘게_거절한다());
         var B = 서버(BIND_PASSWORD);
-        var properties = 설정(List.of(EmbeddedLdapListener.접속_주소(A), EmbeddedLdapListener.접속_주소(B)));
+        var C = 서버(BIND_PASSWORD);
+        // 셋이어야 한다 — 둘이면 시도 수를 회차 사이에 이어 세어도(k=2 → 2 % 2 = 0) A 로 돌아와 같은 값이 나온다
+        var properties = 설정(List.of(EmbeddedLdapListener.접속_주소(A), EmbeddedLdapListener.접속_주소(B), EmbeddedLdapListener.접속_주소(C)));
         properties.setMaxRetries(3);
         var source = 원천을_만든다(properties);
 
