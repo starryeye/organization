@@ -1,9 +1,11 @@
 package dev.starryeye.organization.ldap;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ldap.core.ContextSource;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.SingleContextSource;
 
+import javax.naming.directory.DirContext;
 import java.util.function.Function;
 
 /**
@@ -16,6 +18,7 @@ import java.util.function.Function;
  * <p>{@code LdapTemplate} 의 {@code isIgnore*} 게터는 패키지 전용이라 기존 템플릿에서 값을
  * 복제할 수도 없다. 그래서 값을 읽어 옮기는 대신 만드는 자리를 하나로 모은다.
  */
+@Slf4j
 public final class LdapTemplates {
 
     private LdapTemplates() {
@@ -38,12 +41,23 @@ public final class LdapTemplates {
      * 이 {@code true} 로 돌아가기 때문이다 — 서버가 자른 결과를 조용히 삼키게 된다.
      */
     public static <T> T 한_커넥션에서(LdapTemplate template, Function<LdapTemplate, T> work) {
-        SingleContextSource single = new SingleContextSource(
-                template.getContextSource().getReadOnlyContext());
+        DirContext ctx = template.getContextSource().getReadOnlyContext();
+        넘김을_알린다(ctx, template.getContextSource());
+        SingleContextSource single = new SingleContextSource(ctx);
         try {
             return work.apply(configured(single));
         } finally {
             single.destroy();
+        }
+    }
+
+    /** 붙은 주소가 첫 주소가 아니면 커넥션마다 WARN 한 줄(설계 2026-11-14 F7 a) — 앞 주소가 오래 죽어 있으면 운영자가 알아챈다. */
+    private static void 넘김을_알린다(DirContext ctx, ContextSource source) {
+        var 붙은 = LdapUrls.붙은_주소(ctx);
+        var 첫 = LdapUrls.첫_주소(source);
+        if (붙은.isPresent() && 첫.isPresent() && !붙은.get().equals(첫.get())) {
+            log.warn("LDAP 이 첫 주소({})가 아니라 {} 에 붙었다 — 앞 주소가 접속·바인드에 실패했다. 오래가면 ldap.urls 에서 그 주소를 뒤로 옮기거나 뺀다",
+                    첫.get(), 붙은.get());
         }
     }
 

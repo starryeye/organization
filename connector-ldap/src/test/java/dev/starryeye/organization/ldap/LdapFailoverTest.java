@@ -1,5 +1,9 @@
 package dev.starryeye.organization.ldap;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSimpleBindRequest;
@@ -10,10 +14,14 @@ import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import dev.starryeye.organization.ldap.fixture.SilentLdapServer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.ldap.core.support.LdapContextSource;
 
+import javax.naming.Context;
+import javax.naming.directory.DirContext;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -67,8 +75,18 @@ class LdapFailoverTest {
 
     private final List<InMemoryDirectoryServer> 서버들 = new ArrayList<>();
 
+    private final ListAppender<ILoggingEvent> 로그 = new ListAppender<>();
+    private final Logger 템플릿_로거 = (Logger) LoggerFactory.getLogger(LdapTemplates.class);
+
+    @BeforeEach
+    void 로그를_붙인다() {
+        로그.start();
+        템플릿_로거.addAppender(로그);
+    }
+
     @AfterEach
     void 서버를_내린다() {
+        템플릿_로거.detachAppender(로그);
         서버들.forEach(서버 -> 서버.shutDown(true));
     }
 
@@ -124,6 +142,77 @@ class LdapFailoverTest {
                 .isInstanceOf(org.springframework.ldap.AuthenticationException.class);
         assertThat(A바인드.횟수()).as("인증 실패는 재시도하지 않는다").isEqualTo(1);
         assertThat(B바인드.횟수()).as("인증 실패는 다음 주소로 넘기지 않는다").isZero();
+    }
+
+    @Test
+    @DisplayName("넘긴 커넥션의 붙은 주소는 둘째 주소다")
+    void 넘긴_커넥션의_붙은_주소는_둘째_주소다() throws Exception {
+        var B = 서버(BIND_PASSWORD);
+        var 주소B = EmbeddedLdapListener.접속_주소(B);
+        LdapContextSource contextSource = 컨텍스트_소스(설정(List.of(SilentLdapServer.닫힌_주소(), 주소B)));
+
+        DirContext ctx = contextSource.getReadOnlyContext();
+        try {
+            // F7 이 기대는 JDK provider 동작: 접속한 URL 로 java.naming.provider.url 을 덮어쓴다 (목록 전체가 아니라 붙은 주소 하나)
+            assertThat(ctx.getEnvironment().get(Context.PROVIDER_URL)).asString().doesNotContain(" ").isEqualTo(주소B + "/" + BASE_DN);
+            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B));
+        } finally {
+            ctx.close();
+        }
+    }
+
+    @Test
+    @DisplayName("넘기지 않은 커넥션의 붙은 주소는 첫 주소다")
+    void 넘기지_않은_커넥션의_붙은_주소는_첫_주소다() throws Exception {
+        var B = 서버(BIND_PASSWORD);
+        var 주소B = EmbeddedLdapListener.접속_주소(B);
+        LdapContextSource contextSource = 컨텍스트_소스(설정(List.of(주소B, SilentLdapServer.닫힌_주소())));
+
+        DirContext ctx = contextSource.getReadOnlyContext();
+        try {
+            assertThat(LdapUrls.붙은_주소(ctx)).contains(LdapUrls.주소_부분(주소B));
+        } finally {
+            ctx.close();
+        }
+    }
+
+    @Test
+    @DisplayName("넘긴 커넥션마다 WARN 한 줄을 남긴다")
+    void 넘긴_커넥션마다_WARN_한_줄을_남긴다() throws Exception {
+        var B = 서버(BIND_PASSWORD);
+        var 주소B = EmbeddedLdapListener.접속_주소(B);
+        String 닫힌 = SilentLdapServer.닫힌_주소();
+
+        그림을_읽는다(설정(List.of(닫힌, 주소B)));
+
+        var 경고들 = 경고들();
+        assertThat(경고들).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(경고들).allSatisfy(메시지 -> assertThat(메시지)
+                .contains(LdapUrls.주소_부분(주소B))
+                .contains(LdapUrls.주소_부분(닫힌)));
+    }
+
+    @Test
+    @DisplayName("주소가 하나면 WARN 이 없다")
+    void 주소가_하나면_WARN_이_없다() throws Exception {
+        var B = 서버(BIND_PASSWORD);
+
+        그림을_읽는다(설정(List.of(EmbeddedLdapListener.접속_주소(B))));
+
+        assertThat(경고들()).isEmpty();
+    }
+
+    private List<String> 경고들() {
+        return 로그.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+    }
+
+    private static LdapContextSource 컨텍스트_소스(LdapProperties properties) throws Exception {
+        LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);
+        contextSource.afterPropertiesSet();
+        return contextSource;
     }
 
     private static LdapProperties 설정(List<String> 주소들) {

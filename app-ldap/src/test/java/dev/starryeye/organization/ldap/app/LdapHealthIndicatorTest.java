@@ -1,6 +1,15 @@
 package dev.starryeye.organization.ldap.app;
 
+import com.unboundid.ldap.listener.InMemoryDirectoryServer;
+import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
+import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSimpleBindRequest;
+import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
+import dev.starryeye.organization.ldap.LdapConfig;
 import dev.starryeye.organization.ldap.LdapProperties;
+import dev.starryeye.organization.ldap.LdapUrls;
+import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
+import dev.starryeye.organization.ldap.fixture.SilentLdapServer;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.health.Health;
@@ -238,5 +247,99 @@ class LdapHealthIndicatorTest {
 
         // then
         assertThat(source.호출수).hasValue(2);
+    }
+
+    // ---- 운영과 같은 컨텍스트 소스로, 주소 목록을 넘기는 점검(설계 2026-11-14 F5) ----
+
+    private static final String 베이스 = "dc=example,dc=com";
+    private static final String 바인드_DN = "cn=admin," + 베이스;
+    private static final String 바인드_비밀번호 = "adminpassword";
+
+    private final java.util.List<InMemoryDirectoryServer> 서버들 = new java.util.ArrayList<>();
+
+    @AfterEach
+    void 서버를_내린다() {
+        서버들.forEach(서버 -> 서버.shutDown(true));
+    }
+
+    private InMemoryDirectoryServer 서버(String 비밀번호, InMemoryOperationInterceptor... 가로채기) throws Exception {
+        var config = new InMemoryDirectoryServerConfig(베이스);
+        config.addAdditionalBindCredentials(바인드_DN, 비밀번호);
+        config.setListenerConfigs(EmbeddedLdapListener.리스너("health"));
+        config.setSchema(null);
+        for (InMemoryOperationInterceptor 가로챈다 : 가로채기) {
+            config.addInMemoryOperationInterceptor(가로챈다);
+        }
+        var server = new InMemoryDirectoryServer(config);
+        server.startListening();
+        서버들.add(server);
+        return server;
+    }
+
+    private static LdapHealthIndicator 운영과_같은_인디케이터(List<String> 주소들) throws Exception {
+        var properties = 설정();
+        properties.setUrls(주소들);
+        properties.setBindDn(바인드_DN);
+        properties.setBindPassword(바인드_비밀번호);
+        var contextSource = new LdapConfig().ldapContextSource(properties);
+        contextSource.afterPropertiesSet();
+        return new LdapHealthIndicator(contextSource, properties, Clock.systemUTC());
+    }
+
+    @Test
+    @DisplayName("첫 주소가 거절하고 둘째가 바인드되면 UP 이고 붙은 주소가 둘째다")
+    void 첫_주소가_거절하고_둘째가_바인드되면_UP_이고_붙은_주소가_둘째다() throws Exception {
+        var B = 서버(바인드_비밀번호);
+        var 주소들 = List.of(SilentLdapServer.닫힌_주소(), EmbeddedLdapListener.접속_주소(B));
+
+        Health health = 운영과_같은_인디케이터(주소들).health().block(Duration.ofSeconds(10));
+
+        assertThat(health.getStatus()).isEqualTo(Status.UP);
+        assertThat(health.getDetails())
+                .containsEntry("connectedUrl", LdapUrls.주소_부분(주소들.get(1)))
+                .containsEntry("urls", 주소들);
+    }
+
+    @Test
+    @DisplayName("첫 주소가 답하지 않으면 2초 안에 DOWN 이다")
+    void 첫_주소가_답하지_않으면_2초_안에_DOWN_이다() throws Exception {
+        var B = 서버(바인드_비밀번호);
+        try (SilentLdapServer 침묵 = SilentLdapServer.연다()) {
+            var indicator = 운영과_같은_인디케이터(List.of(침묵.접속_주소(), EmbeddedLdapListener.접속_주소(B)));
+
+            // 프로브 상한(2초)이 접속 한도(기본 10초)보다 짧아 DOWN 이다 — 시간은 단언하지 않는다
+            Health health = indicator.health().block(Duration.ofSeconds(10));
+
+            assertThat(health.getStatus()).isEqualTo(Status.DOWN);
+        }
+    }
+
+    @Test
+    @DisplayName("인증 실패면 프로브 하나에 틀린 바인드는 한 번이다")
+    void 인증_실패면_프로브_하나에_틀린_바인드는_한_번이다() throws Exception {
+        var A바인드 = new 바인드를_센다();
+        var B바인드 = new 바인드를_센다();
+        var A = 서버("다른비밀번호", A바인드);
+        var B = 서버("다른비밀번호", B바인드);
+        var indicator = 운영과_같은_인디케이터(List.of(EmbeddedLdapListener.접속_주소(A), EmbeddedLdapListener.접속_주소(B)));
+
+        Health health = indicator.health().block(Duration.ofSeconds(10));
+
+        assertThat(health.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(A바인드.횟수() + B바인드.횟수()).as("주소마다 바인드하면 틀린 비밀번호가 DC 수만큼 쌓여 잠긴다").isEqualTo(1);
+    }
+
+    private static final class 바인드를_센다 extends InMemoryOperationInterceptor {
+
+        private final AtomicInteger 수 = new AtomicInteger();
+
+        @Override
+        public void processSimpleBindRequest(InMemoryInterceptedSimpleBindRequest request) {
+            수.incrementAndGet();
+        }
+
+        int 횟수() {
+            return 수.get();
+        }
     }
 }

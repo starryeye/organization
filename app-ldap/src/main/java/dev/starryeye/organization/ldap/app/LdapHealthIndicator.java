@@ -1,6 +1,7 @@
 package dev.starryeye.organization.ldap.app;
 
 import dev.starryeye.organization.ldap.LdapProperties;
+import dev.starryeye.organization.ldap.LdapUrls;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.ReactiveHealthIndicator;
@@ -9,6 +10,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import javax.naming.directory.DirContext;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -60,6 +62,10 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
      * {@code getReadOnlyContext()} 는 바인드까지 수행하므로 자격증명 문제도 함께 잡힌다.
      * 다만 인증이 실패하면 {@link #인증_실패_뒤_쉼} 동안은 바인드를 쉬고 마지막 실패로 DOWN 을 답한다 — 틀린 비밀번호를 프로브가 되풀이하면 서비스 계정이 잠긴다.
      *
+     * <p><b>주소 목록 하나로 바인드 하나만 한다</b>(설계 2026-11-14 F5). JNDI 가 목록을 앞에서부터 시도하므로 주소마다 따로 바인드할 필요가 없고, 따로 하면 틀린
+     * 비밀번호가 DC 수만큼 쌓여 AD 가 하나의 잠금 횟수로 센다. 앞 주소가 접속만 받고 답하지 않으면 {@link #PROBE_TIMEOUT} 안에 DOWN 이다. 어느 주소에 붙었는지는
+     * 세부 {@code connectedUrl} 에 싣는다(JNDI 가 덮어쓴 값을 읽을 수 있을 때만).
+     *
      * <p>LDAP 은 블로킹이라 {@code boundedElastic} 으로 격리한다 — 이벤트 루프에서
      * 직접 부르면 프로브 하나가 애플리케이션 전체를 멈춘다.
      */
@@ -80,16 +86,22 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
 
     private Mono<Health> 바인드한다() {
         return Mono.fromCallable(() -> {
-                    contextSource.getReadOnlyContext().close();
-                    return true;
+                    DirContext ctx = contextSource.getReadOnlyContext();
+                    try {
+                        return LdapUrls.붙은_주소(ctx);
+                    } finally {
+                        ctx.close();
+                    }
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(ignored -> 마지막_인증실패.set(null))
-                .map(ignored -> Health.up()
-                        .withDetail("urls", properties.getUrls())
-                        .withDetail("baseDn", properties.getBaseDn())
-                        .withDetail("strategy", properties.getStrategy())
-                        .build())
+                .map(붙은 -> {
+                    Health.Builder up = Health.up().withDetail("urls", properties.getUrls());
+                    붙은.ifPresent(주소 -> up.withDetail("connectedUrl", 주소));
+                    return up.withDetail("baseDn", properties.getBaseDn())
+                            .withDetail("strategy", properties.getStrategy())
+                            .build();
+                })
                 .timeout(PROBE_TIMEOUT)
                 .onErrorResume(error -> {
                     if (error instanceof org.springframework.ldap.AuthenticationException) {
