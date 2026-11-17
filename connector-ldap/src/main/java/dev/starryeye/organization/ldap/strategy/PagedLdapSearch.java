@@ -33,7 +33,8 @@ import java.util.Map;
  * 봐주지만 실제 OpenLDAP 은 거절한다 — 한 페이지를 넘는 디렉터리에서 전체 동기화가 통째로
  * 실패하는데, 임베디드 서버로만 검증하면 그 사실이 드러나지 않는다.
  *
- * <p>{@code pageSize}가 0 이하면 페이징을 걸지 않고 단일 검색으로 처리한다.
+ * <p>{@code pageSize}가 0 이하면 페이징을 걸지 않고 단일 검색으로 처리한다. 그 검색도 {@link dev.starryeye.organization.ldap.LdapTemplates#한_커넥션에서}
+ * 안에서 한다 — 회차의 모든 커넥션이 그곳을 지나야 넘김 WARN(설계 2026-11-14 F7 a)이 빠지지 않는다.
  *
  * <p><b>{@code hasMore()}는 반드시 방금 검색을 수행한 processor 인스턴스에서 확인해야 한다.</b>
  * 응답의 쿠키는 {@code handleResponse()}로 그 인스턴스에 기록되기 때문이다. 새로 생성한
@@ -64,9 +65,12 @@ final class PagedLdapSearch {
         ContextMapperCallbackHandler<T> handler = new ContextMapperCallbackHandler<>(mapper);
         검색의_참조 참조 = new 검색의_참조(base, filter);
         if (pageSize <= 0) {
-            참조.검색한다(() -> template.search(base, filter, controls, handler));
-            참조.확인한다(handler.getList().size());
-            return handler.getList();
+            // 검색 하나가 커넥션 하나라 동작은 같다 — 커넥션을 한_커넥션에서 로 얻어야 넘김 WARN(설계 2026-11-14 F7 a)이 이 길에서도 남는다
+            return LdapTemplates.한_커넥션에서(template, 한커넥션 -> {
+                참조.검색한다(() -> 한커넥션.search(base, filter, controls, handler));
+                참조.확인한다(handler.getList().size());
+                return handler.getList();
+            });
         }
         return LdapTemplates.한_커넥션에서(template, paged -> {
             페이징_처리기 processor = new 페이징_처리기(pageSize, null);

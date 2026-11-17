@@ -210,6 +210,24 @@ class LdapFailoverTest {
     }
 
     @Test
+    @DisplayName("페이징을 끈 검색(ldap.page-size=0)도 넘긴 커넥션에 WARN 을 남긴다")
+    void 페이징을_끈_검색도_넘긴_커넥션에_WARN_을_남긴다() throws Exception {
+        var B = 서버(BIND_PASSWORD);
+        var 주소B = EmbeddedLdapListener.접속_주소(B);
+        String 닫힌 = SilentLdapServer.닫힌_주소();
+        var properties = 설정(List.of(닫힌, 주소B));
+        properties.setPageSize(0);
+
+        DirectorySnapshot 그림 = 그림을_읽는다(properties);
+
+        assertThat(그림.users()).containsOnlyKeys("kim");
+        assertThat(그림.groups()).containsOnlyKeys("DEV001");
+        assertThat(경고들()).isNotEmpty().allSatisfy(메시지 -> assertThat(메시지)
+                .contains(LdapUrls.주소_부분(주소B).orElseThrow())
+                .contains(LdapUrls.주소_부분(닫힌).orElseThrow()));
+    }
+
+    @Test
     @DisplayName("주소가 하나면 WARN 이 없다")
     void 주소가_하나면_WARN_이_없다() throws Exception {
         var B = 서버(BIND_PASSWORD);
