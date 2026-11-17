@@ -25,6 +25,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -73,6 +74,39 @@ class LdapHealthIndicatorTest {
             호출수.incrementAndGet();
             동작.run();
             return 아무것도_안_하는_컨텍스트();
+        }
+    }
+
+    /**
+     * 걸쇠가 풀릴 때까지 막혀 있다가 인증 실패(49)를 던지는 ContextSource — 앞 주소가 답하지 않는 동안 다음 DC 의 틀린 비밀번호 응답을 기다리는 바인드를
+     * 흉내 낸다. 접속 대기처럼 인터럽트로 깨지 않는다 — 받으면 적어 두고 계속 기다린다.
+     */
+    private static final class 늦게_인증을_거절하는_ContextSource extends LdapContextSource {
+
+        final CountDownLatch 들어왔다 = new CountDownLatch(1);
+        final CountDownLatch 풀어준다 = new CountDownLatch(1);
+        final CountDownLatch 던졌다 = new CountDownLatch(1);
+        final AtomicInteger 호출수 = new AtomicInteger();
+        /** 기다리는 동안이나 던질 때 스레드가 인터럽트를 받았는가 */
+        final AtomicBoolean 인터럽트를_받았다 = new AtomicBoolean();
+
+        @Override
+        public DirContext getReadOnlyContext() {
+            호출수.incrementAndGet();
+            들어왔다.countDown();
+            while (true) {
+                try {
+                    풀어준다.await();
+                    break;
+                } catch (InterruptedException e) {
+                    인터럽트를_받았다.set(true);
+                }
+            }
+            if (Thread.currentThread().isInterrupted()) {
+                인터럽트를_받았다.set(true);
+            }
+            던졌다.countDown();
+            throw new org.springframework.ldap.AuthenticationException(new javax.naming.AuthenticationException("49"));
         }
     }
 
@@ -232,6 +266,49 @@ class LdapHealthIndicatorTest {
     }
 
     @Test
+    @DisplayName("프로브 상한 뒤에 온 인증 실패도 쉼을 건다 — 상한이 바인드를 끊거나 인터럽트하지 않는다(설계 2026-11-14 F5)")
+    void 늦게_온_인증_실패도_쉼을_건다() throws Exception {
+        // given — 앞 주소가 답하지 않아 바인드가 상한(2초)을 넘긴다
+        var 시계 = new 움직이는_시계();
+        var source = new 늦게_인증을_거절하는_ContextSource();
+        var indicator = new LdapHealthIndicator(source, 설정(), 시계);
+        Health 첫 = indicator.health().block(Duration.ofSeconds(10));
+
+        // when — 상한 뒤에 다음 DC 가 49 로 답한다
+        source.풀어준다.countDown();
+        assertThat(source.던졌다.await(10, TimeUnit.SECONDS)).isTrue();
+        Health 다음 = indicator.health().block(Duration.ofSeconds(10));
+
+        // then — 그 49 를 기억해 쉬고, 같은 틀린 비밀번호로 다시 바인드하지 않는다
+        assertThat(첫.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(다음.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(다음.getDetails()).containsEntry("다음 확인", "2026-10-05T00:30:00Z");
+        assertThat(source.호출수).hasValue(1);
+        assertThat(source.인터럽트를_받았다).as("상한이 바인드를 인터럽트하면 JNDI 가 다음 DC 에 보낸 틀린 바인드의 답을 잃는다").isFalse();
+    }
+
+    @Test
+    @DisplayName("진행 중인 바인드가 있으면 새로 바인드하지 않는다 — 앞 주소가 답하지 않는 동안 틀린 비밀번호가 프로브마다 쌓이지 않게(설계 2026-11-14 F5)")
+    void 진행_중인_바인드가_있으면_새로_바인드하지_않는다() throws Exception {
+        // given
+        var source = new 늦게_인증을_거절하는_ContextSource();
+        var indicator = new LdapHealthIndicator(source, 설정(), new 움직이는_시계());
+        try {
+            // when — 바인드가 막혀 있는 동안 프로브 둘
+            Health 첫 = indicator.health().block(Duration.ofSeconds(10));
+            assertThat(source.들어왔다.await(10, TimeUnit.SECONDS)).isTrue();
+            Health 둘째 = indicator.health().block(Duration.ofSeconds(10));
+
+            // then
+            assertThat(첫.getStatus()).isEqualTo(Status.DOWN);
+            assertThat(둘째.getStatus()).isEqualTo(Status.DOWN);
+            assertThat(source.호출수).hasValue(1);
+        } finally {
+            source.풀어준다.countDown();
+        }
+    }
+
+    @Test
     @DisplayName("인증이 아닌 실패(연결 끊김)는 쉬지 않고 매번 다시 확인한다")
     void 인증이_아닌_실패는_쉬지_않는다() {
         // given
@@ -298,6 +375,18 @@ class LdapHealthIndicatorTest {
         assertThat(health.getDetails())
                 .containsEntry("connectedUrl", LdapUrls.주소_부분(주소들.get(1)).orElseThrow())
                 .containsEntry("urls", 주소들);
+    }
+
+    @Test
+    @DisplayName("주소가 하나인 실제 서버면 세부에 붙은 주소가 있다")
+    void 주소가_하나인_실제_서버면_세부에_붙은_주소가_있다() throws Exception {
+        var B = 서버(바인드_비밀번호);
+        var 주소 = EmbeddedLdapListener.접속_주소(B);
+
+        Health health = 운영과_같은_인디케이터(List.of(주소)).health().block(Duration.ofSeconds(10));
+
+        assertThat(health.getStatus()).isEqualTo(Status.UP);
+        assertThat(health.getDetails()).containsEntry("connectedUrl", LdapUrls.주소_부분(주소).orElseThrow());
     }
 
     @Test
