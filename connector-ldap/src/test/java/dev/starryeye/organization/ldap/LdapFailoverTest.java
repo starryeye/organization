@@ -253,6 +253,7 @@ class LdapFailoverTest {
         assertThat(그림.groups()).containsOnlyKeys("DEV001");
         assertThat(A검색.횟수()).as("재시도는 둘째 주소부터라 A 는 검색을 한 번만 받는다").isEqualTo(1);
         assertThat(A바인드.횟수()).isEqualTo(1);
+        assertThat(경고들()).as("돌린 시도는 제 목록의 첫 주소(B)에 붙으므로 접속 단계 넘김 WARN(F7 a)이 없다").isEmpty();
     }
 
     @Test
@@ -303,6 +304,7 @@ class LdapFailoverTest {
 
         assertThatThrownBy(() -> source.fetchAll().block(Duration.ofSeconds(30)))
                 .as("마지막 실패를 그대로 던진다 — RetryExhaustedException 이 아니다")
+                .isInstanceOf(org.springframework.ldap.CommunicationException.class)
                 .matches(e -> !reactor.core.Exceptions.isRetryExhausted(e));
     }
 
