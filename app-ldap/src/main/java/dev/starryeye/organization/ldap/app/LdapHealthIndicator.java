@@ -29,6 +29,9 @@ import java.util.concurrent.CompletableFuture;
  * 답하지 않는 동안 틀린 비밀번호가 프로브마다 다음 DC 에 쌓이지 않게. 상한이 바인드를 끊으면 JNDI 는 그 뒤에도 다음 DC 에 바인드를 보내고, 그 49 는
  * 아무도 받지 않아 쉼이 걸리지 않는다 — 프로브마다 틀린 바인드가 하나씩 늘어 몇 분 만에 서비스 계정이 잠긴다.
  *
+ * <p><b>2초보다 오래 걸린 바인드는 붙었어도 DOWN 이다</b>(설계 2026-11-14 §3.3). 그 바인드를 본 모든 프로브가 같은 DOWN 을 받는다 — 앞 주소가 답하지 않는
+ * 동안 늦게 기다리기 시작한 프로브만 UP 을 보는 흔들림이 없다. 세부에 {@code urls}·{@code connectedUrl}·{@code 이유} 를 싣는다.
+ *
  * <p><b>빈 이름이 {@code ldapHealthIndicator} 다.</b> Spring Boot 는 {@code LdapOperations} 빈이 있으면 블로킹 기본 LDAP 인디케이터를 더하는데,
  * {@code ldapHealthIndicator}·{@code ldapHealthContributor} 라는 빈이 있으면 물러난다. 둘 다 헬스 이름이 {@code ldap} 이라, 다른 이름(예:
  * {@code ldap})으로 두면 나중에 등록되는 Boot 의 것이 이것을 덮어 인증 실패 뒤 쉼과 프로브 상한이 돌지 않는다. 헬스 이름은 빈 이름에서
@@ -81,7 +84,8 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
      * <p><b>프로브 상한 뒤에 온 인증 실패도 기억하고, 진행 중인 바인드가 있으면 새로 바인드하지 않는다</b> — 앞 주소가 답하지 않는 동안 틀린 비밀번호가 프로브마다
      * 다음 DC 에 쌓이지 않게. 바인드는 {@link CompletableFuture} 하나로 따로 돌고 결과(인증 실패의 시각·오류, 성공이면 붙은 주소)를 스스로 적는다. 프로브는 그것을
      * {@code Mono.fromFuture(바인드, true)} 로 기다린다 — 둘째 인자(suppressCancel)가 상한이 끝나 구독을 끊어도 바인드를 취소하지 않게 한다. 바인드 작업은
-     * 스케줄러에 넘긴 뒤 아무도 손잡이를 쥐지 않아 끊기거나 인터럽트되지 않는다. 그 사이에 온 프로브는 같은 바인드를 기다린다.
+     * 스케줄러에 넘긴 뒤 아무도 손잡이를 쥐지 않아 끊기거나 인터럽트되지 않는다. 그 사이에 온 프로브는 같은 바인드를 기다린다. 바인드가 상한보다 오래 걸렸으면
+     * 다음 주소에 붙었어도 그 답은 DOWN 이다 — 앞 주소가 답하지 않는 동안 신호가 꾸준히 DOWN 이다.
      *
      * <p>쉼과 진행 중인 바인드는 구독할 때 본다 — {@code health()} 를 부른 때가 아니다.
      *
@@ -114,10 +118,16 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
         });
     }
 
-    /** 바인드 작업을 {@code boundedElastic} 에 넘긴다. 돌려받은 {@code Disposable} 은 쥐지 않는다 — 쥐면 누군가 그것으로 바인드를 끊을 수 있다. */
+    /**
+     * 바인드 작업을 {@code boundedElastic} 에 넘긴다. 돌려받은 {@code Disposable} 은 쥐지 않는다 — 쥐면 누군가 그것으로 바인드를 끊을 수 있다.
+     *
+     * <p>걸린 시간은 여기서부터 잰다({@code System.nanoTime} — 벽시계가 아니다). 이 바인드를 기다리는 첫 프로브의 상한보다 먼저 재기 시작하므로, 첫 프로브가
+     * 상한에 걸린 바인드는 늘 "상한보다 오래 걸렸다" 로 읽힌다. 스케줄러 대기열에서 기다린 시간도 든다 — 그것도 2초 안에 답하지 못한 것이다.
+     */
     private void 시작한다(CompletableFuture<Health> 바인드) {
+        long 시작 = System.nanoTime();
         try {
-            Schedulers.boundedElastic().schedule(() -> 바인드한다(바인드));
+            Schedulers.boundedElastic().schedule(() -> 바인드한다(바인드, 시작));
         } catch (RuntimeException e) {
             // 스케줄러가 받지 않으면(대기열이 참) 자리를 비운다 — 비우지 않으면 다음 프로브들이 시작하지도 않은 바인드를 기다린다
             자리를_비운다();
@@ -128,15 +138,18 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
     /**
      * 바인드 하나를 끝까지 하고 결과를 스스로 적는다 — 기다리는 프로브가 상한으로 먼저 끝났어도 여기서 적은 인증 실패가 쉼을 건다. 결과를 적으며 자리를 비운 뒤에
      * 답을 넘긴다 — 답을 받은 프로브의 다음 구독이 쉼을 보거나 새로 바인드할 수 있게.
+     *
+     * <p>붙었어도 {@link #PROBE_TIMEOUT} 보다 오래 걸렸으면 DOWN 이다({@link #느린_답}). 자격 증명은 맞았으므로 인증 실패 기억은 지운다.
      */
-    private void 바인드한다(CompletableFuture<Health> 바인드) {
+    private void 바인드한다(CompletableFuture<Health> 바인드, long 시작) {
         try {
             Optional<String> 붙은 = 붙는다();
+            boolean 오래_걸렸다 = System.nanoTime() - 시작 > PROBE_TIMEOUT.toNanos();
             synchronized (자물쇠) {
                 마지막_인증실패 = null;
                 진행중 = null;
             }
-            바인드.complete(붙은_답(붙은));
+            바인드.complete(오래_걸렸다 ? 느린_답(붙은) : 붙은_답(붙은));
         } catch (org.springframework.ldap.AuthenticationException e) {
             인증실패 기억 = new 인증실패(clock.instant(), e);
             synchronized (자물쇠) {
@@ -172,6 +185,18 @@ public class LdapHealthIndicator implements ReactiveHealthIndicator {
         붙은.ifPresent(주소 -> up.withDetail("connectedUrl", 주소));
         return up.withDetail("baseDn", properties.getBaseDn())
                 .withDetail("strategy", properties.getStrategy())
+                .build();
+    }
+
+    /**
+     * 상한보다 오래 걸린 바인드의 답 — 결국 다음 주소에 붙었어도 DOWN 이다(설계 2026-11-14 §3.3 "2초 안에 붙지 못함 → DOWN"). 그 바인드를 늦게 기다리기
+     * 시작한 프로브가 성공을 UP 으로 보면, 앞 주소가 답하지 않는 동안 신호가 UP·DOWN 을 오간다. 설정한 목록과 붙은 주소(읽을 수 있을 때), 이유를 싣는다.
+     */
+    private Health 느린_답(Optional<String> 붙은) {
+        Health.Builder down = Health.down().withDetail("urls", properties.getUrls());
+        붙은.ifPresent(주소 -> down.withDetail("connectedUrl", 주소));
+        return down.withDetail("이유", "바인드가 %d초보다 오래 걸렸다 — 앞 주소가 답하지 않았을 수 있다. ldap.urls 에서 그 주소를 뒤로 옮기거나 뺀다"
+                        .formatted(PROBE_TIMEOUT.toSeconds()))
                 .build();
     }
 

@@ -59,21 +59,37 @@ class LdapHealthIndicatorTest {
                 (proxy, method, args) -> null);
     }
 
+    /** 환경의 {@code java.naming.provider.url} 이 {@code 붙은_주소} 인 컨텍스트 — JNDI 가 붙은 주소로 덮어쓴 커넥션을 흉내 낸다. */
+    private static DirContext 붙은_컨텍스트(String 붙은_주소) {
+        var 환경 = new java.util.Hashtable<String, Object>();
+        환경.put(javax.naming.Context.PROVIDER_URL, 붙은_주소);
+        return (DirContext) Proxy.newProxyInstance(
+                LdapHealthIndicatorTest.class.getClassLoader(),
+                new Class<?>[]{DirContext.class},
+                (proxy, method, args) -> "getEnvironment".equals(method.getName()) ? 환경 : null);
+    }
+
     /** 지정한 방식으로만 응답하는 ContextSource. 나머지 동작은 건드리지 않는다. */
     private static class 가짜ContextSource extends LdapContextSource {
 
         private final Runnable 동작;
+        private final DirContext 컨텍스트;
         final AtomicInteger 호출수 = new AtomicInteger();
 
         가짜ContextSource(Runnable 동작) {
+            this(동작, 아무것도_안_하는_컨텍스트());
+        }
+
+        가짜ContextSource(Runnable 동작, DirContext 컨텍스트) {
             this.동작 = 동작;
+            this.컨텍스트 = 컨텍스트;
         }
 
         @Override
         public DirContext getReadOnlyContext() {
             호출수.incrementAndGet();
             동작.run();
-            return 아무것도_안_하는_컨텍스트();
+            return 컨텍스트;
         }
     }
 
@@ -306,6 +322,44 @@ class LdapHealthIndicatorTest {
         } finally {
             source.풀어준다.countDown();
         }
+    }
+
+    @Test
+    @DisplayName("2초보다 오래 걸린 바인드는 다음 주소에 붙어 끝났어도 그것을 본 프로브에 DOWN 이다 — 늦게 기다린 프로브가 UP 으로 흔들리지 않는다(설계 2026-11-14 §3.3)")
+    void 오래_걸린_바인드는_붙었어도_DOWN_이다() throws Exception {
+        // given — 앞 주소가 답하지 않아 바인드가 상한(2초)을 넘긴 뒤 다음 주소(dc2)에 붙는다
+        var 걸쇠 = new CountDownLatch(1);
+        var source = new 가짜ContextSource(() -> {
+            while (true) {
+                try {
+                    걸쇠.await();
+                    return;
+                } catch (InterruptedException e) {
+                    // 접속 대기처럼 인터럽트로 깨지 않는다
+                }
+            }
+        }, 붙은_컨텍스트("ldap://dc2:389/dc=example,dc=com"));
+        var indicator = new LdapHealthIndicator(source, 설정(), new 움직이는_시계());
+        Health 첫 = indicator.health().block(Duration.ofSeconds(10));
+
+        // when — 바인드가 아직 막혀 있을 때 프로브 하나가 그것을 기다리기 시작하고, 그 뒤에 바인드가 끝난다.
+        // 바인드는 첫 프로브의 상한보다 먼저 시작해 그 상한 뒤에 끝났으므로 늘 2초를 넘는다 — 시간 값은 단언하지 않는다
+        java.util.concurrent.CompletableFuture<Health> 기다린_프로브 = indicator.health().toFuture();
+        걸쇠.countDown();
+        Health 기다린 = 기다린_프로브.get(10, TimeUnit.SECONDS);
+        Health 다음 = indicator.health().block(Duration.ofSeconds(10));
+
+        // then
+        assertThat(첫.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(기다린.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(기다린.getDetails())
+                .containsEntry("urls", List.of("ldap://localhost:1389"))
+                .containsEntry("connectedUrl", "ldap://dc2:389")
+                .hasEntrySatisfying("이유", 이유 -> assertThat(이유).asString().contains("오래 걸렸다"))
+                .doesNotContainKey("다음 확인");
+        assertThat(다음.getStatus()).as("빠른 바인드는 UP 이다").isEqualTo(Status.UP);
+        assertThat(다음.getDetails()).containsEntry("connectedUrl", "ldap://dc2:389");
+        assertThat(source.호출수).as("기다린 프로브는 새로 바인드하지 않는다").hasValue(2);
     }
 
     @Test
