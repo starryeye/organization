@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: 27dac6c (ldap-dc-failover, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 66c569c (ldap-dc-failover, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -183,7 +183,7 @@ Authorization: Bearer <admin.sync 범위의 토큰>
 
 접속 설정은 `ldap.urls`(주소 목록, 기본 `[ldap://localhost:1389]`), `ldap.base-dn`(기본 `dc=example,dc=com`), `ldap.bind-dn`, `ldap.bind-password` 다. 운영(`prod`)은 모든 주소가 `ldaps://` 여야 하고(`ldap.require-tls`) 비밀번호를 환경 변수 `LDAP_BIND_PASSWORD` 로 받는다. 바인드 DN 이 있는데 비밀번호가 비었거나 풀리지 않은 자리표시자면 기동을 멈춘다([11 — app-ldap 설정](11-운영.md#14-app-ldap--ldap)).
 
-**주소 목록과 넘김.** `ldap.urls` 는 목록이고 순서가 선호 순서다(가까운 DC 를 앞에). yml 목록이나 쉼표로 이은 문자열(`LDAP_URLS=ldaps://dc1:636,ldaps://dc2:636`)로 준다. 목록은 `LdapContextSource.setUrls` 로 JNDI 의 표준 주소 목록이 된다 — 회차가 여는 커넥션(검색·member 이어받기)마다 앞 주소부터 붙고, 접속·바인드가 실패하면(거절·닿지 않음·`connect-timeout`·바인드 응답 없음) 다음 주소로 간다. **인증 실패(결과 코드 49)는 넘기지 않고** 읽기가 재시도 없이 실패한다 — DC 마다 틀린 바인드를 보내면 AD 의 잠금 기준에 DC 수만큼 빨리 닿는다. 접속한 뒤의 실패(검색 도중 끊김·읽기 한도·busy)는 JNDI 가 넘기지 않으므로 재시도가 맡는다([3.13](#313-재시도와-타임아웃)). 첫 주소가 아닌 곳에 붙으면 WARN 이 남는다("LDAP 이 첫 주소(…)가 아니라 … 에 붙었다"). 주소가 하나인 배포는 넘김도 WARN 도 없다. 기동 때 검사한다(`LdapConfig.설정을_검사한다`): 목록이 비었거나, 주소가 `ldap://호스트[:포트]`·`ldaps://호스트[:포트]` 꼴이 아니거나(빈 항목, 다른 스킴, 호스트 뒤의 DN 경로·질의), `ldap.require-tls` 인데 `ldaps://` 가 아닌 주소가 하나라도 있으면 멈춘다. 검색 베이스는 `ldap.base-dn` 이 따로 붙인다. 설계: [DC 넘김](../superpowers/specs/2026-11-14-ldap-dc-failover-design.md).
+**주소 목록과 넘김.** `ldap.urls` 는 목록이고 순서가 선호 순서다(가까운 DC 를 앞에). yml 목록이나 쉼표로 이은 문자열(`LDAP_URLS=ldaps://dc1:636,ldaps://dc2:636`)로 준다. 목록은 `LdapContextSource.setUrls` 로 JNDI 의 표준 주소 목록이 된다 — 회차가 여는 커넥션(검색·member 이어받기)마다 앞 주소부터 붙고, 접속·바인드가 실패하면(거절·닿지 않음·`connect-timeout`·바인드 응답 없음) 다음 주소로 간다. **인증 실패(결과 코드 49)는 넘기지 않고** 읽기가 재시도 없이 실패한다 — DC 마다 틀린 바인드를 보내면 AD 의 잠금 기준에 DC 수만큼 빨리 닿는다. 접속한 뒤의 실패(검색 도중 끊김·읽기 한도·busy)는 JNDI 가 넘기지 않으므로 재시도가 맡는다([3.13](#313-재시도와-타임아웃)). 첫 주소가 아닌 곳에 붙으면 WARN 이 남는다("LDAP 이 첫 주소(…)가 아니라 … 에 붙었다"). 주소가 하나인 배포는 넘김도 WARN 도 없다. 기동 때 검사한다(`LdapConfig.설정을_검사한다`): 목록이 비었거나, 주소가 `ldap://호스트[:포트]`·`ldaps://호스트[:포트]` 꼴이 아니거나(빈 항목, 다른 스킴, 호스트 뒤의 DN 경로·질의, 사용자 정보 `사용자:비밀번호@`, 숫자가 아니거나 1~65535 밖인 포트), `ldap.require-tls` 인데 `ldaps://` 가 아닌 주소가 하나라도 있으면 멈춘다. 오류 문구는 사용자 정보를 `***` 로 가린다(`ldaps://***@dc1`) — 자격 증명은 `ldap.bind-dn`·`ldap.bind-password` 에 준다. 앞뒤 빈칸은 떼고 검사하고 싣는다. 검색 베이스는 `ldap.base-dn` 이 따로 붙인다. 설계: [DC 넘김](../superpowers/specs/2026-11-14-ldap-dc-failover-design.md).
 
 ### 3.4 불변 id — entryUUID 와 objectGUID
 
