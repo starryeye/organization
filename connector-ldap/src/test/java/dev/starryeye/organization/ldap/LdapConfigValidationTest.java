@@ -133,10 +133,43 @@ class LdapConfigValidationTest {
     }
 
     @Test
+    @DisplayName("주소에 사용자 정보(비밀번호)가 있으면 멈추고, 문구에는 그것을 *** 로 가려 싣는다")
+    void 주소에_사용자_정보가_있으면_멈추고_가려_싣는다() {
+        // 밑줄 호스트는 URI 가 권한부를 서버 형태로 읽지 못해 getRawUserInfo() 가 null 이다 — 그래도 잡는다
+        var 틀린_가린 = new java.util.LinkedHashMap<String, String>();
+        틀린_가린.put("ldaps://svc:pw@dc1", "ldaps://***@dc1");
+        틀린_가린.put("ldap://u:pw@dc1/x", "ldap://***@dc1/x");
+        틀린_가린.put("ldap://svc:pw@dc_1.corp:389", "ldap://***@dc_1.corp:389");
+        틀린_가린.forEach((틀린, 가린) -> {
+            var properties = 설정();
+            properties.setUrls(List.of("ldap://dc1:389", 틀린));
+
+            assertThatThrownBy(() -> LdapConfig.설정을_검사한다(properties))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(주소_모양_문구.formatted(가린))
+                    .message().doesNotContain("pw");
+        });
+    }
+
+    @Test
+    @DisplayName("포트가 숫자가 아니거나 1~65535 밖이면 멈춘다")
+    void 포트가_숫자가_아니거나_범위_밖이면_멈춘다() {
+        for (String 틀린 : List.of("ldap://dc1:abc", "ldap://dc1:0", "ldap://dc1:70000", "ldap://dc_1.corp:abc", "ldap://[::1]:0")) {
+            var properties = 설정();
+            properties.setUrls(List.of(틀린));
+
+            assertThatThrownBy(() -> LdapConfig.설정을_검사한다(properties))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(주소_모양_문구.formatted(틀린));
+        }
+    }
+
+    @Test
     @DisplayName("주소 모양이 맞으면 받는다 — 포트 없음·끝 슬래시·대문자 스킴·IPv6·밑줄 호스트")
     void 주소_모양이_맞으면_받는다() {
         var properties = 설정();
-        properties.setUrls(List.of("ldap://dc1", "ldap://dc1:389/", "LDAPS://DC1:636", "ldap://[::1]:389", "ldap://dc_1.corp:389"));
+        properties.setUrls(List.of("ldap://dc1", "ldap://dc1:389", "ldap://dc1:65535", "ldap://dc1:389/", "LDAPS://DC1:636",
+                "ldap://[::1]:389", "ldap://dc_1.corp:389"));
 
         assertThatCode(() -> LdapConfig.설정을_검사한다(properties)).doesNotThrowAnyException();
     }

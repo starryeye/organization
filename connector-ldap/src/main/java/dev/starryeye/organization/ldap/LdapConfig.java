@@ -34,9 +34,12 @@ public class LdapConfig {
      *       문자열을 그대로 넣는다. 그 값으로 바인드하면 계정 잠금만 부르므로, 바인드 DN 이 있는데 비밀번호가 비었거나 <code>&#36;&#123;</code> 로 시작하면 멈춘다.
      *       바인드 DN 이 없는 익명 바인드는 비밀번호를 보지 않는다.
      *   <li><b>주소 목록.</b> {@code ldap.urls} 가 비었거나, 주소 하나라도 모양이 틀리면 멈춘다 — 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)가 아니거나,
-     *       호스트가 없거나, 경로({@code /} 하나는 허용)·질의·조각이 있는 경우다. 검색 베이스는 주소가 아니라 {@code ldap.base-dn} 에 준다(설계 2026-11-14 F3).
+     *       호스트가 없거나, 사용자 정보({@code 사용자:비밀번호@})가 있거나, 포트가 숫자가 아니거나 1~65535 밖이거나, 경로({@code /} 하나는 허용)·질의·조각이 있는
+     *       경우다. 검색 베이스는 주소가 아니라 {@code ldap.base-dn} 에, 자격 증명은 {@code ldap.bind-dn}·{@code ldap.bind-password} 에 준다(설계 2026-11-14 F4).
      *   <li><b>TLS.</b> {@code ldap.require-tls} 인데 {@code ldap.urls} 에 {@code ldaps://} 가 아닌 주소가 하나라도 있으면 멈춘다(설계 2026-11-14 F4).
      * </ul>
+     *
+     * <p>주소를 싣는 문구는 사용자 정보를 {@code ***} 로 가린다({@link #가린_주소}) — 주소에 적은 비밀번호가 기동 로그에 남지 않게.
      */
     static void 설정을_검사한다(LdapProperties properties) {
         String 전략 = properties.getStrategy();
@@ -59,7 +62,7 @@ public class LdapConfig {
             if (!주소_모양이_맞다(주소)) {
                 throw new IllegalStateException(
                         "ldap.urls 의 주소는 ldap://호스트[:포트] 또는 ldaps://호스트[:포트] 다 — 검색 베이스는 ldap.base-dn 에 준다(받은 값: %s)"
-                                .formatted(주소));
+                                .formatted(가린_주소(주소)));
             }
         }
         if (properties.isRequireTls()) {
@@ -67,20 +70,23 @@ public class LdapConfig {
                 if (!"ldaps".equalsIgnoreCase(스킴(주소))) {
                     throw new IllegalStateException(
                             "ldap.require-tls 인데 ldap.urls 에 ldaps:// 가 아닌 주소가 있다 — StartTLS 는 지원하지 않는다(받은 값: %s)"
-                                    .formatted(주소));
+                                    .formatted(가린_주소(주소)));
                 }
             }
         }
     }
 
-    /** 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)이고 호스트가 있으며 경로·질의·조각이 없다(경로는 비거나 {@code /}). */
+    /**
+     * 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)이고 호스트가 있으며, 사용자 정보가 없고, 포트가 있으면 1~65535 의 숫자이고, 경로·질의·조각이 없다(경로는
+     * 비거나 {@code /}). 앞뒤 빈칸은 뗀 뒤에 본다 — {@link #컨텍스트_소스} 도 뗀 주소를 싣는다.
+     */
     private static boolean 주소_모양이_맞다(String 주소) {
         if (주소 == null || 주소.isBlank()) {
             return false;
         }
         URI uri;
         try {
-            uri = new URI(주소.trim());
+            uri = new URI(주소.strip());
         } catch (URISyntaxException e) {
             return false;
         }
@@ -88,18 +94,62 @@ public class LdapConfig {
         if (스킴 == null || (!"ldap".equalsIgnoreCase(스킴) && !"ldaps".equalsIgnoreCase(스킴))) {
             return false;
         }
-        // getHost() 는 밑줄 든 호스트(dc_1.corp)에서 null 이라 쓰지 않는다 — 권한부가 있는지만 본다
+        // getHost()·getPort()·getRawUserInfo() 는 밑줄 든 호스트(dc_1.corp)에서 비어 있어(권한부를 서버 형태로 읽지 못한다) 쓰지 않는다 — 권한부를 직접 본다
         String 권한 = uri.getRawAuthority();
-        if (권한 == null || 권한.isBlank()) {
+        if (권한 == null || 권한.isBlank() || 권한.indexOf('@') >= 0 || !포트가_맞다(권한)) {
             return false;
         }
         String 경로 = uri.getRawPath();
         return (경로 == null || 경로.isEmpty() || "/".equals(경로)) && uri.getRawQuery() == null && uri.getRawFragment() == null;
     }
 
+    /** 권한부({@code 호스트[:포트]}, IPv6 는 {@code [주소][:포트]})의 포트가 없거나 1~65535 의 숫자다. */
+    private static boolean 포트가_맞다(String 권한) {
+        String 포트;
+        if (권한.startsWith("[")) {
+            int 닫는 = 권한.indexOf(']');
+            if (닫는 < 0) {
+                return false;
+            }
+            String 나머지 = 권한.substring(닫는 + 1);
+            if (나머지.isEmpty()) {
+                return true;
+            }
+            if (!나머지.startsWith(":")) {
+                return false;
+            }
+            포트 = 나머지.substring(1);
+        } else {
+            int 쌍점 = 권한.indexOf(':');
+            if (쌍점 < 0) {
+                return true;
+            }
+            포트 = 권한.substring(쌍점 + 1);
+        }
+        if (포트.isEmpty() || 포트.length() > 5 || !포트.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            return false;
+        }
+        int 값 = Integer.parseInt(포트);
+        return 값 >= 1 && 값 <= 65535;
+    }
+
+    /**
+     * 오류 문구에 실을 주소 — {@code ://} 뒤부터 마지막 {@code @} 앞까지를 {@code ***} 로 가린다({@code ldaps://svc:pw@dc1} → {@code ldaps://***@dc1}).
+     * 문법이 깨진 주소도 가린다 — 비밀번호에 {@code /} 가 들어 있어도 새지 않게 권한부가 아니라 마지막 {@code @} 까지 가린다.
+     */
+    private static String 가린_주소(String 주소) {
+        if (주소 == null) {
+            return null;
+        }
+        int 스킴_끝 = 주소.indexOf("://");
+        int 시작 = 스킴_끝 < 0 ? 0 : 스킴_끝 + 3;
+        int 골뱅이 = 주소.lastIndexOf('@');
+        return 골뱅이 < 시작 ? 주소 : 주소.substring(0, 시작) + "***" + 주소.substring(골뱅이);
+    }
+
     private static String 스킴(String 주소) {
         int 끝 = 주소.indexOf("://");
-        return 끝 < 0 ? "" : 주소.substring(0, 끝).trim();
+        return 끝 < 0 ? "" : 주소.substring(0, 끝).strip();
     }
 
     @Bean
@@ -114,8 +164,9 @@ public class LdapConfig {
     static LdapContextSource 컨텍스트_소스(LdapProperties properties, List<String> urls) {
         설정을_검사한다(properties);
         LdapContextSource contextSource = new LdapContextSource();
-        // 주소 목록은 JNDI 에 그대로 넘긴다 — 새 커넥션마다 앞에서부터 시도해 연결·접속 실패면 다음 주소로 간다(설계 2026-11-14 F2)
-        contextSource.setUrls(urls.toArray(String[]::new));
+        // 주소 목록은 JNDI 에 그대로 넘긴다 — 새 커넥션마다 앞에서부터 시도해 연결·접속 실패면 다음 주소로 간다(설계 2026-11-14 F2).
+        // 앞뒤 빈칸은 뗀다 — 검사도 뗀 주소를 보므로, 따옴표로 감싼 yml 항목(" ldap://dc1 ")이 검사는 지나고 JNDI 에서 깨지지 않게
+        contextSource.setUrls(urls.stream().map(String::strip).toArray(String[]::new));
         contextSource.setBase(properties.getBaseDn());
         contextSource.setUserDn(properties.getBindDn());
         contextSource.setPassword(properties.getBindPassword());

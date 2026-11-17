@@ -108,6 +108,16 @@ class LdapFailoverTest {
     }
 
     @Test
+    @DisplayName("주소 앞뒤의 빈칸은 떼고 싣는다 — 따옴표로 감싼 yml 항목도 JNDI 에는 주소만 간다")
+    void 주소_앞뒤의_빈칸은_떼고_싣는다() {
+        var properties = 설정(List.of(" ldap://dc1:389 "));
+
+        LdapContextSource contextSource = new LdapConfig().ldapContextSource(properties);
+
+        assertThat(contextSource.getUrls()).containsExactly("ldap://dc1:389");
+    }
+
+    @Test
     @DisplayName("첫 주소가 연결을 거절하면 둘째 주소에서 그림을 읽는다")
     void 첫_주소가_연결을_거절하면_둘째_주소에서_그림을_읽는다() throws Exception {
         var B = 서버(BIND_PASSWORD);
