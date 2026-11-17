@@ -321,7 +321,7 @@ scrape_configs:
 바인드하지 않는다(설계 `docs/superpowers/specs/2026-10-27-ops-readiness-design.md`).
 
 **prod 프로필은 로컬 `application.yml` 위에 얹힌다** — `application-prod.yml` 이 덮지 않는 값(`dynamodb.endpoint: http://localhost:8000`, `openfga.api-url`,
-`ldap.url`·`base-dn`·`bind-dn` 등)은 로컬 값 그대로다. 실제 AWS 에서는 `dynamodb.endpoint` 를 빈 값으로 덮어쓴다(예: `--dynamodb.endpoint=`) — 값이 있으면 그
+`ldap.urls`·`base-dn`·`bind-dn` 등)은 로컬 값 그대로다. 실제 AWS 에서는 `dynamodb.endpoint` 를 빈 값으로 덮어쓴다(예: `--dynamodb.endpoint=`) — 값이 있으면 그
 주소에 가짜 자격증명(`local`)으로 붙는다(`DynamoDbConfig`). 나머지는 환경마다 적는다.
 
 | 설정 | 클래스 기본값 | 로컬 `application.yml` | `application-prod.yml` | 뜻 |
@@ -335,7 +335,7 @@ scrape_configs:
 | `openfga.create-store` | `false` | `true` | `false` | store 가 없을 때 만든다. 꺼져 있으면 `OpenFGA store <name> 이 없다 — 처음 설치라면 openfga.create-store=true 로 한 번 띄운다` 로 멈춘다. OpenFGA 에 닿지 않아 확인하지 못했으면 경고만 남기고 뜬다 |
 | `ldap.strategy`(app-ldap) | `group-of-names` | `group-of-names` | — | `group-of-names`·`dit`(대소문자 무시) 밖이면 오타도 멈춘다 |
 | `ldap.bind-password`(app-ldap) | 없음 | `adminpassword` | `${LDAP_BIND_PASSWORD}` | 환경 변수로 받는다. 바인드 DN 이 있는데 비었거나 풀리지 않은 자리표시자면 멈춘다 — 오류 문구에 값을 싣지 않는다 |
-| `ldap.require-tls`(app-ldap) | `false` | — | `true` | `ldap.url` 이 `ldaps://` 가 아니면 멈춘다. StartTLS 는 지원하지 않는다 |
+| `ldap.require-tls`(app-ldap) | `false` | — | `true` | `ldap.urls` 의 주소가 하나라도 `ldaps://` 가 아니면 멈춘다. StartTLS 는 지원하지 않는다 |
 | `spring.security.oauth2.resourceserver.jwt.issuer-uri` | 없음 | `http://localhost:9000` | `${AUTH_ISSUER_URI}` | 인가 서버의 발급자 — 토큰의 `iss` 와 같아야 한다(다르면 모든 토큰이 401). 없거나 비면 멈춘다(로컬도) |
 | `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` | 없음 | `http://localhost:9000/oauth2/jwks` | `${AUTH_JWK_SET_URI}` | 서명 키 목록 주소. 없거나 비면 멈춘다(로컬도) |
 | `auth.require-https` | `false` | — | `true` | 위 둘이 `https://` 가 아니면 멈춘다 — 평문 키 목록은 중간자가 자기 키를 내밀어 아무 토큰이나 위조하게 한다 |

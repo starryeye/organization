@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: ffbbea5 (deletion-guard-absolute-cap, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: 27dac6c (ldap-dc-failover, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -107,7 +107,7 @@ Authorization: Bearer <admin.sync 범위의 토큰>
 `LdapDirectorySnapshotSource.fetchAll` 이 읽는다.
 
 - `Mono.fromCallable(() -> strategy.read(template))` 를 `Schedulers.boundedElastic()` 에서 돌린다. Spring LDAP(JNDI)은 블로킹이라 이벤트 루프에서 부르면 앱이 멈춘다.
-- 재시도(`retryWhen`)를 `subscribeOn` 뒤에 둔다. 재시도도 `boundedElastic` 에서 돌고, **시도마다 처음부터 다시 읽는다** — 앞 시도의 부분 결과가 섞이지 않는다([3.13](#313-재시도와-타임아웃)).
+- 재시도(`retryWhen`)를 `subscribeOn` 뒤에 둔다. 재시도도 `boundedElastic` 에서 돌고, **시도마다 처음부터 다시 읽는다**(재시도 k 번째는 `ldap.urls` 를 k 만큼 돌린 순서, 곧 다음 주소부터) — 앞 시도의 부분 결과가 섞이지 않는다([3.13](#313-재시도와-타임아웃)).
 - 다 읽으면 "LDAP 에서 직원 N명, 조직 M개를 읽었다" 를 남긴다.
 - 전략은 기동할 때 `ldap.strategy` 로 정한다(`LdapConfig.ldapMappingStrategy`). `group-of-names` 면 `GroupOfNamesStrategy`, `dit` 면 `DitStrategy` 다(대소문자 무시). **그 밖의 값은 오타까지 기동을 멈춘다**(`LdapConfig.설정을_검사한다` — `ldap.strategy 는 group-of-names 또는 dit 다(받은 값: …)`). 기본값은 `group-of-names` 다. DIT 디렉터리를 groupOfNames 로 잘못 읽어 조직 없는 조직도가 되는 일을 막는다.
 - 계정 만료를 판정할 "지금" 은 읽기 한 번에 한 번 잡는다(`clock.instant()`). 그 회차의 모든 직원이 같은 시각으로 판정된다. 재시도하면 새 시각을 잡는다.
@@ -181,7 +181,9 @@ Authorization: Bearer <admin.sync 범위의 토큰>
 - **[externalId](02-용어집.md#externalid)** — 두 전략 모두 서버가 준 DN(컨텍스트 베이스에 상대적)에 `ldap.base-dn` 을 붙여 `LdapName` 으로 다시 쓴 절대 DN 이다(`LdapDns.절대로`). 예 `uid=gd.hong,ou=people,dc=example,dc=com`.
 - **active** — [3.10](#310-계정-상태).
 
-접속 설정은 `ldap.url`(기본 `ldap://localhost:1389`), `ldap.base-dn`(기본 `dc=example,dc=com`), `ldap.bind-dn`, `ldap.bind-password` 다. 운영(`prod`)은 `ldaps://` 를 요구하고(`ldap.require-tls`) 비밀번호를 환경 변수 `LDAP_BIND_PASSWORD` 로 받는다. 바인드 DN 이 있는데 비밀번호가 비었거나 풀리지 않은 자리표시자면 기동을 멈춘다([11 — app-ldap 설정](11-운영.md#14-app-ldap--ldap)).
+접속 설정은 `ldap.urls`(주소 목록, 기본 `[ldap://localhost:1389]`), `ldap.base-dn`(기본 `dc=example,dc=com`), `ldap.bind-dn`, `ldap.bind-password` 다. 운영(`prod`)은 모든 주소가 `ldaps://` 여야 하고(`ldap.require-tls`) 비밀번호를 환경 변수 `LDAP_BIND_PASSWORD` 로 받는다. 바인드 DN 이 있는데 비밀번호가 비었거나 풀리지 않은 자리표시자면 기동을 멈춘다([11 — app-ldap 설정](11-운영.md#14-app-ldap--ldap)).
+
+**주소 목록과 넘김.** `ldap.urls` 는 목록이고 순서가 선호 순서다(가까운 DC 를 앞에). yml 목록이나 쉼표로 이은 문자열(`LDAP_URLS=ldaps://dc1:636,ldaps://dc2:636`)로 준다. 목록은 `LdapContextSource.setUrls` 로 JNDI 의 표준 주소 목록이 된다 — 회차가 여는 커넥션(검색·member 이어받기)마다 앞 주소부터 붙고, 접속·바인드가 실패하면(거절·닿지 않음·`connect-timeout`·바인드 응답 없음) 다음 주소로 간다. **인증 실패(결과 코드 49)는 넘기지 않고** 읽기가 재시도 없이 실패한다 — DC 마다 틀린 바인드를 보내면 AD 의 잠금 기준에 DC 수만큼 빨리 닿는다. 접속한 뒤의 실패(검색 도중 끊김·읽기 한도·busy)는 JNDI 가 넘기지 않으므로 재시도가 맡는다([3.13](#313-재시도와-타임아웃)). 첫 주소가 아닌 곳에 붙으면 WARN 이 남는다("LDAP 이 첫 주소(…)가 아니라 … 에 붙었다"). 주소가 하나인 배포는 넘김도 WARN 도 없다. 기동 때 검사한다(`LdapConfig.설정을_검사한다`): 목록이 비었거나, 주소가 `ldap://호스트[:포트]`·`ldaps://호스트[:포트]` 꼴이 아니거나(빈 항목, 다른 스킴, 호스트 뒤의 DN 경로·질의), `ldap.require-tls` 인데 `ldaps://` 가 아닌 주소가 하나라도 있으면 멈춘다. 검색 베이스는 `ldap.base-dn` 이 따로 붙인다. 설계: [DC 넘김](../superpowers/specs/2026-11-14-ldap-dc-failover-design.md).
 
 ### 3.4 불변 id — entryUUID 와 objectGUID
 
@@ -337,7 +339,7 @@ groupOfNames 에서 조직이 하나라도 있고 `member` 값이 하나라도 �
 
 ### 3.13 재시도와 타임아웃
 
-읽기가 예외로 끝나면 `LdapDirectorySnapshotSource.재시도_규칙` 이 처음부터 다시 읽는다.
+읽기가 예외로 끝나면 `LdapDirectorySnapshotSource.재시도_규칙` 이 처음부터 다시 읽는다. **재시도는 다음 주소부터 읽는다** — 첫 읽기는 `ldap.urls` 의 순서대로, 재시도 k 번째는 목록을 k 만큼 돌린 순서다. 접속·바인드 단계의 넘김은 JNDI 가 하지만 바인드는 받고 검색에서 실패하는 DC 는 JNDI 가 넘기지 못해, 이렇게 돌려야 둘째 시도가 다음 DC 에서 읽는다. 다음 회차는 다시 설정 순서부터다. 시작 주소가 첫 주소가 아니면 WARN "LDAP 읽기를 다음 주소부터 다시 한다 — 시작 주소 …" 를 남긴다. 무엇을 재시도하는가(아래 분류)와 대기는 그대로다.
 
 | 설정 | 기본 | 뜻 |
 |---|---|---|
@@ -347,6 +349,7 @@ groupOfNames 에서 조직이 하나라도 있고 `member` 값이 하나라도 �
 | `ldap.connect-timeout` | 10s | TCP 접속과 **bind 응답** 대기(JNDI `com.sun.jndi.ldap.connect.timeout`). bind DN 을 쓰는 컨텍스트 생성은 동기 bind 라 이 값이 잰다 |
 | `ldap.read-timeout` | 150s | bind 이후 응답 대기(`com.sun.jndi.ldap.read.timeout`). 예: 다음 페이지. AD 의 `MaxQueryDuration`(120초)보다 길다 |
 
+- 앞 DC 가 패킷을 버리면 새 커넥션마다 `connect-timeout` 만큼 기다린 뒤 넘기므로 회차가 약 20~30초 늦다. 작업 기한(30분) 안이다.
 - 대기는 10·20·40·80·120초에 Reactor 기본 지터(±50%, 상·하한 안에서)가 붙어 합계 140~345초, 약 2~6분이다. 도메인 컨트롤러 재부팅을 버티려는 값이다.
 - 재시도마다 경고 "LDAP 읽기 실패, 재시도 N회차" 를 남긴다.
 - 다 쓰면 마지막 실패를 그대로 던진다(`RetryExhaustedException` 으로 감싸지 않는다). 실행 기록의 메시지에 진짜 원인이 남는다.
@@ -1189,7 +1192,7 @@ OpenFGA 가 통째로 죽었다면 한 줄도 못 살린 쓰기 배치가 3개 �
 | `sync.cron` | `0 0 * * * *` | [2절](#2-회차를-거는-것) |
 | `sync.job-timeout` | `30m` | [08](08-동시성과-작업.md) |
 | `sync.deletion-guard.enabled` / `threshold-ratio` / `min-baseline` / `max-deletes` | `true` / `0.3` / `10` / `5000` | [6.4](#64-삭제-가드) |
-| `ldap.url`, `ldap.base-dn`, `ldap.bind-dn`, `ldap.bind-password` | `ldap://localhost:1389`, `dc=example,dc=com`, —, —(`prod` 는 `${LDAP_BIND_PASSWORD}`) | [3.3](#33-속성-매핑과-기본값) |
+| `ldap.urls`, `ldap.base-dn`, `ldap.bind-dn`, `ldap.bind-password` | `[ldap://localhost:1389]`, `dc=example,dc=com`, —, —(`prod` 는 `${LDAP_BIND_PASSWORD}`) | [3.3](#33-속성-매핑과-기본값) |
 | `ldap.require-tls` | `false`(`prod` 는 `true`) | [11](11-운영.md#14-app-ldap--ldap) |
 | `ldap.strategy` | `group-of-names` — `group-of-names`·`dit` 밖의 값은 기동을 멈춘다 | [3.1](#31-읽기-한-번의-모양) |
 | `ldap.page-size` | `500` | [3.6](#36-페이징) |
