@@ -113,7 +113,7 @@ management:
   endpoint:
     health:
       # 8081 은 관리 API 와 같은 포트다. 프로브(/actuator/health, /health/liveness, /health/readiness)는 토큰 없이 열려 있으므로
-      # always 로 두면 openfga.api-url, dynamodb.table-name, ldap.url·base-dn, Health.down(error) 의 예외 메시지가 그대로 공개된다.
+      # always 로 두면 openfga.api-url, dynamodb.table-name, ldap.urls·base-dn, Health.down(error) 의 예외 메시지가 그대로 공개된다.
       # 세부는 actuator 범위가 있는 토큰에만 보인다(설계 2026-10-28 A6). roles 가 없으면 범위가 다른 인증된 클라이언트도 세부를 본다.
       # 부트는 roles 를 스프링 시큐리티의 권한 이름과도 맞춘다 — 리소스 서버가 scope 클레임을 SCOPE_<범위> 권한으로 만든다
       show-details: when-authorized
