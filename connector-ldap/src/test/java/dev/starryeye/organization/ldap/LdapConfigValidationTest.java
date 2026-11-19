@@ -175,6 +175,22 @@ class LdapConfigValidationTest {
     }
 
     @Test
+    @DisplayName("빈 호스트(ldap://:389)는 멈추고, IPv6·밑줄 호스트·포트 없는 주소는 그대로 받는다 — 설계 2026-11-19 S8")
+    void 빈_호스트는_멈추고_다른_모양은_그대로다() {
+        // given
+        var 빈_호스트 = 설정();
+        빈_호스트.setUrls(List.of("ldap://dc1:389", "ldap://:389"));
+        var 다른_모양 = 설정();
+        다른_모양.setUrls(List.of("ldap://[::1]:389", "ldap://dc_1.corp:389", "ldaps://dc1"));
+
+        // when, then
+        assertThatThrownBy(() -> LdapConfig.설정을_검사한다(빈_호스트))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(주소_모양_문구.formatted("ldap://:389"));
+        assertThatCode(() -> LdapConfig.설정을_검사한다(다른_모양)).doesNotThrowAnyException();
+    }
+
+    @Test
     @DisplayName("TLS 를 요구하면 모든 주소가 ldaps:// 여야 한다 — StartTLS 는 지원하지 않는다")
     void TLS_를_요구하면_모든_주소가_ldaps_여야_한다() {
         // 깨뜨릴 변경: 첫 주소만 보면 둘째의 평문 주소를 놓친다
@@ -223,7 +239,9 @@ class LdapConfigValidationTest {
         properties.setStrategy("ditt");
 
         // when, then
-        assertThatThrownBy(() -> new LdapConfig().ldapMappingStrategy(properties, Clock.systemUTC()))
+        assertThatThrownBy(() -> new LdapConfig().ldapMappingStrategy(properties, Clock.systemUTC(),
+                        new org.springframework.beans.factory.support.StaticListableBeanFactory()
+                                .getBeanProvider(dev.starryeye.organization.ldap.strategy.SkippedEntryObserver.class)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("ldap.strategy");
     }

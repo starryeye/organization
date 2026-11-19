@@ -5,6 +5,8 @@ import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
 import dev.starryeye.organization.ldap.strategy.LdapIdentifiers;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
+import dev.starryeye.organization.ldap.strategy.SkippedEntryObserver;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -34,7 +36,7 @@ public class LdapConfig {
      *       문자열을 그대로 넣는다. 그 값으로 바인드하면 계정 잠금만 부르므로, 바인드 DN 이 있는데 비밀번호가 비었거나 <code>&#36;&#123;</code> 로 시작하면 멈춘다.
      *       바인드 DN 이 없는 익명 바인드는 비밀번호를 보지 않는다.
      *   <li><b>주소 목록.</b> {@code ldap.urls} 가 비었거나, 주소 하나라도 모양이 틀리면 멈춘다 — 스킴이 {@code ldap}·{@code ldaps}(대소문자 무시)가 아니거나,
-     *       호스트가 없거나, 사용자 정보({@code 사용자:비밀번호@})가 있거나, 포트가 숫자가 아니거나 1~65535 밖이거나, 경로({@code /} 하나는 허용)·질의·조각이 있는
+     *       호스트가 없거나 비었거나({@code ldap://:389}, 설계 2026-11-19 S8), 사용자 정보({@code 사용자:비밀번호@})가 있거나, 포트가 숫자가 아니거나 1~65535 밖이거나, 경로({@code /} 하나는 허용)·질의·조각이 있는
      *       경우다. 검색 베이스는 주소가 아니라 {@code ldap.base-dn} 에, 자격 증명은 {@code ldap.bind-dn}·{@code ldap.bind-password} 에 준다(설계 2026-11-14 F4).
      *   <li><b>TLS.</b> {@code ldap.require-tls} 인데 {@code ldap.urls} 에 {@code ldaps://} 가 아닌 주소가 하나라도 있으면 멈춘다(설계 2026-11-14 F4).
      * </ul>
@@ -96,7 +98,7 @@ public class LdapConfig {
         }
         // getHost()·getPort()·getRawUserInfo() 는 밑줄 든 호스트(dc_1.corp)에서 비어 있어(권한부를 서버 형태로 읽지 못한다) 쓰지 않는다 — 권한부를 직접 본다
         String 권한 = uri.getRawAuthority();
-        if (권한 == null || 권한.isBlank() || 권한.indexOf('@') >= 0 || !포트가_맞다(권한)) {
+        if (권한 == null || 권한.isBlank() || 권한.startsWith(":") || 권한.indexOf('@') >= 0 || !포트가_맞다(권한)) {
             return false;
         }
         String 경로 = uri.getRawPath();
@@ -223,12 +225,15 @@ public class LdapConfig {
     }
 
     @Bean
-    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties, Clock clock) {
+    public LdapMappingStrategy ldapMappingStrategy(LdapProperties properties, Clock clock,
+            ObjectProvider<SkippedEntryObserver> 관찰자) {
         설정을_검사한다(properties);
+        // 건너뛴 엔트리 수를 받는 빈이 없으면(app-ldap 밖) 아무것도 하지 않는다 — 설계 2026-11-19 S6
+        SkippedEntryObserver 알림이 = 관찰자.getIfAvailable(() -> SkippedEntryObserver.NOOP);
         // 계정 만료를 동기화 시각과 비교한다 — 앱의 Clock 빈(DynamoDbConfig)을 쓴다
         return "dit".equalsIgnoreCase(properties.getStrategy())
-                ? new DitStrategy(properties, clock)
-                : new GroupOfNamesStrategy(properties, clock);
+                ? new DitStrategy(properties, clock, 알림이)
+                : new GroupOfNamesStrategy(properties, clock, 알림이);
     }
 
     @Bean

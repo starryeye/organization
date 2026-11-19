@@ -81,7 +81,9 @@ class LdapReadTimeoutDuringPagingTest {
             contextSource.afterPropertiesSet();
             var source = ldapConfig.ldapDirectorySnapshotSource(
                     ldapConfig.ldapTemplate(contextSource),
-                    ldapConfig.ldapMappingStrategy(properties, Clock.systemUTC()),
+                    ldapConfig.ldapMappingStrategy(properties, Clock.systemUTC(),
+                        new org.springframework.beans.factory.support.StaticListableBeanFactory()
+                                .getBeanProvider(dev.starryeye.organization.ldap.strategy.SkippedEntryObserver.class)),
                     properties);
 
             try {

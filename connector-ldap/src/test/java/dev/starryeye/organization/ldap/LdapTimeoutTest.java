@@ -78,7 +78,9 @@ class LdapTimeoutTest {
             contextSource.afterPropertiesSet();
             var source = config.ldapDirectorySnapshotSource(
                     config.ldapTemplate(contextSource),
-                    config.ldapMappingStrategy(properties, Clock.systemUTC()),
+                    config.ldapMappingStrategy(properties, Clock.systemUTC(),
+                        new org.springframework.beans.factory.support.StaticListableBeanFactory()
+                                .getBeanProvider(dev.starryeye.organization.ldap.strategy.SkippedEntryObserver.class)),
                     properties);
 
             // when, then — connect-timeout(1초)이 끊는다. read-timeout(60초)이 대신

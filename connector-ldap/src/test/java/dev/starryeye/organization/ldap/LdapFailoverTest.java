@@ -338,7 +338,9 @@ class LdapFailoverTest {
         contextSource.afterPropertiesSet();
         return config.ldapDirectorySnapshotSource(
                 config.ldapTemplate(contextSource),
-                config.ldapMappingStrategy(properties, Clock.systemUTC()),
+                config.ldapMappingStrategy(properties, Clock.systemUTC(),
+                        new org.springframework.beans.factory.support.StaticListableBeanFactory()
+                                .getBeanProvider(dev.starryeye.organization.ldap.strategy.SkippedEntryObserver.class)),
                 properties);
     }
 
