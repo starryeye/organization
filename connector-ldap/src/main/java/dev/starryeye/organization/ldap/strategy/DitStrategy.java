@@ -225,14 +225,14 @@ public class DitStrategy implements LdapMappingStrategy {
                 // 건너뛸 엔트리다 — 계정 상태 같은 나머지 속성은 읽지 않는다. 표준 밖의 값이 있어도 회차를 멈추지 않는다
                 return UserEntry.식별_속성_없음(dn);
             }
-            // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
-            String userName = firstNonBlank(adapter.getStringAttribute(config.getUserLoginAttribute()), 식별값);
             String id = IdNormalizer.normalize(식별값);
             // 저장 한도를 넘는 id·DN 은 건너뛸 엔트리다 — 식별 속성이 없을 때처럼 계정 상태 같은 나머지 속성은 읽지 않는다(설계 2026-11-19 S3)
             Optional<String> 넘음 = EntryLimits.넘는_값(id, LdapDns.절대로(dn, properties.getBaseDn()), KeyValueLimits.MAX_MEMBER_ID_BYTES);
             if (넘음.isPresent()) {
                 return UserEntry.한도_넘음(dn, 넘음.get());
             }
+            // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
+            String userName = firstNonBlank(adapter.getStringAttribute(config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
                     dn,
                     id,

@@ -209,10 +209,15 @@ class GroupOfNamesLengthLimitTest extends EmbeddedLdapSupport {
     }
 
     @Test
-    @DisplayName("한도를 넘은 그룹의 member 는 읽지 않는다")
-    void 한도를_넘은_그룹의_member_는_읽지_않는다() throws Exception {
+    @DisplayName("한도를 넘은 그룹은 빠지고 그 member 는 해석하지 않는다")
+    void 한도를_넘은_그룹은_빠지고_그_member_는_해석하지_않는다() throws Exception {
+        // member 범위 이어 읽기를 하지 않는 것은 RawEntry.한도_넘음 이 membersComplete=true 로 두는 코드가 보장한다 — 이 시험은 결과만 본다
         조직을_더한다("gbad", "d".repeat(251), "member: 이건 DN 이 아니다");
 
-        assertThatCode(() -> 전략().read(ldapTemplate)).doesNotThrowAnyException();
+        var snapshot = 전략().read(ldapTemplate);
+
+        assertThat(snapshot.groups()).doesNotContainKey("d".repeat(251));
+        assertThat(snapshot.groups()).containsKey("gok");
+        assertThat(snapshot.users()).containsOnlyKeys("ok");
     }
 }

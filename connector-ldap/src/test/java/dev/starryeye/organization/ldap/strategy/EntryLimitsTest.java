@@ -42,12 +42,35 @@ class EntryLimitsTest {
     }
 
     @Test
-    @DisplayName("id 와 DN 이 모두 넘으면 id 를 적는다")
+    @DisplayName("id 와 DN 이 모두 넘으면 id 를 적고, DN 은 앞 100 코드 포인트로 자른다")
     void 둘_다_넘으면_id_를_적는다() {
         String dn = "cn=" + "b".repeat(1100) + ",dc=example,dc=com";
 
-        assertThat(EntryLimits.넘는_값("a".repeat(501), dn, 500)).hasValueSatisfying(문구 ->
-                assertThat(문구).endsWith("(id 501바이트, 한도 500)"));
+        assertThat(EntryLimits.넘는_값("a".repeat(501), dn, 500)).hasValueSatisfying(문구 -> {
+            assertThat(문구).startsWith("dn='" + dn.substring(0, 100) + "…'(id ");
+            assertThat(문구).contains("(id 501바이트, 한도 500)");
+        });
+    }
+
+    @Test
+    @DisplayName("id 가 넘고 DN 이 1024 바이트 이하면 DN 을 통째로 싣는다")
+    void id_가_넘고_DN_은_한도_이내면_통째로() {
+        assertThat(EntryLimits.넘는_값("a".repeat(501), 짧은_DN, 500))
+                .contains("dn='uid=x,dc=example,dc=com'(id 501바이트, 한도 500)");
+    }
+
+    @Test
+    @DisplayName("절대 DN 이 정확히 1024 바이트면 통과하고 1025 바이트면 건너뛴다")
+    void DN_경계() {
+        String 앞 = "cn=";
+        String 뒤 = ",dc=example,dc=com";
+        String 천이십사 = 앞 + "b".repeat(1024 - 앞.length() - 뒤.length()) + 뒤;
+        String 천이십오 = 앞 + "b".repeat(1025 - 앞.length() - 뒤.length()) + 뒤;
+
+        assertThat(천이십사.getBytes(StandardCharsets.UTF_8)).hasSize(1024);
+        assertThat(EntryLimits.넘는_값("short", 천이십사, 500)).isEmpty();
+        assertThat(EntryLimits.넘는_값("short", 천이십오, 500))
+                .hasValueSatisfying(문구 -> assertThat(문구).contains("(DN 1025바이트, 한도 1024)"));
     }
 
     @Test

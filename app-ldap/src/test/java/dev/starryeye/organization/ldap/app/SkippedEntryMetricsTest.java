@@ -79,4 +79,18 @@ class SkippedEntryMetricsTest {
                 "group/missing_id", 5.0, "group/duplicate_id", 6.0, "group/over_limit", 7.0,
                 "member/unmatched_member", 8.0));
     }
+
+    @Test
+    @DisplayName("미리 만들지 않은 (검색, 사유) 조합도 센다")
+    void 미리_만들지_않은_조합도_센다() {
+        // given
+        var metrics = new SkippedEntryMetrics(registry);
+
+        // when
+        metrics.skipped(검색.조직, 사유.부모_조직_없음, 2);
+
+        // then
+        assertThat(값들().get("group/parent_not_found")).isEqualTo(2.0);
+        assertThat(값들().keySet()).containsAll(여덟);
+    }
 }

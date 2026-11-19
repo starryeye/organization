@@ -150,6 +150,20 @@ class DitLengthLimitTest extends EmbeddedLdapSupport {
     }
 
     @Test
+    @DisplayName("상대 DN 은 1024바이트 이하여도 베이스를 붙인 절대 DN 이 넘으면 빠지고, 정확히 1024바이트면 남는다")
+    void 절대_DN_기준으로_잰다() throws Exception {
+        // 레코드의 DN 은 베이스 상대다: "uid=<값>,ou=company"(15바이트 + 값). 절대 DN 은 ",dc=example,dc=com"(18바이트)이 더 붙어 33바이트 + 값이다.
+        // 값 991자 → 절대 1024(남음), 값 992자 → 상대 1007·절대 1025(빠짐)
+        직원을_더한다("", "a".repeat(991), "exact1024");
+        직원을_더한다("", "b".repeat(992), "over1025");
+
+        var snapshot = 전략().read(ldapTemplate);
+
+        assertThat(snapshot.users()).containsKeys("exact1024").doesNotContainKey("over1025");
+        assertThat(경고()).contains("(DN 1025바이트, 한도 1024)");
+    }
+
+    @Test
     @DisplayName("한도를 넘은 직원은 다른 속성을 읽지 않는다")
     void 한도를_넘은_직원은_다른_속성을_읽지_않는다() throws Exception {
         직원을_더한다("", "bad", "c".repeat(501), "userAccountControl: abc");

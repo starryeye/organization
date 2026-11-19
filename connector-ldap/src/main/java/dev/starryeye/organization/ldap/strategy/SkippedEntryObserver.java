@@ -1,7 +1,7 @@
 package dev.starryeye.organization.ldap.strategy;
 
 /**
- * 한 검색에서 건너뛴 엔트리 수를 바깥에 알리는 자리(설계 2026-11-19 S5). {@link SkippedEntries#요약을_남긴다()} 가 경고 한 줄을 남긴 뒤
+ * 한 검색에서 건너뛴 엔트리 수를 바깥에 알리는 자리(설계 2026-11-19 S5). {@code SkippedEntries#요약을_남긴다()} 가 경고 한 줄을 남긴 뒤
  * 건수가 있는 사유마다 한 번 부른다. connector-ldap 은 지표 라이브러리를 모르고, 이 인터페이스만 안다 — 지표로 옮기는 일은 앱 쪽 몫이다.
  */
 public interface SkippedEntryObserver {

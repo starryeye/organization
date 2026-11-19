@@ -25,16 +25,23 @@ final class EntryLimits {
      */
     static Optional<String> 넘는_값(String 정규화한_id, String 절대DN, int id한도) {
         int idBytes = 바이트(정규화한_id);
-        if (idBytes > id한도) {
-            return Optional.of("dn='%s'(id %d바이트, 한도 %d)".formatted(절대DN, idBytes, id한도));
-        }
         int dnBytes = 바이트(절대DN);
-        if (dnBytes > KeyValueLimits.MAX_INDEXED_BYTES) {
-            int 끝 = 절대DN.offsetByCodePoints(0, Math.min(예시_DN_코드_포인트, 절대DN.codePointCount(0, 절대DN.length())));
+        boolean dn넘음 = dnBytes > KeyValueLimits.MAX_INDEXED_BYTES;
+        if (idBytes > id한도) {
+            // DN 도 넘으면 같은 이유(S4)로 id 문구에서도 DN 앞부분만 싣는다
+            String dn = dn넘음 ? 앞부분(절대DN) + "…" : 절대DN;
+            return Optional.of("dn='%s'(id %d바이트, 한도 %d)".formatted(dn, idBytes, id한도));
+        }
+        if (dn넘음) {
             return Optional.of("dn='%s…'(DN %d바이트, 한도 %d)".formatted(
-                    절대DN.substring(0, 끝), dnBytes, KeyValueLimits.MAX_INDEXED_BYTES));
+                    앞부분(절대DN), dnBytes, KeyValueLimits.MAX_INDEXED_BYTES));
         }
         return Optional.empty();
+    }
+
+    private static String 앞부분(String 절대DN) {
+        int 끝 = 절대DN.offsetByCodePoints(0, Math.min(예시_DN_코드_포인트, 절대DN.codePointCount(0, 절대DN.length())));
+        return 절대DN.substring(0, 끝);
     }
 
     private static int 바이트(String 값) {

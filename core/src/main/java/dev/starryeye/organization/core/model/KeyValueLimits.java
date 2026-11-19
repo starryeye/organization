@@ -7,7 +7,8 @@ import java.util.Optional;
 
 /**
  * 키나 색인에 들어갈 값의 쓰기 한도(설계 2026-10-17 §3). 실제 DynamoDB 는 키가 한도를 넘으면 거절하는데 OpenFGA 를 쓴 뒤에 거절해 둘이 어긋나므로,
- * SCIM 쓰기가 표지판·OpenFGA 를 보기 전에 이 한도를 본다. 모두 UTF-8 바이트다.
+ * SCIM 쓰기가 표지판·OpenFGA 를 보기 전에 이 한도를 본다. LDAP 입구(connector-ldap {@code EntryLimits})도 {@link #MAX_MEMBER_ID_BYTES}·
+ * {@link #MAX_GROUP_ID_BYTES}·{@link #MAX_INDEXED_BYTES} 를 써서 넘는 엔트리를 건너뛴다(설계 2026-11-19 S2). 모두 UTF-8 바이트다.
  *
  * <ul>
  *   <li>{@code userName}·{@code displayName} — 키에는 {@code Locale.ROOT} 소문자가 들어가므로 <b>소문자로 만든 뒤</b> 잰다. 소문자로 바꾸면
