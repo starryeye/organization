@@ -15,6 +15,8 @@ import java.util.Optional;
  *   <li>{@code externalId} — 값 그대로 키가 된다. 공백뿐인 값도 잰다(표지판은 건너뛰지만 직원 GSI3 파티션키에는 그대로 들어간다).</li>
  *   <li>넣는 멤버의 아이디 — 두 곳의 한도 가운데 작은 쪽이다. 멤버 줄 정렬키 {@code MEMBER#GROUP#<id>} 는 1024바이트라 아이디가 1011바이트까지, OpenFGA 튜플의
  *       {@code user} 칸({@code user:<id>} / {@code group:<id>})은 512바이트라 506바이트까지다. 작은 쪽을 내림해 {@value #MAX_MEMBER_ID_BYTES}바이트다.</li>
+ *   <li>조직 id — LDAP 입구가 쓴다. OpenFGA {@code object} 칸의 모양 {@code ^[^\s]{2,256}$} 때문에 {@code group:<id>} 의 id 는 250자까지다
+ *       (SCIM 의 조직 id 는 서버가 정하는 UUID 다). {@value #MAX_GROUP_ID_BYTES}바이트.</li>
  * </ul>
  *
  * <p>없는({@code null}) 값은 넘지 않는다. 읽기 쪽 한도는 저장소의 몫이다(설계 §4).
@@ -30,6 +32,13 @@ public final class KeyValueLimits {
      * {@code group:<id>} 면 506바이트까지다. 작은 쪽인 506이 이기고, 500으로 내린다.
      */
     public static final int MAX_MEMBER_ID_BYTES = 500;
+
+    /**
+     * 조직 id 의 한도(설계 2026-11-19 §1). OpenFGA {@code object} 칸은 {@code ^[^\s]{2,256}$}(openfga/api {@code TupleKey}) 라
+     * {@code group:<id>} 의 id 는 250자까지, {@code user} 칸(512바이트)으로는 506바이트까지다. 바이트 250 이면 둘 다 지킨다(1자는 1바이트 이상).
+     * LDAP 입구가 쓴다(SCIM 의 조직 id 는 서버가 정하는 UUID 다).
+     */
+    public static final int MAX_GROUP_ID_BYTES = 250;
 
     /** 한도를 넘은 속성과 그 한도. */
     public record Over(String attribute, int limitBytes) {

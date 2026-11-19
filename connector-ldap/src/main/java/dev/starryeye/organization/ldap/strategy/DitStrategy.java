@@ -73,12 +73,12 @@ public class DitStrategy implements LdapMappingStrategy {
         // 합쳐지고, 계층 롤업이 양쪽 부모 모두에 child 간선을 만들어 조용한 권한 확대로
         // 이어진다. 충돌한 엔트리는 스킵한다 — 그 dn 을 codeByRdnPath 에 넣지 않으므로
         // 산하 엔트리는 "부모를 찾지 못함"으로 자연히 스킵된다.
-        SkippedEntries 건너뛴_조직 = new SkippedEntries("조직", config.getGroupIdAttribute());
+        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), SkippedEntryObserver.NOOP);
         Map<String, String> groupDnByCode = new LinkedHashMap<>();
         for (OrgEntry entry : orgEntries) {
             String code = entry.code();
             if (code == null) {
-                건너뛴_조직.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                건너뛴_조직.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(code, entry.dn(), groupDnByCode)) {
@@ -109,11 +109,11 @@ public class DitStrategy implements LdapMappingStrategy {
         // 직원 소속: 사용자 엔트리의 부모 dn 이 곧 소속 조직이다
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_직원 = new SkippedEntries("직원", config.getUserIdAttribute());
+        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), SkippedEntryObserver.NOOP);
         for (UserEntry entry : userEntries) {
             String userId = entry.id();
             if (userId == null) {
-                건너뛴_직원.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                건너뛴_직원.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(userId, entry.dn(), userDnById)) {
@@ -127,7 +127,7 @@ public class DitStrategy implements LdapMappingStrategy {
             String parentCode = codeByRdnPath.get(LdapDns.대조키(LdapDns.부모(entry.dn())));
             if (parentCode == null) {
                 // 직원으로는 그대로 적재한다 — 소속만 없다(점검 S22)
-                건너뛴_직원.기록한다(SkippedEntries.사유.부모_조직_없음, "dn='" + entry.dn() + "'");
+                건너뛴_직원.기록한다(SkippedEntryObserver.사유.부모_조직_없음, "dn='" + entry.dn() + "'");
                 continue;
             }
             membersByCode.get(parentCode).add(MemberRef.user(userId));

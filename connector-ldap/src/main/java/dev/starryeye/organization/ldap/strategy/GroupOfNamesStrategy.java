@@ -76,10 +76,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> userDnById = new LinkedHashMap<>();
         // 남긴 직원의 AD 기본 그룹 RID — 건너뛴 직원은 읽지 않았으므로 없다
         Map<String, Long> 기본그룹RID_직원별 = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_직원 = new SkippedEntries("직원", config.getUserIdAttribute());
+        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), SkippedEntryObserver.NOOP);
         for (UserEntry entry : userEntries) {
             if (entry.id() == null) {
-                건너뛴_직원.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                건너뛴_직원.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), userDnById)) {
@@ -100,10 +100,10 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
         Map<String, String> groupDnById = new LinkedHashMap<>();
         Map<String, RawEntry> survivingGroupEntries = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_조직 = new SkippedEntries("조직", config.getGroupIdAttribute());
+        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), SkippedEntryObserver.NOOP);
         for (RawEntry entry : groupEntries) {
             if (entry.id() == null) {
-                건너뛴_조직.기록한다(SkippedEntries.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
+                건너뛴_조직.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
             }
             if (DuplicateIdGuard.isDuplicate(entry.id(), entry.dn(), groupDnById)) {
@@ -123,7 +123,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         int 사용자대조수 = 0;
         int 조직대조수 = 0;
         // 읽은 직원도 조직도 아닌 member 값 — 컴퓨터·연락처이거나 위에서 건너뛴 직원·조직이다. 값마다 한 줄이 아니라 요약 한 줄로 남긴다
-        SkippedEntries 건너뛴_member = SkippedEntries.member값();
+        SkippedEntries 건너뛴_member = SkippedEntries.member값(SkippedEntryObserver.NOOP);
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
@@ -141,7 +141,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     조직대조수++;
                     continue;
                 }
-                건너뛴_member.기록한다(SkippedEntries.사유.읽지_않은_member,
+                건너뛴_member.기록한다(SkippedEntryObserver.사유.읽지_않은_member,
                         "조직 '%s'(dn='%s') 의 member '%s'".formatted(entry.id(), entry.dn(), memberDn));
             }
             // AD 기본 그룹(점검 M10)의 소속은 member 값이 아니라 RID 로 정해졌다 — 위 집계의 DN 대조가 아니므로 멤버값수·대조수에 넣지 않는다
