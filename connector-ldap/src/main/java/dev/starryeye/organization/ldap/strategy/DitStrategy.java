@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap.strategy;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.KeyValueLimits;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
@@ -21,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -37,9 +39,17 @@ public class DitStrategy implements LdapMappingStrategy {
     /** 계정 만료를 판정할 "지금" 의 출처. {@code read} 마다 한 번 읽어 그 회차의 모든 직원에게 같은 시각을 쓴다. */
     private final Clock clock;
 
+    /** 건너뛴 엔트리 수를 알릴 곳(설계 2026-11-19 S5). 검색마다 요약을 남길 때 사유별로 부른다 */
+    private final SkippedEntryObserver 관찰자;
+
     /** 시스템 UTC 시계를 쓴다. */
     public DitStrategy(LdapProperties properties) {
         this(properties, Clock.systemUTC());
+    }
+
+    /** 건너뛴 수를 알리지 않는다. */
+    public DitStrategy(LdapProperties properties, Clock clock) {
+        this(properties, clock, SkippedEntryObserver.NOOP);
     }
 
     @Override
@@ -73,10 +83,14 @@ public class DitStrategy implements LdapMappingStrategy {
         // 합쳐지고, 계층 롤업이 양쪽 부모 모두에 child 간선을 만들어 조용한 권한 확대로
         // 이어진다. 충돌한 엔트리는 스킵한다 — 그 dn 을 codeByRdnPath 에 넣지 않으므로
         // 산하 엔트리는 "부모를 찾지 못함"으로 자연히 스킵된다.
-        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), SkippedEntryObserver.NOOP);
+        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), 관찰자);
         Map<String, String> groupDnByCode = new LinkedHashMap<>();
         for (OrgEntry entry : orgEntries) {
             String code = entry.code();
+            if (entry.한도_넘음() != null) {
+                건너뛴_조직.기록한다(SkippedEntryObserver.사유.한도_넘음, entry.한도_넘음());
+                continue;
+            }
             if (code == null) {
                 건너뛴_조직.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
@@ -109,9 +123,13 @@ public class DitStrategy implements LdapMappingStrategy {
         // 직원 소속: 사용자 엔트리의 부모 dn 이 곧 소속 조직이다
         Map<String, DirectoryUser> users = new LinkedHashMap<>();
         Map<String, String> userDnById = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), SkippedEntryObserver.NOOP);
+        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), 관찰자);
         for (UserEntry entry : userEntries) {
             String userId = entry.id();
+            if (entry.한도_넘음() != null) {
+                건너뛴_직원.기록한다(SkippedEntryObserver.사유.한도_넘음, entry.한도_넘음());
+                continue;
+            }
             if (userId == null) {
                 건너뛴_직원.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
@@ -178,14 +196,21 @@ public class DitStrategy implements LdapMappingStrategy {
             if (식별값 == null) {
                 return OrgEntry.식별_속성_없음(dn);
             }
+            String code = IdNormalizer.normalize(식별값);
+            // 저장 한도를 넘는 id·DN 은 건너뛸 엔트리다 — 잰 DN 은 externalId 가 될 절대 DN 이다(설계 2026-11-19 S2·S3)
+            Optional<String> 넘음 = EntryLimits.넘는_값(code, LdapDns.절대로(dn, properties.getBaseDn()), KeyValueLimits.MAX_GROUP_ID_BYTES);
+            if (넘음.isPresent()) {
+                return OrgEntry.한도_넘음(dn, 넘음.get());
+            }
             return new OrgEntry(
                     dn,
-                    IdNormalizer.normalize(식별값),
+                    code,
                     // 이름 속성이 없으면 DN 의 첫 RDN 값이다(설계 2026-10-04 §4.2) — id 는 entryUUID 라 사람이 읽을 수 없고,
                     // 정규화된 code 도 아니다: 금지 문자가 있으면 code 에는 밑줄이 들어가고, 그것이 표시명 칸에 그대로 새어 나온다.
                     // 상대 DN 이 아니라 절대 DN 에서 뽑는다 — root-dn 이 비어 있으면 루트 OU 의 상대 DN 이 빈 문자열이다
                     firstNonBlank(adapter.getStringAttribute(config.getGroupNameAttribute()),
-                            LdapDns.첫_RDN_값(LdapDns.절대로(dn, properties.getBaseDn()))));
+                            LdapDns.첫_RDN_값(LdapDns.절대로(dn, properties.getBaseDn()))),
+                    null);
         };
     }
 
@@ -202,9 +227,15 @@ public class DitStrategy implements LdapMappingStrategy {
             }
             // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
             String userName = firstNonBlank(adapter.getStringAttribute(config.getUserLoginAttribute()), 식별값);
+            String id = IdNormalizer.normalize(식별값);
+            // 저장 한도를 넘는 id·DN 은 건너뛸 엔트리다 — 식별 속성이 없을 때처럼 계정 상태 같은 나머지 속성은 읽지 않는다(설계 2026-11-19 S3)
+            Optional<String> 넘음 = EntryLimits.넘는_값(id, LdapDns.절대로(dn, properties.getBaseDn()), KeyValueLimits.MAX_MEMBER_ID_BYTES);
+            if (넘음.isPresent()) {
+                return UserEntry.한도_넘음(dn, 넘음.get());
+            }
             return new UserEntry(
                     dn,
-                    IdNormalizer.normalize(식별값),
+                    id,
                     userName,
                     // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
                     // 금지 문자가 밑줄로 바뀐 채 표시명 칸에 그대로 새어 나온다 (위 조직명과 같은 이유)
@@ -214,7 +245,8 @@ public class DitStrategy implements LdapMappingStrategy {
                     adapter.getStringAttribute(config.getUserMailAttribute()),
                     // 디렉터리가 막은 계정은 비활성이다 — 소속은 두고 권한 튜플만 사라진다
                     !AccountStatus.막혔는가(dn, attributes, 지금),
-                    LdapPersonName.from(attributes));
+                    LdapPersonName.from(attributes),
+                    null);
         };
     }
 
@@ -233,12 +265,18 @@ public class DitStrategy implements LdapMappingStrategy {
      * @param dn   서버가 준 DN(검색 베이스에 상대적). 조직 계층을 되짚는 키다. externalId 는 여기에 베이스를 붙인 절대 DN 이다
      * @param code 정규화된 조직 id(기본은 entryUUID). 식별 속성이 없는 엔트리는 null 이다
      * @param name 조직명. 없으면 DN 의 첫 RDN 값이다
+     * @param 한도_넘음 id·DN 이 저장 한도를 넘어 건너뛸 엔트리면 요약에 싣는 예시 문구(설계 2026-11-19 S4). 아니면 null 이다
      */
-    private record OrgEntry(String dn, String code, String name) {
+    private record OrgEntry(String dn, String code, String name, String 한도_넘음) {
 
         /** 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이다 */
         static OrgEntry 식별_속성_없음(String dn) {
-            return new OrgEntry(dn, null, null);
+            return new OrgEntry(dn, null, null, null);
+        }
+
+        /** 저장 한도를 넘어 건너뛸 엔트리. 전략이 읽는 것은 문구뿐이다 */
+        static OrgEntry 한도_넘음(String dn, String 문구) {
+            return new OrgEntry(dn, null, null, 문구);
         }
     }
 
@@ -252,13 +290,19 @@ public class DitStrategy implements LdapMappingStrategy {
      * @param email       메일. 없으면 null
      * @param active      디렉터리가 막은 계정이 아니면 true
      * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
+     * @param 한도_넘음   id·DN 이 저장 한도를 넘어 건너뛸 엔트리면 요약에 싣는 예시 문구(설계 2026-11-19 S4). 아니면 null 이다
      */
     private record UserEntry(String dn, String id, String userName, String displayName, String email,
-                             boolean active, PersonName name) {
+                             boolean active, PersonName name, String 한도_넘음) {
 
         /** 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이라 나머지 칸은 자리만 채운다 */
         static UserEntry 식별_속성_없음(String dn) {
-            return new UserEntry(dn, null, null, null, null, true, null);
+            return new UserEntry(dn, null, null, null, null, true, null, null);
+        }
+
+        /** 저장 한도를 넘어 건너뛸 엔트리. 나머지 칸은 자리만 채운다 — 계정 상태는 읽지 않는다 */
+        static UserEntry 한도_넘음(String dn, String 문구) {
+            return new UserEntry(dn, null, null, null, null, true, null, 문구);
         }
     }
 }

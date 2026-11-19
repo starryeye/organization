@@ -68,13 +68,13 @@ class GroupOfNamesRangeContinuationTest {
         Class<?> rawEntryClass = Class.forName(GroupOfNamesStrategy.class.getName() + "$RawEntry");
         Constructor<?> rawEntryCtor = rawEntryClass.getDeclaredConstructor(
                 String.class, String.class, String.class, String.class, Long.class,
-                List.class, boolean.class);
+                List.class, boolean.class, String.class);
         rawEntryCtor.setAccessible(true);
 
         Object 엔트리A = rawEntryCtor.newInstance(
-                아이디A, 진짜DN_A, "제1공장 A", null, 1105L, List.of("cn=u0", "cn=u1"), false);
+                아이디A, 진짜DN_A, "제1공장 A", null, 1105L, List.of("cn=u0", "cn=u1"), false, null);
         Object 엔트리B = rawEntryCtor.newInstance(
-                아이디B, 진짜DN_B, "제1공장:A", null, null, List.of("cn=x1", "cn=x2", "cn=x3"), true);
+                아이디B, 진짜DN_B, "제1공장:A", null, null, List.of("cn=x1", "cn=x2", "cn=x3"), true, null);
 
         // given — A 의 dn 을 베이스에 상대적인 DN 으로 바꿔 재조회하면 처음(0)부터 다시
         // 받는다({@code 전부_읽는다} 의 계약: 첫 조각은 검색을 돌린 다른 커넥션에서 왔으니

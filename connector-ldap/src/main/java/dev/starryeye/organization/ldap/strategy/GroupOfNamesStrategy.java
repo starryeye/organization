@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap.strategy;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.KeyValueLimits;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
@@ -25,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -45,9 +47,17 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     /** 계정 만료를 판정할 "지금" 의 출처. {@code read} 마다 한 번 읽어 그 회차의 모든 직원에게 같은 시각을 쓴다. */
     private final Clock clock;
 
+    /** 건너뛴 엔트리 수를 알릴 곳(설계 2026-11-19 S5). 검색마다 요약을 남길 때 사유별로 부른다 */
+    private final SkippedEntryObserver 관찰자;
+
     /** 시스템 UTC 시계를 쓴다. */
     public GroupOfNamesStrategy(LdapProperties properties) {
         this(properties, Clock.systemUTC());
+    }
+
+    /** 건너뛴 수를 알리지 않는다. */
+    public GroupOfNamesStrategy(LdapProperties properties, Clock clock) {
+        this(properties, clock, SkippedEntryObserver.NOOP);
     }
 
     @Override
@@ -76,8 +86,12 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> userDnById = new LinkedHashMap<>();
         // 남긴 직원의 AD 기본 그룹 RID — 건너뛴 직원은 읽지 않았으므로 없다
         Map<String, Long> 기본그룹RID_직원별 = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), SkippedEntryObserver.NOOP);
+        SkippedEntries 건너뛴_직원 = new SkippedEntries(SkippedEntryObserver.검색.직원, config.getUserIdAttribute(), 관찰자);
         for (UserEntry entry : userEntries) {
+            if (entry.한도_넘음() != null) {
+                건너뛴_직원.기록한다(SkippedEntryObserver.사유.한도_넘음, entry.한도_넘음());
+                continue;
+            }
             if (entry.id() == null) {
                 건너뛴_직원.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
@@ -100,8 +114,12 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         Map<String, String> groupIdByDn = new LinkedHashMap<>();
         Map<String, String> groupDnById = new LinkedHashMap<>();
         Map<String, RawEntry> survivingGroupEntries = new LinkedHashMap<>();
-        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), SkippedEntryObserver.NOOP);
+        SkippedEntries 건너뛴_조직 = new SkippedEntries(SkippedEntryObserver.검색.조직, config.getGroupIdAttribute(), 관찰자);
         for (RawEntry entry : groupEntries) {
+            if (entry.한도_넘음() != null) {
+                건너뛴_조직.기록한다(SkippedEntryObserver.사유.한도_넘음, entry.한도_넘음());
+                continue;
+            }
             if (entry.id() == null) {
                 건너뛴_조직.기록한다(SkippedEntryObserver.사유.식별_속성_없음, "dn='" + entry.dn() + "'");
                 continue;
@@ -123,7 +141,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         int 사용자대조수 = 0;
         int 조직대조수 = 0;
         // 읽은 직원도 조직도 아닌 member 값 — 컴퓨터·연락처이거나 위에서 건너뛴 직원·조직이다. 값마다 한 줄이 아니라 요약 한 줄로 남긴다
-        SkippedEntries 건너뛴_member = SkippedEntries.member값(SkippedEntryObserver.NOOP);
+        SkippedEntries 건너뛴_member = SkippedEntries.member값(관찰자);
         for (RawEntry entry : survivingGroupEntries.values()) {
             Set<MemberRef> members = new LinkedHashSet<>();
             for (String memberDn : entry.members()) {
@@ -218,10 +236,16 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 // 건너뛸 엔트리다 — 계정 상태·기본 그룹 같은 나머지 속성은 읽지 않는다. 표준 밖의 값이 있어도 회차를 멈추지 않는다
                 return UserEntry.식별_속성_없음(dn);
             }
+            String id = IdNormalizer.normalize(식별값);
+            // 저장 한도를 넘는 id·DN 은 건너뛸 엔트리다 — 식별 속성이 없을 때처럼 나머지 속성은 읽지 않는다(설계 2026-11-19 S3)
+            Optional<String> 넘음 = EntryLimits.넘는_값(id, dn, KeyValueLimits.MAX_MEMBER_ID_BYTES);
+            if (넘음.isPresent()) {
+                return UserEntry.한도_넘음(dn, 넘음.get());
+            }
             // userName 은 로그인 속성의 원본 값이다(점검 S25) — 정규화하지 않는다. 없으면 식별 값으로 대신한다
             String userName = firstNonBlank(value(attributes, config.getUserLoginAttribute()), 식별값);
             return new UserEntry(
-                    IdNormalizer.normalize(식별값),
+                    id,
                     dn,
                     userName,
                     // 마지막 폴백은 id 가 아니라 원본 userName 이다 — id 는 UUID 라 표시명으로 보이면 안 되고, 정규화된 id 라면
@@ -233,7 +257,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     // 디렉터리가 막은 계정은 비활성이다 — 멤버십은 두고 권한 튜플만 사라진다
                     !AccountStatus.막혔는가(dn, attributes, 지금),
                     LdapPersonName.from(attributes),
-                    ActiveDirectoryPrimaryGroup.기본그룹_RID(attributes, dn));
+                    ActiveDirectoryPrimaryGroup.기본그룹_RID(attributes, dn),
+                    null);
         };
     }
 
@@ -252,6 +277,11 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                 return RawEntry.식별_속성_없음(dn);
             }
             String code = IdNormalizer.normalize(식별값);
+            // 저장 한도를 넘는 그룹은 건너뛸 엔트리다 — RID·member 는 읽지 않는다(설계 2026-11-19 S3)
+            Optional<String> 넘음 = EntryLimits.넘는_값(code, dn, KeyValueLimits.MAX_GROUP_ID_BYTES);
+            if (넘음.isPresent()) {
+                return RawEntry.한도_넘음(dn, 넘음.get());
+            }
             RangedAttributeReader.Chunk 멤버 =
                     RangedAttributeReader.읽는다(attributes, config.getMemberAttribute());
             return new RawEntry(
@@ -263,7 +293,8 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
                     null,
                     ActiveDirectoryPrimaryGroup.RID(attributes, dn),
                     멤버.values(),
-                    멤버.완료());
+                    멤버.완료(),
+                    null);
         };
     }
 
@@ -307,7 +338,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         return entries.stream()
                 .map(entry -> 이어받은것.containsKey(entry.dn())
                         ? new RawEntry(entry.id(), entry.dn(), entry.displayName(), entry.email(), entry.rid(),
-                                이어받은것.get(entry.dn()), true)
+                                이어받은것.get(entry.dn()), true, null)
                         : entry)
                 .toList();
     }
@@ -365,13 +396,19 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      * @param active      디렉터리가 막은 계정이 아니면 true
      * @param name        RFC 이름 여섯 칸 중 직원에게 달린 것
      * @param primaryGroupRid AD 기본 그룹의 RID({@code primaryGroupID}). 없으면 null
+     * @param 한도_넘음       id·DN 이 저장 한도를 넘어 건너뛸 엔트리면 요약에 싣는 예시 문구(설계 2026-11-19 S4). 아니면 null 이다
      */
     private record UserEntry(String id, String dn, String userName, String displayName, String email,
-                             boolean active, PersonName name, Long primaryGroupRid) {
+                             boolean active, PersonName name, Long primaryGroupRid, String 한도_넘음) {
 
         /** 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이라 나머지 칸은 자리만 채운다 — 기본 그룹 RID 도 읽지 않는다 */
         static UserEntry 식별_속성_없음(String dn) {
-            return new UserEntry(null, dn, null, null, null, true, null, null);
+            return new UserEntry(null, dn, null, null, null, true, null, null, null);
+        }
+
+        /** 저장 한도를 넘어 건너뛸 엔트리. 나머지 칸은 자리만 채운다 — 계정 상태·기본 그룹 RID 는 읽지 않는다 */
+        static UserEntry 한도_넘음(String dn, String 문구) {
+            return new UserEntry(null, dn, null, null, null, true, null, null, 문구);
         }
     }
 
@@ -381,16 +418,22 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
      *                        범위 검색 재요청 때 엔트리를 다시 지목하는 좌표이기도 하다
      * @param rid             AD 그룹의 RID({@code objectSid} 의 마지막 하위 권한). 없으면 null
      * @param membersComplete 멤버 목록이 잘리지 않고 다 왔는가
+     * @param 한도_넘음       id·DN 이 저장 한도를 넘어 건너뛸 엔트리면 요약에 싣는 예시 문구(설계 2026-11-19 S4). 아니면 null 이다
      */
     private record RawEntry(String id, String dn, String displayName, String email, Long rid,
-                            List<String> members, boolean membersComplete) {
+                            List<String> members, boolean membersComplete, String 한도_넘음) {
 
         /**
          * 식별 속성이 없어 건너뛸 엔트리. 전략이 읽는 것은 dn 뿐이다 — RID 는 읽지 않고, 멤버는 비우고 완료로 둔다. 범위 검색으로 잘린 조직만
          * 이어받으므로 이 엔트리는 이어받기 대상이 되지 않는다
          */
         static RawEntry 식별_속성_없음(String dn) {
-            return new RawEntry(null, dn, null, null, null, List.of(), true);
+            return new RawEntry(null, dn, null, null, null, List.of(), true, null);
+        }
+
+        /** 저장 한도를 넘어 건너뛸 엔트리. {@link #식별_속성_없음} 처럼 멤버는 비우고 완료로 둔다 — 이어받기 대상이 되지 않는다 */
+        static RawEntry 한도_넘음(String dn, String 문구) {
+            return new RawEntry(null, dn, null, null, null, List.of(), true, 문구);
         }
     }
 }
