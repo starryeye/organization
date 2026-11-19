@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: 9218a34 (ldap-skip-metrics, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: be43eb5 (ldap-skip-metrics, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -21,7 +21,7 @@
 | 회차 걸기 | `SyncScheduler`, `AdminSyncController` | app-ldap |
 | 회차의 몸통, 길 고르기, 비교 경로 | `FullSyncUseCase` | core (`usecase`) |
 | 장부 맞추기 | `LedgerAlignment`, `TupleReconciler` | core (`usecase`) |
-| 디렉터리 읽기 | `LdapDirectorySnapshotSource`, `GroupOfNamesStrategy`, `DitStrategy`, `PagedLdapSearch`, `RangedAttributeReader`, `AccountStatus`, `LdapIdentifiers`, `ActiveDirectoryPrimaryGroup`, `SkippedEntries`, `UnmatchedMemberGuard`, `EmptyMembershipGuard`, `LdapDns` | connector-ldap (`ldap`, `ldap.strategy`) |
+| 디렉터리 읽기 | `LdapDirectorySnapshotSource`, `GroupOfNamesStrategy`, `DitStrategy`, `PagedLdapSearch`, `RangedAttributeReader`, `AccountStatus`, `LdapIdentifiers`, `ActiveDirectoryPrimaryGroup`, `SkippedEntries`, `SkippedEntryObserver`, `EntryLimits`, `UnmatchedMemberGuard`, `EmptyMembershipGuard`, `LdapDns` | connector-ldap (`ldap`, `ldap.strategy`) |
 | 튜플 변환·비교 | `TupleMapper`, `TupleDiff` | core (`tuple`) |
 | 삭제 가드 | `DeletionGuard`, `DeletionGuardPolicy`, `GuardDecision` | core (`guard`) |
 | OpenFGA 쓰기·장부 훑기 | `OpenFgaRelationTupleWriter`, `OpenFgaRelationTupleScanner` | authz-openfga |
@@ -1009,7 +1009,7 @@ GSI 는 최종 일관성이다. LDAP 앱에는 회차와 동시에 직원·조�
 
 직원·조직 하나의 저장·삭제가 끝날 때마다 그 비교 결과(`DirectoryChanges.UserDiff`·`GroupDiff`)로 `변경마다` 를 부른다 — 회차의 감사 이력 모음이 받는다. 도중에 실패해도 끝난 변경은 알린 뒤다.
 
-교체가 실패하면 회차는 `FAILED` 다. 이 시점에 스냅샷은 이미 저장돼 있다. 다음 회차는 비교 경로이고, 튜플이 그대로면 변경 없음 길에서 교체만 다시 한다. 같은 아이템이 매번 거절되면(키 한도) 매 회차가 같은 자리에서 `FAILED` 다.
+교체가 실패하면 회차는 `FAILED` 다. 이 시점에 스냅샷은 이미 저장돼 있다. 다음 회차는 비교 경로이고, 튜플이 그대로면 변경 없음 길에서 교체만 다시 한다. 저장소가 늘 거절하는 아이템이 있으면 매 회차가 같은 자리에서 `FAILED` 다. LDAP 의 긴 값은 입구에서 건너뛰므로 이 예가 아니다([3.11](#311-건너뛰는-엔트리)).
 
 ---
 
