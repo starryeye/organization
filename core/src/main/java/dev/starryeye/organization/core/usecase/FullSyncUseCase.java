@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.audit.RunAudit;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.GuardDecision;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
@@ -174,12 +175,15 @@ public class FullSyncUseCase {
             if (trigger != SyncTrigger.FORCED) {
                 GuardDecision decision = guard.evaluate(delta.toDelete(), TupleMapper.inactiveMemberTuples(directory),
                         baseline.크기(), "기준 스냅샷");
-                if (decision.partial()) {
-                    return 비활성_회수만_반영한다(baseline, delta, decision, 기록);
-                }
                 if (decision.aborted()) {
+                    // 가드가 걸린 회차는 지우려던 전체의 내역을 남긴다 — 일부 반영·차단기 중단 결론에도 붙는다(설계 2026-11-20 §3.1)
+                    GuardHold hold = GuardHold.of(delta.toDelete(), directory);
+                    log.warn("삭제 가드 내역: {}", hold.summary());
+                    if (decision.partial()) {
+                        return 비활성_회수만_반영한다(baseline, delta, decision, hold, 기록);
+                    }
                     log.warn("삭제 가드 발동: {}", decision.message());
-                    return Mono.just(Mono.just(SyncOutcome.aborted(decision.message())));
+                    return Mono.just(Mono.just(SyncOutcome.aborted(decision.message()).withGuardHold(hold)));
                 }
             }
             // 표시가 쓰기보다 먼저다 — 표시를 남기지 못하면 쓰지 않는다(설계 2026-09-30 §11). 쓴·지운 줄은 묶음마다 기록에 더한다
@@ -203,7 +207,7 @@ public class FullSyncUseCase {
      * 실행 기록은 ABORTED 다. 지우다 차단기로 멈추면 나간 지우기로 스냅샷을 남기고 FAILED 다 — 이때도 현재상태는 바꾸지 않는다.
      */
     private Mono<Mono<SyncOutcome>> 비활성_회수만_반영한다(기준선 baseline, TupleDelta delta, GuardDecision decision,
-                                                     AuditChanges 기록) {
+                                                     GuardHold hold, AuditChanges 기록) {
         Set<RelationTuple> 회수 = decision.revocationsOnly();
         String 결론 = LedgerAlignment.비활성_회수만_반영했다(회수.size(), delta.toDelete().size() - 회수.size(),
                 delta.toWrite().size(), decision.message());
@@ -211,11 +215,11 @@ public class FullSyncUseCase {
         return snapshots.markWriting()
                 .then(Mono.defer(() -> writer.apply(TupleDelta.deleteOnly(회수), 기록::tuples)))
                 .flatMap(result -> 스냅샷을_저장한다(baseline, result)
-                        .map(snapshotId -> Mono.just(SyncOutcome.revokedOnly(result, snapshotId, 결론))))
+                        .map(snapshotId -> Mono.just(SyncOutcome.revokedOnly(result, snapshotId, 결론).withGuardHold(hold))))
                 .onErrorResume(TupleWriteAbortedException.class, stopped ->
                         스냅샷을_저장한다(baseline, stopped.partial())
                                 .map(snapshotId -> Mono.just(SyncOutcome.stopped(stopped.partial(), snapshotId,
-                                        결론 + " / " + stopped.getMessage()))));
+                                        결론 + " / " + stopped.getMessage()).withGuardHold(hold))));
     }
 
     /** 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄). */

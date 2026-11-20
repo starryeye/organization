@@ -328,6 +328,57 @@ class RebuildUseCaseTest {
     }
 
     @Test
+    @DisplayName("재적재가 전부 보류하면 실행 기록에 내역이 있다 — 훑은 장부의 찌꺼기가 사라진 직원·조직으로 나온다")
+    void 재적재가_전부_보류하면_내역이_있다() {
+        // given — 장부에 user0~19 의 DEV002 소속과 없는 조직 OLD 의 소속 2줄이 있고, LDAP 은 kim 한 명만 돌려준다
+        writer.stored.addAll(IntStream.range(0, 20)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet()));
+        writer.stored.add(RelationTuple.directMember("user0", "OLD"));
+        writer.stored.add(RelationTuple.directMember("user1", "OLD"));
+        source.willReturn(조직도("kim", "DEV002"));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().usersGone().count()).isEqualTo(20);
+        assertThat(run.guardHold().groupsGone().count()).isEqualTo(1);
+        assertThat(run.guardHold().groupsGone().ids()).containsExactly("OLD");
+        assertThat(run.guardHold().totalLines()).isEqualTo(22);
+        assertThat(run.message()).contains("삭제 대상 22건");
+    }
+
+    @Test
+    @DisplayName("재적재가 비활성 회수만 반영해도 내역은 훑은 장부에서 지우려던 전체다")
+    void 재적재가_비활성_회수만_반영해도_내역이_있다() {
+        // given — 장부에 user0~19 소속 20줄. 디렉터리에는 user1~5 만 활성으로 남고 user0 은 막혔다
+        writer.stored.addAll(IntStream.range(0, 20)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet()));
+        Map<String, DirectoryUser> users = new java.util.LinkedHashMap<>();
+        IntStream.range(1, 6).forEach(i -> users.put("user" + i,
+                new DirectoryUser("user" + i, "uid=user" + i, "user" + i, "user" + i, null, true)));
+        users.put("user0", new DirectoryUser("user0", "uid=user0", "user0", "user0", null, false));
+        Set<MemberRef> members = users.keySet().stream().map(MemberRef::user).collect(Collectors.toSet());
+        source.willReturn(new DirectorySnapshot(users,
+                Map.of("DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀", members))));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).contains("비활성 회수 1건만 반영");
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().usersInactive().count()).isEqualTo(run.deletedCount()).isEqualTo(1);
+        assertThat(run.guardHold().usersGone().count()).isEqualTo(14);
+        assertThat(run.guardHold().totalLines()).isEqualTo(15);
+    }
+
+    @Test
     @DisplayName("force=true 면 재적재의 가드를 건너뛰고 지운다")
     void 강제면_재적재가_지운다() {
         // given

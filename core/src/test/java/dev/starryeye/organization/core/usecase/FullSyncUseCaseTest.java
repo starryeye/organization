@@ -199,6 +199,75 @@ class FullSyncUseCaseTest {
     }
 
     @Test
+    @DisplayName("가드가 통째로 막으면 실행 기록에 멈춤 내역이 있다 — 사라진 직원 수가 그림대로이고 줄 합이 메시지의 삭제 대상 수와 같다")
+    void 가드가_통째로_막으면_실행_기록에_내역이_있다() {
+        // given — 기준 20건, LDAP 이 0건을 반환해 전건 삭제 상황
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(20, "DEV002"))).block();
+        source.willReturn(DirectorySnapshot.empty());
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().usersGone().count()).isEqualTo(20);
+        assertThat(run.guardHold().usersInactive().count()).isZero();
+        assertThat(run.guardHold().groupsGone().count()).isEqualTo(1);
+        assertThat(run.message()).contains("삭제 대상 " + run.guardHold().totalLines() + "건");
+        assertThat(run.guardHold().totalLines()).isEqualTo(20);
+    }
+
+    @Test
+    @DisplayName("비활성 회수만 반영해도 내역은 지우려던 전체다 — 비활성 직원 수가 반영한 수이고 줄 합은 지울 줄 전체다")
+    void 비활성_회수만_반영해도_내역은_지우려던_전체다() {
+        // given — 지울 줄 15건 가운데 비활성 회수는 user0 의 1건이다
+        대부분이_빠지고_한_명이_막혔다(Set.of());
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().usersInactive().count()).isEqualTo(run.deletedCount()).isEqualTo(1);
+        assertThat(run.guardHold().usersInactive().ids()).containsExactly("user0");
+        assertThat(run.guardHold().usersGone().count()).isEqualTo(14);
+        assertThat(run.guardHold().totalLines()).isEqualTo(15);
+    }
+
+    @Test
+    @DisplayName("비활성 회수만 반영하다 차단기로 멈춰도 가드가 걸린 회차이므로 내역이 있다")
+    void 비활성_회수만_반영하다_차단기로_멈춰도_내역이_있다() {
+        // given
+        대부분이_빠지고_한_명이_막혔다(Set.of());
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().totalLines()).isEqualTo(15);
+    }
+
+    @Test
+    @DisplayName("가드를 지난 회차에는 내역이 없다")
+    void 가드를_지나면_내역이_없다() {
+        // given — 기준 20건 가운데 1건만 지운다(5%)
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(20, "DEV002"))).block();
+        source.willReturn(조직도(직원들(0, 19), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.guardHold()).isNull();
+    }
+
+    @Test
     @DisplayName("FORCED 트리거는 삭제 가드를 건너뛰고 전건 삭제를 진행한다")
     void 강제_실행은_가드를_건너뛴다() {
         // given

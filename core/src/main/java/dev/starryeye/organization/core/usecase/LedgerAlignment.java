@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.GuardDecision;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.RelationTuple;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -16,11 +17,13 @@ import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.tuple.SnapshotIds;
 import dev.starryeye.organization.core.tuple.TupleMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
@@ -45,6 +48,7 @@ import java.util.function.Consumer;
  *       되므로({@code 쓴_줄도_남긴다}) 쓴 줄도 묶음마다 더한다(설계 2026-10-20 §4). 이력은 {@link SyncJobs} 가 남긴다.</li>
  * </ol>
  */
+@Slf4j
 @RequiredArgsConstructor
 final class LedgerAlignment {
 
@@ -84,26 +88,35 @@ final class LedgerAlignment {
      */
     Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, boolean force,
                                   AuditChanges 기록, boolean 쓴_줄도_남긴다) {
+        // 가드가 걸리면 콜백이 내역을 여기에 담는다 — 맞추기 기계(TupleReconciler)는 사유 문자열만 안다(설계 2026-11-20 §3.1)
+        AtomicReference<GuardHold> 내역 = new AtomicReference<>();
         TupleReconciler.DeleteCheck check = force
                 ? TupleReconciler.DeleteCheck.NONE
-                : (최종_D, stale, scanned) -> 가드로_본다(directory, stale, scanned);
+                : (최종_D, stale, scanned) -> 가드로_본다(directory, stale, scanned, 내역);
         Consumer<TupleWriteResult> 쓴_묶음마다 = 쓴_줄도_남긴다 ? 기록::tuples : 묶음 -> {
         };
         return snapshots.markWriting()
                 .then(TupleReconciler.reconcile(writer, scanner, desired, TupleReconciler.DesiredRevision.NONE, check,
                         기록::revoked, 쓴_묶음마다))
                 .flatMap(reconciliation -> reconciliation.heldEntirely()
-                        ? Mono.just(Mono.just(SyncOutcome.held(reconciliation.result(), reconciliation.heldReason())))
-                        : commit(directory, reconciliation, 기록));
+                        ? Mono.just(Mono.just(SyncOutcome.held(reconciliation.result(), reconciliation.heldReason())
+                                .withGuardHold(내역.get())))
+                        : commit(directory, reconciliation, 내역.get(), 기록));
     }
 
     /**
      * 훑은 장부를 기준으로 삭제 가드를 본다(설계 2026-10-20 §5.4). 전체가 넘었지만 비활성 회수만으로는 가드 안이면 그것만 지우게 하고, 결론에 무엇을
      * 반영·보류했는지 적는다.
      */
-    private TupleReconciler.DeleteVerdict 가드로_본다(DirectorySnapshot directory, Set<RelationTuple> stale, long scanned) {
+    private TupleReconciler.DeleteVerdict 가드로_본다(DirectorySnapshot directory, Set<RelationTuple> stale, long scanned,
+                                                         AtomicReference<GuardHold> 내역) {
         GuardDecision decision = guard.evaluate(stale, TupleMapper.inactiveMemberTuples(directory),
                 Math.toIntExact(scanned), "훑은 장부");
+        if (decision.aborted()) {
+            GuardHold hold = GuardHold.of(stale, directory);
+            내역.set(hold);
+            log.warn("삭제 가드 내역: {}", hold.summary());
+        }
         if (decision.partial()) {
             Set<RelationTuple> 회수 = decision.revocationsOnly();
             return TupleReconciler.DeleteVerdict.partial(회수,
@@ -120,7 +133,7 @@ final class LedgerAlignment {
      * 받아들이지 않은 회차다.
      */
     private Mono<Mono<SyncOutcome>> commit(DirectorySnapshot directory, TupleReconciler.Reconciliation reconciliation,
-                                           AuditChanges 기록) {
+                                           GuardHold hold, AuditChanges 기록) {
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
                 SnapshotIds.generate(now, SyncSource.LDAP), now, SyncSource.LDAP, reconciliation.ledger(),
@@ -131,7 +144,7 @@ final class LedgerAlignment {
                 : Mono.defer(() -> state.replaceWith(directory, 기록.directoryListener())).then();
         return snapshots.save(snapshot)
                 .then(현재상태)
-                .thenReturn(Mono.just(결론(reconciliation, snapshot.id())));
+                .thenReturn(Mono.just(결론(reconciliation, snapshot.id()).withGuardHold(hold)));
     }
 
     /**
