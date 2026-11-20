@@ -176,8 +176,8 @@ DynamoDB 테이블은 기동 때 늘 확인하고, 없을 때 `dynamodb.create-t
 
 **테이블만 다시 만들고 OpenFGA store 는 두면(app-ldap) 첫 동기화가 장부를 훑어 맞춘다**(설계 `docs/superpowers/specs/2026-10-20-revocation-convergence-design.md` §4).
 스냅샷 포인터가 없으면 기준선이 없는 것이라 빈 기준선으로 비교하지 않는다 — 있어야 할 줄을 쓰고 장부를 Read 로 훑어 나머지를 지우며, 실행 기록 메시지에 "기준선 없음(첫 회차
-또는 새 테이블) — 장부를 훑어 맞춤"이 남는다. store 에 있던 목표 밖의 줄이 지워진다는 뜻이라 삭제 가드(훑은 장부의 30% 또는 지울 줄 5,000)가 걸릴 수 있다 — 확인한 뒤
-`POST /admin/sync/full?force=true` 로 넘긴다. 빈 store 의 첫 설치는 결과가 같고 Read 가 더 든다(10만 명이면 약 1,100번, 추정 2초). 첫 적재의 부여도 이력에 남는다.
+또는 새 테이블) — 장부를 훑어 맞춤"이 남는다. store 에 있던 목표 밖의 줄이 지워진다는 뜻이라 삭제 가드(훑은 장부의 30% 또는 지울 줄 5,000)가 걸릴 수 있다 — 실행 기록의 멈춤 내역(`guardHold`)을 확인한 뒤
+`POST /admin/sync/full?force=true&maxDeletes=N`(N 은 내역의 `lines.total` 에 작은 여유를 둔 줄 수, 아래 "강제 실행은 확인한 수까지만")으로 넘긴다. 빈 store 의 첫 설치는 결과가 같고 Read 가 더 든다(10만 명이면 약 1,100번, 추정 2초). 첫 적재의 부여도 이력에 남는다.
 단, 새 테이블 옆에 줄이 이미 있던 store 에서는 그 줄도 부여로 남고(중복 무시로 써 이미 있던 줄과 가를 수 없다), 첫 적재가 중간에 멈추면 다음 회차는 "기록 중" 경로를 타 쓴 줄을
 이력에 남기지 않으므로 처음 부여 이력 일부가 빠진다. app-scim 은 스냅샷이 비교 기준이 아니라 해당하지 않는다.
 
@@ -453,10 +453,10 @@ spring:
 | 요청 | 설명 |
 |---|---|
 | `POST /admin/sync/full` | 전체 동기화를 건다 — 202 + 실행 기록(`runId`, `RUNNING`) |
-| `POST /admin/sync/full?force=true` | 삭제 가드를 건너뛰고 건다 — `admin.destructive` 범위가 더 있어야 한다 |
-| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true`(기록의 `trigger` 가 `FORCED_REBUILD`, `admin.destructive` 범위) |
-| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 |
-| `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 없으면 404 |
+| `POST /admin/sync/full?force=true&maxDeletes=N` | 강제로 건다 — 삭제 가드를 건너뛰지 않고 비율 없이 상한 N(허용할 지울 줄 수, 1 이상)으로 본다. N 은 멈춘 회차의 `guardHold.lines.total` 에 작은 여유를 둔 수다. `admin.destructive` 범위가 더 있어야 한다(아래 "강제 실행은 확인한 수까지만") |
+| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true&maxDeletes=N`(기록의 `trigger` 가 `FORCED_REBUILD`, `admin.destructive` 범위) |
+| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 — 멈춤 내역(`guardHold`)은 싣지 않는다 |
+| `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 삭제 가드가 멈춘 회차면 멈춤 내역 `guardHold` 를 싣는다(아래). 없으면 404 |
 
 **app-scim**
 
@@ -475,6 +475,26 @@ spring:
 **실행 기록의 `requestedBy` 는 그 회차를 건 행위자다** — 관리 API 로 걸면 `client:<sub>`, 예약 LDAP 동기화는 `system:scheduler`, SCIM 아카이빙은
 `system:archive`. 이 칸이 생기기 전의 기록에는 없다.
 
+**삭제 가드가 멈춘 LDAP 회차의 단건 기록에는 멈춤 내역 `guardHold` 가 있다**(설계 `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §3.1). 지우려던 줄 전체를 한 번 훑어
+줄 셋(`lines` — 직원 소속 `direct_member`, 하위 조직 연결 `child`, 그 밖, 합 `total`), 직원 갈래 셋(`users` — 그림에서 사라짐 `gone`, 비활성 `inactive`, 남아 있고 활성인데 소속 줄을 잃음
+`losingMembership`), 조직 갈래 둘(`groups` — 사라짐 `gone`, 상위를 잃음 `losingParent`)로 센다. 갈래마다 서로 다른 id 의 수(`count`)와 사전순 앞 10개(`sample`)다.
+
+```json
+"guardHold": {
+  "lines":  { "total": 12000, "directMember": 11800, "child": 200, "other": 0 },
+  "users":  { "gone": { "count": 9500, "sample": ["E00001", "E00002", "…"] },
+              "inactive": { "count": 30, "sample": ["…"] },
+              "losingMembership": { "count": 2000, "sample": ["…"] } },
+  "groups": { "gone": { "count": 150, "sample": ["G-SALES", "…"] },
+              "losingParent": { "count": 20, "sample": ["…"] } }
+}
+```
+
+`lines.total` 은 메시지의 "삭제 대상 N건"과 같은 **줄** 수다 — 디렉터리가 세는 엔트리 수와 맞춰 볼 것은 `users`·`groups` 의 `count` 다(한 직원의 소속 줄 셋은 1명이다).
+사라진 직원·조직이 크면 검색 베이스·필터 실수나 큰 퇴사, 비활성이 크면 정책·시계, 소속을 잃는 활성 직원이 크면 개편이다. 예의 id(직원은 employeeId, 조직은 orgCode)는
+`GET /admin/employees/{employeeId}`·`GET /admin/organizations/{orgCode}` 로 바로 찾아본다. 내역은 단건 조회에만 싣고 목록(`GET /admin/sync/runs`)에는 싣지 않는다 — 멈춘 배포는 매시
+`ABORTED` 를 쌓는다. 같은 수가 WARN `삭제 가드 내역: 지울 줄 N건(소속 a·하위 조직 연결 b·그 밖 c) — …` 로도 남는다(id 는 없다). app-scim 에는 가드가 없어 칸이 늘 없다.
+
 `GET /actuator/health`는 두 앱 공통이며 DynamoDB(DescribeTable) / OpenFGA 상태를 포함한다. OpenFGA 는 캐시한 store 번호를 `GetStore` 로 실제로 묻는다 —
 OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는다(아직 해석 전이면 이름으로 찾기만 하고 만들지 않는다). 둘 다 2초 안에 답이 없으면 DOWN 이다.
 app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
@@ -485,8 +505,8 @@ app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 �
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다. 지정 API 는 본문 오류, 없는 조직·상위 조직, 순환 판정이 조직 1만 개를 넘은 경우(아래 "조직 계층 지정") | 그 사유 |
-| 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이다 | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 의 `force=true` 에 `maxDeletes` 가 없거나 1 미만 — `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다`, `force` 없이 온 `maxDeletes` — `maxDeletes 는 force=true 와 함께만 씁니다`, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다. 지정 API 는 본문 오류, 없는 조직·상위 조직, 순환 판정이 조직 1만 개를 넘은 경우(아래 "조직 계층 지정") | 그 사유 |
+| 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이고, `maxDeletes` 의 400 보다도 먼저다(정수로 읽히지 않는 `maxDeletes` 의 스프링 400 만 그보다 앞선다) | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
 | 409 | 락 경합 — 다른 작업이 락을 쥐고 있다. 정확 조회에 여럿이 일치한다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등). 정확 조회는 `<N>명이 일치한다 — externalId 로 찾는다`·`<N>개가 일치한다`. 지정 API 는 순환이다 — **락 경합은 409 가 아니라 503 이다**(아래 "조직 계층 지정") |
 | 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패. 지정 API 는 락 경합·리스 상실·부분 실패도 여기다 | `일시 장애 — 잠시 뒤 다시 시도한다`. 지정 API 의 락 경합·부분 실패는 그 사유 |
 | 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 가고 응답에 싣지 않는다 |
@@ -546,8 +566,8 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 않으며, 기준선 없음 회차는 종류가 `SYNC` 그대로이고 첫 적재의 부여(쓴 줄)도 남긴다.
 
 **삭제 가드는 훑어 맞추기와 재적재에도 걸린다.** 지울 줄이 훑은 장부의 30% 또는 5,000줄(`sync.deletion-guard` 의 `threshold-ratio`·`max-deletes`)을 넘으면 지우지 않고 `ABORTED`다 —
-검색 베이스·필터 실수로 디렉터리의 큰 부분이 빠진 그림이 장부를 크게 지우는 것을 막는다(사람 소속이 하나도 없는 그림은 그 전에 데이터 오류로 멈춘다 — LDAP 절). 사람이 확인한 뒤 `POST /admin/sync/full?force=true` 또는
-`POST /admin/sync/rebuild?force=true`로 넘긴다. 훑어 맞추기가 가드에 걸려 하나도 반영하지 못했다면 "기록 중" 표시가 남아 다음 회차도 다시 확인한다 — 기준선 없는 첫 회차가 통째로 걸리면 스냅샷이
+검색 베이스·필터 실수로 디렉터리의 큰 부분이 빠진 그림이 장부를 크게 지우는 것을 막는다(사람 소속이 하나도 없는 그림은 그 전에 데이터 오류로 멈춘다 — LDAP 절). 사람이 실행 기록의 멈춤 내역을 확인한 뒤 `POST /admin/sync/full?force=true&maxDeletes=N` 또는
+`POST /admin/sync/rebuild?force=true&maxDeletes=N`로 넘긴다(아래 "강제 실행은 확인한 수까지만"). 훑어 맞추기가 가드에 걸려 하나도 반영하지 못했다면 "기록 중" 표시가 남아 다음 회차도 다시 확인한다 — 기준선 없는 첫 회차가 통째로 걸리면 스냅샷이
 없으니 다음 회차도 장부를 다시 훑는다. 있어야 할 줄은 가드를 보기 전에 이미 썼으므로 그 수는 기록의 쓴 수(`writtenCount`)에 남는다. 비활성 회수만 일부 반영했다면 스냅샷을 남겨 표시가
 지워지고, 다음 회차는 비교 경로로 간다 — 그 회차가 받는 판정은 아래 "가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다" 끝에 있다.
 
@@ -558,9 +578,25 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 초과 문구가 붙는다. **일부 반영하는 동안 현재상태는 회차 전 그대로다** — 관리 API 의 직원 `active` 에는 막힌 직원이 활성으로 보이고, 실제 판정은 `openFgaCheck`(Check 결과)가
 보여 준다. **다음 회차는 같은 판정을 받지 않는다.** 스냅샷은 지운 회수를 뺀 장부라, 다음 회차는 남은 지우기를 줄어든 기준 수에 대어 가드를 다시 본다 — 그사이 새로 막힌 계정이
 없으면 비활성 부분이 비어 대개 전부 보류(`ABORTED`, 아무것도 반영하지 않음)이고, 새로 막힌 계정이 있으면 그 회수만 다시 반영한다. 남은 비율이 임계 아래로, 남은 줄 수가 상한 아래로 내려가면 `force` 없이
-나머지가 그대로 반영된다(코드로 따진 것이고 시험하지 않았다). 사람이 확인해 `force=true` 로 넘기면 나머지가 반영된다. 비활성 부분도 가드를 넘으면(시계 오류나
+나머지가 그대로 반영된다(코드로 따진 것이고 시험하지 않았다). 사람이 내역을 확인해 `force=true&maxDeletes=N` 으로 넘기면 나머지가 반영된다. 비활성 부분도 가드를 넘으면(시계 오류나
 잘못된 정책으로 대량 비활성) 지금처럼 하나도 반영하지 않는다. 훑어 맞추기·재적재는 가드를 보기 전에 있어야 할 줄을 이미 다 썼으므로 보류할 쓰기가 없고, 그 경로에서 가드가
 걸리면 이동자가 옛·새 소속을 함께 가질 수 있다. 판정의 `accountExpires` 는 앱 시계를 쓴다.
+
+**강제 실행은 확인한 수까지만 지운다**(설계 `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §3.2). `force=true` 는 허용할 지울 **줄** 수 `maxDeletes=N`(1 이상)과 함께만 받는다 —
+없거나 1 미만이면 400 `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다`, `force` 없이 `maxDeletes` 만 오면 400 `maxDeletes 는 force=true 와 함께만 씁니다` 다.
+검사 순서는 범위(`admin.destructive` 403) → `maxDeletes`(400) → 재적재의 `mode`(400)이고, 정수로 읽히지 않는 `maxDeletes` 는 스프링의 변환 400 이라 403 보다도 앞선다. 강제 회차(`FORCED`·`FORCED_REBUILD`)는 가드를
+건너뛰지 않는다 — 같은 가드를 **비율 없이 상한 N** 으로 본다. 설정에서 가드를 꺼 두었어도 본다. 비교 경로와 훑어 맞추기·재적재 모두 같다. 지울 줄이 N 을 넘으면(확인한 뒤 디렉터리가 더
+망가졌다) 강제 회차도 `ABORTED` 이고 상한 문구와 새 멈춤 내역이 남는다 — 비활성 회수만 떼어 N 안이면 그것만 반영한다. 강제 재적재도 N 을 넘으면 장부의 후보를 지우지 않는다. N 은 멈춘 회차의
+`guardHold.lines.total` 에 작은 여유(몇 %)를 둔다 — 딱 맞추면 그 사이 퇴사 몇 건으로도 다시 멈춘다.
+
+```
+# 멈춘 회차의 guardHold.lines.total 이 12000 이었다 — 몇 % 여유를 두어 12500. admin.destructive 범위의 토큰(로컬 ops-break-glass)
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxDeletes=12500'
+```
+
+결론을 낸 강제 회차는 메시지 앞에 `강제 실행 — 지울 줄 허용 N건` 이 붙는다(예 `강제 실행 — 지울 줄 허용 12500건 / 기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤 / …`, 변경 없음도
+`강제 실행 — 지울 줄 허용 12500건 / 변경 없음`). 감사 기록을 못 쓴 줄이 있으면 그 메모가 맨 앞에 온다(`감사 기록 N건 실패 / 강제 실행 — …`). 예외로 끝난 강제 회차는 결론이 없어
+허용 수가 남지 않는다 — 트리거와 `requestedBy` 는 남는다.
 app-scim `mode=tuples`는 조직도가 비었는데 장부에 줄이 있으면 지우지 않고 `FAILED`다("조직도가 비어 있다 — 장부를 비우려면 mode=wipe").
 
 ### app-scim 재적재를 부를 때 알아야 할 것
@@ -609,8 +645,8 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 롤업이 없다. 순서는 아래 "조직 계층 지정"의 2·3 이다.
 
 `sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 사람 소속이 하나도 없는 그림(예: 필터가 아무도
-고르지 못해 0건)을 주면 데이터 오류로 `FAILED` 이고 `force=true` 로도 넘기지 못한다(LDAP 절). 일부가 크게 빠진 그림은 삭제 가드가 `ABORTED`로 막고,
-`force=true`로 사람이 확인한 뒤 우회할 수 있다.
+고르지 못해 0건)을 주면 데이터 오류로 `FAILED` 이고 `force` 로도 넘기지 못한다(LDAP 절). 일부가 크게 빠진 그림은 삭제 가드가 `ABORTED`로 막고,
+사람이 멈춤 내역을 확인한 뒤 `force=true&maxDeletes=N` 으로 넘길 수 있다.
 
 ### 조직 계층 지정 (app-scim)
 
@@ -877,7 +913,7 @@ ldap:
 **이름 기반(`uid`/`cn`/`ou`/`employeeNumber`) id 도 설정으로 쓸 수 있지만 개명이 삭제+생성이다.** 이름이 바뀌면 새 id 의 직원·조직이
 생기고 옛 것의 튜플은 지워진다. DIT 에서 OU 하나를 개명하면 그 아래 직원 전원의 튜플이 지워졌다가 다시 쓰이고, 큰 조직을 개명하면 지울
 줄이 장부의 30% 또는 5,000줄을 넘어 삭제 가드가 그 회차를 `ABORTED` 로 멈춘다 — 그동안 디렉터리가 막았다고 명시한 계정의 회수는 먼저 반영되지만(위 "가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다"),
-엔트리가 사라져서 생기는 퇴사 지우기와 새 id 의 부여는 `force=true` 로 넘길 때까지 보류된다. 대소문자만 바꿔도(`JKim` →
+엔트리가 사라져서 생기는 퇴사 지우기와 새 id 의 부여는 `force=true&maxDeletes=N` 으로 넘길 때까지 보류된다. 대소문자만 바꿔도(`JKim` →
 `jkim`) 새 사람이다. `entryUUID`·`objectGUID` 에서는 개명해도 같은 id 라서 이런 일이 없다(큰 조직 개명이 삭제 가드에 걸리지 않는 것을
 e2e 로 확인했다).
 
@@ -969,7 +1005,7 @@ groupOfNames 는 직원 검색에 `primaryGroupID` 를, 그룹 검색에 `object
 - **변경 있는 회차.** 위에 더해 바뀐 줄의 OpenFGA 쓰기·지우기와 바뀐 직원·조직의 상태 쓰기가 들고, **스냅샷 한 벌을 통째로 새로 저장한다** — 한 줄만 바뀌어도 같은 크기(약 6MB·묶음 18개)다.
   스냅샷 보관 7일(`dynamodb.snapshot-retention-days`)에 매시 변경이 있으면 최대 약 168벌, 약 1GB 가 쌓인다.
 - **삭제 가드가 통째로 막고 있는 동안.** 기준선 없는 첫 회차나 "기록 중" 표시가 남은 회차가 가드에 통째로 막히면 스냅샷이 남지 않아 다음 회차도 같은 훑어 맞추기 길을 탄다. 그 회차마다 있어야 할 줄
-  전체를 다시 쓰고(10만 명 규모 약 1,100 묶음) 장부를 처음부터 훑는다. 사람이 `force=true` 로 넘기기 전까지 매시 반복이다 — 하루 한 번이던 때의 24배다. 기준선이 있는 비교 경로에서 막히면 쓰기 없이
+  전체를 다시 쓰고(10만 명 규모 약 1,100 묶음) 장부를 처음부터 훑는다. 사람이 `force=true&maxDeletes=N` 으로 넘기기 전까지 매시 반복이다 — 하루 한 번이던 때의 24배다. 기준선이 있는 비교 경로에서 막히면 쓰기 없이
   첫 항목만큼 든다.
 
 **읽기 재시도 창은 설정 셋이다.** 일시 실패는 `ldap.max-retries`(기본 5번)만큼, 첫 대기 `ldap.retry-min-backoff`(기본 10초)에서 두 배씩 늘려 `ldap.retry-max-backoff`(기본 2분)에서
@@ -1380,6 +1416,19 @@ LDAP 배포는 그대로다 — 계층을 디렉터리가 준다. 배포 하나�
 인스턴스 하나만 돈다. `sync.cron` 주기마다 여러 대가 같은 초에 불러도 한 대만 돌고, 나머지는 로그만 남기고 건너뛴다. 관리 API는 곧바로 409다.
 작업 동안 리스를 `dynamodb.lock-renew-interval`마다 갱신한다. 남이 가져간 것이 확인되면(토큰 조건 실패) 곧바로, 일시 오류가 마지막 성공에서 주기 두 번 넘게 이어지면 그때 멈추고 `FAILED`로 남긴다.
 
+app-ldap 은 작업 락을 지표로 센다(`SyncMetrics`, 태그 없음 — 설계 `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §3.3). 카운터 둘은 기동 때 0 으로 만들어 두므로 `increase()` 가 첫 값을 놓치지 않는다.
+
+| 지표 | 종류 | 의미 |
+|---|---|---|
+| `sync.lock.wait` | Timer | 동기화·재적재의 작업 락 획득이 성공하거나 포기하기까지 걸린 시간 |
+| `sync.lock.contended` | Counter | 다른 인스턴스가 쥐고 있어 조건 실패로 밀린 획득. DynamoDB 장애 같은 다른 획득 오류는 경합이 아니다(기다린 시간만 남는다). **둘 이상 띄운 배포는 매시 (인스턴스 수 − 1)만큼 오르는 것이 정상이다** — 정각에 모든 대의 스케줄러가 깨고 한 대만 돈다 |
+| `sync.lock.lease_lost` | Counter | 회차 도중 리스를 잃었다 — 회차는 `FAILED`("작업 도중 락 리스를 잃었습니다")이고 WARN `작업 락 리스를 잃었다: <사유>` 가 남는다 |
+
+```promql
+# app-ldap 작업 락 리스를 잃었다 — 두 인스턴스가 겹쳤을 수 있다. 경합(contended)이 아니라 이것에 건다
+increase(sync_lock_lease_lost_total[1h]) > 0
+```
+
 **하루 한 번 작업(app-scim 아카이빙·만료 스냅샷 정리, app-ldap 만료 스냅샷 정리)은 `DAILY#<작업>#<날짜>` 표지를 먼저 잡은 인스턴스만
 돈다**(날짜는 UTC, 표지는 사흘 뒤 TTL로 사라진다). 표지는 잡음(`CLAIMED`)과 완료(`DONE`) 둘이다.
 
@@ -1482,6 +1531,8 @@ Check 에는 단계가 없고, 쓰기 묶음만 아래 단계를 지킨다. 재�
 | `scim.lock.wait` | Timer | 락을 잡거나 포기하기까지 기다린 시간(서버 안 줄에서 기다린 시간 포함). 꼬리가 길어지면 `lock-acquire-timeout`을 다시 볼 때다 |
 | `scim.lock.contended` | Counter | 한 번이라도 다른 쪽에 밀린 획득. 꾸준히 오르면 전역 락의 직렬화 비용이 실제로 발생하고 있다는 뜻이다(설계 §4.1의 재검토 신호) |
 | `scim.lock.lease_lost` | Counter | 쥐고 있어야 할 리스를 잃었다 — 작업·쓰기 도중 갱신 실패(토큰 조건 실패, 또는 일시 오류가 한도를 넘김), 쓰기 직전·커밋 직전 재확인 실패, 반납 실패. **응답에 흔적이 없거나(반납 실패) 503 뿐이다.** 0이 아니면 락이 TTL만큼 묶였거나 두 인스턴스가 겹쳤을 수 있다 |
+
+`scim.lock.contended`·`scim.lock.lease_lost` 는 기동 때 0 으로 만들어 둔다. 재적재·초기화의 작업 락 획득도 조건 실패만 경합으로 센다 — DynamoDB 장애는 세지 않는다(`SyncJobs`).
 
 **`scim.drift.detected`(Counter, 태그 `kind=extra|missing`)** — SCIM 쓰기 경로는 델타를
 계산할 때 이미 OpenFGA에 `Check`를 던져 **실제 있는 튜플**을 얻는다. 여기에 상태(DynamoDB)가
@@ -1612,8 +1663,8 @@ sum(increase(scim_writes_unsourced_total[1h])) > 0
   장부와 조직도를 비운 뒤 IdP 에서 프로비저닝을 처음부터 다시 건다(위 "⚠️ `mode=wipe`는 되돌릴 수 없다"). DynamoDB 테이블과 OpenFGA store 를 새로
   만들어도 된다.
 - **app-ldap** — 첫 동기화에서 모든 id 가 바뀌어 옛 튜플 전부가 지울 대상이 되고 삭제 가드가 멈춘다. 첫 동기화를
-  `POST /admin/sync/full?force=true` 로 한 번 넘긴다. 테이블과 store 를 새로 만들어도 된다. 테이블만 새로 만들고 옛 store 를 두면 첫 동기화가 장부를 훑어 옛 id 줄을 지우려 하고
-  같은 가드에 걸린다(위 "테이블만 다시 만들고 OpenFGA store 는 두면") — 이때도 `force=true` 다.
+  멈춘 회차의 `guardHold.lines.total` 을 보고 `POST /admin/sync/full?force=true&maxDeletes=N`(작은 여유를 둔 N, 위 "강제 실행은 확인한 수까지만")으로 한 번 넘긴다. 테이블과 store 를 새로 만들어도 된다. 테이블만 새로 만들고 옛 store 를 두면 첫 동기화가 장부를 훑어 옛 id 줄을 지우려 하고
+  같은 가드에 걸린다(위 "테이블만 다시 만들고 OpenFGA store 는 두면") — 이때도 `force=true&maxDeletes=N` 이다.
 
 권한을 묻는 앱이 옛 id 를 저장해 두었다면 위 "조회 API"로 새 id 를 다시 얻는다.
 
