@@ -12,6 +12,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class DeletionGuardTest {
 
+    /** 가드 문구의 끝 문장(설계 2026-11-20 F5) — 멈춤 내역을 보고 허용 수와 함께 재요청하라고 가르친다. */
+    private static final String F5_끝_문장 =
+            "강제 실행하려면 실행 기록의 guardHold 를 확인한 뒤 force=true 와 maxDeletes(허용할 지울 줄 수)로 재요청하세요";
+
     private static Set<RelationTuple> 튜플들(int count) {
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         IntStream.range(0, count).forEach(i -> tuples.add(RelationTuple.directMember("user" + i, "DEV002")));
@@ -227,7 +231,7 @@ class DeletionGuardTest {
         assertThat(같음.aborted()).isFalse();
         assertThat(넘음.aborted()).isTrue();
         assertThat(넘음.message()).isEqualTo(
-                "삭제 대상 6건(기준 스냅샷 100건의 6.0%)이 상한 5건을 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+                "삭제 대상 6건(기준 스냅샷 100건의 6.0%)이 상한 5건을 초과했습니다. " + F5_끝_문장);
     }
 
     // 깨뜨릴 변경: 상한 판정을 min-baseline 미만 이른 반환 뒤에 두기
@@ -268,7 +272,7 @@ class DeletionGuardTest {
         var decision = guard.evaluate(앞에서(baseline, 40), Set.of(), baseline.size(), "기준 스냅샷");
         // then
         assertThat(decision.message()).isEqualTo(
-                "삭제 대상 40건(기준 스냅샷 100건의 40.0%)이 임계치 30.0%와 상한 5건을 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+                "삭제 대상 40건(기준 스냅샷 100건의 40.0%)이 임계치 30.0%와 상한 5건을 초과했습니다. " + F5_끝_문장);
     }
 
     // 깨뜨릴 변경: 비율만 넘은 문구를 바꾸기
@@ -282,7 +286,7 @@ class DeletionGuardTest {
         var decision = guard.evaluate(앞에서(baseline, 68), Set.of(), baseline.size(), "기준 스냅샷");
         // then
         assertThat(decision.message()).isEqualTo(
-                "삭제 대상 68건(기준 스냅샷 100건의 68.0%)이 임계치 30.0%를 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요");
+                "삭제 대상 68건(기준 스냅샷 100건의 68.0%)이 임계치 30.0%를 초과했습니다. " + F5_끝_문장);
     }
 
     // 깨뜨릴 변경: 비활성 회수 재판정에서 상한을 빼기
@@ -331,5 +335,69 @@ class DeletionGuardTest {
         assertThat(같음.aborted()).isFalse();
         assertThat(넘음.aborted()).isTrue();
         assertThat(넘음.message()).contains("상한 5000건").doesNotContain("임계치");
+    }
+
+    // ---------- 끝 문장과 강제 가드 (설계 2026-11-20 F2·F5) ----------
+
+    // 깨뜨릴 변경: 끝 문장을 옛 "force=true 로 재요청하세요" 로 두기, 세 꼴 가운데 하나만 바꾸기
+    @Test
+    @DisplayName("가드 문구는 세 꼴(비율만·상한만·둘 다) 모두 멈춤 내역을 확인하고 허용 수로 재요청하라는 문장으로 끝난다")
+    void 가드_문구는_세_꼴_모두_F5_문장으로_끝난다() {
+        // given
+        var guard = new DeletionGuard(new DeletionGuardPolicy(true, 0.3, 10, 5));
+        // when
+        var 비율만 = new DeletionGuard(DeletionGuardPolicy.defaults()).evaluate(68, 100, "기준 스냅샷");
+        var 상한만 = guard.evaluate(6, 100, "기준 스냅샷");
+        var 둘_다 = guard.evaluate(40, 100, "기준 스냅샷");
+        // then
+        assertThat(비율만.message()).contains("임계치 30.0%를").endsWith(F5_끝_문장);
+        assertThat(상한만.message()).contains("상한 5건을").endsWith(F5_끝_문장);
+        assertThat(둘_다.message()).contains("임계치 30.0%와 상한 5건을").endsWith(F5_끝_문장);
+    }
+
+    // 깨뜨릴 변경: 강제 가드에 설정의 비율을 남기기
+    @Test
+    @DisplayName("강제 가드는 비율을 보지 않는다 — 기준 100건에서 90건을 지워도 허용 수 90 안이면 진행한다")
+    void 강제_가드는_비율을_보지_않는다() {
+        // given
+        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 90), Set.of(), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.aborted()).isFalse();
+    }
+
+    // 깨뜨릴 변경: 강제 가드의 상한을 허용 수가 아닌 값(0·설정값)으로 두기
+    @Test
+    @DisplayName("강제 가드는 허용 수를 하나 넘으면 상한 문구로 멈춘다")
+    void 강제_가드는_N_을_넘으면_상한_문구로_멈춘다() {
+        // given
+        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 91), Set.of(), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.aborted()).isTrue();
+        assertThat(decision.message())
+                .contains("삭제 대상 91건(기준 스냅샷 100건의 91.0%)이 상한 90건을 초과했습니다")
+                .doesNotContain("임계치")
+                .endsWith(F5_끝_문장);
+    }
+
+    // 깨뜨릴 변경: 강제 가드에서 비활성 회수 재판정을 빼기
+    @Test
+    @DisplayName("강제 가드도 비활성 회수를 떼어 본다 — 전체가 허용 수를 넘어도 비활성 회수가 그 안이면 그것만 반영한다")
+    void 강제_가드는_비활성_회수를_떼어_본다() {
+        // given — 지울 91건(허용 수 90 초과) 가운데 비활성 회수 10건
+        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var baseline = 튜플들(100);
+        // when
+        var decision = guard.evaluate(앞에서(baseline, 91), 앞에서(baseline, 10), baseline.size(), "기준 스냅샷");
+        // then
+        assertThat(decision.aborted()).isTrue();
+        assertThat(decision.partial()).isTrue();
+        assertThat(decision.revocationsOnly()).containsExactlyInAnyOrderElementsOf(앞에서(baseline, 10));
+        assertThat(decision.message()).contains("삭제 대상 91건").contains("상한 90건");
     }
 }

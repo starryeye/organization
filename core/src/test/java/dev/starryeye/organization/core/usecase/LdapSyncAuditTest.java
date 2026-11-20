@@ -16,6 +16,7 @@ import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -29,6 +30,7 @@ import dev.starryeye.organization.core.model.TupleSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -39,6 +41,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -52,6 +55,8 @@ class LdapSyncAuditTest {
     private static final MemberRef 유령 = MemberRef.user("ghost");
     private static final RelationTuple 김_개발 = RelationTuple.directMember("kim", "DEV");
     private static final RelationTuple 유령_개발 = RelationTuple.directMember("ghost", "DEV");
+    /** 가드가 관심이 아닌 강제 회차의 허용 수 — 이 테스트들이 지우는 줄보다 넉넉하다(설계 2026-11-20 F1) */
+    private static final ForceAllowance 넉넉한_허용_수 = new ForceAllowance(1000);
 
     private FakeSnapshotSource source;
     private FakeSnapshotRepository snapshots;
@@ -105,9 +110,16 @@ class LdapSyncAuditTest {
         return runs.awaitFinished(started.runId());
     }
 
-    /** 가드를 넘기는 재적재 — 가드는 이 테스트의 관심이 아니다. */
+    /** 허용 수를 넉넉히 준 강제 동기화 — 가드는 이 테스트의 관심이 아니다. */
+    private SyncRun 강제로_동기화한다() {
+        SyncRun started = sync.startForced(넉넉한_허용_수, run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
+    }
+
+    /** 허용 수를 넉넉히 준 강제 재적재 — 가드는 이 테스트의 관심이 아니다. */
     private SyncRun 재적재한다() {
-        SyncRun started = rebuild.start(true, run -> {
+        SyncRun started = rebuild.startForced(넉넉한_허용_수, run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -230,15 +242,15 @@ class LdapSyncAuditTest {
         assertThat(쓸때_락을_쥠).isFalse();
     }
 
-    /** 반납하는 순간 시계가 가는 락으로 동기화한다 — 이력과 스냅샷이 그 락의 시계를 본다. */
-    private SyncRun 시계가_가는_락으로_동기화한다(ClockAdvancingLock 시계가_가는_락, SyncTrigger trigger) {
+    /** 반납하는 순간 시계가 가는 락으로 동기화한다 — 이력과 스냅샷이 그 락의 시계를 본다. {@code 건다} 가 입구(일반·강제)를 고른다. */
+    private SyncRun 시계가_가는_락으로_동기화한다(ClockAdvancingLock 시계가_가는_락,
+                                     Function<FullSyncUseCase, Mono<SyncRun>> 건다) {
         Clock 시계 = 시계가_가는_락.clock();
         SyncJobs jobs = new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
                 new AuditRecorder(auditLog, 빠진_줄_지표::addAndGet, 시계));
         FullSyncUseCase 시계를_보는_동기화 = new FullSyncUseCase(source, snapshots, state, writer, new FakeTupleScanner(writer),
                 new DeletionGuard(DeletionGuardPolicy.defaults()), jobs, 시계);
-        SyncRun started = 시계를_보는_동기화.start(trigger, run -> {
-        }).block();
+        SyncRun started = 건다.apply(시계를_보는_동기화).block();
         return runs.awaitFinished(started.runId());
     }
 
@@ -250,7 +262,8 @@ class LdapSyncAuditTest {
         source.willReturn(조직도(직원("kim")));
 
         // when
-        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, SyncTrigger.SCHEDULED);
+        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, 동기화 -> 동기화.start(SyncTrigger.SCHEDULED, ignored -> {
+        }));
 
         // then — 반납이 시계를 옮겼고, 이력은 그 전 시각이다
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -268,7 +281,8 @@ class LdapSyncAuditTest {
         source.willReturn(조직도(직원("kim")));
 
         // when
-        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, SyncTrigger.FORCED);
+        SyncRun run = 시계가_가는_락으로_동기화한다(시계가_가는_락, 동기화 -> 동기화.startForced(넉넉한_허용_수, ignored -> {
+        }));
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -314,13 +328,13 @@ class LdapSyncAuditTest {
     @Test
     @DisplayName("기록 중 표시가 남은 회차는 장부 맞추기로 남기고, 지운 줄만 적는다")
     void 장부_맞추기는_지운_줄만() {
-        // given — 지난 회차가 쓰다 멈췄고 장부에 찌꺼기가 있다. 가드는 이 테스트의 관심이 아니라 FORCED 로 넘긴다
+        // given — 지난 회차가 쓰다 멈췄고 장부에 찌꺼기가 있다. 가드는 이 테스트의 관심이 아니라 허용 수를 넉넉히 준 강제 회차로 건다
         writer.stored.add(유령_개발);
         snapshots.writing.set(true);
         source.willReturn(조직도(직원("kim")));
 
         // when
-        SyncRun run = 동기화한다(SyncTrigger.FORCED);
+        SyncRun run = 강제로_동기화한다();
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -443,7 +457,7 @@ class LdapSyncAuditTest {
         source.willReturn(조직도(직원("kim")));
 
         // when
-        SyncRun run = 동기화한다(SyncTrigger.FORCED);
+        SyncRun run = 강제로_동기화한다();
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.FAILED);

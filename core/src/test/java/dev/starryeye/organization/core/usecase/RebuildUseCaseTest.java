@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -82,11 +83,14 @@ class RebuildUseCaseTest {
 
     /** 재적재를 걸고 끝날 때까지 기다린다 — 재적재는 요청과 떼어 돈다(설계 §4). */
     private SyncRun 재적재한다() {
-        return 재적재한다(false);
+        SyncRun started = useCase.start(run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
     }
 
-    private SyncRun 재적재한다(boolean force) {
-        SyncRun started = useCase.start(force, run -> {
+    /** 허용 수 N 을 주어 강제로 재적재하고 끝날 때까지 기다린다 — 강제 재적재는 허용 수 입구로만 든다(설계 2026-11-20 F1). */
+    private SyncRun 강제로_재적재한다(int maxDeletes) {
+        SyncRun started = useCase.startForced(new ForceAllowance(maxDeletes), run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -280,7 +284,7 @@ class RebuildUseCaseTest {
         AtomicReference<SyncRun> 끝남 = new AtomicReference<>();
 
         // when
-        SyncRun started = useCase.start(false, 끝남::set).block();
+        SyncRun started = useCase.start(끝남::set).block();
 
         // then
         assertThat(started.status()).isEqualTo(SyncStatus.RUNNING);
@@ -379,20 +383,48 @@ class RebuildUseCaseTest {
     }
 
     @Test
-    @DisplayName("force=true 면 재적재의 가드를 건너뛰고 지운다")
-    void 강제면_재적재가_지운다() {
-        // given
+    @DisplayName("강제 재적재는 지울 줄이 허용 수 안이면 비율을 넘어도 지우고, 결론 앞에 허용 수를 적는다")
+    void 강제_재적재는_허용_수_안이면_지운다() {
+        // given — 장부 20줄을 모두 지운다(100%). 허용 수는 그 20줄이다
         writer.stored.addAll(IntStream.range(0, 20)
                 .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
                 .collect(Collectors.toSet()));
         source.willReturn(DirectorySnapshot.empty());
 
         // when
-        SyncRun run = 재적재한다(true);
+        SyncRun run = 강제로_재적재한다(20);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
         assertThat(writer.stored).isEmpty();
+        assertThat(run.message()).isEqualTo("강제 실행 — 지울 줄 허용 20건");
+    }
+
+    // 깨뜨릴 변경: 강제 재적재의 장부 맞추기가 DeleteCheck.NONE 으로 가드 없이 지우기
+    @Test
+    @DisplayName("강제 재적재도 지울 줄이 허용 수를 넘으면 장부의 후보를 지우지 않고 ABORTED 이며 멈춤 내역이 있다")
+    void 강제_재적재가_허용_수를_넘으면_장부의_후보를_지우지_않는다() {
+        // given — 장부 20줄을 모두 지우려는데 허용 수는 19건이다
+        writer.stored.addAll(IntStream.range(0, 20)
+                .mapToObj(i -> RelationTuple.directMember("user" + i, "DEV002"))
+                .collect(Collectors.toSet()));
+        source.willReturn(DirectorySnapshot.empty());
+
+        // when
+        SyncRun run = 강제로_재적재한다(19);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.FORCED_REBUILD);
+        assertThat(run.message())
+                .startsWith("강제 실행 — 지울 줄 허용 19건 / 삭제 대상 20건(훑은 장부 20건")
+                .contains("상한 19건을 초과했습니다");
+        assertThat(writer.stored).as("장부의 후보를 그대로 둔다").hasSize(20);
+        assertThat(writer.deleted).isEmpty();
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().totalLines()).isEqualTo(20);
+        assertThat(snapshots.saved).isEmpty();
+        assertThat(snapshots.writing).as("표시가 남아 다음 회차도 다시 확인한다").isTrue();
     }
 
     @Test
@@ -417,13 +449,13 @@ class RebuildUseCaseTest {
     }
 
     @Test
-    @DisplayName("force=true 재적재는 트리거 FORCED_REBUILD 로 남는다 — 락 용도는 REBUILD 그대로다")
+    @DisplayName("강제 재적재는 트리거 FORCED_REBUILD 로 남는다 — 락 용도는 REBUILD 그대로다")
     void force_재적재는_FORCED_REBUILD_로_남는다() {
         // given
         source.willReturn(조직도("kim", "DEV002"));
 
         // when
-        SyncRun started = useCase.start(true, run -> {
+        SyncRun started = useCase.startForced(new ForceAllowance(1), run -> {
         }).block();
         SyncRun finished = runs.awaitFinished(started.runId());
 
@@ -440,7 +472,7 @@ class RebuildUseCaseTest {
         source.willReturn(조직도("kim", "DEV002"));
 
         // when
-        SyncRun run = 재적재한다(false);
+        SyncRun run = 재적재한다();
 
         // then
         assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);

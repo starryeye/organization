@@ -111,7 +111,7 @@ class LdapDeletionGuardScaleTest {
     @DisplayName("기준선을 만든다 — 조직도 전체를 적재한다")
     void 기준선을_만든다() {
         // when, then
-        동기화한다(false).jsonPath("$.writtenCount").isEqualTo(최초튜플수);
+        동기화한다().jsonPath("$.writtenCount").isEqualTo(최초튜플수);
         검증한다();
     }
 
@@ -128,7 +128,7 @@ class LdapDeletionGuardScaleTest {
         양쪽에서_지운다(0, 지울건수);
 
         // then
-        동기화한다(false)
+        동기화한다()
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.deletedCount").isEqualTo(지울건수);
         // deletedCount 숫자만 맞고 OpenFGA 삭제가 조용히 no-op 이어도, 지운 사람 전원의 권한이
@@ -151,7 +151,7 @@ class LdapDeletionGuardScaleTest {
         LDAP에서만_지운다(이미지운수, 이미지운수 + 지울건수);
 
         // when
-        동기화한다(false)
+        동기화한다()
                 .jsonPath("$.status").isEqualTo("ABORTED")
                 .jsonPath("$.deletedCount").isEqualTo(0)
                 .jsonPath("$.message").value(message ->
@@ -164,7 +164,7 @@ class LdapDeletionGuardScaleTest {
 
     @Test
     @Order(4)
-    @DisplayName("L13. force=true 는 가드를 지나 실제로 지운다")
+    @DisplayName("L13. force=true&maxDeletes=N 이면 허용 수 안의 지울 줄을 실제로 지운다")
     void L13_강제로_우회한다() {
         // given — LDAP 은 이미 L12-b 의 상태다. 기대값만 그쪽으로 맞춘다
         int 이미지운수 = (int) Math.floor(최초튜플수 * 임계비율);
@@ -173,11 +173,13 @@ class LdapDeletionGuardScaleTest {
         단일소속직원.subList(이미지운수, 이미지운수 + 추가로지운수).forEach(editor::직원을_지운다);
         기대 = editor.완성();
 
-        // when
-        동기화한다(true)
+        // when — 지운 직원마다 소속 줄이 하나라 허용 수는 지울 줄 수와 딱 맞다
+        강제로_동기화한다(추가로지운수)
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
                 .jsonPath("$.trigger").isEqualTo("FORCED")
-                .jsonPath("$.deletedCount").isEqualTo(추가로지운수);
+                .jsonPath("$.deletedCount").isEqualTo(추가로지운수)
+                .jsonPath("$.message").value(message ->
+                        assertThat((String) message).startsWith("강제 실행 — 지울 줄 허용 " + 추가로지운수 + "건"));
 
         // then
         검증한다();
@@ -203,8 +205,13 @@ class LdapDeletionGuardScaleTest {
         }
     }
 
-    private WebTestClient.BodyContentSpec 동기화한다(boolean force) {
-        return SyncJobClient.끝까지(client, "/admin/sync/full" + (force ? "?force=true" : ""));
+    private WebTestClient.BodyContentSpec 동기화한다() {
+        return SyncJobClient.끝까지(client, "/admin/sync/full");
+    }
+
+    /** 허용 수 N 과 함께 강제로 동기화한다 — force=true 는 maxDeletes 와 함께만 받는다(설계 2026-11-20 F1). */
+    private WebTestClient.BodyContentSpec 강제로_동기화한다(int maxDeletes) {
+        return SyncJobClient.끝까지(client, "/admin/sync/full?force=true&maxDeletes=" + maxDeletes);
     }
 
     private void 검증한다() {

@@ -3,6 +3,7 @@ package dev.starryeye.organization.core.usecase;
 import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.guard.DeletionGuard;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -19,6 +20,7 @@ import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -30,7 +32,8 @@ import java.util.function.Consumer;
  *
  * <p><b>삭제 가드를 지킨다(설계 2026-09-30 §4.3).</b> LDAP 이 설정 실수로 0명을 돌려주면 장부 전체를 지우게 된다 — 지울 줄이 훑은 장부의
  * 임계치 또는 상한을 넘으면 지우지 않고 ABORTED 다. 다만 디렉터리가 막았다고 명시한 회수만으로는 가드 안이면 그것만 지운다(설계 2026-10-20 §5.4,
- * {@link LedgerAlignment}). 사람이 확인한 뒤 {@code force} 로 넘긴다.
+ * {@link LedgerAlignment}). 사람이 실행 기록의 멈춤 내역을 확인한 뒤 허용 수를 주어 강제로 건다({@link #startForced}) — 강제 재적재도 가드를 건너뛰지
+ * 않고, 비율 없이 허용 수 N 을 상한으로 같은 가드를 본다(설계 2026-11-20 F1·F2).
  *
  * <p><b>이력(설계 2026-10-10 §4.2).</b> 회차 id 로, 현재상태가 바뀐 것과 지운 줄을 남긴다. 끝나는 즉시 회차의 변경 모음에 더하고, 회차가 어떻게 끝나든
  * {@link SyncJobs} 가 락을 반납한 뒤 남긴다(설계 2026-10-15).
@@ -39,6 +42,7 @@ import java.util.function.Consumer;
 public class RebuildUseCase {
 
     private final DirectorySnapshotSource source;
+    private final DeletionGuard guard;
     private final SyncJobs jobs;
     private final LedgerAlignment alignment;
 
@@ -46,28 +50,45 @@ public class RebuildUseCase {
                           DirectoryStateRepository state, RelationTupleWriter writer, RelationTupleScanner scanner,
                           DeletionGuard guard, SyncJobs jobs, Clock clock) {
         this.source = source;
+        this.guard = guard;
         this.jobs = jobs;
-        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock);
+        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, clock);
     }
 
     /**
      * 작업 락(REBUILD)을 잡고 실행 기록(RUNNING)을 연 뒤 재적재를 요청과 떼어 띄운다. 못 잡으면 {@link LockUnavailableException}.
+     * 트리거는 {@link SyncTrigger#REBUILD} 이고 설정의 가드를 본다.
      *
-     * @param force      true 면 삭제 가드를 건너뛴다 — ABORTED 뒤 사람이 확인하고 넘기는 통로다. 실행 기록의 트리거는
-     *                   {@link SyncTrigger#FORCED_REBUILD} 로 남는다(동기화의 {@code FORCED} 와 같다). 락 용도는 REBUILD 그대로다
      * @param onFinished 끝난 기록으로 불린다(지표)
      */
-    public Mono<SyncRun> start(boolean force, Consumer<SyncRun> onFinished) {
-        SyncTrigger trigger = force ? SyncTrigger.FORCED_REBUILD : SyncTrigger.REBUILD;
-        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.REBUILD,
-                AuditKind.REBUILD, (run, 기록) -> Mono.defer(() -> rebuild(force, 기록.changes())), onFinished);
+    public Mono<SyncRun> start(Consumer<SyncRun> onFinished) {
+        return 띄운다(SyncTrigger.REBUILD, null, onFinished);
     }
 
-    private Mono<Mono<SyncOutcome>> rebuild(boolean force, AuditChanges 기록) {
+    /**
+     * 허용 수를 받은 강제 재적재 — ABORTED 뒤 사람이 멈춤 내역을 확인하고 넘기는 통로다(설계 2026-11-20 F1·F2). 가드를 건너뛰지 않는다 — 비율 없이 허용 수
+     * N 을 상한으로 같은 가드를 보고, N 을 넘으면 장부의 후보를 지우지 않는다. 결론을 낸 회차는 결론 앞에 {@link ForceAllowance#note()} 를 적는다(F4).
+     * 실행 기록의 트리거는 {@link SyncTrigger#FORCED_REBUILD} 로 남는다(동기화의 {@code FORCED} 와 같다). 락 용도는 REBUILD 그대로다.
+     *
+     * @param onFinished 끝난 기록으로 불린다(지표)
+     */
+    public Mono<SyncRun> startForced(ForceAllowance allowance, Consumer<SyncRun> onFinished) {
+        return 띄운다(SyncTrigger.FORCED_REBUILD, Objects.requireNonNull(allowance, "allowance"), onFinished);
+    }
+
+    /** 이번 회차의 가드를 한 번 고르고 띄운다 — 허용 수가 없으면 설정의 가드, 있으면 그 수를 상한으로 한 강제 가드다. */
+    private Mono<SyncRun> 띄운다(SyncTrigger trigger, ForceAllowance allowance, Consumer<SyncRun> onFinished) {
+        DeletionGuard 이번_가드 = allowance == null ? guard : DeletionGuard.forced(allowance);
+        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.REBUILD, AuditKind.REBUILD,
+                (run, 기록) -> FullSyncUseCase.허용_수를_적는다(Mono.defer(() -> rebuild(이번_가드, 기록.changes())), allowance),
+                onFinished);
+    }
+
+    private Mono<Mono<SyncOutcome>> rebuild(DeletionGuard 가드, AuditChanges 기록) {
         return source.fetchAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
-            return alignment.align(directory, mapping.tuples(), force, 기록);
+            return alignment.align(directory, mapping.tuples(), 가드, 기록);
         });
     }
 }

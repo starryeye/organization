@@ -9,6 +9,7 @@ import dev.starryeye.organization.core.fake.FakeTupleScanner;
 import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -38,6 +39,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class FullSyncUseCaseTest {
 
@@ -105,6 +107,13 @@ class FullSyncUseCaseTest {
     /** 동기화를 걸고 끝날 때까지 기다린다 — 동기화는 요청과 떼어 돈다(설계 2026-09-29 §4). */
     private SyncRun 동기화한다(SyncTrigger trigger) {
         SyncRun started = useCase.start(trigger, run -> {
+        }).block();
+        return runs.awaitFinished(started.runId());
+    }
+
+    /** 허용 수 N 을 주어 강제로 동기화하고 끝날 때까지 기다린다 — 강제 회차는 허용 수 입구로만 든다(설계 2026-11-20 F1). */
+    private SyncRun 강제로_동기화한다(int maxDeletes) {
+        SyncRun started = useCase.startForced(new ForceAllowance(maxDeletes), run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -268,17 +277,19 @@ class FullSyncUseCaseTest {
     }
 
     @Test
-    @DisplayName("FORCED 트리거는 삭제 가드를 건너뛰고 전건 삭제를 진행한다")
-    void 강제_실행은_가드를_건너뛴다() {
-        // given
+    @DisplayName("강제 동기화는 지울 줄이 허용 수 안이면 비율을 넘는 전건 삭제도 진행하고, 트리거는 FORCED 다")
+    void 강제_실행은_허용_수_안이면_전건_삭제를_진행한다() {
+        // given — 기준 20건을 모두 지운다(100%). 허용 수는 그 20건이다
         snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(20, "DEV002"))).block();
         source.willReturn(DirectorySnapshot.empty());
 
         // when
-        var run = 동기화한다(SyncTrigger.FORCED);
+        var run = 강제로_동기화한다(20);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.FORCED);
+        assertThat(run.guardHold()).isNull();
         assertThat(run.deletedCount()).isEqualTo(20);
         assertThat(snapshots.saved).hasSize(2);
         assertThat(snapshots.saved.get(1).tuples()).isEmpty();
@@ -309,8 +320,8 @@ class FullSyncUseCaseTest {
                        RelationTuple.directMember("lee", "DEV002")))).block();
         source.willReturn(조직도(Set.of("kim", "park"), "DEV002"));
 
-        // when
-        동기화한다(SyncTrigger.FORCED);
+        // when — 지울 줄은 lee 하나다
+        강제로_동기화한다(1);
 
         // then
         assertThat(snapshots.saved.get(1).tuples()).containsExactlyInAnyOrder(
@@ -601,15 +612,15 @@ class FullSyncUseCaseTest {
     }
 
     @Test
-    @DisplayName("force=true(FORCED) 면 훑어 맞추기의 가드를 건너뛰고 지운다")
-    void 강제면_훑어_맞추기가_지운다() {
-        // given
+    @DisplayName("허용 수 안이면 훑어 맞추기도 지운다 — 강제 회차는 비율(50%)을 보지 않는다")
+    void 허용_수_안이면_훑어_맞추기도_지운다() {
+        // given — 장부 20줄 가운데 10줄을 지운다. 허용 수는 그 10줄이다
         writer.stored.addAll(소속튜플(20, "DEV002"));
         snapshots.writing.set(true);
         source.willReturn(조직도(IntStream.range(0, 10).mapToObj(i -> "user" + i).collect(Collectors.toSet()), "DEV002"));
 
         // when
-        var run = 동기화한다(SyncTrigger.FORCED);
+        var run = 강제로_동기화한다(10);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -1130,13 +1141,13 @@ class FullSyncUseCaseTest {
     }
 
     @Test
-    @DisplayName("FORCED 는 지금처럼 가드를 건너뛴다 — 막힌 직원만이 아니라 지울 줄을 모두 지우고 현재상태도 바꾼다")
-    void 강제_실행은_비활성_회수만이_아니라_모두_지운다() {
-        // given
+    @DisplayName("강제 동기화는 허용 수 안이면 막힌 직원만이 아니라 지울 줄을 모두 지우고 현재상태도 바꾼다")
+    void 강제_실행은_허용_수_안이면_비활성_회수만이_아니라_모두_지운다() {
+        // given — 지울 줄 15건(75%). 허용 수는 그 15건이다
         대부분이_빠지고_한_명이_막혔다(Set.of());
 
         // when
-        var run = 동기화한다(SyncTrigger.FORCED);
+        var run = 강제로_동기화한다(15);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -1205,15 +1216,15 @@ class FullSyncUseCaseTest {
         assertThat(snapshots.saved).hasSize(1);
     }
 
-    // 깨뜨릴 변경: FORCED 가 가드를 건너뛰지 않기
+    // 깨뜨릴 변경: 강제 회차가 허용 수 대신 설정의 가드를 보기
     @Test
-    @DisplayName("FORCED 면 비교 경로가 상한을 넘어도 지운다")
-    void 강제면_비교_경로가_상한을_넘어도_지운다() {
+    @DisplayName("강제 회차는 설정의 상한 대신 허용 수를 본다 — 설정 상한 5 를 넘어도 허용 수 10 안이면 지운다")
+    void 강제면_비교_경로가_설정_상한을_넘어도_허용_수_안이면_지운다() {
         // given
         기준_100줄에서_10줄이_빠진다(5);
 
         // when
-        var run = 동기화한다(SyncTrigger.FORCED);
+        var run = 강제로_동기화한다(10);
 
         // then
         assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
@@ -1262,5 +1273,118 @@ class FullSyncUseCaseTest {
                 .contains("삭제 대상 5건(훑은 장부 20건의 25.0%)이 상한 3건을 초과했습니다");
         assertThat(writer.deleted).isEmpty();
         assertThat(writer.stored).hasSize(20);
+    }
+
+    // ---------- 확인한 수로만 넘기는 force (설계 2026-11-20 F1·F2·F4) ----------
+
+    // 깨뜨릴 변경: 강제 회차의 비교 경로에서 가드를 건너뛰기(옛 if (trigger != FORCED))
+    @Test
+    @DisplayName("강제 동기화도 지울 줄이 허용 수를 넘으면 지우지 않고 ABORTED 다 — 결론 앞에 허용 수가 있고 멈춤 내역이 있다")
+    void 강제_동기화가_허용_수를_넘으면_멈추고_내역이_있다() {
+        // given — 기준 20건을 모두 지우려는데 허용 수는 19건이다(확인한 뒤 디렉터리가 더 망가졌다)
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, 소속튜플(20, "DEV002"))).block();
+        source.willReturn(DirectorySnapshot.empty());
+
+        // when
+        var run = 강제로_동기화한다(19);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message())
+                .startsWith("강제 실행 — 지울 줄 허용 19건 / 삭제 대상 20건")
+                .contains("상한 19건을 초과했습니다");
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().totalLines()).isEqualTo(20);
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(snapshots.saved).as("미리 저장한 것뿐이다").hasSize(1);
+    }
+
+    // 깨뜨릴 변경: 강제 회차가 설정의 가드를 그대로 쓰기(설정이 꺼져 있으면 아무것도 보지 않는다)
+    @Test
+    @DisplayName("설정에서 가드를 꺼 둔 배포도 강제 동기화는 허용 수를 본다")
+    void 강제_동기화는_설정_가드가_꺼져_있어도_허용_수를_본다() {
+        // given — 가드를 끈 배포. 기준선 kim·lee·park 에서 lee·park 2줄을 지워야 하는데 허용 수는 1건이다
+        useCase = 유스케이스(new DeletionGuardPolicy(false, 0.3, 10, 5000));
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(
+                RelationTuple.directMember("kim", "DEV002"),
+                RelationTuple.directMember("lee", "DEV002"),
+                RelationTuple.directMember("park", "DEV002")))).block();
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        var run = 강제로_동기화한다(1);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).contains("삭제 대상 2건").contains("상한 1건을 초과했습니다");
+        assertThat(writer.appliedDeltas).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 강제 회차의 장부 맞추기에 설정의 비율을 남기기
+    @Test
+    @DisplayName("기준선 없는 강제 동기화는 훑은 장부의 비율을 넘어도 지울 줄이 허용 수 안이면 지운다")
+    void 기준선_없는_강제_동기화는_비율을_넘어도_허용_수_안이면_지운다() {
+        // given — 포인터 없음. 장부 20줄 가운데 10줄(50%)이 목표 밖이다. 허용 수는 그 10줄이다
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(직원들(0, 10), "DEV002"));
+
+        // when
+        var run = 강제로_동기화한다(10);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.deletedCount()).isEqualTo(10);
+        assertThat(writer.stored).hasSize(10);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.writing).isFalse();
+    }
+
+    // 깨뜨릴 변경: 허용 수 문구를 장부 맞추기의 사정보다 먼저(안쪽에) 붙이기, 또는 강제 장부 맞추기가 DeleteCheck.NONE 으로 지우기
+    @Test
+    @DisplayName("강제 장부 맞추기의 결론은 허용 수가 사정(기준선 없음)보다 앞이다 — 허용 수를 넘으면 지우지 않고 내역이 있다")
+    void 강제_장부_맞추기의_결론은_허용_수가_사정보다_앞이다() {
+        // given — 포인터 없음. 장부 20줄 가운데 10줄을 지워야 하는데 허용 수는 9건이다
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        source.willReturn(조직도(직원들(0, 10), "DEV002"));
+
+        // when
+        var run = 강제로_동기화한다(9);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message())
+                .startsWith("강제 실행 — 지울 줄 허용 9건 / 기준선 없음(")
+                .contains("삭제 대상 10건(훑은 장부 20건의 50.0%)이 상한 9건을 초과했습니다");
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().totalLines()).isEqualTo(10);
+        assertThat(writer.deleted).isEmpty();
+        assertThat(writer.stored).hasSize(20);
+    }
+
+    // 깨뜨릴 변경: 변경 없음 회차에는 허용 수를 붙이지 않기
+    @Test
+    @DisplayName("강제 동기화가 변경 없음으로 끝나도 결론 앞에 허용 수를 적는다")
+    void 강제_동기화가_변경_없음이어도_허용_수를_적는다() {
+        // given
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP,
+                Set.of(RelationTuple.directMember("kim", "DEV002")))).block();
+        source.willReturn(조직도(Set.of("kim"), "DEV002"));
+
+        // when
+        var run = 강제로_동기화한다(12500);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.message()).isEqualTo("강제 실행 — 지울 줄 허용 12500건 / 변경 없음");
+    }
+
+    // 깨뜨릴 변경: 일반 입구가 FORCED 를 받아 허용 수 없이 돌기
+    @Test
+    @DisplayName("일반 입구에 FORCED 를 주면 회차를 열기 전에 거절한다 — 강제는 허용 수 입구로만 든다")
+    void start_에_FORCED_를_주면_거절한다() {
+        // when, then
+        assertThatThrownBy(() -> useCase.start(SyncTrigger.FORCED, r -> {
+        })).isInstanceOf(IllegalArgumentException.class);
+        assertThat(runs.findRecent(10).collectList().block()).as("회차를 열지 않았다").isEmpty();
     }
 }

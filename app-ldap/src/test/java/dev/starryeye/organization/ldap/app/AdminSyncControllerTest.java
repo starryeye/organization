@@ -1,6 +1,7 @@
 package dev.starryeye.organization.ldap.app;
 
 import dev.starryeye.organization.admin.AdminExceptionHandler;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
@@ -46,6 +47,9 @@ import static org.springframework.security.test.web.reactive.server.SecurityMock
 class AdminSyncControllerTest {
 
     private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
+    /** 400 문구(설계 2026-11-20 F3) */
+    private static final String 허용_수가_없다 = "force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다";
+    private static final String force_없는_허용_수 = "maxDeletes 는 force=true 와 함께만 씁니다";
 
     private FullSyncUseCase fullSync;
     private RebuildUseCase rebuild;
@@ -132,18 +136,20 @@ class AdminSyncControllerTest {
     }
 
     @Test
-    @DisplayName("force=true 로 요청하면 FORCED 트리거로 걸어 삭제 가드를 우회한다")
-    void 강제_실행은_FORCED로_건다() {
+    @DisplayName("force=true&maxDeletes=N 이면 허용 수 입구에 N 을 넘겨 FORCED 로 건다 — 강제 회차도 N 을 상한으로 가드를 본다")
+    void 강제_실행은_허용_수와_함께_FORCED로_건다() {
         // given
-        Mockito.when(fullSync.start(eq(SyncTrigger.FORCED), any()))
+        Mockito.when(fullSync.startForced(eq(new ForceAllowance(12500)), any()))
                 .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
 
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
-                .post().uri("/admin/sync/full?force=true").exchange()
+                .post().uri("/admin/sync/full?force=true&maxDeletes=12500").exchange()
                 .expectStatus().isAccepted()
                 .expectBody()
                 .jsonPath("$.trigger").isEqualTo("FORCED");
+        Mockito.verify(fullSync).startForced(eq(new ForceAllowance(12500)), any());
+        Mockito.verify(fullSync, Mockito.never()).start(any(), any());
     }
 
     @Test
@@ -152,7 +158,7 @@ class AdminSyncControllerTest {
         // given
         Mockito.when(fullSync.start(any(), any()))
                 .thenReturn(Mono.error(new LockUnavailableException("다른 인스턴스가 변경 락을 쥐고 있습니다")));
-        Mockito.when(rebuild.start(Mockito.anyBoolean(), any()))
+        Mockito.when(rebuild.start(any()))
                 .thenReturn(Mono.error(new LockUnavailableException("다른 인스턴스가 변경 락을 쥐고 있습니다")));
 
         // when, then
@@ -274,7 +280,7 @@ class AdminSyncControllerTest {
     @DisplayName("rebuild 는 가드를 지키며 재적재를 걸고 202 와 RUNNING 기록을 준다")
     void rebuild_는_가드를_지키며_건다() {
         // given
-        Mockito.when(rebuild.start(eq(false), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+        Mockito.when(rebuild.start(any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
 
         // when, then
         client.post().uri("/admin/sync/rebuild").exchange()
@@ -282,19 +288,21 @@ class AdminSyncControllerTest {
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("RUNNING")
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
-        Mockito.verify(rebuild).start(eq(false), any());
+        Mockito.verify(rebuild).start(any());
     }
 
     @Test
-    @DisplayName("rebuild?force=true 는 삭제 가드를 건너뛰고 건다 — ABORTED 뒤 사람이 확인하고 넘기는 통로")
-    void rebuild_force는_가드를_건너뛴다() {
+    @DisplayName("rebuild?force=true&maxDeletes=N 은 허용 수 입구에 N 을 넘겨 건다 — ABORTED 뒤 사람이 내역을 확인하고 넘기는 통로")
+    void rebuild_force는_허용_수_입구로_건다() {
         // given
-        Mockito.when(rebuild.start(eq(true), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+        Mockito.when(rebuild.startForced(eq(new ForceAllowance(12500)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED_REBUILD)));
 
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
-                .post().uri("/admin/sync/rebuild?force=true").exchange().expectStatus().isAccepted();
-        Mockito.verify(rebuild).start(eq(true), any());
+                .post().uri("/admin/sync/rebuild?force=true&maxDeletes=12500").exchange().expectStatus().isAccepted();
+        Mockito.verify(rebuild).startForced(eq(new ForceAllowance(12500)), any());
+        Mockito.verify(rebuild, Mockito.never()).start(any());
     }
 
     @Test
@@ -307,12 +315,13 @@ class AdminSyncControllerTest {
         Mockito.verifyNoInteractions(rebuild);
     }
 
-    @Test
-    @DisplayName("force=true 는 admin.destructive 가 없으면 403 이고 회차를 열지 않는다 — admin.sync 만으로는 안 된다")
-    void force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다() {
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"force=true&maxDeletes=12500", "force=true"})
+    @DisplayName("force=true 는 admin.destructive 가 없으면 403 이고 회차를 열지 않는다 — admin.sync 만으로는 안 된다. maxDeletes 가 있든 없든 범위가 먼저다")
+    void force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다(String 쿼리) {
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC))
-                .post().uri("/admin/sync/full?force=true").exchange()
+                .post().uri("/admin/sync/full?" + 쿼리).exchange()
                 .expectStatus().isForbidden()
                 .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
@@ -337,15 +346,15 @@ class AdminSyncControllerTest {
     }
 
     @Test
-    @DisplayName("admin.destructive 가 있으면 force=true 는 202 다")
+    @DisplayName("admin.destructive 가 있으면 force=true(yes)&maxDeletes=N 은 202 다")
     void admin_destructive_가_있으면_force_는_202_다() {
         // given
-        Mockito.when(fullSync.start(eq(SyncTrigger.FORCED), any()))
+        Mockito.when(fullSync.startForced(eq(new ForceAllowance(12500)), any()))
                 .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
 
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
-                .post().uri("/admin/sync/full?force=yes").exchange()
+                .post().uri("/admin/sync/full?force=yes&maxDeletes=12500").exchange()
                 .expectStatus().isAccepted()
                 .expectBody()
                 .jsonPath("$.trigger").isEqualTo("FORCED");
@@ -378,12 +387,13 @@ class AdminSyncControllerTest {
         Mockito.verifyNoInteractions(fullSync);
     }
 
-    @Test
-    @DisplayName("재적재 force=true 도 admin.destructive 가 없으면 403 이고 재적재를 열지 않는다")
-    void 재적재_force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다() {
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"force=true&maxDeletes=12500", "force=true"})
+    @DisplayName("재적재 force=true 도 admin.destructive 가 없으면 403 이고 재적재를 열지 않는다 — maxDeletes 가 있든 없든 범위가 먼저다")
+    void 재적재_force_는_admin_destructive_가_없으면_403_이고_회차를_열지_않는다(String 쿼리) {
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC))
-                .post().uri("/admin/sync/rebuild?force=true").exchange()
+                .post().uri("/admin/sync/rebuild?" + 쿼리).exchange()
                 .expectStatus().isForbidden()
                 .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectHeader().valueEquals(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"insufficient_scope\"")
@@ -407,30 +417,100 @@ class AdminSyncControllerTest {
     }
 
     @Test
-    @DisplayName("재적재도 admin.destructive 가 있으면 force=true 는 202 다")
+    @DisplayName("재적재도 admin.destructive 가 있으면 force=true(1)&maxDeletes=N 은 202 다")
     void 재적재_admin_destructive_가_있으면_force_는_202_다() {
         // given
-        Mockito.when(rebuild.start(eq(true), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+        Mockito.when(rebuild.startForced(eq(new ForceAllowance(12500)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED_REBUILD)));
 
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
-                .post().uri("/admin/sync/rebuild?force=1").exchange()
+                .post().uri("/admin/sync/rebuild?force=1&maxDeletes=12500").exchange()
                 .expectStatus().isAccepted()
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("RUNNING");
-        Mockito.verify(rebuild).start(eq(true), any());
+        Mockito.verify(rebuild).startForced(eq(new ForceAllowance(12500)), any());
     }
 
     @Test
     @DisplayName("재적재는 force 가 없으면 admin.sync 만으로 202 다")
     void 재적재는_force_가_없으면_admin_sync_만으로_202_다() {
         // given
-        Mockito.when(rebuild.start(eq(false), any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
+        Mockito.when(rebuild.start(any())).thenReturn(Mono.just(도는실행(SyncTrigger.REBUILD)));
 
         // when, then
         client.mutateWith(호출자(Scopes.ADMIN_SYNC))
                 .post().uri("/admin/sync/rebuild").exchange()
                 .expectStatus().isAccepted();
-        Mockito.verify(rebuild).start(eq(false), any());
+        Mockito.verify(rebuild).start(any());
+    }
+
+    // ---------- 확인한 수로만 넘기는 force (설계 2026-11-20 F1·F3) ----------
+
+    /** 범위가 있는 호출자의 요청이 400 이고 정한 문구다. */
+    private void 요청은_400_이다(String uri, String 문구) {
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri(uri).exchange()
+                .expectStatus().isBadRequest()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(400)
+                .jsonPath("$.detail").isEqualTo(문구);
+    }
+
+    // 깨뜨릴 변경: maxDeletes 없는 force=true 를 받아 허용 수 없이 걸기
+    @Test
+    @DisplayName("동기화 force=true 에 maxDeletes 가 없으면 400 이고 동기화를 열지 않는다")
+    void 동기화_force_에_허용_수가_없으면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?force=true", 허용_수가_없다);
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    // 깨뜨릴 변경: maxDeletes 0 을 받기(설정의 0 은 "끔"이다)
+    @Test
+    @DisplayName("동기화 force=true 의 maxDeletes 가 1 미만이면 400 이고 동기화를 열지 않는다")
+    void 동기화_force_의_허용_수가_1_미만이면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?force=true&maxDeletes=0", 허용_수가_없다);
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    // 깨뜨릴 변경: force 없이 온 maxDeletes 를 조용히 무시하기
+    @Test
+    @DisplayName("동기화에 force 없이 maxDeletes 만 오면 400 이고 동기화를 열지 않는다")
+    void 동기화에_force_없이_허용_수만_오면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?maxDeletes=10", force_없는_허용_수);
+        Mockito.verifyNoInteractions(fullSync);
+    }
+
+    // 깨뜨릴 변경: 재적재가 허용 수 검사를 하지 않기
+    @Test
+    @DisplayName("재적재 force=true 에 maxDeletes 가 없으면 400 이고 재적재를 열지 않는다")
+    void 재적재_force_에_허용_수가_없으면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/rebuild?force=true", 허용_수가_없다);
+        Mockito.verifyNoInteractions(rebuild);
+    }
+
+    // 깨뜨릴 변경: 재적재가 force 없이 온 maxDeletes 를 조용히 무시하기
+    @Test
+    @DisplayName("재적재에 force 없이 maxDeletes 만 오면 400 이고 재적재를 열지 않는다")
+    void 재적재에_force_없이_허용_수만_오면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/rebuild?maxDeletes=10", force_없는_허용_수);
+        Mockito.verifyNoInteractions(rebuild);
+    }
+
+    // 깨뜨릴 변경: maxDeletes 를 문자열로 받아 형식 오류를 400 이 아닌 상태로 내기
+    @Test
+    @DisplayName("숫자가 아닌 maxDeletes 는 스프링의 변환 실패로 400 이고 동기화를 열지 않는다")
+    void 숫자가_아닌_허용_수는_400_이다() {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/full?force=true&maxDeletes=abc").exchange()
+                .expectStatus().isBadRequest();
+        Mockito.verifyNoInteractions(fullSync);
     }
 }

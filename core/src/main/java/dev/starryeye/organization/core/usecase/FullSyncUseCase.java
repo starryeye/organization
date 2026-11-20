@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.audit.AuditChanges;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.audit.RunAudit;
 import dev.starryeye.organization.core.guard.DeletionGuard;
+import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.guard.GuardDecision;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.GuardHold;
@@ -33,6 +34,7 @@ import reactor.core.publisher.Mono;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -50,7 +52,11 @@ import java.util.function.Consumer;
  * <p><b>가드가 걸려도 디렉터리가 명시한 회수는 먼저 반영한다(설계 2026-10-20 §5).</b> 지울 줄 전체가 삭제 가드를 넘으면 그 가운데 디렉터리가 막았다고
  * 명시한 직원의 소속 줄({@link TupleMapper#inactiveMemberTuples})만 떼어 같은 가드로 다시 본다. 통과하면 그 지우기만 반영하고 스냅샷을 남긴다 —
  * 부여·나머지 지우기·현재상태 교체는 보류하고 ABORTED 다. 그것마저 넘으면 지금처럼 아무것도 반영하지 않는다. 큰 개편 하나가 퇴사자 회수를 매일 멈추던
- * 것을 막는다. {@code FORCED} 는 가드를 건너뛴다.
+ * 것을 막는다.
+ *
+ * <p><b>강제 회차도 가드를 본다(설계 2026-11-20 F1·F2·F4).</b> 강제({@code FORCED})는 운영자가 멈춤 내역을 보고 정한 허용 수 N 과 함께만 든다
+ * ({@link #startForced}). 그 회차는 비율 없이 N 을 상한으로 같은 가드를 비교 경로와 장부 맞추기 모두에서 본다 — 확인한 뒤 디렉터리가 더 망가지면 다시
+ * 멈춘다. 결론을 낸 강제 회차는 결론 앞에 허용 수를 적는다.
  *
  * <p><b>기록 중 표시(설계 2026-09-30 §4).</b> OpenFGA 에 쓰기 직전 스냅샷 포인터에 "기록 중"을 남기고, 스냅샷 저장이 그것을 지운다. 표시가 남아
  * 있으면 지난 회차가 쓴 뒤·기록 전에 멈춘 것이라 기준선을 믿을 수 없다 — 이번 회차는 비교 대신 장부를 훑어 맞춘다({@link LedgerAlignment}).
@@ -96,42 +102,74 @@ public class FullSyncUseCase {
         this.guard = guard;
         this.jobs = jobs;
         this.clock = clock;
-        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, guard, clock);
+        this.alignment = new LedgerAlignment(snapshots, state, writer, scanner, clock);
     }
 
     /**
      * 작업 락(SYNC)을 잡고 실행 기록(RUNNING)을 연 뒤 동기화를 요청과 떼어 띄운다(설계 2026-09-30 §3). 못 잡으면
      * {@link LockUnavailableException} — 다른 인스턴스가 동기화·재적재 중이다. {@code onFinished} 는 끝난 기록으로 불린다(지표·로그).
+     *
+     * @param trigger {@code SCHEDULED}·{@code MANUAL} 만 받는다. 그 밖(특히 {@code FORCED})이면 회차를 열기 전에 곧바로
+     *                {@link IllegalArgumentException} 이다 — 강제는 허용 수와 함께 {@link #startForced} 로만 든다(설계 2026-11-20 F1)
      */
     public Mono<SyncRun> start(SyncTrigger trigger, Consumer<SyncRun> onFinished) {
-        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC, AuditKind.SYNC,
-                (run, 기록) -> Mono.defer(() -> synchronize(trigger, 기록)), onFinished);
+        if (trigger != SyncTrigger.SCHEDULED && trigger != SyncTrigger.MANUAL) {
+            throw new IllegalArgumentException(
+                    "동기화의 일반 입구는 SCHEDULED·MANUAL 만 받는다 — 강제는 허용 수와 함께 startForced 로 건다: " + trigger);
+        }
+        return 띄운다(trigger, null, onFinished);
     }
 
-    /** 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다. */
-    private Mono<Mono<SyncOutcome>> synchronize(SyncTrigger trigger, RunAudit 기록) {
+    /**
+     * 허용 수를 받은 강제 동기화(설계 2026-11-20 F1·F2). 트리거는 {@code FORCED} 다. 가드를 건너뛰지 않는다 — 비율 없이 허용 수 N 을 상한으로 같은 가드를
+     * 비교 경로와 장부 맞추기 모두에서 본다. 결론을 낸 회차는 결론 앞에 {@link ForceAllowance#note()} 를 적는다(F4). 락·기록은 {@link #start} 와 같다.
+     */
+    public Mono<SyncRun> startForced(ForceAllowance allowance, Consumer<SyncRun> onFinished) {
+        return 띄운다(SyncTrigger.FORCED, Objects.requireNonNull(allowance, "allowance"), onFinished);
+    }
+
+    /** 이번 회차의 가드를 한 번 고르고 띄운다 — 허용 수가 없으면 설정의 가드, 있으면 그 수를 상한으로 한 강제 가드다. */
+    private Mono<SyncRun> 띄운다(SyncTrigger trigger, ForceAllowance allowance, Consumer<SyncRun> onFinished) {
+        DeletionGuard 이번_가드 = allowance == null ? guard : DeletionGuard.forced(allowance);
+        return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC, AuditKind.SYNC,
+                (run, 기록) -> 허용_수를_적는다(Mono.defer(() -> synchronize(이번_가드, 기록)), allowance), onFinished);
+    }
+
+    /**
+     * 강제 회차면 "반납 뒤 할 일"의 결론 앞에 허용 수를 적는다(설계 2026-11-20 F4) — 결론을 다 지은 뒤 가장 바깥에서 한 번 붙이므로 장부 맞추기의
+     * 사정({@code 기준선 없음 …}·{@code 기준선 의심 …})보다 앞에 온다. 변경 없음도 붙는다. 예외로 끝난 회차는 결론이 없어 붙지 않는다(설계 §6).
+     * 재적재({@link RebuildUseCase})도 이것을 쓴다.
+     */
+    static Mono<Mono<SyncOutcome>> 허용_수를_적는다(Mono<Mono<SyncOutcome>> 일, ForceAllowance allowance) {
+        return allowance == null
+                ? 일
+                : 일.map(반납_뒤 -> 반납_뒤.map(outcome -> outcome.withNote(allowance.note())));
+    }
+
+    /** 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다. {@code 가드} 는 이번 회차의 가드다 — 늘 본다. */
+    private Mono<Mono<SyncOutcome>> synchronize(DeletionGuard 가드, RunAudit 기록) {
         return source.fetchAll().flatMap(directory -> {
             TupleMappingResult mapping = TupleMapper.toTuples(directory);
             mapping.warnings().forEach(warning -> log.warn("튜플 변환 경고: {}", warning));
 
             return snapshots.baselineState().flatMap(상태 -> switch (상태) {
                 // 포인터가 없다 — 첫 회차이거나 테이블을 새로 만들었다. 빈 기준선과 비교하면 장부의 찌꺼기를 영원히 못 지운다(설계 2026-10-20 §4)
-                case NONE -> 기준선_없이_맞춘다(directory, mapping.tuples(), trigger, 기록);
-                case WRITING -> 훑어_맞춘다(directory, mapping.tuples(), trigger, 기록);
-                case PRESENT -> 비교해_맞춘다(directory, mapping.tuples(), trigger, 기록.changes());
+                case NONE -> 기준선_없이_맞춘다(directory, mapping.tuples(), 가드, 기록);
+                case WRITING -> 훑어_맞춘다(directory, mapping.tuples(), 가드, 기록);
+                case PRESENT -> 비교해_맞춘다(directory, mapping.tuples(), 가드, 기록.changes());
             });
         });
     }
 
     /**
-     * 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. {@code FORCED} 면 삭제 가드를 건너뛴다.
-     * 지난 회차가 쓴 뒤·기록 전에 멈춰 "기록 중" 표시가 남았다. 이력은 장부 맞추기로 바꾸고 지운 줄만 남긴다.
+     * 기준선을 믿을 수 없는 회차 — 재적재와 같은 청소로 한 번 맞춘다. 지우기 전에 이번 회차의 가드를 본다 — 강제 회차면 허용 수 N 을 상한으로 한 같은
+     * 가드다(설계 2026-11-20 F1·F2). 지난 회차가 쓴 뒤·기록 전에 멈춰 "기록 중" 표시가 남았다. 이력은 장부 맞추기로 바꾸고 지운 줄만 남긴다.
      */
     private Mono<Mono<SyncOutcome>> 훑어_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                               SyncTrigger trigger, RunAudit 기록) {
+                                               DeletionGuard 가드, RunAudit 기록) {
         log.warn(기준선_의심);
         기록.kind(AuditKind.LEDGER_ALIGNMENT);
-        return 장부를_맞춘다(directory, desired, trigger, 기록, 기준선_의심, false);
+        return 장부를_맞춘다(directory, desired, 가드, 기록, 기준선_의심, false);
     }
 
     /**
@@ -142,9 +180,9 @@ public class FullSyncUseCase {
      * 표시가 남아, 다음 회차는 "기록 중" 길로 다시 장부를 훑는다.
      */
     private Mono<Mono<SyncOutcome>> 기준선_없이_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                                    SyncTrigger trigger, RunAudit 기록) {
+                                                    DeletionGuard 가드, RunAudit 기록) {
         log.warn(기준선_없음);
-        return 장부를_맞춘다(directory, desired, trigger, 기록, 기준선_없음, true);
+        return 장부를_맞춘다(directory, desired, 가드, 기록, 기준선_없음, true);
     }
 
     /**
@@ -154,8 +192,8 @@ public class FullSyncUseCase {
      * 사유만 보고는 기준선을 믿지 못해 훑었다는 맥락이 사라진다. 취소는 {@code onErrorMap} 이 보지 못하므로 여기서 감싸지 않는다.
      */
     private Mono<Mono<SyncOutcome>> 장부를_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                               SyncTrigger trigger, RunAudit 기록, String 사정, boolean 쓴_줄도_남긴다) {
-        return alignment.align(directory, desired, trigger == SyncTrigger.FORCED, 기록.changes(), 쓴_줄도_남긴다)
+                                               DeletionGuard 가드, RunAudit 기록, String 사정, boolean 쓴_줄도_남긴다) {
+        return alignment.align(directory, desired, 가드, 기록.changes(), 쓴_줄도_남긴다)
                 .map(반납_뒤 -> 반납_뒤.map(outcome -> outcome.withNote(사정)))
                 .onErrorMap(error -> new IllegalStateException(
                         사정 + " / " + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName()),
@@ -163,7 +201,7 @@ public class FullSyncUseCase {
     }
 
     private Mono<Mono<SyncOutcome>> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired,
-                                                SyncTrigger trigger, AuditChanges 기록) {
+                                                DeletionGuard 가드, AuditChanges 기록) {
         return baseline().flatMap(baseline -> {
             TupleDelta delta = 델타를_정한다(baseline, desired);
             if (delta.isEmpty()) {
@@ -172,19 +210,18 @@ public class FullSyncUseCase {
                 return state.replaceWith(directory, 기록.directoryListener())
                         .thenReturn(Mono.just(SyncOutcome.noChange()));
             }
-            if (trigger != SyncTrigger.FORCED) {
-                GuardDecision decision = guard.evaluate(delta.toDelete(), TupleMapper.inactiveMemberTuples(directory),
-                        baseline.크기(), "기준 스냅샷");
-                if (decision.aborted()) {
-                    // 가드가 걸린 회차는 지우려던 전체의 내역을 남긴다 — 일부 반영·차단기 중단 결론에도 붙는다(설계 2026-11-20 §3.1)
-                    GuardHold hold = GuardHold.of(delta.toDelete(), directory);
-                    log.warn("삭제 가드 내역: {}", hold.summary());
-                    if (decision.partial()) {
-                        return 비활성_회수만_반영한다(baseline, delta, decision, hold, 기록);
-                    }
-                    log.warn("삭제 가드 발동: {}", decision.message());
-                    return Mono.just(Mono.just(SyncOutcome.aborted(decision.message()).withGuardHold(hold)));
+            // 가드는 늘 본다 — 강제 회차는 허용 수 N 을 상한으로 한 같은 가드다(설계 2026-11-20 F2)
+            GuardDecision decision = 가드.evaluate(delta.toDelete(), TupleMapper.inactiveMemberTuples(directory),
+                    baseline.크기(), "기준 스냅샷");
+            if (decision.aborted()) {
+                // 가드가 걸린 회차는 지우려던 전체의 내역을 남긴다 — 일부 반영·차단기 중단 결론에도 붙는다(설계 2026-11-20 §3.1)
+                GuardHold hold = GuardHold.of(delta.toDelete(), directory);
+                log.warn("삭제 가드 내역: {}", hold.summary());
+                if (decision.partial()) {
+                    return 비활성_회수만_반영한다(baseline, delta, decision, hold, 기록);
                 }
+                log.warn("삭제 가드 발동: {}", decision.message());
+                return Mono.just(Mono.just(SyncOutcome.aborted(decision.message()).withGuardHold(hold)));
             }
             // 표시가 쓰기보다 먼저다 — 표시를 남기지 못하면 쓰지 않는다(설계 2026-09-30 §11). 쓴·지운 줄은 묶음마다 기록에 더한다
             return snapshots.markWriting()

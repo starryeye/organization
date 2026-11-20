@@ -10,8 +10,8 @@ import java.util.Set;
  * 권한이 한 번에 크게 날아가는 것을 막는다. 사람 소속이 하나도 없는 그림(필터 오류로 0건 등)은 여기까지 오지 않는다 — LDAP 전략이 데이터 오류로
  * 먼저 멈추고 {@code force} 로도 넘기지 못한다(설계 2026-10-27 §13).
  *
- * <p>LDAP 의 스냅샷 비교, 멈춘 뒤 훑어 맞추기, 재적재에 적용한다(설계 2026-09-30 §4.3) — {@code FORCED}·{@code force} 로만
- * 건너뛴다. SCIM 의 의도된 단건 삭제에는 적용하지 않는다.
+ * <p>LDAP 의 스냅샷 비교, 멈춘 뒤 훑어 맞추기, 재적재에 적용한다(설계 2026-09-30 §4.3). 강제 회차({@code force=true&maxDeletes=N})도
+ * 건너뛰지 않는다 — 허용 수 N 을 상한으로 같은 가드를 본다({@link #forced}, 설계 2026-11-20 F1·F2). SCIM 의 의도된 단건 삭제에는 적용하지 않는다.
  *
  * <p><b>걸려도 디렉터리가 명시한 회수는 먼저 본다(설계 2026-10-20 §5.2).</b> 정상적인 큰 개편 하나로 가드가 걸리면 다음 회차도 같은 델타로 다시 걸려,
  * 사람이 {@code force} 할 때까지 퇴사자 회수가 매일 멈춘다. 그래서 전체가 넘으면 그 가운데 디렉터리가 "막힘"으로 명시한 지우기만 떼어 같은 가드
@@ -27,6 +27,18 @@ public class DeletionGuard {
 
     public DeletionGuard(DeletionGuardPolicy policy) {
         this.policy = policy;
+    }
+
+    /**
+     * 강제 회차의 가드(설계 2026-11-20 F2) — 허용 수 N 을 상한으로 같은 가드를 본다. 비율은 보지 않는다. 큰 개편은 비율을 넘는 것이 정상이고, 그래서
+     * 멈춘 회차를 운영자가 확인했기 때문이다. 설정에서 가드를 꺼 두었어도 이 가드는 켜져 있다. 비활성 회수를 떼어 다시 보는 규칙(설계 2026-10-20 §5.2)은
+     * 그대로다 — N 을 넘으면 N 안의 비활성 회수만 반영하거나 전부 보류한다.
+     *
+     * <p>비율은 기준 수가 {@code min-baseline} 이상일 때만 보므로 그것을 {@code int} 의 끝으로 두어 닿지 않게 한다. 임계치 1.0(100%)도 넘을 수 없다 —
+     * 지울 줄은 기준 수에 드는 줄의 부분집합이다.
+     */
+    public static DeletionGuard forced(ForceAllowance allowance) {
+        return new DeletionGuard(new DeletionGuardPolicy(true, 1.0, Integer.MAX_VALUE, allowance.maxDeletes()));
     }
 
     /**
@@ -76,7 +88,8 @@ public class DeletionGuard {
      * <p>순서(설계 2026-11-13 §3.1): 가드가 꺼졌으면 진행한다. 아니면 상한 초과({@code maxDeletes > 0} 이고 지울 수 &gt; 상한,
      * 기준 수와 무관)와 임계치 초과(기준 수 &ge; {@code min-baseline} 이고 비율 &gt; 임계치)를 따로 보아, 하나라도 넘으면 중단한다.
      * 문구는 넘은 것에 따라 세 꼴이다: {@code 임계치 30.0%를}(비율만, 예전 문구와 같다), {@code 상한 5000건을}(상한만),
-     * {@code 임계치 30.0%와 상한 5000건을}(둘 다). 기준 수 0 은 지울 수도 0 이라 상한에 닿지 않는다.
+     * {@code 임계치 30.0%와 상한 5000건을}(둘 다). 기준 수 0 은 지울 수도 0 이라 상한에 닿지 않는다. 끝 문장은 실행 기록의 멈춤 내역을 확인하고
+     * {@code force=true} 와 허용 수({@code maxDeletes})로 재요청하라는 안내다(설계 2026-11-20 F5) — 강제 회차가 허용 수를 넘어 다시 멈춘 경우에도 맞다.
      *
      * @param baselineLabel 메시지에 쓸 기준의 이름("기준 스냅샷", "훑은 장부")
      */
@@ -102,7 +115,8 @@ public class DeletionGuard {
             넘은_것 = "상한 %d건을".formatted(policy.maxDeletes());
         }
         return GuardDecision.abort(
-                "삭제 대상 %d건(%s %d건의 %.1f%%)이 %s 초과했습니다. 강제 실행하려면 force=true 로 재요청하세요"
+                ("삭제 대상 %d건(%s %d건의 %.1f%%)이 %s 초과했습니다. "
+                        + "강제 실행하려면 실행 기록의 guardHold 를 확인한 뒤 force=true 와 maxDeletes(허용할 지울 줄 수)로 재요청하세요")
                         .formatted(deleteCount, baselineLabel, baselineCount, ratio * 100, 넘은_것));
     }
 }

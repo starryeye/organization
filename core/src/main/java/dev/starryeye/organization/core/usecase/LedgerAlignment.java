@@ -31,7 +31,8 @@ import java.util.function.Consumer;
  *
  * <ol>
  *   <li>쓰기 전에 "기록 중" 표시를 남긴다 — 이 청소가 중간에 멈춰도 다음 회차가 다시 맞춘다.</li>
- *   <li>장부를 D 에 맞추되, 지우기 전에 삭제 가드를 본다({@code force} 면 건너뛴다). 기준 수는 훑은 줄 수다.
+ *   <li>장부를 D 에 맞추되, 지우기 전에 이번 회차의 삭제 가드를 본다. 기준 수는 훑은 줄 수다. 강제 회차도 건너뛰지 않는다 — 허용 수 N 을 상한으로 같은
+ *       가드를 본다({@link DeletionGuard#forced}, 설계 2026-11-20 F1·F2).
  *     <ul>
  *       <li>전부 보류면 지우지 않고 ABORTED — 스냅샷을 남기지 않으므로 표시가 남아 다음 회차도 다시 확인한다. D 는 이미 썼으므로 쓴 수는 실행 기록에
  *           남긴다({@link SyncOutcome#held}, 설계 2026-10-27 §12).</li>
@@ -59,7 +60,6 @@ final class LedgerAlignment {
     private final DirectoryStateRepository state;
     private final RelationTupleWriter writer;
     private final RelationTupleScanner scanner;
-    private final DeletionGuard guard;
     private final Clock clock;
 
     /**
@@ -75,24 +75,23 @@ final class LedgerAlignment {
     }
 
     /** 쓴 줄은 남기지 않는 장부 맞추기 — 재적재와 "기록 중" 회차. */
-    Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, boolean force,
+    Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, DeletionGuard guard,
                                   AuditChanges 기록) {
-        return align(directory, desired, force, 기록, false);
+        return align(directory, desired, guard, 기록, false);
     }
 
     /**
      * 락 안에서 맞추고 "반납 뒤 할 일"을 내놓는다. 바꾼 것은 끝나는 즉시 {@code 기록} 에 더한다.
      *
+     * @param guard        이번 회차의 삭제 가드 — 설정의 가드이거나, 강제 회차면 허용 수 N 을 상한으로 한 가드다(설계 2026-11-20 F2). 늘 본다
      * @param 쓴_줄도_남긴다 true 면 쓴 줄도 묶음마다 부여로 더한다 — 기준선 없는 첫 회차(설계 2026-10-20 §4). 그 회차는 종류가 동기화 그대로라 첫 적재의
      *                       부여 이력이 사라지면 안 된다
      */
-    Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, boolean force,
+    Mono<Mono<SyncOutcome>> align(DirectorySnapshot directory, Set<RelationTuple> desired, DeletionGuard guard,
                                   AuditChanges 기록, boolean 쓴_줄도_남긴다) {
         // 가드가 걸리면 콜백이 내역을 여기에 담는다 — 맞추기 기계(TupleReconciler)는 사유 문자열만 안다(설계 2026-11-20 §3.1)
         AtomicReference<GuardHold> 내역 = new AtomicReference<>();
-        TupleReconciler.DeleteCheck check = force
-                ? TupleReconciler.DeleteCheck.NONE
-                : (최종_D, stale, scanned) -> 가드로_본다(directory, stale, scanned, 내역);
+        TupleReconciler.DeleteCheck check = (최종_D, stale, scanned) -> 가드로_본다(guard, directory, stale, scanned, 내역);
         Consumer<TupleWriteResult> 쓴_묶음마다 = 쓴_줄도_남긴다 ? 기록::tuples : 묶음 -> {
         };
         return snapshots.markWriting()
@@ -108,8 +107,9 @@ final class LedgerAlignment {
      * 훑은 장부를 기준으로 삭제 가드를 본다(설계 2026-10-20 §5.4). 전체가 넘었지만 비활성 회수만으로는 가드 안이면 그것만 지우게 하고, 결론에 무엇을
      * 반영·보류했는지 적는다.
      */
-    private TupleReconciler.DeleteVerdict 가드로_본다(DirectorySnapshot directory, Set<RelationTuple> stale, long scanned,
-                                                         AtomicReference<GuardHold> 내역) {
+    private static TupleReconciler.DeleteVerdict 가드로_본다(DeletionGuard guard, DirectorySnapshot directory,
+                                                                Set<RelationTuple> stale, long scanned,
+                                                                AtomicReference<GuardHold> 내역) {
         GuardDecision decision = guard.evaluate(stale, TupleMapper.inactiveMemberTuples(directory),
                 Math.toIntExact(scanned), "훑은 장부");
         if (decision.aborted()) {

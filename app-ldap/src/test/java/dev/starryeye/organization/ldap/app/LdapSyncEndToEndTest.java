@@ -381,12 +381,14 @@ class LdapSyncEndToEndTest {
 
     @Test
     @Order(13)
-    @DisplayName("재적재에 force=true 를 줄 수 있다 — 가드에 걸린 뒤 사람이 넘기는 통로")
+    @DisplayName("재적재에 force=true&maxDeletes=N 을 줄 수 있다 — 가드에 걸린 뒤 사람이 내역을 확인하고 넘기는 통로, 결론 앞에 허용 수가 남는다")
     void 재적재에_force를_줄_수_있다() {
         // when, then
-        SyncJobClient.끝까지(client, "/admin/sync/rebuild?force=true")
+        SyncJobClient.끝까지(client, "/admin/sync/rebuild?force=true&maxDeletes=1000")
                 .jsonPath("$.status").isEqualTo("SUCCEEDED")
-                .jsonPath("$.trigger").isEqualTo("FORCED_REBUILD");
+                .jsonPath("$.trigger").isEqualTo("FORCED_REBUILD")
+                .jsonPath("$.message").value(message ->
+                        assertThat((String) message).startsWith("강제 실행 — 지울 줄 허용 1000건"));
     }
 
     // ---------- 변경 이력 (설계 2026-10-10) ----------

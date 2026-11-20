@@ -5,11 +5,11 @@ public enum SyncTrigger {
     SCHEDULED,
     /** 관리 API 수동 실행 */
     MANUAL,
-    /** 관리 API 수동 실행 + 삭제 가드 우회 */
+    /** 관리 API 강제 실행 — 허용 수 N 을 상한으로 같은 삭제 가드를 본다(설계 2026-11-20 F1·F2) */
     FORCED,
     /** 전체 재적재 */
     REBUILD,
-    /** LDAP 재적재 + 삭제 가드 우회 (SCIM 재적재에는 force 가 없다) */
+    /** LDAP 강제 재적재 — 허용 수 N 을 상한으로 같은 삭제 가드를 본다(설계 2026-11-20 F1·F2). SCIM 재적재에는 force 가 없다 */
     FORCED_REBUILD,
     /** SCIM 인스턴스의 일 1회 스냅샷 아카이빙 */
     ARCHIVE,
