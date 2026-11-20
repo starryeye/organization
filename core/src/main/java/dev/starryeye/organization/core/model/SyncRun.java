@@ -17,7 +17,8 @@ public record SyncRun(
         int failureCount,
         String snapshotId,
         String message,
-        String requestedBy
+        String requestedBy,
+        GuardHold guardHold
 ) {
 
     /**
@@ -44,6 +45,7 @@ public record SyncRun(
                 .failureCount(outcome.failureCount())
                 .snapshotId(outcome.snapshotId())
                 .message(outcome.message())
+                .guardHold(outcome.guardHold())
                 .build();
     }
 }

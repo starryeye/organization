@@ -6,8 +6,15 @@ public record SyncOutcome(
         int deletedCount,
         int failureCount,
         String snapshotId,
-        String message
+        String message,
+        GuardHold guardHold
 ) {
+
+    /** 내역이 없는 결론 — 가드가 걸리지 않은 회차와 기존 호출처가 쓴다. */
+    public SyncOutcome(SyncStatus status, int writtenCount, int deletedCount, int failureCount, String snapshotId,
+                       String message) {
+        this(status, writtenCount, deletedCount, failureCount, snapshotId, message, null);
+    }
 
     public static SyncOutcome noChange() {
         return new SyncOutcome(SyncStatus.SUCCEEDED, 0, 0, 0, null, "변경 없음");
@@ -62,12 +69,17 @@ public record SyncOutcome(
     /** 이 결론 끝에 한마디를 잇는다 — "현재상태는 디렉터리대로 교체했다"처럼 회차가 한 일을 메시지에 남길 때(설계 2026-10-27 §12). */
     public SyncOutcome withSuffix(String suffix) {
         String combined = message == null ? suffix : message + suffix;
-        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined);
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold);
     }
 
     /** 이 결론 앞에 한마디를 붙인다 — "기준선 의심"처럼 회차의 사정을 기록에 남길 때(설계 2026-09-30 §4.2). */
     public SyncOutcome withNote(String note) {
         String combined = message == null ? note : note + " / " + message;
-        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined);
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold);
+    }
+
+    /** 가드가 멈춘 회차의 지우려던 것의 내역을 붙인 복사(설계 2026-11-20 H2). 나머지 칸은 그대로다. */
+    public SyncOutcome withGuardHold(GuardHold hold) {
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, message, hold);
     }
 }
