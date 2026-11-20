@@ -155,7 +155,15 @@ class LdapDeletionGuardScaleTest {
                 .jsonPath("$.status").isEqualTo("ABORTED")
                 .jsonPath("$.deletedCount").isEqualTo(0)
                 .jsonPath("$.message").value(message ->
-                        assertThat((String) message).contains("임계치").contains("force=true"));
+                        assertThat((String) message).contains("임계치").contains("force=true"))
+                // 깨뜨릴 변경: 멈춤 내역이 가드에서 DynamoDB 를 거쳐 API 응답까지 실제 스택 전체로 오지 않는 것 —
+                // 지운 직원마다 소속 줄이 하나라 줄 수·직접 소속·사라진 사람 수가 모두 지울건수다
+                .jsonPath("$.guardHold.lines.total").isEqualTo(지울건수)
+                .jsonPath("$.guardHold.lines.directMember").isEqualTo(지울건수)
+                .jsonPath("$.guardHold.users.gone.count").isEqualTo(지울건수)
+                .jsonPath("$.guardHold.users.gone.sample").value(sample ->
+                        assertThat((java.util.List<?>) sample).hasSize(Math.min(10, 지울건수)))
+                .jsonPath("$.guardHold.users.gone.sample[0]").isEqualTo(단일소속직원.get(이미지운수));
 
         // then — OpenFGA 도 DynamoDB 도 손대지 않았어야 한다.
         // 가드가 "중단" 이라고 말해 놓고 절반쯤 지웠으면 그게 최악이다

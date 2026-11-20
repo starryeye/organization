@@ -549,6 +549,16 @@ class AdminSyncControllerTest {
         Mockito.verifyNoInteractions(rebuild);
     }
 
+    // 깨뜨릴 변경: 옛 mode 400 검사를 허용 수 검사보다 앞에 두기(검사 순서는 범위 → maxDeletes → mode, 설계 F3)
+    @Test
+    @DisplayName("재적재에 mode 와 force 없는 maxDeletes 가 함께 오면 maxDeletes 400 이 먼저다")
+    void 재적재_허용_수_400_은_mode_400_보다_먼저다() {
+        // when, then
+        요청은_400_이다("/admin/sync/rebuild?mode=store&maxDeletes=10", force_없는_허용_수);
+        요청은_400_이다("/admin/sync/rebuild?mode=store&force=true", 허용_수가_없다);
+        Mockito.verifyNoInteractions(rebuild);
+    }
+
     // 깨뜨릴 변경: 재적재가 force 없이 온 maxDeletes 를 조용히 무시하기
     @Test
     @DisplayName("재적재에 force 없이 maxDeletes 만 오면 400 이고 재적재를 열지 않는다")
