@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -20,6 +21,7 @@ import java.time.Duration;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -44,6 +46,17 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String MESSAGE = "message";
     private static final String REQUESTED_BY = "requestedBy";
+    private static final String GUARD_HOLD = "guardHold";
+    private static final String DIRECT_MEMBER_LINES = "directMemberLines";
+    private static final String CHILD_LINES = "childLines";
+    private static final String OTHER_LINES = "otherLines";
+    private static final String USERS_GONE = "usersGone";
+    private static final String USERS_INACTIVE = "usersInactive";
+    private static final String USERS_LOSING_MEMBERSHIP = "usersLosingMembership";
+    private static final String GROUPS_GONE = "groupsGone";
+    private static final String GROUPS_LOSING_PARENT = "groupsLosingParent";
+    private static final String COUNT = "count";
+    private static final String IDS = "ids";
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -104,6 +117,9 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         Attrs.putIfPresent(item, SNAPSHOT_ID, run.snapshotId());
         Attrs.putIfPresent(item, MESSAGE, run.message());
         Attrs.putIfPresent(item, REQUESTED_BY, run.requestedBy());
+        if (run.guardHold() != null) {
+            item.put(GUARD_HOLD, Attrs.m(guardHoldAttrs(run.guardHold())));
+        }
 
         PutItemRequest.Builder request = PutItemRequest.builder()
                 .tableName(properties.getTableName())
@@ -205,6 +221,53 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
                 .snapshotId(Attrs.str(item, SNAPSHOT_ID))
                 .message(Attrs.str(item, MESSAGE))
                 .requestedBy(Attrs.str(item, REQUESTED_BY))
+                .guardHold(toGuardHold(item.get(GUARD_HOLD)))
                 .build();
+    }
+
+    /** 가드 멈춤 내역을 M 속성의 안쪽 맵으로 푼다 — 예 목록은 빈 L 이어도 싣는다(설계 2026-11-20 §3.1 저장). */
+    private static Map<String, AttributeValue> guardHoldAttrs(GuardHold hold) {
+        Map<String, AttributeValue> map = new HashMap<>();
+        map.put(DIRECT_MEMBER_LINES, Attrs.n(hold.directMemberLines()));
+        map.put(CHILD_LINES, Attrs.n(hold.childLines()));
+        map.put(OTHER_LINES, Attrs.n(hold.otherLines()));
+        map.put(USERS_GONE, sampleAttr(hold.usersGone()));
+        map.put(USERS_INACTIVE, sampleAttr(hold.usersInactive()));
+        map.put(USERS_LOSING_MEMBERSHIP, sampleAttr(hold.usersLosingMembership()));
+        map.put(GROUPS_GONE, sampleAttr(hold.groupsGone()));
+        map.put(GROUPS_LOSING_PARENT, sampleAttr(hold.groupsLosingParent()));
+        return map;
+    }
+
+    private static AttributeValue sampleAttr(GuardHold.Sample sample) {
+        return Attrs.m(Map.of(
+                COUNT, Attrs.n(sample.count()),
+                IDS, Attrs.l(sample.ids().stream().map(Attrs::s).toList())));
+    }
+
+    /** 속성이 없거나 M 이 아니면 null — 내역이 없는 기록과 옛 기록이다. */
+    private static GuardHold toGuardHold(AttributeValue value) {
+        if (value == null || !value.hasM()) {
+            return null;
+        }
+        Map<String, AttributeValue> map = value.m();
+        return new GuardHold(
+                Attrs.integer(map, DIRECT_MEMBER_LINES),
+                Attrs.integer(map, CHILD_LINES),
+                Attrs.integer(map, OTHER_LINES),
+                toSample(map.get(USERS_GONE)),
+                toSample(map.get(USERS_INACTIVE)),
+                toSample(map.get(USERS_LOSING_MEMBERSHIP)),
+                toSample(map.get(GROUPS_GONE)),
+                toSample(map.get(GROUPS_LOSING_PARENT)));
+    }
+
+    private static GuardHold.Sample toSample(AttributeValue value) {
+        if (value == null || !value.hasM()) {
+            return new GuardHold.Sample(0, List.of());
+        }
+        AttributeValue ids = value.m().get(IDS);
+        List<String> list = ids == null || !ids.hasL() ? List.of() : ids.l().stream().map(AttributeValue::s).toList();
+        return new GuardHold.Sample(Attrs.integer(value.m(), COUNT), list);
     }
 }

@@ -104,7 +104,7 @@ public class AdminSyncController {
     @GetMapping("/runs")
     public Flux<SyncRunResponse> runs(@RequestParam(defaultValue = "20") int limit) {
         int clampedLimit = Math.max(MIN_RUNS_LIMIT, Math.min(limit, MAX_RUNS_LIMIT));
-        return runs.findRecent(clampedLimit).map(SyncRunResponse::from);
+        return runs.findRecent(clampedLimit).map(SyncRunResponse::listed);
     }
 
     /** 실행 기록 하나. 202 로 건 작업의 결과를 여기서 본다. 없으면 404 — 잘못된 번호이거나 보관 기간(30일)이 지났다. */

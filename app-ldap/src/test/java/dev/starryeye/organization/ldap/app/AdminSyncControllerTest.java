@@ -2,6 +2,7 @@ package dev.starryeye.organization.ldap.app;
 
 import dev.starryeye.organization.admin.AdminExceptionHandler;
 import dev.starryeye.organization.core.guard.ForceAllowance;
+import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
@@ -222,6 +223,60 @@ class AdminSyncControllerTest {
                 .expectBody()
                 .jsonPath("$[0].runId").isEqualTo("run-1")
                 .jsonPath("$[0].trigger").isEqualTo("SCHEDULED");
+    }
+
+    private static SyncRun 멈춤_내역_있는_실행() {
+        var hold = new GuardHold(3, 2, 1,
+                new GuardHold.Sample(2, List.of("u1", "u2")),
+                new GuardHold.Sample(0, List.of()),
+                new GuardHold.Sample(1, List.of("u3")),
+                new GuardHold.Sample(1, List.of("g1")),
+                new GuardHold.Sample(1, List.of("g2")));
+        return 완료된실행(SyncTrigger.MANUAL, SyncStatus.ABORTED).toBuilder().guardHold(hold).build();
+    }
+
+    @Test
+    @DisplayName("실행 기록 하나에는 멈춤 내역이 실린다(설계 2026-11-20 §3.1)")
+    void 실행_기록_하나에는_멈춤_내역이_실린다() {
+        // given
+        Mockito.when(runs.findById("run-1")).thenReturn(Mono.just(멈춤_내역_있는_실행()));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/run-1").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.guardHold.lines.total").isEqualTo(6)
+                .jsonPath("$.guardHold.lines.directMember").isEqualTo(3)
+                .jsonPath("$.guardHold.users.gone.count").isEqualTo(2)
+                .jsonPath("$.guardHold.users.gone.sample[0]").isEqualTo("u1")
+                .jsonPath("$.guardHold.groups.losingParent.count").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("실행 기록 목록에는 멈춤 내역이 없다 — 한 건씩 열어 볼 때만 싣는다")
+    void 실행_기록_목록에는_멈춤_내역이_없다() {
+        // given
+        Mockito.when(runs.findRecent(anyInt())).thenReturn(Flux.just(멈춤_내역_있는_실행()));
+
+        // when, then
+        client.get().uri("/admin/sync/runs").exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .value(body -> assertThat(body).contains("\"runId\":\"run-1\"").doesNotContain("guardHold"));
+    }
+
+    @Test
+    @DisplayName("내역이 없는 기록에는 guardHold 칸이 없다")
+    void 내역이_없는_기록에는_칸이_없다() {
+        // given
+        Mockito.when(runs.findById("run-1"))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.SCHEDULED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/run-1").exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .value(body -> assertThat(body).contains("\"runId\":\"run-1\"").doesNotContain("guardHold"));
     }
 
     @Test

@@ -4,6 +4,7 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 /** AttributeValue 를 만들고 읽는 잡일을 한 곳에 모은다. */
@@ -22,6 +23,14 @@ public final class Attrs {
 
     public static AttributeValue bool(boolean value) {
         return AttributeValue.builder().bool(value).build();
+    }
+
+    public static AttributeValue m(Map<String, AttributeValue> value) {
+        return AttributeValue.builder().m(value).build();
+    }
+
+    public static AttributeValue l(List<AttributeValue> value) {
+        return AttributeValue.builder().l(value).build();
     }
 
     public static AttributeValue b(byte[] value) {

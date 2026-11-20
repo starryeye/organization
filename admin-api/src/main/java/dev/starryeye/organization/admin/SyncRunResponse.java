@@ -18,10 +18,22 @@ public record SyncRunResponse(
         String snapshotId,
         String message,
         /** 이 회차를 건 행위자({@code client:<sub>}·{@code system:scheduler} 등). 모르는 기록(속성이 없는 옛 기록)은 칸이 없다. */
-        @JsonInclude(JsonInclude.Include.NON_NULL) String requestedBy
+        @JsonInclude(JsonInclude.Include.NON_NULL) String requestedBy,
+        /** 가드가 멈춘 회차의 지우려던 것의 내역(설계 2026-11-20 §3.1). 내역이 없는 기록과 목록 응답은 칸이 없다. */
+        @JsonInclude(JsonInclude.Include.NON_NULL) GuardHoldResponse guardHold
 ) {
 
+    /** 단건·202 응답 — 멈춤 내역을 싣는다. */
     public static SyncRunResponse from(SyncRun run) {
+        return of(run, run.guardHold() == null ? null : GuardHoldResponse.from(run.guardHold()));
+    }
+
+    /** 목록 응답 — 멈춤 내역은 한 건씩 열어 볼 때만 싣는다(설계 2026-11-20 §3.1). */
+    public static SyncRunResponse listed(SyncRun run) {
+        return of(run, null);
+    }
+
+    private static SyncRunResponse of(SyncRun run, GuardHoldResponse guardHold) {
         return new SyncRunResponse(
                 run.runId(),
                 run.source() == null ? null : run.source().name(),
@@ -34,6 +46,7 @@ public record SyncRunResponse(
                 run.failureCount(),
                 run.snapshotId(),
                 run.message(),
-                run.requestedBy());
+                run.requestedBy(),
+                guardHold);
     }
 }

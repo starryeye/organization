@@ -1,5 +1,6 @@
 package dev.starryeye.organization.storage;
 
+import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -269,5 +271,54 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         assertThat(찾은것).extracting(run -> run.runId())
                 .containsExactly(이번달_셋째.runId(), 지난달_기록.runId());
         assertThat(찾은것).allSatisfy(run -> assertThat(run.status()).isEqualTo(SyncStatus.RUNNING));
+    }
+
+    private static GuardHold 멈춤_내역() {
+        return new GuardHold(3, 2, 1,
+                new GuardHold.Sample(2, List.of("u1", "u2")),
+                new GuardHold.Sample(0, List.of()),
+                new GuardHold.Sample(1, List.of("u3")),
+                new GuardHold.Sample(1, List.of("g1")),
+                new GuardHold.Sample(1, List.of("g2")));
+    }
+
+    @Test
+    @DisplayName("가드 멈춤 내역을 싣고 읽는다 — 빈 예 목록인 갈래도 같은 값으로 돌아온다(설계 2026-11-20 §3.1)")
+    void 멈춤_내역을_싣고_읽는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        var hold = 멈춤_내역();
+
+        // when
+        repository.finish(run, SyncOutcome.aborted("삭제 가드").withGuardHold(hold)).block();
+
+        // then
+        assertThat(repository.findById(run.runId()).block().guardHold()).isEqualTo(hold);
+    }
+
+    @Test
+    @DisplayName("멈춤 내역이 없는 기록은 null 로 읽는다 — 속성 자체가 없다")
+    void 멈춤_내역이_없으면_null_이다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+
+        // when
+        repository.finish(run, SyncOutcome.noChange()).block();
+
+        // then
+        assertThat(repository.findById(run.runId()).block().guardHold()).isNull();
+    }
+
+    @Test
+    @DisplayName("최근 목록도 내역째 읽는다 — 응답에서만 뺀다(설계 2026-11-20 §3.1)")
+    void 목록도_내역째_읽는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        var hold = 멈춤_내역();
+        repository.finish(run, SyncOutcome.aborted("삭제 가드").withGuardHold(hold)).block();
+
+        // when, then
+        assertThat(repository.findRecent(10).collectList().block())
+                .singleElement().satisfies(found -> assertThat(found.guardHold()).isEqualTo(hold));
     }
 }
