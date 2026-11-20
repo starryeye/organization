@@ -20,13 +20,14 @@ public interface LockObserver {
     /**
      * 락 획득 시도가 끝났다.
      *
-     * @param waited    획득에 성공하거나 포기하기까지 걸린 시간 — {@code scim.lock.wait}
-     * @param contended 한 번이라도 다른 쪽에 밀렸는가 — {@code scim.lock.contended}
+     * @param waited    획득에 성공하거나 포기하기까지 걸린 시간 — {@code scim.lock.wait}·{@code sync.lock.wait}
+     * @param contended 다른 쪽이 쥐고 있어 조건 실패로 밀렸는가 — {@code scim.lock.contended}·{@code sync.lock.contended}.
+     *                  저장소 오류 같은 다른 실패는 아니다
      */
     void acquireFinished(Duration waited, boolean contended);
 
     /**
-     * 쥐고 있어야 할 리스를 잃었다(또는 잃었을 수 있다) — {@code scim.lock.lease_lost}.
+     * 쥐고 있어야 할 리스를 잃었다(또는 잃었을 수 있다) — {@code scim.lock.lease_lost}·{@code sync.lock.lease_lost}.
      *
      * @param reason 진단용 문구. 지표 태그로 쓰지 않는다 — 설계 §7 의 표는 태그가 없고,
      *               자유 문자열을 태그로 쓰면 카디널리티가 터진다

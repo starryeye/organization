@@ -14,7 +14,6 @@ import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.DailyOnce;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
-import dev.starryeye.organization.core.usecase.LockObserver;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
 import dev.starryeye.organization.storage.DynamoDbProperties;
@@ -52,8 +51,8 @@ public class UseCaseConfig {
      */
     @Bean(destroyMethod = "shutdown")
     public SyncJobs syncJobs(SyncRunRepository runs, MutationLock lock, DynamoDbProperties dynamoDb,
-                             SyncProperties properties, AuditRecorder auditRecorder, Clock clock) {
-        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), LockObserver.NOOP, properties.getJobTimeout(),
+                             SyncProperties properties, AuditRecorder auditRecorder, Clock clock, SyncMetrics metrics) {
+        return new SyncJobs(runs, lock, dynamoDb.getLockRenewInterval(), metrics, properties.getJobTimeout(),
                 auditRecorder, clock);
     }
 

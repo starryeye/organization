@@ -54,6 +54,61 @@ class SyncJobsTest {
         반납수단 = () -> Mono.fromRunnable(반납::incrementAndGet);
     }
 
+    /** 획득 관찰을 기록하는 관찰자 — 경합 여부만 모은다(설계 2026-11-20 L3). */
+    private static final class 기록하는_관찰자 implements LockObserver {
+        final java.util.List<Boolean> 경합 = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override
+        public void acquireFinished(Duration waited, boolean contended) {
+            경합.add(contended);
+        }
+
+        @Override
+        public void leaseLost(String reason) {
+        }
+    }
+
+    private SyncJobs 관찰자를_달아_만든다(기록하는_관찰자 관찰자) {
+        return new SyncJobs(runs, lock, Duration.ofSeconds(10), 관찰자, Duration.ofMinutes(1),
+                AuditRecorder.NONE, Clock.fixed(지금, ZoneOffset.UTC));
+    }
+
+    @Test
+    @DisplayName("락이 잡혀 있으면 경합으로 알린다 (설계 2026-11-20 L3)")
+    void 락이_잡혀_있으면_경합으로_알린다() {
+        // given
+        기록하는_관찰자 관찰자 = new 기록하는_관찰자();
+        lock.failAcquire = true;
+
+        // when
+        assertThatThrownBy(() -> 관찰자를_달아_만든다(관찰자).startLockedThen(SyncSource.LDAP, SyncTrigger.MANUAL,
+                MutationLock.LockPurpose.SYNC, dev.starryeye.organization.core.audit.AuditKind.SYNC,
+                (run, audit) -> Mono.just(Mono.just(SyncOutcome.noChange())), r -> {
+                }).block())
+                .isInstanceOf(LockUnavailableException.class);
+
+        // then
+        assertThat(관찰자.경합).containsExactly(true);
+    }
+
+    @Test
+    @DisplayName("락 획득이 다른 오류로 끝나면 경합이 아니다 (설계 2026-11-20 L3)")
+    void 락_획득이_다른_오류로_끝나면_경합이_아니다() {
+        // given — 저장소 오류는 다른 쪽이 쥔 것이 아니다
+        기록하는_관찰자 관찰자 = new 기록하는_관찰자();
+        lock.acquireError = new IllegalStateException("저장소 오류");
+
+        // when
+        assertThatThrownBy(() -> 관찰자를_달아_만든다(관찰자).startLockedThen(SyncSource.LDAP, SyncTrigger.MANUAL,
+                MutationLock.LockPurpose.SYNC, dev.starryeye.organization.core.audit.AuditKind.SYNC,
+                (run, audit) -> Mono.just(Mono.just(SyncOutcome.noChange())), r -> {
+                }).block())
+                .isInstanceOf(IllegalStateException.class);
+
+        // then
+        assertThat(관찰자.경합).containsExactly(false);
+    }
+
     private SyncRun 건다(Mono<SyncOutcome> work) {
         return jobs.start(SyncSource.LDAP, SyncTrigger.MANUAL, work, 반납수단).block();
     }

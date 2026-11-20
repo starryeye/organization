@@ -26,6 +26,30 @@ class SyncMetricsTest {
         metrics = new SyncMetrics(registry);
     }
 
+    @Test
+    @DisplayName("락 카운터는 기동 때 0 으로 있다 (설계 2026-11-20 L1)")
+    void 락_카운터는_기동_때_0으로_있다() {
+        assertThat(registry.find("sync.lock.contended").counter().count()).isZero();
+        assertThat(registry.find("sync.lock.lease_lost").counter().count()).isZero();
+    }
+
+    @Test
+    @DisplayName("경합한 획득은 대기와 경합을 남긴다 (설계 2026-11-20 L1)")
+    void 경합한_획득은_대기와_경합을_남긴다() {
+        metrics.acquireFinished(java.time.Duration.ofMillis(5), true);
+
+        assertThat(registry.find("sync.lock.wait").timer().count()).isEqualTo(1);
+        assertThat(registry.find("sync.lock.contended").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("리스 상실을 센다 (설계 2026-11-20 L1)")
+    void 리스_상실을_센다() {
+        metrics.leaseLost("작업 도중 리스 상실");
+
+        assertThat(registry.find("sync.lock.lease_lost").counter().count()).isEqualTo(1);
+    }
+
     private static SyncRun 실행(SyncStatus status, int written, int deleted, int failed) {
         return SyncRun.builder()
                 .runId("run-1")

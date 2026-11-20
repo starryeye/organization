@@ -95,6 +95,9 @@ public class ScimSyncMetrics implements DriftObserver, ArchiveDriftObserver, Loc
         for (Kind kind : Kind.values()) {
             registry.counter("scim.revocations", "kind", kind.tag());
         }
+        // 락 카운터 둘도 같은 까닭으로 기동 때 0 으로 만든다 — 첫 경합·상실 때 계열을 만들면 첫 값이 증가로 세어지지 않는다(설계 2026-11-20 L2)
+        registry.counter("scim.lock.contended");
+        registry.counter("scim.lock.lease_lost");
         // 원천 없는 줄 카운터도 같은 까닭으로 기동 때 0 으로 만들어 필드에 쥔다
         unsourced = Counter.builder("scim.writes.unsourced")
                 .description("조직 쪽 쓰기가 원천 없는 줄(저장된 상태가 요구하지 않는 부여 줄)을 남겼을 수 있는 요청 수 — 오르면 WARN 의 조직을 보고, 같은 요청이 성공하지 않았으면 재적재(mode=tuples)")

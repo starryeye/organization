@@ -33,6 +33,13 @@ class ScimSyncMetricsTest {
     }
 
     @Test
+    @DisplayName("락 카운터는 기동 때 0 으로 있다 (설계 2026-11-20 L2)")
+    void 락_카운터는_기동_때_0으로_있다() {
+        assertThat(registry.find("scim.lock.contended").counter().count()).isZero();
+        assertThat(registry.find("scim.lock.lease_lost").counter().count()).isZero();
+    }
+
+    @Test
     @DisplayName("어긋남은 kind 태그를 달고 발견한 건수만큼 오른다")
     void 어긋남을_센다() {
         // when

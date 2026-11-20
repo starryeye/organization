@@ -154,7 +154,8 @@ public class SyncJobs {
         return Mono.defer(() -> {
             long 시작 = System.nanoTime();
             return lock.acquireOnce(purpose)
-                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), true))
+                    // 경합은 조건 실패(다른 쪽이 쥐었다)만이다 — 저장소 오류·시도 한도 초과는 경합이 아니다(설계 2026-11-20 L3)
+                    .doOnError(error -> lockObserver.acquireFinished(경과(시작), error instanceof LockUnavailableException))
                     .doOnSuccess(lease -> lockObserver.acquireFinished(경과(시작), false))
                     .flatMap(lease -> 띄운다(source, trigger, kind, work,
                             run -> 남은_기록을_닫는다(source, run.runId()),
