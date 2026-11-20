@@ -739,7 +739,7 @@ sequenceDiagram
     Note over A: 읽은 줄을 present(D 안)와<br/>지울 후보(D 밖)로 가른다
     A->>G: evaluate(지울 후보, 비활성 직원의 direct_member 줄, 읽은 줄 수) — 강제 회차는 상한 N 의 가드
     alt 전부 보류
-        Note over A: ABORTED — 지우지 않음, 스냅샷 없음, 기록 중 표시가 남음
+        Note over A: ABORTED + 멈춤 내역 — 지우지 않음, 스냅샷 없음, 기록 중 표시가 남음
     else 진행 또는 비활성 회수만
         A->>W: apply(지울 줄만)
         A->>S: save(B, U) — 기록 중 표시가 지워진다
