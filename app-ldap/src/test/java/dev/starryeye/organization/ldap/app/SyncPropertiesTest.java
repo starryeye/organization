@@ -122,27 +122,42 @@ class SyncPropertiesTest {
         assertThat(config.getMaxReactivations()).isEqualTo(100);
     }
 
-    // 깨뜨릴 변경: UseCaseConfig.reactivationGuard 가 상한·켬·기준 수 중 하나를 넘기지 않거나 다른 값을 넘김
-    @Test
-    @DisplayName("sync.reactivation-guard.* 를 주면 가드가 그 값을 쓴다 — 상한은 같으면 통과하고 넘으면 걸리며, 끄면 보지 않는다")
-    void 재활성_가드_설정을_바인딩하면_가드가_그_값을_쓴다() {
-        // given — 기준 8명은 min-baseline(20) 미만이라 비율은 보지 않는다. 상한 7 만 본다
+    private static SyncProperties 재활성_가드_설정(Map<String, String> 값) {
         var properties = new SyncProperties();
-        new Binder(new MapConfigurationPropertySource(Map.of(
+        new Binder(new MapConfigurationPropertySource(값)).bind("sync", Bindable.ofInstance(properties));
+        return properties;
+    }
+
+    // 깨뜨릴 변경: UseCaseConfig.reactivationGuard 가 상한·켬·기준 수·임계치 중 하나를 넘기지 않거나 기본값으로 바꿔 넘김
+    @Test
+    @DisplayName("sync.reactivation-guard.* 네 값이 모두 판정까지 닿는다 — 상한·임계치·기준 수는 경계에서, 끄면 보지 않는다")
+    void 재활성_가드_설정을_바인딩하면_가드가_그_값을_쓴다() {
+        // given — 임계치 0.5, 기준 수 20. 상한은 두 가지로 본다
+        var 상한_7 = new UseCaseConfig().reactivationGuard(재활성_가드_설정(Map.of(
                 "sync.reactivation-guard.threshold-ratio", "0.5",
                 "sync.reactivation-guard.min-baseline", "20",
-                "sync.reactivation-guard.max-reactivations", "7")))
-                .bind("sync", Bindable.ofInstance(properties));
-        var guard = new UseCaseConfig().reactivationGuard(properties);
+                "sync.reactivation-guard.max-reactivations", "7")));
+        var 상한_100 = new UseCaseConfig().reactivationGuard(재활성_가드_설정(Map.of(
+                "sync.reactivation-guard.threshold-ratio", "0.5",
+                "sync.reactivation-guard.min-baseline", "20",
+                "sync.reactivation-guard.max-reactivations", "100")));
 
-        // when, then
-        assertThat(guard.check(이전(8), 그림(8, 7)).held()).isFalse();
-        assertThat(guard.check(이전(8), 그림(8, 8)).held()).isTrue();
+        // when, then — 상한: 기준 8명은 기준 수(20) 미만이라 비율은 안 보고 상한 7 만 본다(기본 상한 100 이면 8 이 안 걸려 어긋난다)
+        assertThat(상한_7.check(이전(8), 그림(8, 7)).held()).isFalse();
+        assertThat(상한_7.check(이전(8), 그림(8, 8)).held()).isTrue();
 
-        // when, then — 끄면 같은 그림도 보지 않는다
-        new Binder(new MapConfigurationPropertySource(Map.of("sync.reactivation-guard.enabled", "false")))
-                .bind("sync", Bindable.ofInstance(properties));
-        assertThat(new UseCaseConfig().reactivationGuard(properties).check(이전(8), 그림(8, 8)).held()).isFalse();
+        // then — 임계치: 20명 중 10명은 정확히 50% 라 통과한다(기본 임계치 0.3 이면 걸려 어긋난다). 11명은 걸린다
+        assertThat(상한_100.check(이전(20), 그림(20, 10)).held()).isFalse();
+        assertThat(상한_100.check(이전(20), 그림(20, 11)).held()).isTrue();
+
+        // then — 기준 수: 19명 전원이 재활성이어도 기준 19 는 20 미만이라 비율을 안 본다(기본 기준 수 10 이면 걸려 어긋난다)
+        assertThat(상한_100.check(이전(19), 그림(19, 19)).held()).isFalse();
+
+        // then — 켬: 끄면 같은 그림도 보지 않는다(기본 켬이면 걸려 어긋난다)
+        var 끔 = new UseCaseConfig().reactivationGuard(재활성_가드_설정(Map.of(
+                "sync.reactivation-guard.enabled", "false",
+                "sync.reactivation-guard.max-reactivations", "7")));
+        assertThat(끔.check(이전(8), 그림(8, 8)).held()).isFalse();
     }
 
     private static Set<RelationTuple> 이전(int 기준) {
