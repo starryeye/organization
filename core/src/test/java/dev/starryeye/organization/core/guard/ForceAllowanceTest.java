@@ -36,4 +36,31 @@ class ForceAllowanceTest {
         // when, then
         assertThat(new ForceAllowance(12500).note()).isEqualTo("강제 실행 — 지울 줄 허용 12500건");
     }
+
+    // 깨뜨릴 변경: 둘 다 null 을 허용하거나 maxReactivations 검사를 지우기
+    @Test
+    @DisplayName("두 수 가운데 하나도 없거나 준 수가 1 미만이면 만들 수 없다(설계 2026-11-24 R9)")
+    void 두_수가_없거나_1_미만이면_만들_수_없다() {
+        // when, then
+        assertThatThrownBy(() -> new ForceAllowance(null, null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ForceAllowance(null, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ForceAllowance(0, 5)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // 깨뜨릴 변경: note 의 세 꼴 가운데 하나를 바꾸기
+    @Test
+    @DisplayName("결론 앞 문구는 준 수에 따라 세 꼴이다(설계 2026-11-24 R11)")
+    void 결론_앞_문구는_세_꼴이다() {
+        // when, then
+        assertThat(new ForceAllowance(null, 7).note()).isEqualTo("강제 실행 — 재활성 허용 7명");
+        assertThat(new ForceAllowance(12500, 7).note()).isEqualTo("강제 실행 — 지울 줄 허용 12500건·재활성 허용 7명");
+    }
+
+    // 깨뜨릴 변경: 보조 생성자를 지우거나 다른 값을 넣기
+    @Test
+    @DisplayName("수 하나짜리 보조 생성자는 재활성 수가 없는 허용 수와 같다")
+    void 보조_생성자는_재활성_수가_없는_허용_수와_같다() {
+        // when, then
+        assertThat(new ForceAllowance(5)).isEqualTo(new ForceAllowance(5, null));
+    }
 }

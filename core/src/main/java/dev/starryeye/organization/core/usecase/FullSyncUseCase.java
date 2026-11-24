@@ -130,7 +130,7 @@ public class FullSyncUseCase {
 
     /** 이번 회차의 가드를 한 번 고르고 띄운다 — 허용 수가 없으면 설정의 가드, 있으면 그 수를 상한으로 한 강제 가드다. */
     private Mono<SyncRun> 띄운다(SyncTrigger trigger, ForceAllowance allowance, Consumer<SyncRun> onFinished) {
-        DeletionGuard 이번_가드 = allowance == null ? guard : DeletionGuard.forced(allowance);
+        DeletionGuard 이번_가드 = allowance == null ? guard : DeletionGuard.forced(allowance.maxDeletes());
         return jobs.startLockedThen(SyncSource.LDAP, trigger, MutationLock.LockPurpose.SYNC, AuditKind.SYNC,
                 (run, 기록) -> 허용_수를_적는다(Mono.defer(() -> synchronize(이번_가드, 기록)), allowance), onFinished);
     }

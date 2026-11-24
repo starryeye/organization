@@ -360,7 +360,7 @@ class DeletionGuardTest {
     @DisplayName("강제 가드는 비율을 보지 않는다 — 기준 100건에서 90건을 지워도 허용 수 90 안이면 진행한다")
     void 강제_가드는_비율을_보지_않는다() {
         // given
-        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var guard = DeletionGuard.forced(90);
         var baseline = 튜플들(100);
         // when
         var decision = guard.evaluate(앞에서(baseline, 90), Set.of(), baseline.size(), "기준 스냅샷");
@@ -373,7 +373,7 @@ class DeletionGuardTest {
     @DisplayName("강제 가드는 허용 수를 하나 넘으면 상한 문구로 멈춘다")
     void 강제_가드는_N_을_넘으면_상한_문구로_멈춘다() {
         // given
-        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var guard = DeletionGuard.forced(90);
         var baseline = 튜플들(100);
         // when
         var decision = guard.evaluate(앞에서(baseline, 91), Set.of(), baseline.size(), "기준 스냅샷");
@@ -390,7 +390,7 @@ class DeletionGuardTest {
     @DisplayName("강제 가드도 비활성 회수를 떼어 본다 — 전체가 허용 수를 넘어도 비활성 회수가 그 안이면 그것만 반영한다")
     void 강제_가드는_비활성_회수를_떼어_본다() {
         // given — 지울 91건(허용 수 90 초과) 가운데 비활성 회수 10건
-        var guard = DeletionGuard.forced(new ForceAllowance(90));
+        var guard = DeletionGuard.forced(90);
         var baseline = 튜플들(100);
         // when
         var decision = guard.evaluate(앞에서(baseline, 91), 앞에서(baseline, 10), baseline.size(), "기준 스냅샷");

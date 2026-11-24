@@ -30,15 +30,16 @@ public class DeletionGuard {
     }
 
     /**
-     * 강제 회차의 가드(설계 2026-11-20 F2) — 허용 수 N 을 상한으로 같은 가드를 본다. 비율은 보지 않는다. 큰 개편은 비율을 넘는 것이 정상이고, 그래서
+     * 강제 회차의 가드(설계 2026-11-20 F2) — 허용 수 N({@code ForceAllowance.maxDeletes}, 설계 2026-11-24 R9·R11 로 재활성 허용 수와 나란한 두 수 가운데 하나)을
+     * 상한으로 같은 가드를 본다. 비율은 보지 않는다. 큰 개편은 비율을 넘는 것이 정상이고, 그래서
      * 멈춘 회차를 운영자가 확인했기 때문이다. 설정에서 가드를 꺼 두었어도 이 가드는 켜져 있다. 비활성 회수를 떼어 다시 보는 규칙(설계 2026-10-20 §5.2)은
      * 그대로다 — N 을 넘으면 N 안의 비활성 회수만 반영하거나 전부 보류한다.
      *
      * <p>비율은 기준 수가 {@code min-baseline} 이상일 때만 보므로 그것을 {@code int} 의 끝으로 두어 닿지 않게 한다. 임계치 1.0(100%)도 넘을 수 없다 —
      * 지울 줄은 기준 수에 드는 줄의 부분집합이다.
      */
-    public static DeletionGuard forced(ForceAllowance allowance) {
-        return new DeletionGuard(new DeletionGuardPolicy(true, 1.0, Integer.MAX_VALUE, allowance.maxDeletes()));
+    public static DeletionGuard forced(int maxDeletes) {
+        return new DeletionGuard(new DeletionGuardPolicy(true, 1.0, Integer.MAX_VALUE, maxDeletes));
     }
 
     /**
