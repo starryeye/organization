@@ -1040,13 +1040,23 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         // given
         작은_묶음_저장소(16).saveWithCreatedAt(스냅샷("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), 튜플들(3), Set.of(), 비활성_튜플들(10))).block();
         repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
-        assertThat(비활성_묶음_키들(파티션("20260804T030000-LDAP")).size()).isGreaterThanOrEqualTo(2);
+        var 만료_파티션 = 파티션("20260804T030000-LDAP");
+        int 본문_묶음_수 = 묶음_키들(만료_파티션).size();
+        int 비활성_묶음_수 = 비활성_묶음_키들(만료_파티션).size();
+        assertThat(비활성_묶음_수).isGreaterThanOrEqualTo(2);
+
+        AtomicInteger deleteItem수 = new AtomicInteger();
+        AtomicInteger batchWriteItem수 = new AtomicInteger();
+        var 세는_저장소 = new DynamoDbTupleSnapshotRepository(
+                지우기_호출을_세는_클라이언트(deleteItem수, batchWriteItem수), properties, Clock.fixed(지금, ZoneOffset.UTC));
 
         // when
-        var purged = repository.purgeExpired().block();
+        var purged = 세는_저장소.purgeExpired().block();
 
-        // then
+        // then — 본문 묶음 + 비활성 묶음마다 DeleteItem 하나 + 메타 하나, 묶음 요청(BatchWriteItem)은 없다
         assertThat(purged).isEqualTo(1);
+        assertThat(deleteItem수.get()).isEqualTo(본문_묶음_수 + 비활성_묶음_수 + 1);
+        assertThat(batchWriteItem수.get()).isZero();
         assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
 
