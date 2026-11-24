@@ -10,6 +10,8 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
 import dev.starryeye.organization.core.guard.ForceAllowance;
+import dev.starryeye.organization.core.guard.ReactivationGuard;
+import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -69,8 +71,12 @@ class FullSyncUseCaseTest {
     }
 
     private FullSyncUseCase 유스케이스(DeletionGuardPolicy 정책) {
+        return 유스케이스(정책, ReactivationGuardPolicy.defaults());
+    }
+
+    private FullSyncUseCase 유스케이스(DeletionGuardPolicy 정책, ReactivationGuardPolicy 재활성_정책) {
         return new FullSyncUseCase(source, snapshots, state, writer, scanner,
-                new DeletionGuard(정책),
+                new DeletionGuard(정책), new ReactivationGuard(재활성_정책),
                 new SyncJobs(runs, new FakeMutationLock(), Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
@@ -113,7 +119,12 @@ class FullSyncUseCaseTest {
 
     /** 허용 수 N 을 주어 강제로 동기화하고 끝날 때까지 기다린다 — 강제 회차는 허용 수 입구로만 든다(설계 2026-11-20 F1). */
     private SyncRun 강제로_동기화한다(int maxDeletes) {
-        SyncRun started = useCase.startForced(new ForceAllowance(maxDeletes), run -> {
+        return 강제로_동기화한다(new ForceAllowance(maxDeletes));
+    }
+
+    /** 허용 수(지울 줄·재활성 가운데 준 것)로 강제로 동기화하고 끝날 때까지 기다린다(설계 2026-11-24 R9). */
+    private SyncRun 강제로_동기화한다(ForceAllowance allowance) {
+        SyncRun started = useCase.startForced(allowance, run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -1386,5 +1397,456 @@ class FullSyncUseCaseTest {
         assertThatThrownBy(() -> useCase.start(SyncTrigger.FORCED, r -> {
         })).isInstanceOf(IllegalArgumentException.class);
         assertThat(runs.findRecent(10).collectList().block()).as("회차를 열지 않았다").isEmpty();
+    }
+
+    // ---------- 재활성 가드 (설계 2026-11-24) ----------
+
+    /** 상한 1명 — 재활성 둘이면 보류한다. 기준(직전 비활성 소속 직원)이 10명 미만이라 비율은 보지 않는다. */
+    private static final ReactivationGuardPolicy 상한_1명 = new ReactivationGuardPolicy(true, 0.3, 10, 1);
+    private static final RelationTuple 김_백엔드 = RelationTuple.directMember("kim", "DEV002");
+    private static final RelationTuple 막힌_가 = RelationTuple.directMember("blocked1", "DEV002");
+    private static final RelationTuple 막힌_나 = RelationTuple.directMember("blocked2", "DEV002");
+    private static final RelationTuple 입사자 = RelationTuple.directMember("newbie", "DEV002");
+    private static final String 둘을_보류했다 = "재활성 가드 발동 — 직원 2명의 재활성을 보류(비활성 그대로 둠) / "
+            + "재활성 대상 2명(직전 비활성 소속 직원 2명의 100.0%)이 상한 1명을 초과했습니다. "
+            + "강제 실행하려면 실행 기록의 reactivationHold 를 확인한 뒤 force=true 와 maxReactivations(허용할 재활성 직원 수)로 재요청하세요";
+
+    /**
+     * 1회차 — {@code 활성} 직원과 막힌 blocked1·blocked2 가 DEV002 에 함께 있다. 포인터가 없어 장부 맞추기로 맞추고, 그 커밋이 스냅샷 I 에 막힌 둘의
+     * 소속 줄을 남긴다(설계 2026-11-24 R1). 이 회차는 판정하지 않는다(포인터 없음, R8).
+     */
+    private void 막힌_둘이_든_첫_회차를_돈다(ReactivationGuardPolicy 재활성_정책, Set<String> 활성) {
+        useCase = 유스케이스(DeletionGuardPolicy.defaults(), 재활성_정책);
+        source.willReturn(조직도(활성, Set.of("blocked1", "blocked2"), "DEV002"));
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.saved.get(0).inactive()).as("장부 맞추기 커밋이 그림의 I 를 남긴다")
+                .containsExactlyInAnyOrder(막힌_가, 막힌_나);
+    }
+
+    private void 막힌_둘이_든_첫_회차를_돈다(ReactivationGuardPolicy 재활성_정책) {
+        막힌_둘이_든_첫_회차를_돈다(재활성_정책, Set.of("kim"));
+    }
+
+    /** {@code 활성} 에 막혔던 blocked1·blocked2 가 더해져 모두 활성인 그림 — 계정 상태 속성을 못 읽게 된 회차를 흉내 낸다(설계 2026-11-24 §1). */
+    private static DirectorySnapshot 막혔던_둘도_활성인_조직도(Set<String> 활성) {
+        Set<String> 모두 = new HashSet<>(활성);
+        모두.addAll(Set.of("blocked1", "blocked2"));
+        return 조직도(모두, "DEV002");
+    }
+
+    private TupleSnapshot 마지막_스냅샷() {
+        return snapshots.saved.get(snapshots.saved.size() - 1);
+    }
+
+    // 깨뜨릴 변경: 판정 뒤 매핑·현재상태 교체·스냅샷 I 에 그림′ 대신 받은 그림을 넘기기
+    @Test
+    @DisplayName("막혔던 직원이 한꺼번에 활성으로 읽히면 재활성을 보류한다 — 그들의 줄은 쓰지 않고 현재상태와 스냅샷 I 에 비활성으로 남으며, 같은 회차의 입사자는 쓴다")
+    void 막혔던_직원이_한꺼번에_활성이면_재활성을_보류한다() {
+        // given — 1회차에 막혀 있던 둘이 2회차에 활성으로 읽힌다. 같은 회차에 새 입사자도 들었다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim", "newbie")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 가드가 걸린 회차라 ABORTED 이고, 보류 내역과 앞 문구가 남는다(설계 2026-11-24 R6·R7)
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.reactivationHold().ids()).containsExactly("blocked1", "blocked2");
+        assertThat(run.guardHold()).isNull();
+        assertThat(run.message()).isEqualTo(둘을_보류했다);
+
+        // then — 쓴 줄은 입사자의 것뿐이다
+        var 마지막 = writer.appliedDeltas.get(writer.appliedDeltas.size() - 1);
+        assertThat(마지막.toWrite()).containsExactly(입사자);
+        assertThat(마지막.toDelete()).isEmpty();
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+        assertThat(run.writtenCount()).isEqualTo(1);
+
+        // then — 현재상태는 비활성 그대로다. 입사자는 들었다
+        assertThat(state.users.get("blocked1").active()).isFalse();
+        assertThat(state.users.get("blocked2").active()).isFalse();
+        assertThat(state.users).containsKey("newbie");
+
+        // then — 새 스냅샷의 I 에 보류한 둘의 줄이 있어 다음 회차도 같은 판정을 받는다
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(마지막_스냅샷().inactive()).containsExactlyInAnyOrder(막힌_가, 막힌_나);
+        assertThat(마지막_스냅샷().tuples()).containsExactlyInAnyOrder(김_백엔드, 입사자);
+    }
+
+    // 깨뜨릴 변경: 스냅샷 I 를 받은 그림(보류 전)에서 만들기 — 다음 회차가 직전 비활성을 잊는다
+    @Test
+    @DisplayName("다음 회차가 같은 그림이면 다시 보류한다 — 스냅샷 I 로 이어진다")
+    void 같은_그림이면_다음_회차도_보류한다() {
+        // given — 2회차가 보류했다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim", "newbie")));
+        동기화한다(SyncTrigger.SCHEDULED);
+        int 둘째까지 = writer.appliedDeltas.size();
+
+        // when — 3회차도 같은 그림이다
+        var run3 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 그림′ 이 2회차와 같아 변경은 없지만 보류는 그대로다
+        assertThat(run3.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run3.reactivationHold()).isNotNull();
+        assertThat(run3.reactivationHold().count()).isEqualTo(2);
+        assertThat(run3.message()).isEqualTo(둘을_보류했다 + " / 변경 없음");
+        assertThat(writer.appliedDeltas).hasSize(둘째까지);
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+        assertThat(state.users.get("blocked1").active()).isFalse();
+    }
+
+    // 깨뜨릴 변경: 보류를 회차 사이에 따로 기억해 재활성이 0 이어도 보류하기
+    @Test
+    @DisplayName("읽기가 돌아와 그들이 다시 비활성으로 읽히면 보류가 풀린다 — 재활성 0, 지울 줄 0, 변경 없음")
+    void 다시_비활성으로_읽히면_보류가_풀린다() {
+        // given — 2회차가 보류했다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim", "newbie")));
+        동기화한다(SyncTrigger.SCHEDULED);
+
+        // when — 3회차에 계정 상태 속성을 다시 읽는다. 둘은 여전히 막혀 있다
+        source.willReturn(조직도(Set.of("kim", "newbie"), Set.of("blocked1", "blocked2"), "DEV002"));
+        var run3 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run3.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run3.reactivationHold()).isNull();
+        assertThat(run3.deletedCount()).isZero();
+        assertThat(run3.message()).isEqualTo("변경 없음");
+        assertThat(writer.deleted).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 문턱(상한·비율)을 보지 않고 재활성이 있으면 늘 보류하기
+    @Test
+    @DisplayName("재활성이 문턱 아래면 그대로 쓴다 — SUCCEEDED 이고 그 직원은 다음 스냅샷 I 에서 빠진다")
+    void 문턱_아래면_그대로_쓴다() {
+        // given — 막혔던 둘 가운데 blocked1 만 다시 켰다(상한 1명과 같다 — 초과만 걸린다)
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(조직도(Set.of("kim", "blocked1"), Set.of("blocked2"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(writer.appliedDeltas.get(writer.appliedDeltas.size() - 1).toWrite()).containsExactly(막힌_가);
+        assertThat(writer.stored).contains(막힌_가).doesNotContain(막힌_나);
+        assertThat(state.users.get("blocked1").active()).isTrue();
+        assertThat(마지막_스냅샷().inactive()).containsExactly(막힌_나);
+    }
+
+    // 깨뜨릴 변경: 보류를 줄 단위로(옛 조직의 줄만) 하거나, 새 조직의 소속을 받은 그림으로 매핑하기
+    @Test
+    @DisplayName("재활성 직원이 같은 회차에 조직을 옮겨도 보류하면 그 직원의 줄은 쓰지도 지우지도 않는다")
+    void 재활성_직원이_조직을_옮겨도_보류하면_어느_줄도_쓰지_않는다() {
+        // given — blocked1 은 활성이 되며 DEV003 으로 옮겼고, blocked2 는 DEV002 에서 활성이 됐다. 새 입사자도 들었다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        Set.of("kim", "newbie", "blocked1", "blocked2").forEach(id -> users.put(id, 직원(id)));
+        source.willReturn(new DirectorySnapshot(users, Map.of(
+                "DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀",
+                        Set.of(MemberRef.user("kim"), MemberRef.user("newbie"), MemberRef.user("blocked2"))),
+                "DEV003", new DirectoryGroup("DEV003", "cn=DEV003", "프론트팀", Set.of(MemberRef.user("blocked1"))))));
+        RelationTuple 옮긴_가 = RelationTuple.directMember("blocked1", "DEV003");
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 새 조직의 줄도 쓰지 않고, 옛 조직의 줄은 기준선(B)에 없으니 지울 줄도 생기지 않는다(Review Focus 1)
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        var 마지막 = writer.appliedDeltas.get(writer.appliedDeltas.size() - 1);
+        assertThat(마지막.toWrite()).containsExactly(입사자);
+        assertThat(마지막.toDelete()).isEmpty();
+        assertThat(writer.written).doesNotContain(옮긴_가, 막힌_가, 막힌_나);
+        assertThat(writer.deleted).isEmpty();
+        assertThat(state.users.get("blocked1").active()).isFalse();
+        assertThat(마지막_스냅샷().inactive()).containsExactlyInAnyOrder(옮긴_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 변경 없음 회차에는 보류를 적지 않기(SUCCEEDED 로 끝나 경보가 울리지 않는다)
+    @Test
+    @DisplayName("변경이 없어도 재활성을 보류한 회차는 ABORTED 이고 메시지 끝이 변경 없음이다")
+    void 변경이_없어도_보류하면_ABORTED_이고_끝이_변경_없음이다() {
+        // given — 막혔던 둘이 활성으로 읽힐 뿐 다른 변경은 없다. 그림′ 은 1회차 그림과 같다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        int 첫_회차까지 = writer.appliedDeltas.size();
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message()).isEqualTo(둘을_보류했다 + " / 변경 없음");
+        assertThat(writer.appliedDeltas).hasSize(첫_회차까지);
+        assertThat(snapshots.saved).as("변경 없음은 스냅샷을 남기지 않는다").hasSize(1);
+    }
+
+    // 깨뜨릴 변경: 삭제 가드가 걸리면 재활성 판정의 결론을 버리기, 또는 결론 붙이는 순서를 뒤집기
+    @Test
+    @DisplayName("삭제 가드와 함께 걸리면 두 내역이 다 있고, 메시지는 재활성 보류 문구가 앞, 삭제 가드 문구가 뒤다")
+    void 삭제_가드와_함께_걸리면_두_내역이_있다() {
+        // given — 1회차에 user0~19 가 들었다. 2회차에는 user0~4 만 남고(지울 15줄, 75%) 막혔던 둘이 활성으로 읽힌다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명, 직원들(0, 20));
+        int 첫_회차까지 = writer.appliedDeltas.size();
+        source.willReturn(막혔던_둘도_활성인_조직도(직원들(0, 5)));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.guardHold().totalLines()).isEqualTo(15);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message())
+                .startsWith(둘을_보류했다 + " / 삭제 대상 15건(기준 스냅샷 20건의 75.0%)이 임계치 30.0%를 초과했습니다");
+        assertThat(writer.appliedDeltas).hasSize(첫_회차까지);
+    }
+
+    // 깨뜨릴 변경: 비활성 회수만 반영한 회차의 스냅샷 I 를 빈 집합이나 받은 그림(보류 전)으로 만들기
+    @Test
+    @DisplayName("비활성 회수만 반영한 회차도 스냅샷에 그림′ 의 I 를 남긴다 — 보류한 직원의 줄이 I 에 있다")
+    void 비활성_회수만_반영한_회차도_그림_프라임의_I_를_남긴다() {
+        // given — 1회차에 user0~19 가 들었다. 2회차에는 user0 이 막히고 user1~5 만 남으며 막혔던 둘이 활성으로 읽힌다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명, 직원들(0, 20));
+        Set<String> 활성 = new HashSet<>(직원들(1, 6));
+        활성.addAll(Set.of("blocked1", "blocked2"));
+        source.willReturn(조직도(활성, Set.of("user0"), "DEV002"));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 지울 15줄로 삭제 가드가 걸리고 user0 의 회수만 반영한다. 재활성 둘은 보류한다
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.message()).startsWith(둘을_보류했다 + " / 삭제 가드 발동 — 비활성 회수 1건만 반영");
+        assertThat(run.deletedCount()).isEqualTo(1);
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(마지막_스냅샷().inactive()).containsExactlyInAnyOrder(
+                RelationTuple.directMember("user0", "DEV002"), 막힌_가, 막힌_나);
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 차단기 멈춤 결론에 보류를 적지 않거나 FAILED 를 ABORTED 로 바꾸기, 멈춤 스냅샷의 I 를 받은 그림으로 만들기
+    @Test
+    @DisplayName("쓰기가 차단기로 멈춰도 상태는 FAILED 그대로이고 보류 내역과 앞 문구가 붙는다")
+    void 차단기로_멈춰도_FAILED_그대로이고_보류_내역이_붙는다() {
+        // given
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim", "newbie")));
+        writer.abortWhen(delta -> true);
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message())
+                .startsWith(둘을_보류했다 + " / ")
+                .contains("연속 실패로 멈췄다")
+                .endsWith(" — 현재상태는 디렉터리대로 교체했다");
+        assertThat(마지막_스냅샷().inactive()).containsExactlyInAnyOrder(막힌_가, 막힌_나);
+        assertThat(state.users.get("blocked1").active()).isFalse();
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 재활성 허용 수만 준 강제 회차에서 maxDeletes 를 꺼내다 NPE, 또는 강제 회차가 설정의 재활성 가드를 보기
+    @Test
+    @DisplayName("재활성만 강제로 넘기면 허용 수 안의 재활성을 쓴다 — 보류가 없고 결론 앞에 재활성 허용 수가 있다")
+    void 재활성만_강제로_넘기면_허용_수_안에서_쓴다() {
+        // given — 설정 상한 1명이면 보류할 재활성 둘. 운영자가 확인하고 2명을 허용한다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 강제로_동기화한다(new ForceAllowance(null, 2));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.FORCED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(run.message()).isEqualTo("강제 실행 — 재활성 허용 2명");
+        assertThat(writer.appliedDeltas.get(writer.appliedDeltas.size() - 1).toWrite())
+                .containsExactlyInAnyOrder(막힌_가, 막힌_나);
+        assertThat(state.users.get("blocked1").active()).isTrue();
+        assertThat(마지막_스냅샷().inactive()).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 재활성 허용 수만 준 강제 회차의 삭제 가드를 강제 가드(허용 수 없음 = 무제한 따위)로 바꾸기
+    @Test
+    @DisplayName("재활성만 강제로 넘긴 회차의 삭제 가드는 설정대로다 — 지울 줄이 설정을 넘으면 걸린다")
+    void 재활성만_강제하면_삭제_가드는_설정대로_본다() {
+        // given — 1회차에 user0~19 가 들었다. 2회차에는 user0~4 만 남고(지울 15줄, 75%) 막혔던 둘이 활성으로 읽힌다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명, 직원들(0, 20));
+        int 첫_회차까지 = writer.appliedDeltas.size();
+        source.willReturn(막혔던_둘도_활성인_조직도(직원들(0, 5)));
+
+        // when
+        var run = 강제로_동기화한다(new ForceAllowance(null, 2));
+
+        // then — 설정의 임계치(30%)로 걸린다. 재활성은 허용 수 안이라 보류가 없다
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(run.guardHold()).isNotNull();
+        assertThat(run.message())
+                .startsWith("강제 실행 — 재활성 허용 2명 / 삭제 대상 15건(기준 스냅샷 20건의 75.0%)이 임계치 30.0%를 초과했습니다");
+        assertThat(writer.appliedDeltas).hasSize(첫_회차까지);
+    }
+
+    // 깨뜨릴 변경: 강제 회차가 허용 수 대신 설정의 재활성 가드를 보기(설정 기본값은 재활성 둘을 통과시킨다)
+    @Test
+    @DisplayName("재활성이 허용 수를 넘으면 강제 회차도 보류한다 — 결론은 강제 문구, 보류 문구 순이다")
+    void 허용_수를_넘으면_강제해도_보류한다() {
+        // given — 설정은 기본값(기준 10명 미만이라 비율은 보지 않고 상한 100명)이라 재활성 둘은 지나간다. 허용 수는 1명이다
+        막힌_둘이_든_첫_회차를_돈다(ReactivationGuardPolicy.defaults());
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 강제로_동기화한다(new ForceAllowance(null, 1));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message()).isEqualTo("강제 실행 — 재활성 허용 1명 / " + 둘을_보류했다 + " / 변경 없음");
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 강제 재활성 가드가 설정의 enabled 를 이어받기
+    @Test
+    @DisplayName("설정에서 재활성 가드를 꺼 두어도 강제 회차는 허용 수를 본다")
+    void 설정에서_꺼_두어도_강제_회차는_허용_수를_본다() {
+        // given — 가드를 끈 배포
+        막힌_둘이_든_첫_회차를_돈다(new ReactivationGuardPolicy(false, 0.3, 10, 1));
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 강제로_동기화한다(new ForceAllowance(null, 1));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 기록 중 회차(장부 맞추기)에서 판정하지 않기, 또는 사정 문구를 보류 문구보다 앞에 붙이기
+    @Test
+    @DisplayName("기록 중 표시가 남은 회차는 최신 스냅샷의 I 로 판정한다 — 장부 맞추기 결론에 보류가 붙고 기준선 의심 사정도 남는다")
+    void 기록_중_회차는_최신_스냅샷의_I_로_판정한다() {
+        // given — 1회차 뒤 다음 회차가 쓰다 멈췄다(기록 중 표시만 남았다). 이번 회차에 막혔던 둘이 활성으로 읽힌다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        snapshots.writing.set(true);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message()).isEqualTo(둘을_보류했다 + " / " + FullSyncUseCase.기준선_의심);
+        assertThat(writer.stored).contains(김_백엔드).doesNotContain(막힌_가, 막힌_나);
+        assertThat(snapshots.writing).isFalse();
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(마지막_스냅샷().inactive()).as("장부 맞추기 커밋도 그림′ 의 I 를 남긴다")
+                .containsExactlyInAnyOrder(막힌_가, 막힌_나);
+        assertThat(state.users.get("blocked1").active()).isFalse();
+    }
+
+    // 깨뜨릴 변경: 기록 중 회차가 스냅샷 읽기 실패로 회차를 실패시키기(재적재·장부 맞추기는 깨진 스냅샷을 고치는 길이다)
+    @Test
+    @DisplayName("기록 중 회차가 최신 스냅샷을 읽지 못하면 판정 없이 장부를 맞춘다 — 회차는 실패하지 않는다")
+    void 기록_중_회차가_스냅샷을_못_읽으면_판정_없이_맞춘다() {
+        // given
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        snapshots.writing.set(true);
+        snapshots.failFindLatest(new SnapshotIntegrityException(
+                "기준선 스냅샷 20260806T030000-LDAP 의 묶음 수가 맞지 않습니다 — POST /admin/sync/rebuild 로 복구하세요"));
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(run.message()).isEqualTo(FullSyncUseCase.기준선_의심);
+        assertThat(writer.stored).contains(막힌_가, 막힌_나);
+        assertThat(snapshots.writing).isFalse();
+    }
+
+    // 깨뜨릴 변경: 이 한계(설계 2026-11-24 §6·§12)를 고치면 — 전부 보류에도 I 를 남기거나 쓰기 전에 재활성 줄을 D 에서 빼면 — 이 시험이 바뀐다
+    @Test
+    @DisplayName("기록 중 회차에서 재활성만 강제로 넘기고 삭제 가드가 전부 보류면 스냅샷이 남지 않아, 다음 회차가 같은 직원을 다시 재활성으로 센다(받아들인 한계)")
+    void 기록_중_회차에서_재활성만_강제하고_삭제_가드가_전부_보류면_다음_회차가_다시_센다() {
+        // given — 1회차 뒤 기록 중 표시가 남았고, 장부에는 그림에 없는 20줄(user0~19)이 있다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        writer.stored.addAll(소속튜플(20, "DEV002"));
+        snapshots.writing.set(true);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when — 2회차: 재활성 둘만 허용한 강제 회차
+        var run2 = 강제로_동기화한다(new ForceAllowance(null, 2));
+
+        // then — 재활성 둘의 줄은 D 로 이미 나갔다. 지울 20줄(훑은 23줄의 87%)은 설정의 가드가 전부 보류해 스냅샷이 남지 않는다
+        assertThat(run2.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run2.reactivationHold()).isNull();
+        assertThat(run2.guardHold()).isNotNull();
+        assertThat(run2.message()).startsWith("강제 실행 — 재활성 허용 2명 / " + FullSyncUseCase.기준선_의심);
+        assertThat(writer.stored).contains(막힌_가, 막힌_나);
+        assertThat(snapshots.saved).as("1회차의 것뿐이다 — I 도 옛것이다").hasSize(1);
+        assertThat(snapshots.writing).isTrue();
+
+        // when — 3회차: 강제 아닌 회차, 같은 그림
+        var run3 = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then — 옛 I 로 같은 둘을 다시 재활성으로 세어 보류한다. 방금 나간 줄은 그림′ 에서 비활성 직원의 줄이라 비활성 회수로 지워진다 — 강제로 연
+        // 권한이 한 회차 뒤 닫힌다(설계 2026-11-24 §6)
+        assertThat(run3.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run3.reactivationHold()).isNotNull();
+        assertThat(run3.reactivationHold().count()).isEqualTo(2);
+        assertThat(run3.message()).contains("비활성 회수 2건만 반영");
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 포인터가 없는 회차도 최신 스냅샷을 읽어 판정하기
+    @Test
+    @DisplayName("포인터가 없는 회차(첫 적재·새 테이블)는 재활성을 판정하지 않는다")
+    void 기준선_없는_회차는_판정하지_않는다() {
+        // given — 포인터는 없는데 저장소에서 막힌 둘이 든 옛 스냅샷이 읽힌다
+        snapshots = new FakeSnapshotRepository() {
+            @Override
+            public Mono<BaselineState> baselineState() {
+                return Mono.just(BaselineState.NONE);
+            }
+        };
+        snapshots.save(new TupleSnapshot("옛것", 고정시각, SyncSource.LDAP, Set.of(), Set.of(), Set.of(막힌_가, 막힌_나)))
+                .block();
+        useCase = 유스케이스(DeletionGuardPolicy.defaults(), 상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(run.message()).isEqualTo(FullSyncUseCase.기준선_없음);
+        assertThat(writer.stored).contains(김_백엔드, 막힌_가, 막힌_나);
     }
 }

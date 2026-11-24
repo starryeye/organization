@@ -48,6 +48,13 @@ import java.util.function.Consumer;
  *       중복 무시로 써 이미 있던 줄과 가를 수 없어 보통 남기지 않는다(설계 2026-10-10 §3.5). 다만 기준선 없는 첫 회차는 첫 적재의 부여 이력을 잃으면 안
  *       되므로({@code 쓴_줄도_남긴다}) 쓴 줄도 묶음마다 더한다(설계 2026-10-20 §4). 이력은 {@link SyncJobs} 가 남긴다.</li>
  * </ol>
+ *
+ * <p><b>재활성 가드(설계 2026-11-24 R4·R8, §6).</b> 판정은 부르는 쪽(동기화의 기록 중 회차, 재적재)이 매핑 앞에서 한다. 여기 오는 그림과 D 는 판정이 정한
+ * 것이다 — 재활성을 보류했으면 그 직원들을 비활성으로 되돌린 그림′ 이라, 삭제 가드의 비활성 회수·멈춤 내역·현재상태 교체·스냅샷의 비활성 소속 줄(I)이 모두
+ * 그림′ 을 본다. 커밋(일부 반영 포함)은 받은 그림의 I 를 스냅샷에 남긴다. <b>한계:</b> 이 길은 가드를 보기 전에 D 를 다 쓰므로, 삭제 가드가 전부 보류하면
+ * 이번 회차에 통과한(문턱 아래이거나 강제로 넘긴) 재활성 직원의 줄은 장부에 나갔는데 스냅샷이 남지 않아 I 는 옛것이다. 다음 회차가 같은 직원을 다시
+ * 재활성으로 세고, 보류하면 방금 나간 줄을 비활성 회수로 지운다. 막는 두 길(전부 보류에서도 I 저장, 쓰기 전 판정 순서 변경) 모두 드문 겹침에 비해 커서
+ * 받아들였다 — 운영 절차가 두 수를 함께 주게 한다(설계 2026-11-24 §3.6·§12).
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -129,6 +136,7 @@ final class LedgerAlignment {
 
     /**
      * 스냅샷에는 장부에 있다고 확실히 아는 줄(B)과, 보냈는데 결과를 몰라 있는지 모르는 줄(U)을 따로 담는다(설계 2026-09-29 §3.1 4단계, 2026-10-20 §3.4).
+     * 비활성 소속 줄(I)은 받은 그림의 것이다 — 재활성을 보류한 회차면 그림′ 이다(설계 2026-11-24 R1·R4). 일부 반영도 같다.
      * 그다음 현재상태를 LDAP 대로 바꾼다 — 가드가 걸려 비활성 회수만 반영했으면 바꾸지 않는다(설계 2026-10-20 §5.4). 가드가 걸린 회차는 디렉터리 그림을
      * 받아들이지 않은 회차다.
      */
@@ -137,7 +145,7 @@ final class LedgerAlignment {
         Instant now = clock.instant();
         TupleSnapshot snapshot = new TupleSnapshot(
                 SnapshotIds.generate(now, SyncSource.LDAP), now, SyncSource.LDAP, reconciliation.ledger(),
-                reconciliation.uncertain());
+                reconciliation.uncertain(), TupleMapper.inactiveMemberTuples(directory));
 
         Mono<Void> 현재상태 = reconciliation.revokedOnly()
                 ? Mono.empty()

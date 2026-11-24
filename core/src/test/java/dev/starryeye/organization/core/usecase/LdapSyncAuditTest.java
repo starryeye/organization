@@ -4,6 +4,7 @@ import dev.starryeye.organization.core.audit.AttributeChange;
 import dev.starryeye.organization.core.audit.Actor;
 import dev.starryeye.organization.core.audit.AuditCause;
 import dev.starryeye.organization.core.audit.AuditEntry;
+import dev.starryeye.organization.core.audit.AuditEvent;
 import dev.starryeye.organization.core.audit.AuditKind;
 import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.fake.FakeAuditLog;
@@ -17,6 +18,8 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
 import dev.starryeye.organization.core.guard.ForceAllowance;
+import dev.starryeye.organization.core.guard.ReactivationGuard;
+import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -86,8 +89,10 @@ class LdapSyncAuditTest {
         audit = new AuditRecorder(auditLog, 빠진_줄_지표::addAndGet, clock);
         SyncJobs jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1), audit);
         guard = new DeletionGuard(DeletionGuardPolicy.defaults());
-        sync = new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
-        rebuild = new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
+        sync = new FullSyncUseCase(source, snapshots, state, writer, scanner, guard,
+                new ReactivationGuard(ReactivationGuardPolicy.defaults()), jobs, clock);
+        rebuild = new RebuildUseCase(source, snapshots, state, writer, scanner, guard,
+                new ReactivationGuard(ReactivationGuardPolicy.defaults()), jobs, clock);
     }
 
     private static DirectoryUser 직원(String id) {
@@ -249,7 +254,7 @@ class LdapSyncAuditTest {
         SyncJobs jobs = new SyncJobs(runs, 시계가_가는_락, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1),
                 new AuditRecorder(auditLog, 빠진_줄_지표::addAndGet, 시계));
         FullSyncUseCase 시계를_보는_동기화 = new FullSyncUseCase(source, snapshots, state, writer, new FakeTupleScanner(writer),
-                new DeletionGuard(DeletionGuardPolicy.defaults()), jobs, 시계);
+                new DeletionGuard(DeletionGuardPolicy.defaults()), new ReactivationGuard(ReactivationGuardPolicy.defaults()), jobs, 시계);
         SyncRun started = 건다.apply(시계를_보는_동기화).block();
         return runs.awaitFinished(started.runId());
     }
@@ -430,7 +435,7 @@ class LdapSyncAuditTest {
         SyncJobs 짧게_갱신하는_잡스 = new SyncJobs(runs, lock, Duration.ofMillis(50), LockObserver.NOOP, Duration.ofMinutes(1),
                 audit);
         FullSyncUseCase 동기화 = new FullSyncUseCase(source, snapshots, state, writer, new FakeTupleScanner(writer), guard,
-                짧게_갱신하는_잡스, clock);
+                new ReactivationGuard(ReactivationGuardPolicy.defaults()), 짧게_갱신하는_잡스, clock);
         writer.delay = Duration.ofMinutes(10);
         writer.onApply(() -> lock.failRenew = true);
         source.willReturn(조직도(직원("kim")));
@@ -483,5 +488,45 @@ class LdapSyncAuditTest {
         assertThat(auditLog.events).singleElement().satisfies(event -> assertThat(event.cause())
                 .isEqualTo(AuditCause.run(SyncSource.LDAP, AuditKind.REBUILD, run.runId(), Actor.UNKNOWN)));
         assertThat(auditLog.lastOf(유령).revoked()).containsExactly(유령_개발);
+    }
+
+    // 깨뜨릴 변경: 현재상태 교체를 그림′ 대신 받은 그림으로 하기 — 보류한 직원에게 속성 변경(active)과 부여 이력이 생긴다
+    @Test
+    @DisplayName("재활성을 보류한 직원은 그 회차의 이력이 없다 — 현재상태가 바뀌지 않았고 줄도 쓰지 않았다. 같은 회차의 입사자 이력은 있다(설계 2026-11-24 §3.3)")
+    void 보류한_직원은_이력이_없다() {
+        // given — 상한 1명의 재활성 가드. 1회차에 kim 은 활성이고 blocked1·blocked2 는 막혔다
+        SyncJobs jobs = new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1), audit);
+        FullSyncUseCase 보는_동기화 = new FullSyncUseCase(source, snapshots, state, writer, new FakeTupleScanner(writer), guard,
+                new ReactivationGuard(new ReactivationGuardPolicy(true, 0.3, 10, 1)), jobs, clock);
+        DirectoryUser 막힌_가 = new DirectoryUser("blocked1", "uid=blocked1", "blocked1", "blocked1", "blocked1@example.com", false);
+        DirectoryUser 막힌_나 = new DirectoryUser("blocked2", "uid=blocked2", "blocked2", "blocked2", "blocked2@example.com", false);
+        source.willReturn(조직도(직원("kim"), 막힌_가, 막힌_나));
+        SyncRun 첫째 = 보는_동기화.start(SyncTrigger.SCHEDULED, ignored -> {
+        }).block();
+        runs.awaitFinished(첫째.runId());
+
+        // when — 2회차에 둘이 활성으로 읽히고 새 입사자가 들었다
+        source.willReturn(조직도(직원("kim"), 막힌_가.withActive(true), 막힌_나.withActive(true), 직원("newbie")));
+        SyncRun started = 보는_동기화.start(SyncTrigger.SCHEDULED, ignored -> {
+        }).block();
+        SyncRun run = runs.awaitFinished(started.runId());
+
+        // then — 보류한 회차다
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+
+        // then — 그 회차의 이력에 보류한 둘의 줄이 없다(속성 변경·부여 모두)
+        assertThat(auditLog.events).hasSize(2);
+        AuditEvent 둘째 = auditLog.events.get(1);
+        assertThat(둘째.cause().id()).isEqualTo(run.runId());
+        assertThat(둘째.entries()).extracting(AuditEntry::subject)
+                .doesNotContain(MemberRef.user("blocked1"), MemberRef.user("blocked2"));
+        assertThat(auditLog.entriesOf(MemberRef.user("blocked1"))).as("1회차에 만든 줄뿐이다").hasSize(1);
+
+        // then — 같은 회차의 입사자 이력은 있다
+        AuditEntry 입사자의_줄 = auditLog.lastOf(MemberRef.user("newbie"));
+        assertThat(입사자의_줄.created()).isTrue();
+        assertThat(입사자의_줄.granted()).containsExactly(RelationTuple.directMember("newbie", "DEV"));
     }
 }

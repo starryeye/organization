@@ -10,6 +10,8 @@ import dev.starryeye.organization.core.fake.FakeTupleWriter;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
 import dev.starryeye.organization.core.guard.ForceAllowance;
+import dev.starryeye.organization.core.guard.ReactivationGuard;
+import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.model.DirectoryGroup;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.DirectoryUser;
@@ -19,6 +21,7 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.MutationLock;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +32,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -68,8 +72,12 @@ class RebuildUseCaseTest {
         scanner = new FakeTupleScanner(writer);
         runs = new FakeSyncRunRepository(고정시각);
         lock = new FakeMutationLock();
-        useCase = new RebuildUseCase(source, snapshots, state, writer, scanner,
-                new DeletionGuard(DeletionGuardPolicy.defaults()),
+        useCase = 유스케이스(ReactivationGuardPolicy.defaults());
+    }
+
+    private RebuildUseCase 유스케이스(ReactivationGuardPolicy 재활성_정책) {
+        return new RebuildUseCase(source, snapshots, state, writer, scanner,
+                new DeletionGuard(DeletionGuardPolicy.defaults()), new ReactivationGuard(재활성_정책),
                 new SyncJobs(runs, lock, Duration.ofSeconds(10), LockObserver.NOOP, Duration.ofMinutes(1)),
                 Clock.fixed(고정시각, ZoneOffset.UTC));
     }
@@ -90,7 +98,12 @@ class RebuildUseCaseTest {
 
     /** 허용 수 N 을 주어 강제로 재적재하고 끝날 때까지 기다린다 — 강제 재적재는 허용 수 입구로만 든다(설계 2026-11-20 F1). */
     private SyncRun 강제로_재적재한다(int maxDeletes) {
-        SyncRun started = useCase.startForced(new ForceAllowance(maxDeletes), run -> {
+        return 강제로_재적재한다(new ForceAllowance(maxDeletes));
+    }
+
+    /** 허용 수(지울 줄·재활성 가운데 준 것)로 강제로 재적재하고 끝날 때까지 기다린다(설계 2026-11-24 R9). */
+    private SyncRun 강제로_재적재한다(ForceAllowance allowance) {
+        SyncRun started = useCase.startForced(allowance, run -> {
         }).block();
         return runs.awaitFinished(started.runId());
     }
@@ -169,7 +182,7 @@ class RebuildUseCaseTest {
     }
 
     @Test
-    @DisplayName("기준선 스냅샷이 깨져 있어도 재적재는 스냅샷을 읽지 않고 끝난다 — 깨진 기준선을 고치는 수단이다")
+    @DisplayName("기준선 스냅샷이 깨져 있어도 재적재는 끝난다 — 깨진 기준선을 고치는 수단이다")
     void 깨진_기준선에서도_끝난다() {
         // given
         source.willReturn(조직도("kim", "DEV002"));
@@ -476,5 +489,116 @@ class RebuildUseCaseTest {
 
         // then
         assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
+    }
+
+    // ---------- 재활성 가드 (설계 2026-11-24 R8) ----------
+
+    /** 상한 1명 — 재활성 둘이면 보류한다. 기준이 10명 미만이라 비율은 보지 않는다. */
+    private static final ReactivationGuardPolicy 상한_1명 = new ReactivationGuardPolicy(true, 0.3, 10, 1);
+    private static final RelationTuple 막힌_가 = RelationTuple.directMember("blocked1", "DEV002");
+    private static final RelationTuple 막힌_나 = RelationTuple.directMember("blocked2", "DEV002");
+
+    /** 활성 직원과 막힌 직원이 DEV002 에 함께 있는 조직도. */
+    private static DirectorySnapshot 조직도(Set<String> 활성, Set<String> 비활성) {
+        Map<String, DirectoryUser> users = new LinkedHashMap<>();
+        활성.forEach(id -> users.put(id, new DirectoryUser(id, "uid=" + id, id, id, null, true)));
+        비활성.forEach(id -> users.put(id, new DirectoryUser(id, "uid=" + id, id, id, null, false)));
+        Set<MemberRef> members = users.keySet().stream().map(MemberRef::user).collect(Collectors.toSet());
+        return new DirectorySnapshot(users, Map.of("DEV002", new DirectoryGroup("DEV002", "cn=DEV002", "백엔드팀", members)));
+    }
+
+    /** 직전 스냅샷 — 장부에 kim 의 줄이 있고, 막혀 있던 blocked1·blocked2 의 소속 줄이 I 에 있다. */
+    private void 막힌_둘이_든_스냅샷을_둔다() {
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(김_백엔드), Set.of(), Set.of(막힌_가, 막힌_나)))
+                .block();
+        writer.stored.add(김_백엔드);
+    }
+
+    // 깨뜨릴 변경: 재적재가 판정하지 않거나, 판정 뒤 매핑·현재상태·스냅샷 I 에 그림′ 대신 받은 그림을 넘기기
+    @Test
+    @DisplayName("재적재도 직전 스냅샷이 있으면 재활성을 판정해 보류한다 — 장부 맞추기 커밋의 스냅샷 I 는 그림′ 의 것이다")
+    void 재적재도_스냅샷이_있으면_재활성을_보류한다() {
+        // given
+        useCase = 유스케이스(상한_1명);
+        막힌_둘이_든_스냅샷을_둔다();
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.REBUILD);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.reactivationHold().ids()).containsExactly("blocked1", "blocked2");
+        assertThat(run.message()).isEqualTo("재활성 가드 발동 — 직원 2명의 재활성을 보류(비활성 그대로 둠) / "
+                + "재활성 대상 2명(직전 비활성 소속 직원 2명의 100.0%)이 상한 1명을 초과했습니다. "
+                + "강제 실행하려면 실행 기록의 reactivationHold 를 확인한 뒤 force=true 와 maxReactivations(허용할 재활성 직원 수)로 재요청하세요");
+        assertThat(writer.written).doesNotContain(막힌_가, 막힌_나);
+        assertThat(writer.stored).containsExactly(김_백엔드);
+        assertThat(state.users.get("blocked1").active()).isFalse();
+        assertThat(state.users.get("blocked2").active()).isFalse();
+        assertThat(snapshots.saved).hasSize(2);
+        assertThat(snapshots.saved.get(1).inactive()).containsExactlyInAnyOrder(막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 재적재가 비교 경로처럼 스냅샷이 없으면 SnapshotIntegrityException 으로 실패하기
+    @Test
+    @DisplayName("재적재는 직전 스냅샷이 없으면 판정하지 않고 끝낸다")
+    void 재적재는_스냅샷이_없으면_판정하지_않는다() {
+        // given — 스냅샷이 없다
+        useCase = 유스케이스(상한_1명);
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 막힌_가, 막힌_나);
+    }
+
+    // 깨뜨릴 변경: 재적재가 스냅샷 읽기 실패로 회차를 실패시키기 — 재적재는 깨진 스냅샷을 고치는 통로다
+    @Test
+    @DisplayName("재적재는 직전 스냅샷을 읽지 못해도 판정 없이 끝낸다")
+    void 재적재는_스냅샷을_못_읽어도_판정_없이_끝낸다() {
+        // given
+        useCase = 유스케이스(상한_1명);
+        막힌_둘이_든_스냅샷을_둔다();
+        snapshots.failFindLatest(new SnapshotIntegrityException(
+                "기준선 스냅샷 20260806T030000-LDAP 의 묶음 수가 맞지 않습니다 — POST /admin/sync/rebuild 로 복구하세요"));
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 막힌_가, 막힌_나);
+        assertThat(snapshots.saved).hasSize(2);
+    }
+
+    // 깨뜨릴 변경: 재활성 허용 수만 준 강제 재적재에서 maxDeletes 를 꺼내다 NPE, 또는 강제 재적재가 설정의 재활성 가드를 보기
+    @Test
+    @DisplayName("강제 재적재도 재활성 허용 수 안이면 재활성을 쓰고, 결론 앞에 재활성 허용 수를 적는다")
+    void 강제_재적재는_재활성_허용_수_안이면_쓴다() {
+        // given
+        useCase = 유스케이스(상한_1명);
+        막힌_둘이_든_스냅샷을_둔다();
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 강제로_재적재한다(new ForceAllowance(null, 2));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.FORCED_REBUILD);
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(run.message()).isEqualTo("강제 실행 — 재활성 허용 2명");
+        assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 막힌_가, 막힌_나);
+        assertThat(snapshots.saved.get(1).inactive()).isEmpty();
     }
 }
