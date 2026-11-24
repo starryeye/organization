@@ -601,4 +601,25 @@ class RebuildUseCaseTest {
         assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 막힌_가, 막힌_나);
         assertThat(snapshots.saved.get(1).inactive()).isEmpty();
     }
+
+    // 깨뜨릴 변경: 삭제 허용 수만 준 강제 재적재의 재활성 가드를 강제 가드(허용 수 무제한)나 꺼진 가드로 바꾸기 — 재활성_가드를_고른다 가 allowance != null 만 보기
+    @Test
+    @DisplayName("삭제만 강제로 넘긴 재적재의 재활성 가드는 설정대로다 — 재활성이 설정 상한을 넘으면 보류한다")
+    void 삭제만_강제한_재적재도_재활성_가드는_설정대로_본다() {
+        // given — 설정 상한 1명이면 보류할 재활성 둘. 운영자는 지울 줄만 허용했다
+        useCase = 유스케이스(상한_1명);
+        막힌_둘이_든_스냅샷을_둔다();
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 강제로_재적재한다(new ForceAllowance(1000));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.trigger()).isEqualTo(SyncTrigger.FORCED_REBUILD);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message()).startsWith("강제 실행 — 지울 줄 허용 1000건 / 재활성 가드 발동 — 직원 2명의 재활성을 보류(비활성 그대로 둠) / ");
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
 }

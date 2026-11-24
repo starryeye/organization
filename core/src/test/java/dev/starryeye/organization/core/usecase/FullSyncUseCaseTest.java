@@ -1706,6 +1706,25 @@ class FullSyncUseCaseTest {
         assertThat(writer.appliedDeltas).hasSize(첫_회차까지);
     }
 
+    // 깨뜨릴 변경: 삭제 허용 수만 준 강제 회차의 재활성 가드를 강제 가드(허용 수 무제한)나 꺼진 가드로 바꾸기 — 재활성_가드를_고른다 가 allowance != null 만 보기
+    @Test
+    @DisplayName("삭제만 강제로 넘긴 회차의 재활성 가드는 설정대로다 — 재활성이 설정 상한을 넘으면 보류한다")
+    void 삭제만_강제해도_재활성_가드는_설정대로_본다() {
+        // given — 설정 상한 1명이면 보류할 재활성 둘. 운영자는 지울 줄만 허용했다
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 강제로_동기화한다(new ForceAllowance(1000));
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.ABORTED);
+        assertThat(run.reactivationHold()).isNotNull();
+        assertThat(run.reactivationHold().count()).isEqualTo(2);
+        assertThat(run.message()).startsWith("강제 실행 — 지울 줄 허용 1000건 / " + 둘을_보류했다);
+        assertThat(writer.stored).doesNotContain(막힌_가, 막힌_나);
+    }
+
     // 깨뜨릴 변경: 강제 회차가 허용 수 대신 설정의 재활성 가드를 보기(설정 기본값은 재활성 둘을 통과시킨다)
     @Test
     @DisplayName("재활성이 허용 수를 넘으면 강제 회차도 보류한다 — 결론은 강제 문구, 보류 문구 순이다")
