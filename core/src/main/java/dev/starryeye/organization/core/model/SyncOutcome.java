@@ -7,13 +7,20 @@ public record SyncOutcome(
         int failureCount,
         String snapshotId,
         String message,
-        GuardHold guardHold
+        GuardHold guardHold,
+        ReactivationHold reactivationHold
 ) {
+
+    /** 삭제 가드 내역만 있는 결론 — 재활성 보류 내역은 없다. */
+    public SyncOutcome(SyncStatus status, int writtenCount, int deletedCount, int failureCount, String snapshotId,
+                       String message, GuardHold guardHold) {
+        this(status, writtenCount, deletedCount, failureCount, snapshotId, message, guardHold, null);
+    }
 
     /** 내역이 없는 결론 — 가드가 걸리지 않은 회차와 기존 호출처가 쓴다. */
     public SyncOutcome(SyncStatus status, int writtenCount, int deletedCount, int failureCount, String snapshotId,
                        String message) {
-        this(status, writtenCount, deletedCount, failureCount, snapshotId, message, null);
+        this(status, writtenCount, deletedCount, failureCount, snapshotId, message, null, null);
     }
 
     public static SyncOutcome noChange() {
@@ -69,17 +76,27 @@ public record SyncOutcome(
     /** 이 결론 끝에 한마디를 잇는다 — "현재상태는 디렉터리대로 교체했다"처럼 회차가 한 일을 메시지에 남길 때(설계 2026-10-27 §12). */
     public SyncOutcome withSuffix(String suffix) {
         String combined = message == null ? suffix : message + suffix;
-        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold);
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold, reactivationHold);
     }
 
     /** 이 결론 앞에 한마디를 붙인다 — "기준선 의심"처럼 회차의 사정을 기록에 남길 때(설계 2026-09-30 §4.2). */
     public SyncOutcome withNote(String note) {
         String combined = message == null ? note : note + " / " + message;
-        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold);
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold, reactivationHold);
     }
 
     /** 가드가 멈춘 회차의 지우려던 것의 내역을 붙인 복사(설계 2026-11-20 H2). 나머지 칸은 그대로다. */
     public SyncOutcome withGuardHold(GuardHold hold) {
-        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, message, hold);
+        return new SyncOutcome(status, writtenCount, deletedCount, failureCount, snapshotId, message, hold, reactivationHold);
+    }
+
+    /**
+     * 재활성 가드가 직원의 재활성을 보류한 회차의 결론(설계 2026-11-24 R6·R7). 성공·부분은 ABORTED 로 바꾸고(가드가 걸렸다), 이미 ABORTED·FAILED 면
+     * 그대로 둔다. 보류 내역을 칸에 싣고 {@code note} 를 {@link #withNote} 규칙대로 앞에 붙인다.
+     */
+    public SyncOutcome withReactivationHold(ReactivationHold hold, String note) {
+        SyncStatus next = status == SyncStatus.SUCCEEDED || status == SyncStatus.PARTIAL ? SyncStatus.ABORTED : status;
+        String combined = message == null ? note : note + " / " + message;
+        return new SyncOutcome(next, writtenCount, deletedCount, failureCount, snapshotId, combined, guardHold, hold);
     }
 }

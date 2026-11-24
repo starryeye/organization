@@ -18,7 +18,8 @@ public record SyncRun(
         String snapshotId,
         String message,
         String requestedBy,
-        GuardHold guardHold
+        GuardHold guardHold,
+        ReactivationHold reactivationHold
 ) {
 
     /**
@@ -46,6 +47,7 @@ public record SyncRun(
                 .snapshotId(outcome.snapshotId())
                 .message(outcome.message())
                 .guardHold(outcome.guardHold())
+                .reactivationHold(outcome.reactivationHold())
                 .build();
     }
 }

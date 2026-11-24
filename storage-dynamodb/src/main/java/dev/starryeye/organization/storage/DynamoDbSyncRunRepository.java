@@ -1,6 +1,7 @@
 package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.GuardHold;
+import dev.starryeye.organization.core.model.ReactivationHold;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -47,6 +48,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     private static final String MESSAGE = "message";
     private static final String REQUESTED_BY = "requestedBy";
     private static final String GUARD_HOLD = "guardHold";
+    private static final String REACTIVATION_HOLD = "reactivationHold";
     private static final String DIRECT_MEMBER_LINES = "directMemberLines";
     private static final String CHILD_LINES = "childLines";
     private static final String OTHER_LINES = "otherLines";
@@ -119,6 +121,9 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
         Attrs.putIfPresent(item, REQUESTED_BY, run.requestedBy());
         if (run.guardHold() != null) {
             item.put(GUARD_HOLD, Attrs.m(guardHoldAttrs(run.guardHold())));
+        }
+        if (run.reactivationHold() != null) {
+            item.put(REACTIVATION_HOLD, sampleAttr(run.reactivationHold().count(), run.reactivationHold().ids()));
         }
 
         PutItemRequest.Builder request = PutItemRequest.builder()
@@ -222,6 +227,7 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
                 .message(Attrs.str(item, MESSAGE))
                 .requestedBy(Attrs.str(item, REQUESTED_BY))
                 .guardHold(toGuardHold(item.get(GUARD_HOLD)))
+                .reactivationHold(toReactivationHold(item.get(REACTIVATION_HOLD)))
                 .build();
     }
 
@@ -240,9 +246,23 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     }
 
     private static AttributeValue sampleAttr(GuardHold.Sample sample) {
+        return sampleAttr(sample.count(), sample.ids());
+    }
+
+    /** {@code {count N, ids L of S}} 꼴 — 삭제 가드의 갈래와 재활성 보류 내역이 같이 쓴다. */
+    private static AttributeValue sampleAttr(int count, List<String> ids) {
         return Attrs.m(Map.of(
-                COUNT, Attrs.n(sample.count()),
-                IDS, Attrs.l(sample.ids().stream().map(Attrs::s).toList())));
+                COUNT, Attrs.n(count),
+                IDS, Attrs.l(ids.stream().map(Attrs::s).toList())));
+    }
+
+    /** 속성이 없거나 M 이 아니면 null — 보류하지 않은 회차와 옛 기록이다(설계 2026-11-24 R7). */
+    private static ReactivationHold toReactivationHold(AttributeValue value) {
+        if (value == null || !value.hasM()) {
+            return null;
+        }
+        GuardHold.Sample sample = toSample(value);
+        return new ReactivationHold(sample.count(), sample.ids());
     }
 
     /** 속성이 없거나 M 이 아니면 null — 내역이 없는 기록과 옛 기록이다. */

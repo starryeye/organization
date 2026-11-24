@@ -1,6 +1,7 @@
 package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.GuardHold;
+import dev.starryeye.organization.core.model.ReactivationHold;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
@@ -307,6 +308,53 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
 
         // then
         assertThat(repository.findById(run.runId()).block().guardHold()).isNull();
+    }
+
+    @Test
+    @DisplayName("재활성 보류 내역을 싣고 읽는다 — 수와 예 목록이 같은 값으로 돌아온다(설계 2026-11-24 R7)")
+    void 보류_내역을_왕복한다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        var hold = new ReactivationHold(12, List.of("u1", "u2"));
+
+        // when
+        repository.finish(run, SyncOutcome.noChange().withReactivationHold(hold, "보류")).block();
+
+        // then
+        var found = repository.findById(run.runId()).block();
+        assertThat(found.reactivationHold()).isEqualTo(hold);
+        assertThat(found.status()).isEqualTo(SyncStatus.ABORTED);
+    }
+
+    @Test
+    @DisplayName("빈 ids 의 보류 내역도 왕복한다")
+    void 빈_ids_의_보류_내역도_왕복한다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        var hold = new ReactivationHold(0, List.of());
+
+        // when
+        repository.finish(run, SyncOutcome.noChange().withReactivationHold(hold, "보류")).block();
+
+        // then
+        assertThat(repository.findById(run.runId()).block().reactivationHold()).isEqualTo(hold);
+    }
+
+    @Test
+    @DisplayName("보류 내역이 없으면 속성이 없고 null 로 읽는다")
+    void 보류_내역이_없으면_속성이_없다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+
+        // when
+        repository.finish(run, SyncOutcome.noChange()).block();
+
+        // then
+        assertThat(repository.findById(run.runId()).block().reactivationHold()).isNull();
+        var items = client.scan(r -> r.tableName(properties.getTableName())).join().items();
+        assertThat(items).filteredOn(i -> i.containsKey("runId"))
+                .isNotEmpty()
+                .allSatisfy(i -> assertThat(i).doesNotContainKey("reactivationHold"));
     }
 
     @Test

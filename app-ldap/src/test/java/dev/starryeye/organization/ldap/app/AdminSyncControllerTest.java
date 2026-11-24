@@ -3,6 +3,7 @@ package dev.starryeye.organization.ldap.app;
 import dev.starryeye.organization.admin.AdminExceptionHandler;
 import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.GuardHold;
+import dev.starryeye.organization.core.model.ReactivationHold;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
@@ -277,6 +278,45 @@ class AdminSyncControllerTest {
                 .expectStatus().isOk()
                 .expectBody(String.class)
                 .value(body -> assertThat(body).contains("\"runId\":\"run-1\"").doesNotContain("guardHold"));
+    }
+
+    private static SyncRun 보류_내역_있는_실행() {
+        return 완료된실행(SyncTrigger.MANUAL, SyncStatus.ABORTED).toBuilder()
+                .reactivationHold(new ReactivationHold(12, List.of("u1", "u2"))).build();
+    }
+
+    @Test
+    @DisplayName("단건 응답에는 재활성 보류 내역이 있고 목록에는 없다(설계 2026-11-24 R7)")
+    void 단건_응답에_보류_내역이_있고_목록에는_없다() {
+        // given
+        Mockito.when(runs.findById("run-1")).thenReturn(Mono.just(보류_내역_있는_실행()));
+        Mockito.when(runs.findRecent(anyInt())).thenReturn(Flux.just(보류_내역_있는_실행()));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/run-1").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.reactivationHold.count").isEqualTo(12)
+                .jsonPath("$.reactivationHold.sample[0]").isEqualTo("u1");
+        client.get().uri("/admin/sync/runs").exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$[0].runId").isEqualTo("run-1")
+                .jsonPath("$[0].reactivationHold").doesNotExist();
+    }
+
+    @Test
+    @DisplayName("보류 내역이 없는 기록의 단건에는 reactivationHold 칸이 없다")
+    void 보류_내역이_없는_기록의_단건에는_칸이_없다() {
+        // given
+        Mockito.when(runs.findById("run-1"))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.SCHEDULED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/run-1").exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class)
+                .value(body -> assertThat(body).contains("\"runId\":\"run-1\"").doesNotContain("reactivationHold"));
     }
 
     @Test
