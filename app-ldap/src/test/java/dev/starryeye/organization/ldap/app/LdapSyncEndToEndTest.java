@@ -122,6 +122,8 @@ class LdapSyncEndToEndTest {
         LDAP.startListening();
 
         registry.add("ldap.urls", () -> EmbeddedLdapListener.접속_주소(LDAP));
+        // 재활성 가드의 상한을 1 로 낮춘다 — 한 회차에 직원 둘이 한꺼번에 켜지면 걸린다(설계 2026-11-24 §11)
+        registry.add("sync.reactivation-guard.max-reactivations", () -> "1");
         registry.add("openfga.api-url",
                 () -> "http://" + OPENFGA.getHost() + ":" + OPENFGA.getMappedPort(8080));
         registry.add("dynamodb.endpoint",
@@ -447,6 +449,80 @@ class LdapSyncEndToEndTest {
                     .as("%s 그룹에 든 외부 의존", 프로브)
                     .noneMatch(그룹::isMember);
         }
+    }
+
+    // ---------- 재활성 가드 (설계 2026-11-24) ----------
+
+    @Test
+    @Order(16)
+    @DisplayName("계정 상태 속성을 못 읽어 둘이 한꺼번에 켜진 것처럼 보이면 가드가 멈추고, 표준 값으로 돌아오면 지나가며, 진짜 재활성은 강제로만 넘긴다")
+    void 속성을_못_읽으면_재활성_가드가_멈춘다() throws Exception {
+        // given — 둘 다 막힌 채로 한 회차를 돌려, 스냅샷의 비활성 소속 줄(I)에 둘이 들게 한다
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
+        LDAP.modify("uid=park,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.DELETE, "accountExpires"),
+                new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
+        동기화한다();
+        assertThat(check("user:kim", "direct_member", "group:DEV002")).isFalse();
+
+        // when — 두 직원의 속성을 읽지 못하는 상황을 흉내 낸다(속성이 없으면 활성으로 본다)
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.DELETE, "userAccountControl"));
+        LDAP.modify("uid=park,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.DELETE, "userAccountControl"));
+        String 멈춘회차 = SyncJobClient.건다(client, "/admin/sync/full").runId();
+        SyncJobClient.기다린다(client, 멈춘회차, Duration.ofMinutes(2));
+
+        // then — 재활성 둘을 보류한 회차는 ABORTED 이고, 두 직원은 비활성 그대로다
+        client.get().uri("/admin/sync/runs/" + 멈춘회차).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("ABORTED")
+                .jsonPath("$.reactivationHold.count").isEqualTo(2)
+                .jsonPath("$.reactivationHold.sample[0]").isEqualTo("kim")
+                .jsonPath("$.reactivationHold.sample[1]").isEqualTo("park");
+        assertThat(check("user:kim", "direct_member", "group:DEV002")).isFalse();
+        var 보류후 = state.loadAll().block(Duration.ofSeconds(30));
+        assertThat(보류후).isNotNull();
+        assertThat(보류후.users().get("kim").active()).isFalse();
+
+        // when — 속성을 되돌린다(여전히 막힘)
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
+        LDAP.modify("uid=park,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "514"));
+        String 되돌린회차 = SyncJobClient.건다(client, "/admin/sync/full").runId();
+        SyncJobClient.기다린다(client, 되돌린회차, Duration.ofMinutes(2));
+
+        // then — 가드가 멈추지 않는다(보류한 회차가 I 를 지우지 않았으므로 기준이 그대로다)
+        client.get().uri("/admin/sync/runs/" + 되돌린회차).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").value(status -> assertThat((String) status).isNotEqualTo("ABORTED"));
+
+        // when — 이번에는 정말 둘을 켠다
+        LDAP.modify("uid=kim,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "512"));
+        LDAP.modify("uid=park,ou=people,dc=example,dc=com",
+                new Modification(ModificationType.REPLACE, "userAccountControl", "512"));
+        String 다시멈춘회차 = SyncJobClient.건다(client, "/admin/sync/full").runId();
+        SyncJobClient.기다린다(client, 다시멈춘회차, Duration.ofMinutes(2));
+
+        // then — 가드는 속성을 못 읽은 경우와 진짜 재활성을 가리지 못하므로 다시 멈춘다
+        client.get().uri("/admin/sync/runs/" + 다시멈춘회차).exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("ABORTED")
+                .jsonPath("$.reactivationHold.count").isEqualTo(2);
+
+        // when, then — 사람이 내역을 보고 둘을 허용하면 넘어간다
+        SyncJobClient.끝까지(client, "/admin/sync/full?force=true&maxReactivations=2")
+                .jsonPath("$.status").isEqualTo("SUCCEEDED")
+                .jsonPath("$.trigger").isEqualTo("FORCED")
+                .jsonPath("$.message").value(message ->
+                        assertThat((String) message).startsWith("강제 실행 — 재활성 허용 2명"));
+        assertThat(check("user:kim", "direct_member", "group:DEV002")).isTrue();
     }
 
     private void 동기화한다() {

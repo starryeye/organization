@@ -50,8 +50,8 @@ class AdminSyncControllerTest {
 
     private static final Instant 지금 = Instant.parse("2026-08-14T03:00:00Z");
     /** 400 문구(설계 2026-11-20 F3) */
-    private static final String 허용_수가_없다 = "force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다";
-    private static final String force_없는_허용_수 = "maxDeletes 는 force=true 와 함께만 씁니다";
+    private static final String 허용_수가_없다 = "force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다";
+    private static final String force_없는_허용_수 = "maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다";
 
     private FullSyncUseCase fullSync;
     private RebuildUseCase rebuild;
@@ -617,5 +617,115 @@ class AdminSyncControllerTest {
                 .post().uri("/admin/sync/full?force=true&maxDeletes=abc").exchange()
                 .expectStatus().isBadRequest();
         Mockito.verifyNoInteractions(fullSync);
+    }
+
+    // ---------- 재활성 허용 수 maxReactivations (설계 2026-11-24 R9·R10) ----------
+
+    // 깨뜨릴 변경: maxReactivations 를 받지 않거나 maxDeletes 없이는 400 으로 막기
+    @Test
+    @DisplayName("동기화는 maxReactivations 만으로 강제한다 — 지울 줄 허용 수는 없다(null)")
+    void 동기화는_maxReactivations_만으로_강제한다() {
+        // given
+        Mockito.when(fullSync.startForced(eq(new ForceAllowance(null, 2)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/full?force=true&maxReactivations=2").exchange()
+                .expectStatus().isAccepted();
+        Mockito.verify(fullSync).startForced(eq(new ForceAllowance(null, 2)), any());
+    }
+
+    @Test
+    @DisplayName("재적재도 maxReactivations 만으로 강제한다")
+    void 재적재는_maxReactivations_만으로_강제한다() {
+        // given
+        Mockito.when(rebuild.startForced(eq(new ForceAllowance(null, 2)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED_REBUILD)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/rebuild?force=true&maxReactivations=2").exchange()
+                .expectStatus().isAccepted();
+        Mockito.verify(rebuild).startForced(eq(new ForceAllowance(null, 2)), any());
+    }
+
+    @Test
+    @DisplayName("동기화에 두 수를 함께 주면 둘 다 넘긴다")
+    void 동기화에_두_수를_함께_준다() {
+        // given
+        Mockito.when(fullSync.startForced(eq(new ForceAllowance(12500, 2)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/full?force=true&maxDeletes=12500&maxReactivations=2").exchange()
+                .expectStatus().isAccepted();
+        Mockito.verify(fullSync).startForced(eq(new ForceAllowance(12500, 2)), any());
+    }
+
+    @Test
+    @DisplayName("재적재에 두 수를 함께 주면 둘 다 넘긴다")
+    void 재적재에_두_수를_함께_준다() {
+        // given
+        Mockito.when(rebuild.startForced(eq(new ForceAllowance(12500, 2)), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.FORCED_REBUILD)));
+
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC, Scopes.ADMIN_DESTRUCTIVE))
+                .post().uri("/admin/sync/rebuild?force=true&maxDeletes=12500&maxReactivations=2").exchange()
+                .expectStatus().isAccepted();
+        Mockito.verify(rebuild).startForced(eq(new ForceAllowance(12500, 2)), any());
+    }
+
+    @Test
+    @DisplayName("force=true 에 수가 하나도 없으면 400 이다(동기화·재적재)")
+    void force_에_수가_하나도_없으면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?force=true", 허용_수가_없다);
+        요청은_400_이다("/admin/sync/rebuild?force=true", 허용_수가_없다);
+        Mockito.verifyNoInteractions(fullSync, rebuild);
+    }
+
+    // 깨뜨릴 변경: maxReactivations 0 을 받기(설정의 0 은 "끔"이다)
+    @Test
+    @DisplayName("maxReactivations 가 0 이면 400 이다 — 다른 수가 맞아도 마찬가지다(동기화·재적재)")
+    void maxReactivations_가_0_이면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?force=true&maxReactivations=0", 허용_수가_없다);
+        요청은_400_이다("/admin/sync/full?force=true&maxDeletes=5&maxReactivations=0", 허용_수가_없다);
+        요청은_400_이다("/admin/sync/rebuild?force=true&maxReactivations=0", 허용_수가_없다);
+        Mockito.verifyNoInteractions(fullSync, rebuild);
+    }
+
+    @Test
+    @DisplayName("force 없이 maxReactivations 만 오면 400 이다(동기화·재적재)")
+    void force_없이_maxReactivations_만_오면_400_이다() {
+        // when, then
+        요청은_400_이다("/admin/sync/full?maxReactivations=2", force_없는_허용_수);
+        요청은_400_이다("/admin/sync/rebuild?maxReactivations=2", force_없는_허용_수);
+        Mockito.verifyNoInteractions(fullSync, rebuild);
+    }
+
+    @Test
+    @DisplayName("범위가 없으면 maxReactivations 400 보다 403 이 먼저다")
+    void 범위가_없으면_maxReactivations_보다_403_이_먼저다() {
+        // when, then
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/full?force=true&maxReactivations=0").exchange()
+                .expectStatus().isForbidden();
+        client.mutateWith(호출자(Scopes.ADMIN_SYNC))
+                .post().uri("/admin/sync/rebuild?force=true&maxReactivations=0").exchange()
+                .expectStatus().isForbidden();
+        Mockito.verifyNoInteractions(fullSync, rebuild);
+    }
+
+    @Test
+    @DisplayName("재적재의 허용 수 400 은 mode 400 보다 먼저다 — maxReactivations=0 과 mode 가 함께 와도")
+    void 재적재의_허용_수_400_은_mode_400_보다_먼저다() {
+        // when, then
+        요청은_400_이다("/admin/sync/rebuild?mode=store&force=true&maxReactivations=0", 허용_수가_없다);
+        요청은_400_이다("/admin/sync/rebuild?mode=store&maxReactivations=2", force_없는_허용_수);
+        Mockito.verifyNoInteractions(rebuild);
     }
 }

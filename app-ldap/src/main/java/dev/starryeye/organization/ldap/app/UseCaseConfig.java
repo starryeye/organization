@@ -3,6 +3,8 @@ package dev.starryeye.organization.ldap.app;
 import dev.starryeye.organization.core.audit.AuditRecorder;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.guard.ReactivationGuard;
+import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.port.AuditLog;
 import dev.starryeye.organization.core.port.DailyJobClaims;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
@@ -42,6 +44,13 @@ public class UseCaseConfig {
                 config.isEnabled(), config.getThresholdRatio(), config.getMinBaseline(), config.getMaxDeletes()));
     }
 
+    @Bean
+    public ReactivationGuard reactivationGuard(SyncProperties properties) {
+        var config = properties.getReactivationGuard();
+        return new ReactivationGuard(new ReactivationGuardPolicy(
+                config.isEnabled(), config.getThresholdRatio(), config.getMinBaseline(), config.getMaxReactivations()));
+    }
+
     /**
      * 동기화·재적재를 요청과 떼어 돌리고(설계 2026-09-29 §4·§5), 작업 락을 클러스터 전체에서 하나로 잡는다(설계 2026-09-30 §3) — app-ldap 을 여러 대
      * 띄워도 한 번에 하나만 돈다. 락을 잡은 작업이 시작할 때 죽은 인스턴스가 남긴 RUNNING 기록을 "비정상 종료로 중단"으로 닫고, 시작한 지
@@ -78,9 +87,10 @@ public class UseCaseConfig {
                                            RelationTupleWriter writer,
                                            RelationTupleScanner scanner,
                                            DeletionGuard guard,
+                                           ReactivationGuard reactivationGuard,
                                            SyncJobs jobs,
                                            Clock clock) {
-        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
+        return new FullSyncUseCase(source, snapshots, state, writer, scanner, guard, reactivationGuard, jobs, clock);
     }
 
     @Bean
@@ -90,8 +100,9 @@ public class UseCaseConfig {
                                          RelationTupleWriter writer,
                                          RelationTupleScanner scanner,
                                          DeletionGuard guard,
+                                         ReactivationGuard reactivationGuard,
                                          SyncJobs jobs,
                                          Clock clock) {
-        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, jobs, clock);
+        return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, reactivationGuard, jobs, clock);
     }
 }

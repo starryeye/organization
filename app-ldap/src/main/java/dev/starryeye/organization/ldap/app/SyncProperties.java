@@ -35,6 +35,7 @@ public class SyncProperties {
      */
     private String purgeCron = "0 0 4-8 * * *";
     private DeletionGuardConfig deletionGuard = new DeletionGuardConfig();
+    private ReactivationGuardConfig reactivationGuard = new ReactivationGuardConfig();
 
     /**
      * 동기화·재적재 한 번의 전체 기한(설계 2026-09-29 §5). 넘으면 남은 일을 멈추고 FAILED("기한 초과 — N분")로 기록한 뒤 가드를
@@ -55,5 +56,20 @@ public class SyncProperties {
          * 평소 변동보다 훨씬 크고 비율 30% 보다 훨씬 작은 수다(설계 2026-11-13 G1·G2).
          */
         private int maxDeletes = 5000;
+    }
+
+    /**
+     * 재활성 가드(설계 2026-11-24 R3). 기본값은 잰 값이 아니다 — 삭제 가드와 같은 30%·기준 10명에, 상한 100명은 한 회차에 다시 켜지는 직원 수의
+     * 평소 변동보다 크게 잡은 짐작이다. 운영 규모의 실제 변동을 본 뒤 조정한다. 값 검사는 두지 않는다(삭제 가드 설정과 같다).
+     */
+    @Getter
+    @Setter
+    public static class ReactivationGuardConfig {
+        private boolean enabled = true;
+        private double thresholdRatio = 0.3;
+        private int minBaseline = 10;
+
+        /** 한 회차에 다시 켜지는 직원 수의 상한. 넘으면 비율과 상관없이 걸린다(같으면 통과). {@code 0} 이하면 보지 않는다. */
+        private int maxReactivations = 100;
     }
 }

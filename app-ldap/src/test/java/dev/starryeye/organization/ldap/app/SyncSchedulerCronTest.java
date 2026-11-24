@@ -4,6 +4,8 @@ import dev.starryeye.organization.core.fake.FakeDailyJobClaims;
 import dev.starryeye.organization.core.fake.FakeSnapshotRepository;
 import dev.starryeye.organization.core.guard.DeletionGuard;
 import dev.starryeye.organization.core.guard.DeletionGuardPolicy;
+import dev.starryeye.organization.core.guard.ReactivationGuard;
+import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.usecase.DailyOnce;
@@ -40,7 +42,8 @@ class SyncSchedulerCronTest {
 
         놀고_있는_동기화() {
             super(null, null, null, null, null,
-                    new DeletionGuard(DeletionGuardPolicy.defaults()), null, Clock.systemUTC());
+                    new DeletionGuard(DeletionGuardPolicy.defaults()),
+                    new ReactivationGuard(ReactivationGuardPolicy.defaults()), null, Clock.systemUTC());
         }
 
         @Override

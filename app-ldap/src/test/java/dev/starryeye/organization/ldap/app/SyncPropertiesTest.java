@@ -101,4 +101,57 @@ class SyncPropertiesTest {
                     .as(파일).isEqualTo(기본값);
         }
     }
+
+    @Test
+    @DisplayName("재활성 가드의 기본값은 켬·30%·기준 10명·상한 100명이다(설계 2026-11-24 R3)")
+    void 재활성_가드의_기본값은_넷이다() {
+        // given, when
+        var config = new SyncProperties().getReactivationGuard();
+
+        // then
+        assertThat(config.isEnabled()).isTrue();
+        assertThat(config.getThresholdRatio()).isEqualTo(0.3);
+        assertThat(config.getMinBaseline()).isEqualTo(10);
+        assertThat(config.getMaxReactivations()).isEqualTo(100);
+    }
+
+    // 깨뜨릴 변경: UseCaseConfig.reactivationGuard 가 상한을 넘기지 않음
+    @Test
+    @DisplayName("sync.reactivation-guard.* 를 주면 가드가 그 값을 쓴다")
+    void 재활성_가드_설정을_바인딩하면_가드가_그_값을_쓴다() {
+        // given
+        var properties = new SyncProperties();
+        new Binder(new MapConfigurationPropertySource(Map.of(
+                "sync.reactivation-guard.enabled", "false",
+                "sync.reactivation-guard.threshold-ratio", "0.5",
+                "sync.reactivation-guard.min-baseline", "20",
+                "sync.reactivation-guard.max-reactivations", "7")))
+                .bind("sync", Bindable.ofInstance(properties));
+
+        // when
+        var config = properties.getReactivationGuard();
+
+        // then
+        assertThat(config.isEnabled()).isFalse();
+        assertThat(config.getThresholdRatio()).isEqualTo(0.5);
+        assertThat(config.getMinBaseline()).isEqualTo(20);
+        assertThat(config.getMaxReactivations()).isEqualTo(7);
+        assertThat(new UseCaseConfig().reactivationGuard(properties)).isNotNull();
+    }
+
+    @Test
+    @DisplayName("application.yml 의 재활성 가드 값은 속성 기본값과 같다")
+    void yml_의_재활성_가드_값은_속성_기본값과_같다() {
+        // given
+        var 기본 = new SyncProperties().getReactivationGuard();
+        var yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        var 값 = yaml.getObject();
+
+        // when, then
+        assertThat(값.getProperty("sync.reactivation-guard.enabled")).isEqualTo(String.valueOf(기본.isEnabled()));
+        assertThat(값.getProperty("sync.reactivation-guard.threshold-ratio")).isEqualTo(String.valueOf(기본.getThresholdRatio()));
+        assertThat(값.getProperty("sync.reactivation-guard.min-baseline")).isEqualTo(String.valueOf(기본.getMinBaseline()));
+        assertThat(값.getProperty("sync.reactivation-guard.max-reactivations")).isEqualTo(String.valueOf(기본.getMaxReactivations()));
+    }
 }
