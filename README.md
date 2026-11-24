@@ -113,7 +113,7 @@ type group
 
 | 모듈 | 책임 |
 |---|---|
-| `core` | 도메인 모델, 포트, 유스케이스, 튜플 변환·비교, 삭제 가드 |
+| `core` | 도메인 모델, 포트, 유스케이스, 튜플 변환·비교, 삭제 가드·재활성 가드 |
 | `storage-dynamodb` | 현재상태·조회, 스냅샷, 실행이력, 변경 이력, 작업·쓰기 락, 하루 1회 표지, 유일 값 표지판, 책갈피 저장소와 기동 때 테이블 검사 |
 | `authz-openfga` | store 해석, 인가 모델 등록, 멱등 튜플 쓰기 |
 | `connector-ldap` | groupOfNames / DIT 두 매핑 전략 |
@@ -453,10 +453,10 @@ spring:
 | 요청 | 설명 |
 |---|---|
 | `POST /admin/sync/full` | 전체 동기화를 건다 — 202 + 실행 기록(`runId`, `RUNNING`) |
-| `POST /admin/sync/full?force=true&maxDeletes=N` | 강제로 건다 — 삭제 가드를 건너뛰지 않고 비율 없이 상한 N(허용할 지울 줄 수, 1 이상)으로 본다. N 은 멈춘 회차의 `guardHold.lines.total` 에 작은 여유를 둔 수다. `admin.destructive` 범위가 더 있어야 한다(아래 "강제 실행은 확인한 수까지만") |
-| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true&maxDeletes=N`(기록의 `trigger` 가 `FORCED_REBUILD`, `admin.destructive` 범위) |
-| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 — 멈춤 내역(`guardHold`)은 싣지 않는다 |
-| `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 삭제 가드가 멈춘 회차면 멈춤 내역 `guardHold` 를 싣는다(아래). 없으면 404 |
+| `POST /admin/sync/full?force=true&maxDeletes=N&maxReactivations=M` | 강제로 건다 — 가드를 건너뛰지 않고 준 수의 가드를 비율 없이 상한으로 본다. `maxDeletes=N` 은 삭제 가드(허용할 지울 줄 수, 1 이상, 멈춘 회차의 `guardHold.lines.total` 에 작은 여유를 둔 수), `maxReactivations=M` 은 재활성 가드(허용할 재활성 직원 수, 1 이상, `reactivationHold.count` 에 작은 여유를 둔 수)다. 둘 중 하나 이상이 온다. `admin.destructive` 범위가 더 있어야 한다(아래 "강제 실행은 확인한 수까지만") |
+| `POST /admin/sync/rebuild` | 재적재를 건다 — LDAP을 다시 읽어 장부와 현재상태를 맞춘다(아래 "재적재·수동 동기화") — 가드에 걸리면 `?force=true&maxDeletes=N&maxReactivations=M`(하나 이상. 기록의 `trigger` 가 `FORCED_REBUILD`, `admin.destructive` 범위) |
+| `GET /admin/sync/runs?limit=20` | 최근 실행 이력 — 멈춤 내역(`guardHold`)·재활성 보류 내역(`reactivationHold`)은 싣지 않는다 |
+| `GET /admin/sync/runs/{runId}` | 실행 기록 하나 — 건 작업의 결과를 여기서 본다. 삭제 가드가 멈춘 회차면 멈춤 내역 `guardHold` 를, 재활성 가드가 보류한 회차면 재활성 보류 내역 `reactivationHold` 를 싣는다(아래). 없으면 404 |
 
 **app-scim**
 
@@ -495,6 +495,12 @@ spring:
 `GET /admin/employees/{employeeId}`·`GET /admin/organizations/{orgCode}` 로 바로 찾아본다. 내역은 단건 조회에만 싣고 목록(`GET /admin/sync/runs`)에는 싣지 않는다 — 멈춘 배포는 매시
 `ABORTED` 를 쌓는다. 같은 수가 WARN `삭제 가드 내역: 지울 줄 N건(소속 a·하위 조직 연결 b·그 밖 c) — …` 로도 남는다(id 는 없다). app-scim 에는 가드가 없어 칸이 늘 없다.
 
+**재활성 가드가 재활성을 보류한 LDAP 회차의 단건 기록에는 보류 내역 `reactivationHold` 가 있다**(설계 `docs/superpowers/specs/2026-11-24-reactivation-guard-design.md` §3.4). 보류한 직원의 수(`count` — 서로 다른 직원 id)와 사전순 앞 10개(`sample`)다. 모양은 `guardHold` 의 갈래와 같다. 단건 조회에만 싣고 목록에는 싣지 않으며, 한 회차에 `guardHold` 와 함께 있을 수 있다(앞의 것은 지우려던 것, 이것은 비활성 그대로 둔 재활성 직원이다). 같은 수가 WARN `재활성 가드 발동: …` 로도 남는다(id 는 없다). app-scim 에는 없다.
+
+```json
+"reactivationHold": { "count": 2000, "sample": ["E00107", "E00108", "…"] }
+```
+
 `GET /actuator/health`는 두 앱 공통이며 DynamoDB(DescribeTable) / OpenFGA 상태를 포함한다. OpenFGA 는 캐시한 store 번호를 `GetStore` 로 실제로 묻는다 —
 OpenFGA 가 죽거나 store 가 지워진 뒤에도 UP 으로 보이지 않는다(아직 해석 전이면 이름으로 찾기만 하고 만들지 않는다). 둘 다 2초 안에 답이 없으면 DOWN 이다.
 app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 거기서 시작하기 때문이다. 프로브(liveness·readiness)는 이것들을 보지 않는다(위 "운영 배포").
@@ -505,8 +511,8 @@ app-ldap 은 LDAP 연결까지 함께 본다 — 이 앱의 파이프라인이 �
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 의 `force=true` 에 `maxDeletes` 가 없거나 1 미만 — `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다`, `force` 없이 온 `maxDeletes` — `maxDeletes 는 force=true 와 함께만 씁니다`, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다. 지정 API 는 본문 오류, 없는 조직·상위 조직, 순환 판정이 조직 1만 개를 넘은 경우(아래 "조직 계층 지정") | 그 사유 |
-| 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이고, `maxDeletes` 의 400 보다도 먼저다(정수로 읽히지 않는 `maxDeletes` 의 스프링 400 만 그보다 앞선다) | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
+| 400·404 | 요청이 틀렸다(검색 키가 없거나 둘 이상, 조회·변경 이력의 `limit` 범위 밖 — `/admin/sync/runs` 의 `limit` 은 거절하지 않고 1~100 으로 맞춘다, 깨진 커서, app-ldap 의 `force=true` 에 `maxDeletes`·`maxReactivations` 가 하나도 없거나 준 수가 1 미만 — `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다`, `force` 없이 온 수 — `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다`, app-ldap 재적재의 `mode`, app-scim 의 모르는 `mode`·틀린 `confirm`, 형식이 틀린 파라미터), 없는 직원·조직·실행 기록, 정확 조회에 일치하는 것이 없다. 지정 API 는 본문 오류, 없는 조직·상위 조직, 순환 판정이 조직 1만 개를 넘은 경우(아래 "조직 계층 지정") | 그 사유 |
+| 403 + `WWW-Authenticate` | `force=true`·`mode=wipe` 에 `admin.destructive` 범위가 없다 — 회차·락을 만들기 전이고, 두 수의 400 보다도 먼저다(정수로 읽히지 않는 수의 스프링 400 만 그보다 앞선다) | `force=true은 admin.destructive 범위가 필요하다`·`mode=wipe은 admin.destructive 범위가 필요하다` |
 | 409 | 락 경합 — 다른 작업이 락을 쥐고 있다. 정확 조회에 여럿이 일치한다 | app-ldap 은 `다른 동기화·재적재가 진행 중입니다`, app-scim 은 쥔 쪽의 용도(`다른 작업이 변경 락을 쥐고 있습니다(WRITE)` 등). 정확 조회는 `<N>명이 일치한다 — externalId 로 찾는다`·`<N>개가 일치한다`. 지정 API 는 순환이다 — **락 경합은 409 가 아니라 503 이다**(아래 "조직 계층 지정") |
 | 503 + `Retry-After` | 일시 장애 — SCIM 과 같은 분류기(아래 SCIM "오류 응답")가 다시 보내면 나을 수 있다고 본 DynamoDB·OpenFGA 실패. 지정 API 는 락 경합·리스 상실·부분 실패도 여기다 | `일시 장애 — 잠시 뒤 다시 시도한다`. 지정 API 의 락 경합·부분 실패는 그 사유 |
 | 500 | 그 밖 | `내부 오류` — 예외 문구는 로그로만 가고 응답에 싣지 않는다 |
@@ -571,6 +577,26 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 없으니 다음 회차도 장부를 다시 훑는다. 있어야 할 줄은 가드를 보기 전에 이미 썼으므로 그 수는 기록의 쓴 수(`writtenCount`)에 남는다. 비활성 회수만 일부 반영했다면 스냅샷을 남겨 표시가
 지워지고, 다음 회차는 비교 경로로 간다 — 그 회차가 받는 판정은 아래 "가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다" 끝에 있다.
 
+**재활성 가드는 막혀 있던 계정이 한꺼번에 활성으로 읽히는 사고를 막는다**(설계 `docs/superpowers/specs/2026-11-24-reactivation-guard-design.md`). 동기화 계정이 `userAccountControl`·`accountExpires`(OpenLDAP 이면 `pwdAccountLockedTime`)를 못 읽게 되면 속성이 없는 계정은 활성으로 읽히므로 막힌 계정이 모두 활성이 되고, 다음 회차가 그 직원들의 `direct_member` 를 다시 쓴다 — 오류가 없고 `SUCCEEDED` 인 채 권한이 돌아온다. 앱 시계가 뒤로 가거나 한 OU 의 접근 제어만 바뀌어도 일부가 같다.
+
+- **직전에 막혀 있던 직원을 안다.** LDAP 이 저장하는 스냅샷에 그 회차 그림의 비활성 소속 줄 I 가 함께 있다(묶음 `INACTIVE#`, 메타 `inactiveCount`·`inactiveChunkCount`, 비면 없다). 직전 I 의 직원 가운데 이번 그림에 있고 활성인 직원이 **재활성**이다. 원인은 해석하지 않고 상태의 변화만 본다.
+- **판정은 삭제 가드와 같은 모양이다.** 기준 수(I 의 서로 다른 직원 수)가 `min-baseline` 이상이고 재활성/기준이 `threshold-ratio` 를 **넘거나**, 재활성 수가 `max-reactivations` 를 **넘으면** 걸린다(같으면 통과). 상한이 `0` 이하면 상한을 보지 않는다. 속성을 통째로 못 읽는 사고는 비율이 100% 라 기준이 10명 이상이면 걸리고, 한 OU 만 뒤집히는 일부는 상한이 잡는다.
+
+| 설정 | 기본 | 뜻 |
+|---|---|---|
+| `sync.reactivation-guard.enabled` | `true` | 끄면 보지 않는다 |
+| `sync.reactivation-guard.threshold-ratio` | `0.3` | 재활성 ÷ 직전 비활성 소속 직원 수가 이 값을 넘으면 걸린다 |
+| `sync.reactivation-guard.min-baseline` | `10` | 기준 수가 이 값 미만이면 비율을 보지 않는다(상한은 본다) |
+| `sync.reactivation-guard.max-reactivations` | `100` | 재활성 직원 수가 이 값을 넘으면 걸린다. `0` 이하면 끈다 |
+
+기본값은 실제 배포의 재활성 빈도를 잰 값이 아니다. 값 검사는 두지 않는다(삭제 가드 설정에도 없다).
+
+- **걸리면 재활성 전부를 보류한다.** 그 직원들을 비활성으로 되돌린 그림(그림′)으로 회차를 진행한다 — 매핑·삭제 가드·멈춤 내역·현재상태 교체·스냅샷 I 가 모두 그림′ 을 본다. 그 직원의 줄은 쓰지 않고 현재상태는 비활성 그대로이며 감사 이력 줄도 없다. 나머지 변경(새 입사자 등)은 평소대로 반영한다. 삭제 가드는 그림′ 위에서 지금 규칙대로 본다 — 둘 다 걸릴 수 있다. 관리 API 에서 그 직원들은 비활성이고 `openFgaCheck` 도 거짓이다(디렉터리와 다르게 보이는 것이 맞는 상태다).
+- **보류한 회차는 `ABORTED` 다.** 경로의 결론이 `SUCCEEDED`·`PARTIAL`(변경 없음 포함)이면 `ABORTED` 로 바꾸고 `ABORTED`·`FAILED` 는 그대로 둔다. 메시지 앞에 `재활성 가드 발동 — 직원 N명의 재활성을 보류(비활성 그대로 둠) / ` 와 `재활성 대상 N명(직전 비활성 소속 직원 M명의 X%)이 임계치 30.0%를·상한 100명을·임계치 30.0%와 상한 100명을 초과했습니다. 강제 실행하려면 실행 기록의 reactivationHold 를 확인한 뒤 force=true 와 maxReactivations(허용할 재활성 직원 수)로 재요청하세요` 가 붙는다. 실행 기록에 `reactivationHold` 가 남는다(위 "관리 API").
+- **직전 스냅샷이 있는 LDAP 회차 전부에서 본다** — 비교 경로, "기록 중" 표시가 남은 훑어 맞추기, 재적재. 기록 중 회차와 재적재는 스냅샷이 없거나 읽기가 실패하면 보지 않고 넘어간다(WARN `직전 스냅샷을 읽지 못해 재활성 가드를 보지 않는다: …`). 포인터가 없는 회차(첫 적재·새 테이블)는 보지 않는다. SCIM 은 범위 밖이다(요청마다 `active` 를 명시한다).
+- **풀리는 길.** 읽기 문제(서비스 계정 권한, 시계)면 고치면 다음 회차가 그 직원들을 다시 비활성으로 읽어 재활성이 0 이 되고 저절로 풀린다 — 그동안 권한이 없는 것이 맞다. 정말 다시 켰다면(대량 재고용, 계약 연장) 위 `force=true&maxReactivations=M` 으로 넘긴다. 같은 회차에 `guardHold` 도 있고 메시지가 훑어 맞추기·재적재의 전부 보류라면 `maxDeletes` 와 `maxReactivations` 를 **함께** 준다 — 이 길은 가드를 보기 전에 있어야 할 줄을 이미 다 쓰고 스냅샷을 남기지 않아, 재활성만 넘기면 다음 회차가 같은 직원을 다시 재활성으로 세어 방금 나간 줄을 비활성 회수로 지울 수 있다.
+- **막지 못하는 것.** 문턱 아래의 뒤집힘(막힌 계정 1,000명 가운데 한 OU 의 30명, 3%·30명), 직전 스냅샷에 소속이 없던 비활성 직원, 스냅샷이 없는 회차. 보류하는 동안 새로 막힌 계정도 활성으로 읽혀 회수 신호가 끊긴다 — 이 가드가 막는 것은 "이미 막혀 있던 사람의 권한이 돌아오는 것"뿐이고, 그 신호는 마지막 성공 경보(아래)다. 저장은 I 만큼 는다(막힌 계정 2만 명·소속 1.5개면 본문의 약 20%, 어림이고 재지 않았다). 10만 명 규모와 실제 AD 로 보지 않았다.
+
 **가드에 걸려도 디렉터리가 막은 계정의 회수는 먼저 반영한다**(설계 2026-10-20 §5). 큰 개편 하나로 가드가 걸려도 퇴사 회수가 `force` 할 때까지 멈추지 않게 한다. 지울 줄
 전체가 가드를 넘으면 그 가운데 **비활성으로 생긴 지우기** — 이번 회차의 디렉터리 그림에 여전히 있고 소속도 그대로인데 막힌(`active=false`) 직원의 `direct_member` 줄 —
 만 떼어 같은 가드(같은 기준 수·임계치·상한)로 다시 본다. 그것이 가드 안이면 **그 지우기만** 반영한다. 부여, 나머지 지우기, 현재상태 교체는 보류한다 — 부여만 반영하면 이동자가
@@ -582,19 +608,23 @@ OpenFGA가 요청 내용을 거절하면(400 — 없는 타입, 너무 긴 아�
 잘못된 정책으로 대량 비활성) 지금처럼 하나도 반영하지 않는다. 훑어 맞추기·재적재는 가드를 보기 전에 있어야 할 줄을 이미 다 썼으므로 보류할 쓰기가 없고, 그 경로에서 가드가
 걸리면 이동자가 옛·새 소속을 함께 가질 수 있다. 판정의 `accountExpires` 는 앱 시계를 쓴다.
 
-**강제 실행은 확인한 수까지만 지운다**(설계 `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §3.2). `force=true` 는 허용할 지울 **줄** 수 `maxDeletes=N`(1 이상)과 함께만 받는다 —
-없거나 1 미만이면 400 `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다`, `force` 없이 `maxDeletes` 만 오면 400 `maxDeletes 는 force=true 와 함께만 씁니다` 다.
-검사 순서는 범위(`admin.destructive` 403) → `maxDeletes`(400) → 재적재의 `mode`(400)이고, 정수로 읽히지 않는 `maxDeletes` 는 스프링의 변환 400 이라 403 보다도 앞선다. 강제 회차(`FORCED`·`FORCED_REBUILD`)는 가드를
-건너뛰지 않는다 — 같은 가드를 **비율 없이 상한 N** 으로 본다. 설정에서 가드를 꺼 두었어도 본다. 비교 경로와 훑어 맞추기·재적재 모두 같다. 지울 줄이 N 을 넘으면(확인한 뒤 디렉터리가 더
+**강제 실행은 확인한 수까지만 넘긴다**(설계 `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §3.2, `docs/superpowers/specs/2026-11-24-reactivation-guard-design.md` §3.5). `force=true` 는 허용할 지울 **줄** 수 `maxDeletes=N`(삭제 가드) 또는 허용할 재활성 **직원** 수 `maxReactivations=M`(재활성 가드)과 함께만 받는다(각각 1 이상, 하나 이상이면 된다) —
+둘 다 없거나 준 수가 1 미만이면 400 `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다`, `force` 없이 수가 오면 400 `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다` 다.
+검사 순서는 범위(`admin.destructive` 403) → 두 수(400) → 재적재의 `mode`(400)이고, 정수로 읽히지 않는 수는 스프링의 변환 400 이라 403 보다도 앞선다. 강제 회차(`FORCED`·`FORCED_REBUILD`)는 가드를
+건너뛰지 않는다 — 준 수의 가드를 **비율 없이 그 수를 상한으로** 본다(삭제 가드는 N, 재활성 가드는 M). 주지 않은 가드는 설정대로다. 재활성 가드는 M 명까지 통과하고 M+1 명부터 보류한다. 설정에서 가드를 꺼 두었어도 본다. 비교 경로와 훑어 맞추기·재적재 모두 같다. 지울 줄이 N 을 넘으면(확인한 뒤 디렉터리가 더
 망가졌다) 강제 회차도 `ABORTED` 이고 상한 문구와 새 멈춤 내역이 남는다 — 비활성 회수만 떼어 N 안이면 그것만 반영한다. 강제 재적재도 N 을 넘으면 장부의 후보를 지우지 않는다. N 은 멈춘 회차의
-`guardHold.lines.total` 에 작은 여유(몇 %)를 둔다 — 딱 맞추면 그 사이 퇴사 몇 건으로도 다시 멈춘다.
+`guardHold.lines.total` 에, M 은 `reactivationHold.count` 에 작은 여유(몇 %)를 둔다 — 딱 맞추면 그 사이 퇴사 몇 건으로도 다시 멈춘다.
 
 ```
 # 멈춘 회차의 guardHold.lines.total 이 12000 이었다 — 몇 % 여유를 두어 12500. admin.destructive 범위의 토큰(로컬 ops-break-glass)
 curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxDeletes=12500'
+# 재활성 보류 내역 reactivationHold.count 가 2000 이었고 예의 직원을 디렉터리에서 "정말 다시 켰다"고 확인했다 — 작은 여유를 두어 2050
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxReactivations=2050'
+# 같은 회차에 두 내역이 있고 메시지가 장부 맞추기(기준선 의심·기준선 없음)이거나 재적재의 전부 보류면 두 수를 함께 준다
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxDeletes=12500&maxReactivations=2050'
 ```
 
-결론을 낸 강제 회차는 메시지 앞에 `강제 실행 — 지울 줄 허용 N건` 이 붙는다(예 `강제 실행 — 지울 줄 허용 12500건 / 기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤 / …`, 변경 없음도
+결론을 낸 강제 회차는 메시지 앞에 준 수의 꼴 — `강제 실행 — 지울 줄 허용 N건`, `강제 실행 — 재활성 허용 M명`, 둘 다면 `강제 실행 — 지울 줄 허용 N건·재활성 허용 M명` — 이 붙는다(예 `강제 실행 — 지울 줄 허용 12500건 / 기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤 / …`, 변경 없음도
 `강제 실행 — 지울 줄 허용 12500건 / 변경 없음`). 감사 기록을 못 쓴 줄이 있으면 그 메모가 맨 앞에 온다(`감사 기록 N건 실패 / 강제 실행 — …`). 예외로 끝난 강제 회차는 결론이 없어
 허용 수가 남지 않는다 — 트리거와 `requestedBy` 는 남는다.
 app-scim `mode=tuples`는 조직도가 비었는데 장부에 줄이 있으면 지우지 않고 `FAILED`다("조직도가 비어 있다 — 장부를 비우려면 mode=wipe").
@@ -646,7 +676,7 @@ Sync, Entra의 프로비저닝 재시작). 그 절차는 이 API 밖에 있고, 
 
 `sync.cron`으로 지정한 주기(기본 매시 정각)마다 전체 동기화가 자동으로도 돈다. LDAP이 사람 소속이 하나도 없는 그림(예: 필터가 아무도
 고르지 못해 0건)을 주면 데이터 오류로 `FAILED` 이고 `force` 로도 넘기지 못한다(LDAP 절). 일부가 크게 빠진 그림은 삭제 가드가 `ABORTED`로 막고,
-사람이 멈춤 내역을 확인한 뒤 `force=true&maxDeletes=N` 으로 넘길 수 있다.
+사람이 멈춤 내역을 확인한 뒤 `force=true&maxDeletes=N` 으로 넘길 수 있다. 막혀 있던 계정이 한꺼번에 활성으로 읽히면 재활성 가드가 보류하고(`reactivationHold`), `force=true&maxReactivations=M` 으로 넘긴다.
 
 ### 조직 계층 지정 (app-scim)
 
@@ -991,7 +1021,7 @@ groupOfNames 는 직원 검색에 `primaryGroupID` 를, 그룹 검색에 `object
 
 - 속성이 없는 디렉터리에서는 전원 활성이다 — AD 의 둘은 OpenLDAP 에, ppolicy 는 AD 에 없다.
 - AD 두 속성의 값이 정수가 아니면(공백이 섞여도) 그 회차는 실패하고, 오류에 그 엔트리의 DN 이 실린다.
-- 동기화 계정이 세 속성을 읽을 수 있어야 한다 — 못 읽으면 전원이 활성으로 읽힌다. `pwdAccountLockedTime` 은 운영 속성이라 이름을 대 요청한다.
+- 동기화 계정이 세 속성을 읽을 수 있어야 한다 — 못 읽으면 막힌 계정이 활성으로 읽힌다. 한꺼번에 많이 그렇게 읽히면 재활성 가드가 보류한다(위 "재활성 가드는 …"). `pwdAccountLockedTime` 은 운영 속성이라 이름을 대 요청한다.
 - ppolicy 는 표준 영구 잠금 값만 본다. `pwdLockoutDuration: 0` 정책 아래의 다른 값(사실상 영구)은 정책 엔트리를 읽어야 알 수 있어 일시 잠금(활성)으로 읽는다.
 - 막힌 직후부터 다음 동기화까지는 권한이 남는다. LDAP은 주기 동기화다.
 
@@ -1014,8 +1044,8 @@ groupOfNames 는 직원 검색에 `primaryGroupID` 를, 그룹 검색에 `object
 
 **마지막 성공 시각을 게이지로 낸다.** `sync.last.success`(Micrometer 이름. Prometheus 이름 `sync_last_success{source="LDAP"}`)는 디렉터리 그림을 받아들여 반영까지 마친 마지막 LDAP 회차가
 끝난 시각(epoch 초)이다. 회차의 종류는 동기화·장부 맞추기·재적재이고, 끝난 상태가 `SUCCEEDED` 나 `PARTIAL` 이어야 센다. `PARTIAL` 을 넣는 까닭: 영구히 거절되는 줄 하나가 있으면 매 회차가
-`PARTIAL` 이지만 회수는 계속 나가는데, 그것을 멈춤으로 울리면 경보가 늘 울린다. `ABORTED`(가드가 걸린 회차, 일부 반영 포함)와 `FAILED` 는 세지 않는다 — 그 동안이 경보가 울려야 하는
-때다. 값은 실행 이력(DynamoDB)에서 읽어 어느 인스턴스를 보든·재시작을 넘어서도 같고, 1분마다 갱신한다. **성공한 회차가 이력에 없거나(처음 뜬 직후, 보관 기간 `dynamodb.syncrun-retention-days`
+`PARTIAL` 이지만 회수는 계속 나가는데, 그것을 멈춤으로 울리면 경보가 늘 울린다. `ABORTED`(삭제 가드·재활성 가드가 걸린 회차, 일부 반영 포함)와 `FAILED` 는 세지 않는다 — 그 동안이 경보가 울려야 하는
+때다. 재활성 가드의 보류가 이어지는 동안도 그 회차들이 `ABORTED` 라 이 값이 멈춘다 — 속성을 못 읽는 동안은 새로 막힌 계정도 활성으로 읽혀 회수 신호가 끊긴 것이므로 이 경보가 울리는 것이 사정과 맞다(재활성 가드 전용 지표는 없다 — `sync.guard.aborted` 가 두 원인으로 오르고 원인은 실행 기록의 `guardHold`·`reactivationHold` 가 가른다). 값은 실행 이력(DynamoDB)에서 읽어 어느 인스턴스를 보든·재시작을 넘어서도 같고, 1분마다 갱신한다. **성공한 회차가 이력에 없거나(처음 뜬 직후, 보관 기간 `dynamodb.syncrun-retention-days`
 를 지났을 때) 이력을 읽지 못하면 NaN 이다** — 지난 값을 쥐고 있으면 이력이 끊긴 동안 "방금 성공"으로 보이기 때문이다.
 
 ```promql

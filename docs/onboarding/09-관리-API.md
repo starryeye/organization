@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: 0b102e3 (guard-hold-detail, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: cdd4fc4 (reactivation-guard, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -28,11 +28,11 @@
 | `GET /admin/organizations/{orgCode}/history` | 둘 다 | 조직의 감사 이력 | `admin.read` | 200 한 쪽 | 400 |
 | `PUT /admin/organizations/{orgCode}/parent` 본문 `{"parentOrgCode": "<상위 orgCode>"}` | app-scim | 조직의 지정 상위를 둔다(이미 있으면 바꾼다)([4.4](#44-조직-계층-지정-app-scim)) | `admin.hierarchy` | 204 | 400, 404, 409, 503 |
 | `DELETE /admin/organizations/{orgCode}/parent` | app-scim | 조직의 지정 상위를 없앤다 — 없었으면 아무것도 하지 않는다 | `admin.hierarchy` | 204 | 404, 503 |
-| `POST /admin/sync/full[?force=true&maxDeletes=N]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)). `force=true` 는 허용할 지울 줄 수 `maxDeletes`(1 이상)와 함께만 온다 | `admin.sync`. `force=true` 는 `admin.destructive` 도 | 202 실행 기록 | 400(`force=true` 에 `maxDeletes` 가 없거나 1 미만, `force` 없이 `maxDeletes`), 403, 409 |
-| `POST /admin/sync/rebuild[?force=true&maxDeletes=N]` | app-ldap | 재적재를 건다. `maxDeletes` 는 위와 같다 | 같다 | 202 실행 기록 | 400(위와 같다. `mode` 가 와도), 403, 409 |
+| `POST /admin/sync/full[?force=true&maxDeletes=N&maxReactivations=M]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)). `force=true` 는 허용할 지울 줄 수 `maxDeletes` 또는 허용할 재활성 직원 수 `maxReactivations`(각각 1 이상, 하나 이상)와 함께만 온다 | `admin.sync`. `force=true` 는 `admin.destructive` 도 | 202 실행 기록 | 400(`force=true` 에 두 수가 하나도 없거나 준 수가 1 미만, `force` 없이 어느 수든), 403, 409 |
+| `POST /admin/sync/rebuild[?force=true&maxDeletes=N&maxReactivations=M]` | app-ldap | 재적재를 건다. 두 수는 위와 같다 | 같다 | 202 실행 기록 | 400(위와 같다. `mode` 가 와도), 403, 409 |
 | `POST /admin/sync/rebuild?mode=tuples\|wipe[&confirm=<테이블명>]` | app-scim | 재적재 또는 [초기화](02-용어집.md#초기화)를 건다([9.3](#93-app-scim)) | `admin.sync`. `mode=wipe` 는 `admin.destructive` 도 | 202 실행 기록 | 400, 403, 409 |
-| `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)). 멈춤 내역(`guardHold`)은 싣지 않는다 | `admin.read` | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
-| `GET /admin/sync/runs/{runId}` | 둘 다 | 실행 기록 하나 — 삭제 가드가 멈춘 회차면 [멈춤 내역](02-용어집.md#멈춤-내역)(`guardHold`)도([9.4](#94-실행-기록-보기)) | `admin.read` | 200 | 404 |
+| `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)). 멈춤 내역(`guardHold`)·재활성 보류 내역(`reactivationHold`)은 싣지 않는다 | `admin.read` | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
+| `GET /admin/sync/runs/{runId}` | 둘 다 | 실행 기록 하나 — 삭제 가드가 멈춘 회차면 [멈춤 내역](02-용어집.md#멈춤-내역)(`guardHold`), 재활성 가드가 보류한 회차면 [재활성 보류](02-용어집.md#재활성-보류) 내역(`reactivationHold`)도([9.4](#94-실행-기록-보기)) | `admin.read` | 200 | 404 |
 
 모든 경로가 토큰이 없거나 틀리면 401, 그 경로의 범위가 토큰에 없으면 403, 인가 서버의 키 목록을 받지 못하면 503 + `Retry-After: 10` 이다([10절](#10-인증과-범위)). 저장소의 일시 장애에는 503 + `Retry-After`, 그 밖의 예기치 않은 실패에는 500 으로 답한다([오류](#오류)). 표의 "실패" 칸은 이것들을 빼고 그 경로에 고유한 것만 적었다(`force=true`·`mode=wipe` 의 403 은 고유한 것이라 적었다).
 
@@ -95,8 +95,8 @@
 
 | 상태 | 언제 |
 |---|---|
-| 400 | 지정 API(`PUT …/parent`)의 본문이 틀렸다 — `parentOrgCode 가 필요하다`. 순환을 판정하느라 펼친 조직이 1만 개를 넘었다(다시 보내도 같다). 검색 파라미터가 정확히 하나가 아니다. 정확 조회의 파라미터가 맞지 않다(직원은 `userName`·`externalId` 중 정확히 하나, 조직은 `externalId`). `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언으로 읽히지 않는다(스프링은 `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 읽는다). app-ldap 의 `force=true` 에 `maxDeletes` 가 없거나 1 미만이다 — `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다`. `force` 없이 `maxDeletes` 가 왔다 — `maxDeletes 는 force=true 와 함께만 씁니다`. `maxDeletes` 가 정수로 읽히지 않는다(스프링의 변환 실패라 범위 403 보다도 먼저다, [9.2](#92-app-ldap)). app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
-| 403 | `force=true`(app-ldap, `maxDeletes` 가 있든 없든)·`mode=wipe`(app-scim)인데 토큰에 `admin.destructive` 가 없다 — `force=true은 admin.destructive 범위가 필요하다`, `mode=wipe은 admin.destructive 범위가 필요하다`. `WWW-Authenticate: Bearer error="insufficient_scope"` 가 붙는다([10.3](#103-위험한-요청--admindestructive)) |
+| 400 | 지정 API(`PUT …/parent`)의 본문이 틀렸다 — `parentOrgCode 가 필요하다`. 순환을 판정하느라 펼친 조직이 1만 개를 넘었다(다시 보내도 같다). 검색 파라미터가 정확히 하나가 아니다. 정확 조회의 파라미터가 맞지 않다(직원은 `userName`·`externalId` 중 정확히 하나, 조직은 `externalId`). `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언으로 읽히지 않는다(스프링은 `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 읽는다). app-ldap 의 `force=true` 에 `maxDeletes`·`maxReactivations` 가 하나도 없거나 준 수가 1 미만이다 — `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다`. `force` 없이 어느 수가 왔다 — `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다`. 두 수가 정수로 읽히지 않는다(스프링의 변환 실패라 범위 403 보다도 먼저다, [9.2](#92-app-ldap)). app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
+| 403 | `force=true`(app-ldap, 두 수가 있든 없든)·`mode=wipe`(app-scim)인데 토큰에 `admin.destructive` 가 없다 — `force=true은 admin.destructive 범위가 필요하다`, `mode=wipe은 admin.destructive 범위가 필요하다`. `WWW-Authenticate: Bearer error="insufficient_scope"` 가 붙는다([10.3](#103-위험한-요청--admindestructive)) |
 | 404 | 지정 API 의 조직이 없다 — `조직이 없다: <orgCode>`, 상위 조직이 없다 — `상위 조직이 없다: <parentOrgCode>`. 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). 정확 조회가 하나도 찾지 못했다 — `일치하는 직원이 없다`, `일치하는 조직이 없다`. **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
 | 409 | 락 경합(위, 지정 API 는 제외). 지정이 순환을 닫는다 — `<parentOrgCode> 를 <orgCode> 의 상위로 두면 순환이 된다`. 정확 조회가 여럿을 찾았다 — `<N>명이 일치한다 — externalId 로 찾는다`, `<N>개가 일치한다` |
 
@@ -570,7 +570,7 @@ sequenceDiagram
     API-->>Op: 200 status=SUCCEEDED 등
 ```
 
-- 락을 잡기 전에 요청을 본다(그림에는 없다). 보안 필터가 토큰과 `admin.sync` 범위를 보고(없으면 401·403), 컨트롤러가 `force=true`·`mode=wipe` 면 `admin.destructive` 를 본 뒤(없으면 403, [10.3](#103-위험한-요청--admindestructive)) app-ldap 은 `force` 의 `maxDeletes` 와 `mode` 를, app-scim 은 `wipe` 의 `confirm` 을 본다(400, [9.2](#92-app-ldap)·[9.3](#93-app-scim)). 어디서 거절돼도 락도 실행 기록도 만들지 않는다.
+- 락을 잡기 전에 요청을 본다(그림에는 없다). 보안 필터가 토큰과 `admin.sync` 범위를 보고(없으면 401·403), 컨트롤러가 `force=true`·`mode=wipe` 면 `admin.destructive` 를 본 뒤(없으면 403, [10.3](#103-위험한-요청--admindestructive)) app-ldap 은 `force` 의 `maxDeletes`·`maxReactivations` 와 `mode` 를, app-scim 은 `wipe` 의 `confirm` 을 본다(400, [9.2](#92-app-ldap)·[9.3](#93-app-scim)). 어디서 거절돼도 락도 실행 기록도 만들지 않는다.
 - 락을 못 잡으면 곧바로 409 다. 기다리지 않는다. 락은 클러스터 전체에서 하나(앱마다 따로)라, 다른 인스턴스가 동기화·재적재를 하고 있어도 409 다. 운영자가 잠시 뒤 다시 건다.
 - 락 저장소(DynamoDB)의 오류는 409 로 옮기지 않는다. 409 는 "락 조건이 깨졌다" 에만 쓴다. 일시 장애로 분류되면 503 + `Retry-After`, 아니면 500 이다([오류](#오류)). 락을 잡은 뒤 실행 기록을 열지 못해도 같다(락은 반납한다). 어느 쪽이든 작업은 시작하지 않았다.
 - 202 의 본문은 실행 기록이 막 열린 모습이다: `status: "RUNNING"`, `finishedAt: null`, 세 집계는 0, `snapshotId`·`message` 는 `null`, `requestedBy` 는 건 클라이언트(`client:<sub>`).
@@ -582,29 +582,32 @@ sequenceDiagram
 | 요청 | 하는 일 | 트리거 | 락 용도 | 범위 |
 |---|---|---|---|---|
 | `POST /admin/sync/full` | LDAP 을 읽어 동기화한다([05 LDAP 동기화](05-LDAP-동기화.md)) | `MANUAL` | `SYNC` | `admin.sync` |
-| `POST /admin/sync/full?force=true&maxDeletes=N` | 같되 [삭제 가드](02-용어집.md#삭제-가드)를 비율 없이 상한 N 으로 본다. `ABORTED` 뒤 사람이 [멈춤 내역](02-용어집.md#멈춤-내역)을 확인하고 넘기는 통로다 | `FORCED` | `SYNC` | `admin.sync` + `admin.destructive` |
+| `POST /admin/sync/full?force=true&maxDeletes=N&maxReactivations=M` | 같되 준 수의 가드를 비율 없이 그 수를 상한으로 본다 — [삭제 가드](02-용어집.md#삭제-가드)는 N, [재활성 가드](02-용어집.md#재활성-가드)는 M(하나만 줘도 된다). `ABORTED` 뒤 사람이 [멈춤 내역](02-용어집.md#멈춤-내역)·[재활성 보류](02-용어집.md#재활성-보류) 내역을 확인하고 넘기는 통로다 | `FORCED` | `SYNC` | `admin.sync` + `admin.destructive` |
 | `POST /admin/sync/rebuild` | 재적재 — LDAP 을 다시 읽어 장부를 맞추고 현재상태를 교체한다 | `REBUILD` | `REBUILD` | `admin.sync` |
-| `POST /admin/sync/rebuild?force=true&maxDeletes=N` | 같되 삭제 가드를 비율 없이 상한 N 으로 본다 | `FORCED_REBUILD` | `REBUILD` | `admin.sync` + `admin.destructive` |
+| `POST /admin/sync/rebuild?force=true&maxDeletes=N&maxReactivations=M` | 같되 준 수의 가드를 비율 없이 상한으로 본다 | `FORCED_REBUILD` | `REBUILD` | `admin.sync` + `admin.destructive` |
 
-**`force=true` 는 `maxDeletes=N` 과 함께만 받는다.** N 은 운영자가 멈춘 회차의 [멈춤 내역](02-용어집.md#멈춤-내역)을 보고 허용하는 지울 **줄** 수다(1 이상). 요청은 이렇게 갈린다(`AdminSyncController.허용_수를_정한다`).
+**`force=true` 는 `maxDeletes=N` 또는 `maxReactivations=M`(둘 다여도 된다)과 함께만 받는다.** N 은 운영자가 멈춘 회차의 [멈춤 내역](02-용어집.md#멈춤-내역)을 보고 허용하는 지울 **줄** 수, M 은 [재활성 보류](02-용어집.md#재활성-보류) 내역을 보고 허용하는 재활성 **직원** 수다(각각 1 이상). 요청은 이렇게 갈린다(`AdminSyncController.허용_수를_정한다`).
 
 | 요청 | 결과 |
 |---|---|
 | `POST /admin/sync/full` | `MANUAL`, 설정의 가드 |
-| `POST /admin/sync/full?force=true&maxDeletes=12500` | `FORCED`, 상한 12500 의 가드 |
-| `POST /admin/sync/full?force=true` | 400 `force=true 에는 maxDeletes(허용할 지울 줄 수, 1 이상)가 함께 와야 합니다` |
-| `POST /admin/sync/full?force=true&maxDeletes=0`(음수도) | 400, 위와 같은 문구 |
-| `POST /admin/sync/full?maxDeletes=12500` | 400 `maxDeletes 는 force=true 와 함께만 씁니다` — 없는 `force` 에 붙은 수는 실수라 조용히 버리지 않는다 |
+| `POST /admin/sync/full?force=true&maxDeletes=12500` | `FORCED`, 삭제 가드는 상한 12500, 재활성 가드는 설정대로 |
+| `POST /admin/sync/full?force=true&maxReactivations=2050` | `FORCED`, 재활성 가드는 상한 2050(비율 없이), 삭제 가드는 설정대로 |
+| `POST /admin/sync/full?force=true&maxDeletes=12500&maxReactivations=2050` | `FORCED`, 두 가드 모두 준 수가 상한 |
+| `POST /admin/sync/full?force=true` | 400 `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다` |
+| `POST /admin/sync/full?force=true&maxDeletes=0` 또는 `&maxReactivations=0`(음수도) | 400, 위와 같은 문구 |
+| `POST /admin/sync/full?maxDeletes=12500` 또는 `?maxReactivations=2050` | 400 `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다` — 없는 `force` 에 붙은 수는 실수라 조용히 버리지 않는다 |
 | `POST /admin/sync/full?force=true&maxDeletes=abc` | 400 — 스프링이 정수로 바꾸지 못했다. 범위 검사보다 먼저다(아래) |
-| `POST /admin/sync/rebuild?force=true&maxDeletes=12500` | `FORCED_REBUILD`, 상한 12500 의 가드. 위의 400 은 재적재도 같다 |
-| 위의 `force=true` 요청(`maxDeletes=abc` 는 빼고) 어느 것이든 `admin.destructive` 가 없음 | 403 — `maxDeletes` 의 400 보다 먼저다 |
+| `POST /admin/sync/rebuild?force=true&maxDeletes=12500` | `FORCED_REBUILD`, 상한 12500 의 가드. `maxReactivations` 도 같은 꼴로 받는다. 위의 400 은 재적재도 같다 |
+| 위의 `force=true` 요청(숫자가 아닌 수는 빼고) 어느 것이든 `admin.destructive` 가 없음 | 403 — 두 수의 400 보다 먼저다 |
 
-- **검사 순서.** 스프링의 파라미터 변환(`force` 가 불리언으로, `maxDeletes` 가 정수로 읽히지 않으면 400) → `force=true` 의 범위 `admin.destructive`(403, `maxDeletes` 가 있든 없든) → `maxDeletes` 의 400 두 가지 → (재적재) `mode` 의 400 → 락(409). 어느 거절에서도 회차·락은 생기지 않는다. 숫자가 아닌 `maxDeletes` 가 403 보다 먼저인 것은 변환이 컨트롤러 본문보다 앞서기 때문이다 — 지금의 `force=abc` 와 같은 길이고, 형식 오류는 권한과 상관없는 요청의 잘못이라 알려 줘도 새는 것이 없다. "403 이 400 보다 먼저" 는 의미 검사(없음·1 미만·`force` 없이 옴)에만 해당한다. 그래서 `rebuild` 에 `mode` 와 `force=true` 를 함께 보내면 `admin.destructive` 가 없을 때 400 이 아니라 403 이다.
+- **검사 순서.** 스프링의 파라미터 변환(`force` 가 불리언으로, 두 수가 정수로 읽히지 않으면 400) → `force=true` 의 범위 `admin.destructive`(403, 수가 있든 없든) → 두 수의 400 두 가지(`force=true` 인데 수가 하나도 없거나 준 수가 1 미만 / `force` 없이 수) → (재적재) `mode` 의 400 → 락(409). 어느 거절에서도 회차·락은 생기지 않는다. 숫자가 아닌 수가 403 보다 먼저인 것은 변환이 컨트롤러 본문보다 앞서기 때문이다 — 지금의 `force=abc` 와 같은 길이고, 형식 오류는 권한과 상관없는 요청의 잘못이라 알려 줘도 새는 것이 없다. "403 이 400 보다 먼저" 는 의미 검사(없음·1 미만·`force` 없이 옴)에만 해당한다. 그래서 `rebuild` 에 `mode` 와 `force=true` 를 함께 보내면 `admin.destructive` 가 없을 때 400 이 아니라 403 이다.
 - `force` 는 스프링이 불리언으로 읽는다 — `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 받고, 그 밖의 값은 400 이다. `admin.destructive` 판정도 읽은 값으로 하므로 `force=yes` 도 `force=true` 와 같다.
+- **M 을 고르는 법.** 멈춘 회차의 `reactivationHold.count`([9.4](#94-실행-기록-보기)) — 메시지의 "재활성 대상 N명" 과 같은 수 — 에 작은 여유를 둔다. 줄 수가 아니라 직원 수다. 재활성 가드는 읽기 문제를 고치면 저절로 풀리므로 예의 id 를 디렉터리에서 확인한 뒤에만 건다([12 — 4.6](12-장애와-복구.md#46-계정-상태-속성을-못-읽어-막힌-직원이-한꺼번에-활성이-됨)).
 - **N 을 고르는 법.** 멈춘 회차의 `guardHold.lines.total`([9.4](#94-실행-기록-보기)) — 메시지의 "삭제 대상 N건" 과 같은 수 — 에 작은 여유(몇 %)를 둔다. 직원 수가 아니라 줄 수다. 딱 맞춘 N 은 확인과 실행 사이의 퇴사 몇 건으로도 다시 멈춘다. 정확한 여유는 운영자의 판단이다.
-- **강제 회차도 가드를 본다.** 비율은 보지 않고 상한만 N 이다(`DeletionGuard.forced`). 설정에서 가드를 꺼 두었어도(`sync.deletion-guard.enabled=false`) 본다. 비교 경로와 [장부 맞추기](02-용어집.md#장부-맞추기)(기준선 없음·기록 중·재적재) 모두 같은 가드다. 지울 줄이 N 을 넘으면 — 확인한 뒤 디렉터리가 더 망가졌다 — 강제 회차도 `ABORTED` 다. 비활성 회수만 떼어 N 안이면 그것만 반영하고, 아니면 아무것도 지우지 않는다. 메시지는 상한 꼴(`… 상한 N건을 초과했습니다. …`)이고 멈춤 내역이 다시 붙는다([05 — 삭제 가드](05-LDAP-동기화.md#64-삭제-가드)).
-- **결론 앞의 허용 수.** 결론을 낸 강제 회차는 메시지 앞에 `강제 실행 — 지울 줄 허용 N건` 이 붙는다(숫자는 쉼표 없이) — 예 `강제 실행 — 지울 줄 허용 12500건 / 변경 없음`, `강제 실행 — 지울 줄 허용 12500건 / 기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤 / …`. 감사 이력을 못 쓴 줄이 있으면 그 메모는 결론이 정해진 뒤에 붙어 맨 앞에 온다(`감사 기록 N건 실패 / 강제 실행 — 지울 줄 허용 N건 / …`). 예외로 끝난 강제 회차는 결론이 없어 허용 수가 남지 않는다 — 트리거와 `requestedBy` 는 남는다.
-- `force` 가 바꾸는 것은 삭제 가드의 상한뿐이다 — 사람 소속이 하나도 없는 디렉터리 그림은 가드보다 먼저 데이터 오류(`FAILED`)로 멈추고 `force` 로도 넘기지 못한다([05 LDAP 동기화](05-LDAP-동기화.md)).
+- **강제 회차도 가드를 본다.** 준 수의 가드는 비율을 보지 않고 상한만 그 수다(`DeletionGuard.forced`, `ReactivationGuard.forced`). 재활성 가드는 M 명까지 통과하고 M+1 명부터 보류하며, 문구는 상한 꼴(`… 상한 M명을 초과했습니다. …`)이다. 주지 않은 가드는 설정대로 본다. 아래는 삭제 가드 쪽이다. 설정에서 가드를 꺼 두었어도(`sync.deletion-guard.enabled=false`) 본다. 비교 경로와 [장부 맞추기](02-용어집.md#장부-맞추기)(기준선 없음·기록 중·재적재) 모두 같은 가드다. 지울 줄이 N 을 넘으면 — 확인한 뒤 디렉터리가 더 망가졌다 — 강제 회차도 `ABORTED` 다. 비활성 회수만 떼어 N 안이면 그것만 반영하고, 아니면 아무것도 지우지 않는다. 메시지는 상한 꼴(`… 상한 N건을 초과했습니다. …`)이고 멈춤 내역이 다시 붙는다([05 — 삭제 가드](05-LDAP-동기화.md#64-삭제-가드)).
+- **결론 앞의 허용 수.** 결론을 낸 강제 회차는 메시지 앞에 준 수의 꼴이 붙는다(숫자는 쉼표 없이) — 세 꼴은 `강제 실행 — 지울 줄 허용 N건`, `강제 실행 — 재활성 허용 M명`, `강제 실행 — 지울 줄 허용 N건·재활성 허용 M명` 이다. 재활성 보류 문구(`재활성 가드 발동 — …`)보다 더 바깥이다. 예 `강제 실행 — 지울 줄 허용 12500건 / 변경 없음`, `강제 실행 — 지울 줄 허용 12500건 / 기준선 없음(첫 회차 또는 새 테이블) — 장부를 훑어 맞춤 / …`. 감사 이력을 못 쓴 줄이 있으면 그 메모는 결론이 정해진 뒤에 붙어 맨 앞에 온다(`감사 기록 N건 실패 / 강제 실행 — 지울 줄 허용 N건 / …`). 예외로 끝난 강제 회차는 결론이 없어 허용 수가 남지 않는다 — 트리거와 `requestedBy` 는 남는다.
+- `force` 가 바꾸는 것은 삭제 가드와 재활성 가드의 상한뿐이다 — 사람 소속이 하나도 없는 디렉터리 그림은 가드보다 먼저 데이터 오류(`FAILED`)로 멈추고 `force` 로도 넘기지 못한다([05 LDAP 동기화](05-LDAP-동기화.md)).
 - 재적재는 모드가 하나다. `mode` 파라미터가 오면(빈 값이어도) 400 이다 — 옛 `mode=snapshot`·`mode=store` 를 합쳤다는 안내가 담긴다.
 - 정기 동기화(`sync.cron`)도 같은 `FullSyncUseCase.start` 를 건다. 트리거는 `SCHEDULED`, 요청자는 `system:scheduler` 다.
 - `full`·`rebuild` 의 완료는 `sync.*` 지표로도 남는다([11 운영](11-운영.md#3-지표)).
@@ -613,6 +616,8 @@ sequenceDiagram
 curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full'
 # 멈춘 회차의 guardHold.lines.total 이 12000 이었다 — 몇 % 여유를 두어 12500. admin.destructive — 로컬은 ops-break-glass 의 토큰
 curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxDeletes=12500'
+# 재활성 보류 내역 reactivationHold.count 가 2000 이었고 예의 직원을 디렉터리에서 확인했다 — 작은 여유를 두어 2050
+curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync/full?force=true&maxReactivations=2050'
 ```
 
 ```json
@@ -662,7 +667,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 
 `GET /admin/sync/runs[?limit=20]` — 최근 [실행 기록](02-용어집.md#실행-기록)을 **배열**로 준다(쪽이 아니다). 새 것이 먼저다. `limit` 은 기본 20이고 1~100 으로 맞춘다.
 
-`GET /admin/sync/runs/{runId}` — 하나. 없으면 404 다. 삭제 가드가 멈춘 회차면 [멈춤 내역](02-용어집.md#멈춤-내역) `guardHold` 를 싣는다(아래). **목록에는 싣지 않는다** — 멈춘 배포는 매시 `ABORTED` 를 쌓으므로, 목록에서 `ABORTED` 를 보고 그 회차를 연다.
+`GET /admin/sync/runs/{runId}` — 하나. 없으면 404 다. 삭제 가드가 멈춘 회차면 [멈춤 내역](02-용어집.md#멈춤-내역) `guardHold` 를, 재활성 가드가 보류한 회차면 [재활성 보류](02-용어집.md#재활성-보류) 내역 `reactivationHold` 를 싣는다(아래). **목록에는 싣지 않는다** — 멈춘 배포는 매시 `ABORTED` 를 쌓으므로, 목록에서 `ABORTED` 를 보고 그 회차를 연다.
 
 - 둘 다 이번 달과 지난달 파티션만 읽는다. 보관 기간(`dynamodb.syncrun-retention-days`, 기본 30일) 안이어도 그보다 앞선 달의 기록은 찾지 못한다. 404 는 "번호가 틀렸다" 거나 "너무 오래됐다" 다.
 - 최종 일관성이다. 방금 닫힌 기록이 아직 `RUNNING` 으로 보일 수 있다.
@@ -679,9 +684,10 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 | `status` | [실행 상태](02-용어집.md#실행-상태): `RUNNING`, `SUCCEEDED`, `PARTIAL`, `ABORTED`, `FAILED` |
 | `writtenCount`, `deletedCount`, `failureCount` | 쓴·지운·실패한 튜플 수. 전부 보류로 끝난 장부 맞추기도 이미 쓴 D 의 수를 남긴다. 아카이빙은 뜻이 다르다 — `writtenCount` 는 스냅샷에 담은 줄 수, `deletedCount`·`failureCount` 는 남은 회수 지우기가 지운·지우지 못한 줄 수다([07](07-재적재-초기화-아카이빙.md#실행-기록)) |
 | `snapshotId` | 남긴 튜플 스냅샷 id. 없을 수 있다 |
-| `message` | 사유·메모. 변경이 없으면 "변경 없음". 가드가 걸렸거나 실패했으면 그 사유. 차단기로 멈췄지만 현재상태를 디렉터리대로 교체한 회차는 끝에 ` — 현재상태는 디렉터리대로 교체했다` 가 붙는다. 결론을 낸 강제 회차는 앞에 `강제 실행 — 지울 줄 허용 N건` 이 붙는다([9.2](#92-app-ldap)). 감사 이력을 못 쓴 줄이 있으면 맨 앞에 "감사 기록 N건 실패" 가 붙는다 |
+| `message` | 사유·메모. 변경이 없으면 "변경 없음". 가드가 걸렸거나 실패했으면 그 사유(재활성 가드가 보류했으면 앞에 `재활성 가드 발동 — 직원 N명의 재활성을 보류(비활성 그대로 둠) / ` 와 가드 문구가 붙는다). 차단기로 멈췄지만 현재상태를 디렉터리대로 교체한 회차는 끝에 ` — 현재상태는 디렉터리대로 교체했다` 가 붙는다. 결론을 낸 강제 회차는 앞에 준 수의 꼴(`강제 실행 — 지울 줄 허용 N건`·`재활성 허용 M명`·둘 다)이 붙는다([9.2](#92-app-ldap)). 감사 이력을 못 쓴 줄이 있으면 맨 앞에 "감사 기록 N건 실패" 가 붙는다 |
 | `requestedBy` | 이 회차를 건 [행위자](02-용어집.md#행위자). 관리 API 로 건 회차는 토큰의 `sub` 로 `client:<sub>`, 정기 동기화는 `system:scheduler`, SCIM 아카이빙은 `system:archive`. 행위자를 남기기 전에 쓴 옛 기록은 이 칸이 아예 없다(`null` 로도 나오지 않는다) |
 | `guardHold` | 삭제 가드가 멈춘 LDAP 회차가 지우려던 것의 [멈춤 내역](02-용어집.md#멈춤-내역)(아래). 단건 조회에만 싣는다. 내역이 없는 기록과 목록 응답에는 칸이 아예 없다. 202 응답은 `RUNNING` 이라 늘 없다. app-scim 에는 가드가 없어 늘 없다 |
+| `reactivationHold` | 재활성 가드가 재활성을 보류한 LDAP 회차의 [재활성 보류](02-용어집.md#재활성-보류) 내역(아래). 단건 조회에만 싣는다. 보류하지 않은 기록과 목록 응답에는 칸이 아예 없다. 202 응답은 `RUNNING` 이라 늘 없다. app-scim 에는 늘 없다. 한 회차에 `guardHold` 와 함께 있을 수 있다 |
 
 완료된 기록의 예:
 
@@ -743,6 +749,24 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 - 같은 수를 WARN 한 줄로도 남긴다 — `삭제 가드 내역: 지울 줄 12000건(소속 11800·하위 조직 연결 200·그 밖 0) — 직원 사라짐 9500·비활성 30·소속 잃음 2000 / 조직 사라짐 150·상위 잃음 20`. id 는 싣지 않는다. 회차가 예외로 끝나 결론이 없으면 내역은 이 로그에만 남는다.
 - 저장은 실행 기록 아이템의 M 속성 `guardHold` 다([04 데이터 모델](04-데이터-모델.md)). 목록 읽기도 아이템째 읽고 응답에서만 뺀다 — 읽기 용량은 줄지 않는다([13 — 6.10](13-한계와-알려진-문제.md#610-멈춘-배포가-오래-가면-실행-기록-읽기가-무거워진다)).
 
+#### 재활성 보류 내역 `reactivationHold`
+
+[재활성 가드](02-용어집.md#재활성-가드)가 보류한 회차(비교 경로·기록 중 회차·재적재 모두. 상태는 `ABORTED` 이거나, 경로가 `FAILED` 였으면 `FAILED` 그대로)가 **비활성 그대로 둔 직원**의 수와 예다. `guardHold` 의 갈래와 같은 모양(`GuardHoldResponse.Sample`)이다.
+
+```json
+"reactivationHold": { "count": 2000, "sample": ["E00107", "E00108", "…"] }
+```
+
+| 칸 | 뜻 |
+|---|---|
+| `count` | 보류한 직원의 수 — 서로 다른 직원 id 의 수. 메시지의 "재활성 대상 N명" 과 같다. **`maxReactivations` 는 이 수에 작은 여유를 두어 정한다** |
+| `sample` | `String` 자연 순서(사전순)로 앞에서 **10개**의 직원 id([employeeId](02-용어집.md#employeeid)). 무작위 표본이 아니다. 10개보다 적으면 있는 만큼 |
+
+- 같은 회차의 `message` 는 `재활성 가드 발동 — 직원 2000명의 재활성을 보류(비활성 그대로 둠) / 재활성 대상 2000명(직전 비활성 소속 직원 2000명의 100.0%)이 임계치 30.0%와 상한 100명을 초과했습니다. 강제 실행하려면 실행 기록의 reactivationHold 를 확인한 뒤 force=true 와 maxReactivations(허용할 재활성 직원 수)로 재요청하세요` 다. 원래 메시지가 있으면(예: 변경 없음) 그 앞에 붙는다.
+- 예의 id 를 [직원 상세](#32-상세)로 열면 보류한 직원은 `active` 가 거짓이고 `shouldHaveAccess`·`openFgaCheck` 도 거짓이다 — 디렉터리에서는 활성이지만 회차는 그들을 받아들이지 않았다.
+- 같은 수를 WARN `재활성 가드 발동: …` 으로도 남긴다(수만 담고 id 는 싣지 않는다). 회차가 예외로 끝나 결론이 없으면 내역은 이 로그에만 남는다.
+- 저장은 실행 기록 아이템의 M 속성 `reactivationHold`(`count`, `ids`)다([04 데이터 모델](04-데이터-모델.md#실행-기록)).
+
 ## 10. 인증과 범위
 
 `/admin/**` 의 모든 요청은 bearer 토큰을 실어야 한다(RFC 6750 — `Authorization: Bearer <토큰>`). 토큰은 인가 서버 app-auth 가 client credentials 로 발급한 JWT 이고, 두 앱이 [리소스 서버](02-용어집.md#리소스-서버)로서 그 자리에서 검증한다 — 서명(`spring.security.oauth2.resourceserver.jwt.jwk-set-uri` 의 [키 목록](02-용어집.md#키-목록)), 발급자(`issuer-uri` 와 토큰의 `iss`), 만료(`exp`). `aud` 는 보지 않는다. 기동 때 인가 서버에 묻지 않고, 키 목록은 첫 토큰을 볼 때 받는다. 같은 포트의 `/scim/v2/**`·actuator 도 같은 보안 체인을 탄다([06 — 인증](06-SCIM.md#25-인증), [11 — 헬스](11-운영.md#4-헬스)). 클라이언트 등록·토큰 받기·키·https 는 [11 — 인증 운영](11-운영.md#9-인증-운영)에 있다.
@@ -802,10 +826,10 @@ Content-Type: application/problem+json
 
 ### 10.3 위험한 요청 — `admin.destructive`
 
-삭제 가드의 상한을 운영자가 정한 수로 바꾸는 `force=true&maxDeletes=N`(app-ldap `POST /admin/sync/full`·`/rebuild`, [9.2](#92-app-ldap))과 조직도의 유일한 사본을 지우는 `mode=wipe`(app-scim `POST /admin/sync/rebuild`)는 `admin.sync` 에 더해 `admin.destructive` 가 있어야 한다.
+삭제 가드·재활성 가드의 상한을 운영자가 정한 수로 바꾸는 `force=true&maxDeletes=N`·`maxReactivations=M`(app-ldap `POST /admin/sync/full`·`/rebuild`, [9.2](#92-app-ldap))과 조직도의 유일한 사본을 지우는 `mode=wipe`(app-scim `POST /admin/sync/rebuild`)는 `admin.sync` 에 더해 `admin.destructive` 가 있어야 한다.
 
 - **필터가 아니라 컨트롤러가 본다.** 컨트롤러가 스프링이 바꾼 값(`boolean force`, 해석한 `ScimRebuildMode`)으로 판정한 뒤 `Callers.요구한다`(web-security)를 부른다. 필터에서 쿼리 문자열을 따로 읽으면 스프링과 다르게 해석해(`force=yes`·`force=1`·`mode=WIPE`) 우회된다. 그래서 쿼리 모양으로 우회하지 못한다.
-- **무엇보다 먼저 본다.** 실행 기록을 열거나 락을 잡기 전이고, `force` 의 `maxDeletes` 확인과 `wipe` 의 `confirm` 확인보다도 앞이다(스프링의 파라미터 변환 400 만 그보다 앞선다). 거절되면 회차가 생기지 않는다.
+- **무엇보다 먼저 본다.** 실행 기록을 열거나 락을 잡기 전이고, `force` 의 두 수 확인과 `wipe` 의 `confirm` 확인보다도 앞이다(스프링의 파라미터 변환 400 만 그보다 앞선다). 거절되면 회차가 생기지 않는다.
 - 403 은 `InsufficientScopeException`(web-security, `ResponseStatusException` 의 하위)이고 `AdminExceptionHandler` 가 problem details 로 바꾼다. 예외가 든 머리 `WWW-Authenticate: Bearer error="insufficient_scope"` 를 응답에 옮기므로 보안 필터의 403 과 같은 머리다.
 - 로컬 개발 클라이언트 가운데 이 범위를 가진 것은 `ops-break-glass` 하나다.
 
@@ -828,6 +852,7 @@ Content-Type: application/problem+json
 - 감사 이력 조회: `docs/superpowers/specs/2026-10-10-audit-log-design.md` §5
 - 요청과 떼어 돌리기(202), 409: `docs/superpowers/specs/2026-09-29-rebuild-jobs-fixed-store-design.md` §4, `2026-09-30-cluster-jobs-baseline-design.md` §3
 - 멈춤 내역 `guardHold`(단건에만), `force=true&maxDeletes=N` 과 400 두 가지·검사 순서, 결론 앞의 허용 수: `docs/superpowers/specs/2026-11-20-guard-hold-detail-design.md` §2 H1~H5·F1~F5, §3.1·§3.2
+- `reactivationHold`(단건에만), `maxReactivations`, 바뀐 400 문구 둘·검사 순서, 강제 문구 세 꼴: `docs/superpowers/specs/2026-11-24-reactivation-guard-design.md` §2 R7·R9~R11, §3.4·§3.5
 - 오류 응답(problem details·503·500), 직원 응답의 `externalId`: `docs/superpowers/specs/2026-10-27-ops-readiness-design.md` §10·§11
 - 조직 계층 지정(요청·응답, 락 경합 503, 조회, 범위 `admin.hierarchy`): `docs/superpowers/specs/2026-11-04-scim-org-hierarchy-design.md` §3·§7·§8
 - 지정 실패의 새 연결 되지우기: `docs/superpowers/specs/2026-11-11-unsourced-grants-design.md` §2 U3·U4
