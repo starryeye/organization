@@ -29,7 +29,7 @@
 
 **한 번에 하나.** 여러 대를 띄워도 일은 DynamoDB 로 만든 [변경 락](02-용어집.md#변경-락) 하나로 줄 선다. 완벽한 상호 배제는 아니다 — OpenFGA 에 [펜싱](02-용어집.md#펜싱)이 없다.
 
-**토큰으로 부른다.** 부르는 쪽은 모두 기계다(IdP, 운영 도구, 권한을 묻는 앱, Prometheus). 인가 서버 app-auth 가 client credentials 로 JWT [액세스 토큰](02-용어집.md#액세스-토큰)을 발급하고, 두 앱이 그 토큰의 [범위](02-용어집.md#범위)로 SCIM·관리 API·actuator 를 지킨다 — 토큰 없이 열린 것은 프로브 셋뿐이다. `force=true`(`maxDeletes=N` 과 함께만 받는다)·`mode=wipe` 는 `admin.destructive` 범위가, 조직의 지정 상위를 두고 없애는 `PUT`·`DELETE …/parent` 는 `admin.hierarchy` 범위가 있어야 한다. 누가 바꿨는지는 [행위자](02-용어집.md#행위자)(`client:<sub>`)로 감사 이력과 실행 기록에 남는다. 권한을 묻는 앱은 [정확 조회](02-용어집.md#정확-조회) 둘로 로그인 이름을 employeeId 로 바꾼다. OpenFGA 호출에는 [사전 공유 키](02-용어집.md#사전-공유-키)를 싣는다.
+**토큰으로 부른다.** 부르는 쪽은 모두 기계다(IdP, 운영 도구, 권한을 묻는 앱, Prometheus). 인가 서버 app-auth 가 client credentials 로 JWT [액세스 토큰](02-용어집.md#액세스-토큰)을 발급하고, 두 앱이 그 토큰의 [범위](02-용어집.md#범위)로 SCIM·관리 API·actuator 를 지킨다 — 토큰 없이 열린 것은 프로브 셋뿐이다. `force=true`(`maxDeletes` 또는 `maxReactivations` 가운데 하나 이상을 1 이상으로 함께 받는다)·`mode=wipe` 는 `admin.destructive` 범위가, 조직의 지정 상위를 두고 없애는 `PUT`·`DELETE …/parent` 는 `admin.hierarchy` 범위가 있어야 한다. 누가 바꿨는지는 [행위자](02-용어집.md#행위자)(`client:<sub>`)로 감사 이력과 실행 기록에 남는다. 권한을 묻는 앱은 [정확 조회](02-용어집.md#정확-조회) 둘로 로그인 이름을 employeeId 로 바꾼다. OpenFGA 호출에는 [사전 공유 키](02-용어집.md#사전-공유-키)를 싣는다.
 
 **아직 운영 배포 전이다.** 데이터는 초기화해도 되고 이관 코드는 만들지 않는다.
 
