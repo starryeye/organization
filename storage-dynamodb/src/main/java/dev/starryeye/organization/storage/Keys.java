@@ -91,6 +91,8 @@ public final class Keys {
     public static final String CHUNK_PREFIX = "CHUNK#";
     /** 튜플 스냅샷의 불확실 줄(U) 묶음의 정렬키 접두사(설계 2026-10-20 §3.5). {@link #CHUNK_PREFIX} 와 겹치지 않아 본문 묶음으로 읽히지 않는다. */
     public static final String UNCERTAIN_CHUNK_PREFIX = "UNCERTAIN#";
+    /** 튜플 스냅샷의 비활성 소속 줄(I) 묶음의 정렬키 접두사(설계 2026-11-24 R1, §3.1). 다른 묶음 접두사와 겹치지 않는다. */
+    public static final String INACTIVE_CHUNK_PREFIX = "INACTIVE#";
     public static final String SYNCRUN_PREFIX = "SYNCRUN#";
     /** 변경 이력 파티션 접두사(설계 2026-10-10 §3.2). 대상마다 하나 — {@code AUDIT#USER#kim}, {@code AUDIT#GROUP#DEV}. */
     public static final String AUDIT_PREFIX = "AUDIT#";
@@ -397,6 +399,19 @@ public final class Keys {
     /** 정렬키가 {@link #uncertainChunkSk} 로 만들어진 불확실 묶음 아이템인지 판별한다. */
     public static boolean isUncertainChunkSk(String sk) {
         return sk.startsWith(UNCERTAIN_CHUNK_PREFIX);
+    }
+
+    /** 비활성 소속 줄(I) 묶음의 정렬키(설계 2026-11-24 §3.1). {@link #uncertainChunkSk} 와 같은 꼴의 따로 된 계열이다. */
+    public static String inactiveChunkSk(int index) {
+        if (index < 0 || index > 9_999) {
+            throw new IllegalArgumentException("비활성 묶음 번호는 0~9999 다: " + index);
+        }
+        return INACTIVE_CHUNK_PREFIX + "%04d".formatted(index);
+    }
+
+    /** 정렬키가 {@link #inactiveChunkSk} 로 만들어진 비활성 묶음 아이템인지 판별한다. */
+    public static boolean isInactiveChunkSk(String sk) {
+        return sk.startsWith(INACTIVE_CHUNK_PREFIX);
     }
 
     /** {@code EDGE#<부모>|<자식>}. 아이디에는 {@code |} 가 없다({@code IdNormalizer}). */

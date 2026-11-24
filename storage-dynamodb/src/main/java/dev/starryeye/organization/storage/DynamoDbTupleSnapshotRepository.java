@@ -43,7 +43,11 @@ import java.util.function.Predicate;
  * {@code UNCERTAIN#} 묶음으로 나눈다. 비어 있지 않을 때만 메타에 줄 수({@code uncertainCount})와 묶음 수({@code uncertainChunkCount})를 적고,
  * 메타에 그 칸이 없으면 빈 U 로 읽는다. 무결성 검사는 본문과 같다(묶음 수·번호·본문·줄 수).
  *
- * <p>저장 순서는 메타 → 본문 묶음 → U 묶음 → 포인터다. 메타가 먼저라 묶음을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
+ * <p><b>비활성 소속 줄(I)도 같은 꼴의 세 번째 묶음 계열이다</b>(설계 2026-11-24 R1, §3.1). 그 회차 그림에서 비활성 계정의 소속 줄을 정렬키
+ * {@code INACTIVE#} 묶음으로 나누고, 비어 있지 않을 때만 메타에 줄 수({@code inactiveCount})와 묶음 수({@code inactiveChunkCount})를 적는다.
+ * 메타에 그 칸이 없으면 빈 I 로 읽는다(운영 배포 전이라 옛 스냅샷을 이관하지 않는다).
+ *
+ * <p>저장 순서는 메타 → 본문 묶음 → U 묶음 → I 묶음 → 포인터다. 메타가 먼저라 묶음을 쓰다 죽어도 정리 작업이 그 조각을 찾아 지우고,
  * 포인터가 마지막이라 반쪽 스냅샷이 기준선이 되지 않는다.
  *
  * <p><b>스냅샷은 테이블 TTL({@link Keys#EXPIRES_AT})을 쓰지 않는다.</b> TTL 은 아이템마다 붙은 시각만 보고 지워 최신인지
@@ -66,6 +70,8 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String CHUNK_COUNT = "chunkCount";
     private static final String UNCERTAIN_COUNT = "uncertainCount";
     private static final String UNCERTAIN_CHUNK_COUNT = "uncertainChunkCount";
+    private static final String INACTIVE_COUNT = "inactiveCount";
+    private static final String INACTIVE_CHUNK_COUNT = "inactiveChunkCount";
     private static final String DATA = "data";
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String RETAIN_UNTIL = "retainUntil";
@@ -77,6 +83,9 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     /** 불확실 줄(U) 묶음 계열 — 정렬키 {@code UNCERTAIN#}, 메타의 {@code uncertainCount}·{@code uncertainChunkCount}. */
     private static final ChunkSeries UNCERTAIN = new ChunkSeries("불확실 ", UNCERTAIN_COUNT, UNCERTAIN_CHUNK_COUNT,
             Keys::isUncertainChunkSk, Keys::uncertainChunkSk, "메타에 불확실 묶음 수가 없다");
+    /** 비활성 소속 줄(I) 묶음 계열 — 정렬키 {@code INACTIVE#}, 메타의 {@code inactiveCount}·{@code inactiveChunkCount}. */
+    private static final ChunkSeries INACTIVE = new ChunkSeries("비활성 ", INACTIVE_COUNT, INACTIVE_CHUNK_COUNT,
+            Keys::isInactiveChunkSk, Keys::inactiveChunkSk, "메타에 비활성 묶음 수가 없다");
 
     private final DynamoDbAsyncClient client;
     private final DynamoDbProperties properties;
@@ -110,10 +119,12 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
         return Mono.fromCallable(() -> new EncodedChunks(
                         SnapshotChunks.encode(snapshot.tuples(), chunkSize),
-                        snapshot.uncertain().isEmpty() ? List.of() : SnapshotChunks.encode(snapshot.uncertain(), chunkSize)))
+                        snapshot.uncertain().isEmpty() ? List.of() : SnapshotChunks.encode(snapshot.uncertain(), chunkSize),
+                        snapshot.inactive().isEmpty() ? List.of() : SnapshotChunks.encode(snapshot.inactive(), chunkSize)))
                 .flatMap(chunks -> writeMeta(snapshot, retainUntil, chunks)
                         .then(writeChunks(snapshot.id(), chunks.body(), BODY))
                         .then(writeChunks(snapshot.id(), chunks.uncertain(), UNCERTAIN))
+                        .then(writeChunks(snapshot.id(), chunks.inactive(), INACTIVE))
                         .then(writePointer(snapshot.id())));
     }
 
@@ -136,7 +147,10 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         return item;
     }
 
-    /** 불확실 줄(U)이 비어 있으면 그 칸 둘({@code uncertainCount}·{@code uncertainChunkCount})을 적지 않는다 — 읽을 때 칸이 없으면 빈 U 다. */
+    /**
+     * 불확실 줄(U)이 비어 있으면 그 칸 둘({@code uncertainCount}·{@code uncertainChunkCount})을 적지 않는다 — 읽을 때 칸이 없으면 빈 U 다.
+     * 비활성 소속 줄(I)도 같다({@code inactiveCount}·{@code inactiveChunkCount}).
+     */
     private Mono<Void> writeMeta(TupleSnapshot snapshot, long retainUntil, EncodedChunks chunks) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.snapshotPk(snapshot.id())));
@@ -150,6 +164,10 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         if (!snapshot.uncertain().isEmpty()) {
             item.put(UNCERTAIN_COUNT, Attrs.n(snapshot.uncertain().size()));
             item.put(UNCERTAIN_CHUNK_COUNT, Attrs.n(chunks.uncertain().size()));
+        }
+        if (!snapshot.inactive().isEmpty()) {
+            item.put(INACTIVE_COUNT, Attrs.n(snapshot.inactive().size()));
+            item.put(INACTIVE_CHUNK_COUNT, Attrs.n(chunks.inactive().size()));
         }
         item.put(RETAIN_UNTIL, Attrs.n(retainUntil));
         return putItem(item);
@@ -232,12 +250,17 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         Set<RelationTuple> uncertain = meta.containsKey(UNCERTAIN_COUNT)
                 ? 줄들(snapshotId, meta, items, UNCERTAIN)
                 : Set.of();
+        // I 도 같다 — 칸이 없으면 빈 I 다(설계 2026-11-24 §3.1)
+        Set<RelationTuple> inactive = meta.containsKey(INACTIVE_COUNT)
+                ? 줄들(snapshotId, meta, items, INACTIVE)
+                : Set.of();
         return new TupleSnapshot(
                 snapshotId,
                 Attrs.instant(meta, CREATED_AT),
                 SyncSource.valueOf(Attrs.str(meta, SOURCE)),
                 tuples,
-                uncertain);
+                uncertain,
+                inactive);
     }
 
     /** 한 묶음 계열을 풀어 튜플 집합으로 만들고, 튜플 수가 메타와 같은지 본다. 본문(B)과 불확실 줄(U)이 같은 규칙을 쓴다. */
@@ -350,13 +373,13 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     /**
      * 메타가 아닌 줄(본문 묶음, 불확실 묶음, 옛 형식의 튜플 줄) 먼저, 메타 마지막 — 중간에 실패해도 메타가 남아 다음 정리가 다시 찾는다.
-     * 저장 순서(메타 → 본문 묶음 → U 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 지우는 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
+     * 저장 순서(메타 → 본문 묶음 → U 묶음 → I 묶음 → 포인터)를 그대로 뒤집은 순서다 — 메타를 먼저 지우면 지우는 도중 실패했을 때 그 조각을 아무도 다시 찾지 못한다.
      *
      * <p>묶음은 쓸 때와 같은 까닭으로 번호 순서로 하나씩 DeleteItem 으로 지운다(설계 2026-10-09 §3.3, §8). DeleteItem 도 지우는 아이템의
      * 크기만큼 쓰기 용량을 써서(묶음 하나가 최대 약 350 WCU) 묶음 열몇 개를 BatchWriteItem 에 담으면 한 파티션의 쓰기 한도(초당 1,000)에
      * 걸려 {@link BatchRequests} 의 재시도 예산이 모자라고, 그 실패가 {@link #purgeExpired()} 의 다른 스냅샷 정리까지 끊는다. 하나씩이면
      * 스로틀이 요청 전체의 오류로 와 SDK 재시도가 받는다. 끝내 실패해도 메타가 남으므로 다음 정리가 남은 것을 이어 지운다.
-     * 본문 묶음과 불확실 묶음을 모두 이렇게 지운다. 묶음이 아닌 줄(옛 형식의 튜플 줄)은 용량이 작아 지금처럼 묶음 요청(BatchWriteItem)으로 지운다.
+     * 본문·불확실·비활성 묶음을 모두 이렇게 지운다. 묶음이 아닌 줄(옛 형식의 튜플 줄)은 용량이 작아 지금처럼 묶음 요청(BatchWriteItem)으로 지운다.
      */
     private Mono<Void> deleteSnapshot(String snapshotId) {
         String pk = Keys.snapshotPk(snapshotId);
@@ -368,7 +391,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .then(Mono.defer(() -> deleteItem(pk, Keys.META)));
     }
 
-    /** 본문 묶음(CHUNK#)과 불확실 묶음(UNCERTAIN#) 모두를 하나씩 지운다. */
+    /** 본문 묶음(CHUNK#)·불확실 묶음(UNCERTAIN#)·비활성 묶음(INACTIVE#) 모두를 하나씩 지운다. */
     private Mono<Void> deleteChunks(String pk, List<String> sks) {
         return Flux.fromIterable(sks)
                 .filter(DynamoDbTupleSnapshotRepository::isChunkRow)
@@ -377,7 +400,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     private static boolean isChunkRow(String sk) {
-        return Keys.isChunkSk(sk) || Keys.isUncertainChunkSk(sk);
+        return Keys.isChunkSk(sk) || Keys.isUncertainChunkSk(sk) || Keys.isInactiveChunkSk(sk);
     }
 
     private Mono<Void> deleteOldFormatRows(String pk, List<String> sks) {
@@ -396,8 +419,8 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     // ---------- 공통 ----------
 
-    /** 압축해 나눈 본문(B) 묶음과 불확실 줄(U) 묶음. U 가 비면 U 묶음도 없다. */
-    private record EncodedChunks(List<byte[]> body, List<byte[]> uncertain) {
+    /** 압축해 나눈 본문(B)·불확실 줄(U)·비활성 소속 줄(I) 묶음. U 나 I 가 비면 그 묶음도 없다. */
+    private record EncodedChunks(List<byte[]> body, List<byte[]> uncertain, List<byte[]> inactive) {
     }
 
     /**

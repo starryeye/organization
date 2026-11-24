@@ -98,4 +98,35 @@ class TupleSnapshotTest {
         assertThat(meta.id()).isEqualTo("S1");
         assertThat(meta.tupleCount()).isEqualTo(2);
     }
+
+    @Test
+    @DisplayName("I 는 B 와 겹쳐도 된다 — 겹침 검사는 B 와 U 사이에만 있다(설계 2026-11-24 R1)")
+    void I_는_B_와_겹쳐도_된다() {
+        // given, when — 같은 줄 '가'가 B 와 I 에 모두 든다
+        var snapshot = new TupleSnapshot("S1", 시각, SyncSource.LDAP, Set.of(가, 나), Set.of(다), Set.of(가));
+
+        // then
+        assertThat(snapshot.tuples()).containsExactlyInAnyOrder(가, 나);
+        assertThat(snapshot.uncertain()).containsExactly(다);
+        assertThat(snapshot.inactive()).containsExactly(가);
+        assertThat(new TupleSnapshot("S2", 시각, SyncSource.LDAP, Set.of(가), Set.of(), Set.of(가)).inactive()).containsExactly(가);
+    }
+
+    @Test
+    @DisplayName("다섯 인자 생성자는 I 를 빈 집합으로 두고, I 가 null 이면 빈 집합이며 복사해 가진다")
+    void 다섯_인자_생성자는_빈_I_다() {
+        // given
+        Set<RelationTuple> 비활성 = new HashSet<>(Set.of(가));
+
+        // when
+        var 다섯 = new TupleSnapshot("S1", 시각, SyncSource.LDAP, Set.of(가), Set.of(다));
+        var 널 = new TupleSnapshot("S2", 시각, SyncSource.LDAP, Set.of(가), Set.of(다), null);
+        var 복사 = new TupleSnapshot("S3", 시각, SyncSource.LDAP, Set.of(가), Set.of(다), 비활성);
+        비활성.clear();
+
+        // then
+        assertThat(다섯.inactive()).isEmpty();
+        assertThat(널.inactive()).isEmpty();
+        assertThat(복사.inactive()).containsExactly(가);
+    }
 }

@@ -78,6 +78,18 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         return new TupleSnapshot(id, at, SyncSource.LDAP, tuples, uncertain);
     }
 
+    /** 직전 회차에 비활성이던 직원의 소속 줄(I). 확실한 줄과 겹쳐도 된다. */
+    private static Set<RelationTuple> 비활성_튜플들(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> RelationTuple.directMember("idle" + i, "DEV004"))
+                .collect(Collectors.toSet());
+    }
+
+    private static TupleSnapshot 스냅샷(String id, Instant at, Set<RelationTuple> tuples, Set<RelationTuple> uncertain,
+                                      Set<RelationTuple> inactive) {
+        return new TupleSnapshot(id, at, SyncSource.LDAP, tuples, uncertain, inactive);
+    }
+
     /** 묶음을 작게(바이트) 잘라 작은 스냅샷도 여러 묶음이 되게 하는 저장소. */
     private DynamoDbTupleSnapshotRepository 작은_묶음_저장소(int chunkSize) {
         return new DynamoDbTupleSnapshotRepository(client, properties, Clock.fixed(지금, ZoneOffset.UTC), chunkSize);
@@ -271,6 +283,10 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
 
     private static List<String> 불확실_묶음_키들(List<Map<String, AttributeValue>> items) {
         return items.stream().map(item -> item.get(Keys.SK).s()).filter(Keys::isUncertainChunkSk).toList();
+    }
+
+    private static List<String> 비활성_묶음_키들(List<Map<String, AttributeValue>> items) {
+        return items.stream().map(item -> item.get(Keys.SK).s()).filter(Keys::isInactiveChunkSk).toList();
     }
 
     private static Map<String, AttributeValue> 메타(List<Map<String, AttributeValue>> items) {
@@ -944,6 +960,94 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
         assertThat(batchWriteItem수.get()).isZero();
         assertThat(파티션("20260804T030000-LDAP")).isEmpty();
         assertThat(repository.findLatest().block().id()).isEqualTo("20260814T030000-LDAP");
+    }
+
+    // ---------- 비활성 소속 줄 (설계 2026-11-24 R1, §3.1) ----------
+
+    @Test
+    @DisplayName("비활성 소속 줄(I)을 왕복한다 — findLatest 와 findById 가 같고 메타에 수가 적힌다")
+    void 비활성_소속_줄을_왕복한다() {
+        // given
+        var 확실 = 튜플들(3);
+        var 비활성 = 비활성_튜플들(2);
+
+        // when
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 확실, Set.of(), 비활성)).block();
+
+        // then
+        assertThat(repository.findLatest().block().inactive()).isEqualTo(비활성);
+        assertThat(repository.findById("20260814T030000-LDAP").block().inactive()).isEqualTo(비활성);
+        assertThat(repository.findLatest().block().tuples()).isEqualTo(확실);
+        var items = 파티션("20260814T030000-LDAP");
+        assertThat(메타(items).get("inactiveCount").n()).isEqualTo("2");
+        assertThat(메타(items).get("inactiveChunkCount").n()).isEqualTo(String.valueOf(비활성_묶음_키들(items).size()));
+    }
+
+    @Test
+    @DisplayName("비활성 소속 줄이 여러 묶음이어도 왕복한다 — INACTIVE# 번호가 0부터 이어진다")
+    void 비활성_소속_줄이_여러_묶음이어도_왕복한다() {
+        // given
+        var 비활성 = 비활성_튜플들(10);
+
+        // when
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), 불확실_튜플들(2), 비활성)).block();
+        var latest = repository.findLatest().block();
+
+        // then
+        var 키 = 비활성_묶음_키들(파티션("20260814T030000-LDAP"));
+        assertThat(키).hasSizeGreaterThan(1);
+        assertThat(키).isEqualTo(IntStream.range(0, 키.size()).mapToObj(Keys::inactiveChunkSk).toList());
+        assertThat(latest.inactive()).isEqualTo(비활성);
+        assertThat(latest.uncertain()).isEqualTo(불확실_튜플들(2));
+        assertThat(latest.tuples()).isEqualTo(튜플들(3));
+    }
+
+    @Test
+    @DisplayName("I 가 비면 메타에 칸이 없고 INACTIVE# 묶음도 없다")
+    void I_가_비면_메타에_칸이_없다() {
+        // given, when
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3))).block();
+
+        // then
+        var items = 파티션("20260814T030000-LDAP");
+        assertThat(메타(items)).doesNotContainKeys("inactiveCount", "inactiveChunkCount");
+        assertThat(비활성_묶음_키들(items)).isEmpty();
+        assertThat(repository.findLatest().block().inactive()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("I 칸이 없는 옛 메타는 예외 없이 빈 I 로 읽는다")
+    void I_칸이_없는_옛_메타는_빈_I_로_읽는다() {
+        // given — I 가 있는 스냅샷에서 I 칸과 묶음을 걷어낸다
+        작은_묶음_저장소(16).save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(3), Set.of(), 비활성_튜플들(4))).block();
+        비활성_묶음_키들(파티션("20260814T030000-LDAP")).forEach(sk -> 아이템을_지운다("20260814T030000-LDAP", sk));
+        메타를_고친다("20260814T030000-LDAP", meta -> {
+            meta.remove("inactiveCount");
+            meta.remove("inactiveChunkCount");
+        });
+
+        // when
+        var latest = repository.findLatest().block();
+
+        // then
+        assertThat(latest.tuples()).hasSize(3);
+        assertThat(latest.inactive()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("만료 정리는 INACTIVE# 묶음도 하나씩 지워 파티션이 빈다")
+    void 만료_정리가_I_묶음도_지운다() {
+        // given
+        작은_묶음_저장소(16).saveWithCreatedAt(스냅샷("20260804T030000-LDAP", 지금.minusSeconds(10 * 86400), 튜플들(3), Set.of(), 비활성_튜플들(10))).block();
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(1))).block();
+        assertThat(비활성_묶음_키들(파티션("20260804T030000-LDAP")).size()).isGreaterThanOrEqualTo(2);
+
+        // when
+        var purged = repository.purgeExpired().block();
+
+        // then
+        assertThat(purged).isEqualTo(1);
+        assertThat(파티션("20260804T030000-LDAP")).isEmpty();
     }
 
     // ---------- 기록 중 표시와 포인터 상태 (설계 2026-09-30 §4.1, 2026-10-20 §4) ----------
