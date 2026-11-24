@@ -1,5 +1,9 @@
 package dev.starryeye.organization.ldap.app;
 
+import dev.starryeye.organization.core.model.DirectoryGroup;
+import dev.starryeye.organization.core.model.DirectorySnapshot;
+import dev.starryeye.organization.core.model.DirectoryUser;
+import dev.starryeye.organization.core.model.RelationTuple;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.config.YamlPropertiesFactoryBean;
@@ -10,7 +14,10 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.scheduling.support.CronExpression;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -115,28 +122,44 @@ class SyncPropertiesTest {
         assertThat(config.getMaxReactivations()).isEqualTo(100);
     }
 
-    // 깨뜨릴 변경: UseCaseConfig.reactivationGuard 가 상한을 넘기지 않음
+    // 깨뜨릴 변경: UseCaseConfig.reactivationGuard 가 상한·켬·기준 수 중 하나를 넘기지 않거나 다른 값을 넘김
     @Test
-    @DisplayName("sync.reactivation-guard.* 를 주면 가드가 그 값을 쓴다")
+    @DisplayName("sync.reactivation-guard.* 를 주면 가드가 그 값을 쓴다 — 상한은 같으면 통과하고 넘으면 걸리며, 끄면 보지 않는다")
     void 재활성_가드_설정을_바인딩하면_가드가_그_값을_쓴다() {
-        // given
+        // given — 기준 8명은 min-baseline(20) 미만이라 비율은 보지 않는다. 상한 7 만 본다
         var properties = new SyncProperties();
         new Binder(new MapConfigurationPropertySource(Map.of(
-                "sync.reactivation-guard.enabled", "false",
                 "sync.reactivation-guard.threshold-ratio", "0.5",
                 "sync.reactivation-guard.min-baseline", "20",
                 "sync.reactivation-guard.max-reactivations", "7")))
                 .bind("sync", Bindable.ofInstance(properties));
+        var guard = new UseCaseConfig().reactivationGuard(properties);
 
-        // when
-        var config = properties.getReactivationGuard();
+        // when, then
+        assertThat(guard.check(이전(8), 그림(8, 7)).held()).isFalse();
+        assertThat(guard.check(이전(8), 그림(8, 8)).held()).isTrue();
 
-        // then
-        assertThat(config.isEnabled()).isFalse();
-        assertThat(config.getThresholdRatio()).isEqualTo(0.5);
-        assertThat(config.getMinBaseline()).isEqualTo(20);
-        assertThat(config.getMaxReactivations()).isEqualTo(7);
-        assertThat(new UseCaseConfig().reactivationGuard(properties)).isNotNull();
+        // when, then — 끄면 같은 그림도 보지 않는다
+        new Binder(new MapConfigurationPropertySource(Map.of("sync.reactivation-guard.enabled", "false")))
+                .bind("sync", Bindable.ofInstance(properties));
+        assertThat(new UseCaseConfig().reactivationGuard(properties).check(이전(8), 그림(8, 8)).held()).isFalse();
+    }
+
+    private static Set<RelationTuple> 이전(int 기준) {
+        Set<RelationTuple> i = new HashSet<>();
+        for (int n = 1; n <= 기준; n++) {
+            i.add(RelationTuple.directMember("E" + n, "G"));
+        }
+        return i;
+    }
+
+    /** E1..E{기준} 가운데 앞 {활성}명은 활성인 그림. */
+    private static DirectorySnapshot 그림(int 기준, int 활성) {
+        Map<String, DirectoryUser> users = new HashMap<>();
+        for (int n = 1; n <= 기준; n++) {
+            users.put("E" + n, new DirectoryUser("E" + n, "dn" + n, "u" + n, "이름" + n, null, n <= 활성));
+        }
+        return new DirectorySnapshot(users, Map.of("G", new DirectoryGroup("G", "g", "조직", Set.of())), Set.of());
     }
 
     @Test
