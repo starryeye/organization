@@ -263,7 +263,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 inactive);
     }
 
-    /** 한 묶음 계열을 풀어 튜플 집합으로 만들고, 튜플 수가 메타와 같은지 본다. 본문(B)과 불확실 줄(U)이 같은 규칙을 쓴다. */
+    /** 한 묶음 계열을 풀어 튜플 집합으로 만들고, 튜플 수가 메타와 같은지 본다. 본문(B)·불확실 줄(U)·비활성 소속 줄(I)이 같은 규칙을 쓴다. */
     private Set<RelationTuple> 줄들(String snapshotId, Map<String, AttributeValue> meta,
                                  List<Map<String, AttributeValue>> items, ChunkSeries series) {
         Set<RelationTuple> tuples = new LinkedHashSet<>(묶음을_푼다(snapshotId, meta, items, series));
@@ -425,7 +425,7 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     /**
      * 같은 규칙으로 저장하고 읽는 묶음 계열 하나. 이름({@code label})은 오류 메시지에 앞붙이로 들어간다 — 본문은 비어 있고, 불확실 계열은
-     * "불확실 " 이라 어느 계열이 온전하지 않은지 알 수 있다.
+     * "불확실 ", 비활성 계열(sk {@code INACTIVE#})은 "비활성 " 이라 어느 계열이 온전하지 않은지 알 수 있다.
      */
     private record ChunkSeries(String label, String tupleCountAttribute, String chunkCountAttribute,
                                Predicate<String> isSk, IntFunction<String> sk, String missingCountReason) {

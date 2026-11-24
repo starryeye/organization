@@ -57,8 +57,9 @@ public class AdminSyncController {
      * @param force      true 면 강제 동기화(FORCED)다 — ABORTED 이후 사람이 실행 기록의 {@code guardHold} 를 보고 승인하는 통로다. 가드를 건너뛰지 않고
      *                   비율 없이 {@code maxDeletes} 를 상한으로 같은 가드를 본다(설계 2026-11-20 F1·F2). {@code admin.sync} 에 더해
      *                   {@code admin.destructive} 가 있어야 한다
-     * @param maxDeletes 허용할 지울 줄 수 N — {@code force=true} 와 함께만, 1 이상으로 온다. 아니면 400 이다(F3). 범위 검사(403)가 먼저다
-     * @param maxReactivations 허용할 재활성 직원 수 M — {@code maxDeletes} 와 같은 규칙이다. 둘 중 하나는 있어야 한다(설계 2026-11-24 R9)
+     * @param maxDeletes 허용할 지울 줄 수 N — 1 이상이다. {@code force=true} 에는 이것과 {@code maxReactivations} 중 적어도 하나가 있어야 하고,
+     *                   {@code force} 없이 오면 400 이다(F3). 범위 검사(403)가 먼저다. 안 준 쪽 가드는 설정의 가드가 그대로 본다
+     * @param maxReactivations 허용할 재활성 직원 수 M — {@code maxDeletes} 와 같은 규칙이다(설계 2026-11-24 R9)
      * @param caller     토큰의 호출자. 보안 필터가 {@code admin.sync} 를 본 뒤에 오며, {@code force} 의 추가 범위는 여기서 본다
      */
     @PostMapping("/full")
@@ -124,7 +125,7 @@ public class AdminSyncController {
      * <ol>
      *   <li>{@code force=true} 면 범위({@code admin.destructive})를 본다 — 없으면 403({@link #요구한다_force}). 두 수보다 먼저다.</li>
      *   <li>{@code force=true} 인데 {@code maxDeletes}·{@code maxReactivations} 가 하나도 없거나, 준 수가 1 미만이면 400 — 설정의 {@code 0} 은 "끔"이라
-     *       요청의 0 을 받으면 같은 수가 두 뜻이 된다. 한쪽만 줘도 되고(안 준 쪽은 허용 0), 둘 다 줘도 된다(설계 2026-11-24 R9).</li>
+     *       요청의 0 을 받으면 같은 수가 두 뜻이 된다. 한쪽만 줘도 되고(안 준 쪽 가드는 설정의 가드가 그대로 본다), 둘 다 줘도 된다(설계 2026-11-24 R9).</li>
      *   <li>{@code force} 없이 어느 수든 오면 400 — 없는 force 에 붙은 수는 실수다.</li>
      * </ol>
      * 숫자가 아닌 두 수는 여기까지 오지 않는다 — 스프링의 변환 실패로 400 이다(설계 §3.2 판단, 지금의 {@code force=abc} 와 같다).
