@@ -12,6 +12,7 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
@@ -328,6 +329,19 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                 });
     }
 
+    /** Query 만 스로틀 오류로 실패시키고 나머지(포인터 getItem 포함)는 진짜 클라이언트로 보낸다. */
+    private DynamoDbAsyncClient Query가_스로틀되는_클라이언트() {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("query")) {
+                        return CompletableFuture.failedFuture(
+                                ProvisionedThroughputExceededException.builder().message("스로틀(테스트)").build());
+                    }
+                    return method.invoke(client, args);
+                });
+    }
+
     /** 두 번째 불확실 묶음(정렬키 UNCERTAIN#) PutItem 만 실패시키고 나머지는 진짜 클라이언트로 보낸다. */
     private DynamoDbAsyncClient 두번째_불확실_묶음_쓰기가_실패하는_클라이언트() {
         AtomicInteger 불확실_묶음_쓰기_수 = new AtomicInteger();
@@ -512,6 +526,86 @@ class DynamoDbTupleSnapshotRepositoryTest extends DynamoDbTestSupport {
                 .isInstanceOf(SnapshotIntegrityException.class)
                 .hasMessageContaining("20260814T030000-LDAP")
                 .hasMessageContaining("메타 튜플 5 · 읽음 4");
+    }
+
+    // 깨뜨릴 변경: 푸는 동안의 RuntimeException 을 무결성 오류로 묶지 않기 — 기록 중 회차·재적재가 깨진 스냅샷 때문에 영영 실패한다(설계 2026-11-25 E3)
+    @Test
+    @DisplayName("메타의 튜플 수가 수가 아니면 무결성 오류다 — 깨진 칸 하나가 재적재를 막지 않는다")
+    void 메타의_튜플_수가_수가_아니면_무결성_오류다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+        메타를_고친다("20260814T030000-LDAP", meta -> meta.put("tupleCount", AttributeValue.fromS("다섯")));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: NumberFormatException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+        assertThatThrownBy(() -> repository.findById("20260814T030000-LDAP").block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: NumberFormatException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+    }
+
+    // 깨뜨릴 변경: 푸는 동안의 RuntimeException 을 무결성 오류로 묶지 않기 — 기록 중 회차·재적재가 깨진 스냅샷 때문에 영영 실패한다(설계 2026-11-25 E3)
+    @Test
+    @DisplayName("메타의 만든 시각이 시각이 아니면 무결성 오류다 — 깨진 칸 하나가 재적재를 막지 않는다")
+    void 메타의_만든_시각이_시각이_아니면_무결성_오류다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+        메타를_고친다("20260814T030000-LDAP", meta -> meta.put("createdAt", AttributeValue.fromS("어제")));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: DateTimeParseException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+        assertThatThrownBy(() -> repository.findById("20260814T030000-LDAP").block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: DateTimeParseException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+    }
+
+    // 깨뜨릴 변경: 푸는 동안의 RuntimeException 을 무결성 오류로 묶지 않기 — 기록 중 회차·재적재가 깨진 스냅샷 때문에 영영 실패한다(설계 2026-11-25 E3)
+    @Test
+    @DisplayName("메타의 출처가 모르는 값이면 무결성 오류다 — 깨진 칸 하나가 재적재를 막지 않는다")
+    void 메타의_출처가_모르는_값이면_무결성_오류다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+        메타를_고친다("20260814T030000-LDAP", meta -> meta.put("source", AttributeValue.fromS("FTP")));
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatest().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: IllegalArgumentException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+        assertThatThrownBy(() -> repository.findById("20260814T030000-LDAP").block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("20260814T030000-LDAP")
+                .hasMessageContaining("메타를 풀 수 없다: IllegalArgumentException")
+                .hasMessageContaining("POST /admin/sync/rebuild 로 복구하세요");
+    }
+
+    // 깨뜨릴 변경: 가져오기 실패(SDK 오류)까지 무결성 오류로 묶기 — 일시 장애에 재활성 가드가 꺼진다(설계 2026-11-25 E3)
+    @Test
+    @DisplayName("스냅샷 아이템을 가져오다 실패하면 무결성 오류가 아니라 그 오류 그대로다 — 깨짐과 일시 장애를 가른다")
+    void 가져오기_실패는_무결성_오류로_묶지_않는다() {
+        // given
+        repository.save(스냅샷("20260814T030000-LDAP", 지금, 튜플들(4))).block();
+        var 가져오기가_실패하는_저장소 = new DynamoDbTupleSnapshotRepository(
+                Query가_스로틀되는_클라이언트(), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when, then
+        assertThatThrownBy(() -> 가져오기가_실패하는_저장소.findLatest().block())
+                .isInstanceOf(ProvisionedThroughputExceededException.class)
+                .isNotInstanceOf(SnapshotIntegrityException.class);
+        assertThatThrownBy(() -> 가져오기가_실패하는_저장소.findById("20260814T030000-LDAP").block())
+                .isInstanceOf(ProvisionedThroughputExceededException.class);
     }
 
     @Test

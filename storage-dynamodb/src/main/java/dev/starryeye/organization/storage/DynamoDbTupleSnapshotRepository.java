@@ -234,7 +234,18 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     public Mono<TupleSnapshot> findById(String snapshotId) {
         return queryPartition(Keys.snapshotPk(snapshotId))
                 .collectList()
-                .flatMap(items -> Mono.justOrEmpty(toSnapshot(snapshotId, items)));
+                .flatMap(items -> Mono.justOrEmpty(풀어_본다(snapshotId, items)));
+    }
+
+    /** 가져온 아이템을 푸는 동안의 실패는 모두 깨짐이다 — 가져오기 실패(SDK)는 여기 오기 전에 오른다(설계 2026-11-25 E3). */
+    private TupleSnapshot 풀어_본다(String snapshotId, List<Map<String, AttributeValue>> items) {
+        try {
+            return toSnapshot(snapshotId, items);
+        } catch (SnapshotIntegrityException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw 온전하지_않다(snapshotId, "메타를 풀 수 없다: " + e.getClass().getSimpleName());
+        }
     }
 
     private TupleSnapshot toSnapshot(String snapshotId, List<Map<String, AttributeValue>> items) {
