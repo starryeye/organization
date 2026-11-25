@@ -104,7 +104,7 @@ public class RebuildUseCase {
     }
 
     /**
-     * LDAP 을 다 읽고, 최신 스냅샷의 I 로 재활성을 판정한 뒤(없거나 읽지 못하면 판정 없음), 판정이 정한 그림(보류면 그림′)으로 매핑해 장부를 맞춘다
+     * LDAP 을 다 읽고, 최신 스냅샷의 I 로 재활성을 판정한 뒤(없거나 깨졌으면 판정 없음, 그 밖의 읽기 오류는 실패), 판정이 정한 그림(보류면 그림′)으로 매핑해 장부를 맞춘다
      * (설계 2026-11-24 §3.3). 결론에 보류를 적는다 — 강제 문구는 그보다 바깥이다.
      */
     private Mono<Mono<SyncOutcome>> rebuild(DeletionGuard 가드, ReactivationGuard 재활성_가드, AuditChanges 기록) {

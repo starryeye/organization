@@ -560,10 +560,32 @@ class RebuildUseCaseTest {
         assertThat(writer.stored).containsExactlyInAnyOrder(김_백엔드, 막힌_가, 막힌_나);
     }
 
-    // 깨뜨릴 변경: 재적재가 스냅샷 읽기 실패로 회차를 실패시키기 — 재적재는 깨진 스냅샷을 고치는 통로다
+    // 깨뜨릴 변경: 재적재가 깨짐이 아닌 스냅샷 읽기 오류도 삼키고 판정 없이 장부를 맞추기(설계 2026-11-25 E1)
     @Test
-    @DisplayName("재적재는 직전 스냅샷을 읽지 못해도 판정 없이 끝낸다")
-    void 재적재는_스냅샷을_못_읽어도_판정_없이_끝낸다() {
+    @DisplayName("재적재는 깨짐이 아닌 오류로 직전 스냅샷을 읽지 못하면 FAILED 이고 아무것도 쓰지 않는다")
+    void 재적재는_일시_오류로_스냅샷을_못_읽으면_실패한다() {
+        // given
+        useCase = 유스케이스(상한_1명);
+        막힌_둘이_든_스냅샷을_둔다();
+        snapshots.failFindLatest(new RuntimeException("DynamoDB 일시 장애(테스트)"));
+        source.willReturn(조직도(Set.of("kim", "blocked1", "blocked2"), Set.of()));
+
+        // when
+        SyncRun run = 재적재한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).isEqualTo("DynamoDB 일시 장애(테스트)");
+        assertThat(writer.stored).containsExactly(김_백엔드);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.writing).isFalse();
+        assertThat(state.users).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 재적재가 깨진 스냅샷으로 회차를 실패시키기 — 재적재는 깨진 스냅샷을 고치는 통로다
+    @Test
+    @DisplayName("재적재는 직전 스냅샷이 깨져 있어도 판정 없이 끝낸다")
+    void 재적재는_깨진_스냅샷이어도_판정_없이_끝낸다() {
         // given
         useCase = 유스케이스(상한_1명);
         막힌_둘이_든_스냅샷을_둔다();

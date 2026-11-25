@@ -23,9 +23,15 @@ import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
@@ -33,6 +39,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashSet;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -54,9 +61,15 @@ class FullSyncUseCaseTest {
     private FakeTupleScanner scanner;
     private FakeSyncRunRepository runs;
     private FullSyncUseCase useCase;
+    private ListAppender<ILoggingEvent> 로그;
+    private Logger 로거;
 
     @BeforeEach
     void setUp() {
+        로거 = (Logger) LoggerFactory.getLogger(FullSyncUseCase.class);
+        로그 = new ListAppender<>();
+        로그.start();
+        로거.addAppender(로그);
         source = new FakeSnapshotSource();
         snapshots = new FakeSnapshotRepository();
         state = new FakeStateRepository();
@@ -64,6 +77,20 @@ class FullSyncUseCaseTest {
         runs = new FakeSyncRunRepository(고정시각);
         scanner = new FakeTupleScanner(writer);
         useCase = 유스케이스();
+    }
+
+    @AfterEach
+    void tearDown() {
+        로거.detachAppender(로그);
+        로그.stop();
+    }
+
+    private List<String> 재활성_가드를_보지_않는다는_WARN() {
+        return 로그.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("직전 스냅샷이 온전하지 않아 재활성 가드를 보지 않는다: "))
+                .toList();
     }
 
     private FullSyncUseCase 유스케이스() {
@@ -1787,10 +1814,35 @@ class FullSyncUseCaseTest {
         assertThat(state.users.get("blocked1").active()).isFalse();
     }
 
-    // 깨뜨릴 변경: 기록 중 회차가 스냅샷 읽기 실패로 회차를 실패시키기(재적재·장부 맞추기는 깨진 스냅샷을 고치는 길이다)
+    // 깨뜨릴 변경: 기록 중 회차가 깨짐이 아닌 스냅샷 읽기 오류도 삼키고 판정 없이 장부를 맞추기(설계 2026-11-25 E1)
     @Test
-    @DisplayName("기록 중 회차가 최신 스냅샷을 읽지 못하면 판정 없이 장부를 맞춘다 — 회차는 실패하지 않는다")
-    void 기록_중_회차가_스냅샷을_못_읽으면_판정_없이_맞춘다() {
+    @DisplayName("기록 중 회차가 깨짐이 아닌 오류로 직전 스냅샷을 읽지 못하면 FAILED 이고 아무것도 쓰지 않는다 — 다음 정각이 다시 본다")
+    void 기록_중_회차가_일시_오류로_스냅샷을_못_읽으면_실패한다() {
+        // given
+        막힌_둘이_든_첫_회차를_돈다(상한_1명);
+        var 앞_장부 = List.copyOf(writer.stored);
+        snapshots.writing.set(true);
+        snapshots.failFindLatest(new RuntimeException("DynamoDB 일시 장애(테스트)"));
+        source.willReturn(막혔던_둘도_활성인_조직도(Set.of("kim")));
+
+        // when
+        var run = 동기화한다(SyncTrigger.SCHEDULED);
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.FAILED);
+        assertThat(run.message()).isEqualTo("DynamoDB 일시 장애(테스트)");
+        assertThat(run.reactivationHold()).isNull();
+        assertThat(writer.stored).containsExactlyInAnyOrderElementsOf(앞_장부);
+        assertThat(snapshots.saved).hasSize(1);
+        assertThat(snapshots.writing).isTrue();
+        assertThat(state.users.get("blocked1").active()).isFalse();
+        assertThat(재활성_가드를_보지_않는다는_WARN()).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 기록 중 회차가 깨진 스냅샷으로 회차를 실패시키기(재적재·장부 맞추기는 깨진 스냅샷을 고치는 길이다)
+    @Test
+    @DisplayName("기록 중 회차가 최신 스냅샷이 깨져 있으면 판정 없이 장부를 맞춘다 — 회차는 실패하지 않는다")
+    void 기록_중_회차가_깨진_스냅샷이면_판정_없이_맞춘다() {
         // given
         막힌_둘이_든_첫_회차를_돈다(상한_1명);
         snapshots.writing.set(true);
@@ -1807,6 +1859,9 @@ class FullSyncUseCaseTest {
         assertThat(run.message()).isEqualTo(FullSyncUseCase.기준선_의심);
         assertThat(writer.stored).contains(막힌_가, 막힌_나);
         assertThat(snapshots.writing).isFalse();
+        assertThat(재활성_가드를_보지_않는다는_WARN())
+                .containsExactly("직전 스냅샷이 온전하지 않아 재활성 가드를 보지 않는다: "
+                        + "기준선 스냅샷 20260806T030000-LDAP 의 묶음 수가 맞지 않습니다 — POST /admin/sync/rebuild 로 복구하세요");
     }
 
     // 깨뜨릴 변경: 이 한계(설계 2026-11-24 §6·§12)를 고치면 — 전부 보류에도 I 를 남기거나 쓰기 전에 재활성 줄을 D 에서 빼면 — 이 시험이 바뀐다

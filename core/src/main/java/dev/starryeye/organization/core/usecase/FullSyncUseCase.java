@@ -204,15 +204,16 @@ public class FullSyncUseCase {
     }
 
     /**
-     * 기록 중 회차와 재적재가 판정에 쓸 직전 I — 최신 스냅샷의 I 다(설계 2026-11-24 R8, §3.3). 스냅샷이 없으면 빈 집합(판정 없음)이고, 읽기가 실패해도
-     * WARN 을 남기고 빈 집합이다. 이 두 길은 기준선을 믿지 않고 장부를 훑으므로 깨진 스냅샷 때문에 실패시키지 않는다. 재적재도 쓴다.
+     * 기록 중 회차와 재적재가 판정에 쓸 직전 I — 최신 스냅샷의 I 다(설계 2026-11-24 R8, §3.3). 스냅샷이 없으면 빈 집합(판정 없음), 깨졌으면
+     * ({@link SnapshotIntegrityException}) WARN 을 남기고 빈 집합이다. 그 밖의 오류는 그대로 올려 회차가 실패한다(설계 2026-11-25 E1) — 깨진
+     * 스냅샷은 이 두 길(재적재·장부 맞추기)이 고칠 일이고, 일시 장애는 다음 정각이 다시 본다. 재적재도 쓴다.
      */
     static Mono<Set<RelationTuple>> 직전_I_를_읽어_본다(TupleSnapshotRepository snapshots) {
         return snapshots.findLatest()
                 .map(TupleSnapshot::inactive)
                 .defaultIfEmpty(Set.of())
-                .onErrorResume(error -> {
-                    log.warn("직전 스냅샷을 읽지 못해 재활성 가드를 보지 않는다: {}",
+                .onErrorResume(SnapshotIntegrityException.class, error -> {
+                    log.warn("직전 스냅샷이 온전하지 않아 재활성 가드를 보지 않는다: {}",
                             error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName());
                     return Mono.just(Set.of());
                 });
@@ -229,7 +230,7 @@ public class FullSyncUseCase {
             // 포인터가 없다 — 첫 회차이거나 테이블을 새로 만들었다. 빈 기준선과 비교하면 장부의 찌꺼기를 영원히 못 지운다(설계 2026-10-20 §4).
             // 직전 I 도 없으니 재활성을 판정하지 않는다(설계 2026-11-24 R8)
             case NONE -> 기준선_없이_맞춘다(directory, 매핑한다(directory), 가드, 기록);
-            // 기준선을 믿지 않는 회차 — 최신 스냅샷을 읽어 보고 그 I 로 판정한다. 없거나 읽지 못하면 판정 없이 간다
+            // 기준선을 믿지 않는 회차 — 최신 스냅샷을 읽어 보고 그 I 로 판정한다. 없거나 깨졌으면 판정 없이 간다. 그 밖의 읽기 오류는 회차를 실패시킨다
             case WRITING -> 직전_I_를_읽어_본다(snapshots).flatMap(직전_I -> {
                 ReactivationCheck check = 재활성을_판정한다(재활성_가드, 직전_I, directory);
                 return 재활성_보류를_적는다(훑어_맞춘다(check.picture(), 매핑한다(check.picture()), 가드, 기록), check);
