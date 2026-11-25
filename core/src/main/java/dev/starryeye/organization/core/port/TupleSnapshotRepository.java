@@ -18,6 +18,8 @@ public interface TupleSnapshotRepository {
     /**
      * 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono(처음 설치). 포인터가 가리키는 스냅샷의 메타가 없거나 본문을 온전히 읽지 못하면(빠진 조각, 풀 수 없는 본문, 메타와 다른 튜플 수 등)
      * {@link SnapshotIntegrityException} — 빈 기준선으로 넘어가면 삭제를 조용히 놓친다. 불확실 줄(U)도 본문과 같은 검사를 받는다.
+     * 가져온 아이템을 푸는 동안의 실패는 모두 {@link SnapshotIntegrityException} 이고, 가져오는 중의 실패(저장소·SDK 오류)는 절대 이 예외로 보고하지 않는다 —
+     * 기록 중 회차와 재적재는 이 예외일 때만 재활성 가드를 건너뛰고 그 밖의 오류는 회차를 실패시킨다(설계 2026-11-25 E1·E3).
      */
     Mono<TupleSnapshot> findLatest();
 
@@ -29,7 +31,10 @@ public interface TupleSnapshotRepository {
 
     Flux<SnapshotMeta> listRecent(int days);
 
-    /** 메타가 없으면 빈 Mono. 본문을 온전히 읽지 못하면 {@link SnapshotIntegrityException}. */
+    /**
+     * 메타가 없으면 빈 Mono. 본문을 온전히 읽지 못하면 {@link SnapshotIntegrityException}. 가져온 아이템을 푸는 실패만 이 예외이고
+     * 가져오는 중의 실패는 아니다({@link #findLatest} 와 같은 계약, 설계 2026-11-25 E1·E3).
+     */
     Mono<TupleSnapshot> findById(String snapshotId);
 
     /**
