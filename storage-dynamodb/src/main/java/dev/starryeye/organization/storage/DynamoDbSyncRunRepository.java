@@ -19,8 +19,8 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.time.Clock;
-import java.time.Instant;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.HashMap;
@@ -148,6 +148,8 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
      * <p>이번 달 결과만으로 {@code limit} 이 채워지면 지난달 조회는 <b>실행되지 않는다</b> —
      * {@code concatWith} 는 앞이 끝나야 뒤를 구독하고, {@code take} 가 그 전에 끊기 때문이다.
      * {@code queryMonth} 자체는 요청 객체만 만들 뿐 구독 전에는 아무 일도 하지 않는다.
+     *
+     * <p>같은 파티션을 app-ldap 의 {@code LastSuccessGauge} 가 인스턴스마다 1분에 한 번 첫 쪽부터 읽는다 — 읽기 비용이 문제가 되면 이 읽기부터 본다.
      */
     @Override
     public Flux<SyncRun> findRecent(int limit) {

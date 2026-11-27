@@ -883,7 +883,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
   - `source` 는 `LDAP`·`SCIM` 이다.
   - `kind` 는 `SYNC`·`REBUILD`·`LEDGER_ALIGNMENT`(지난 회차가 장부·스냅샷을 기록하다 멈춘 뒤의 동기화. 기준선이 없어 훑어 맞춘 첫 회차는 `SYNC` 그대로다)·`SCIM_REQUEST`·
     `HIERARCHY_REQUEST`(관리 API 의 지정 요청 — `source` 는 `SCIM`) 다.
-  - `id` 는 회차면 `/admin/sync/runs` 의 `runId`, SCIM 요청·지정 요청이면 로그의 traceId 다.
+  - `id` 는 회차면 `GET /admin/sync/runs/{runId}` 의 `runId`(단건 조회, 보관 기간 안이면 찾는다), SCIM 요청·지정 요청이면 로그의 traceId 다.
   - `actor` 는 변경을 일으킨 쪽이다 — 토큰으로 온 요청(SCIM 쓰기, 지정 요청, 관리 API 로 건 회차)은 `client:<sub>`(`sub` 는 클라이언트 id), 예약 LDAP 동기화는
     `system:scheduler`, SCIM 아카이빙과 그 남은 회수 지우기는 `system:archive`. 찾지 못하면 `system:unknown` 이고 WARN 을 남긴다 — 이 칸이 생기기 전의 줄도 이 값이다.
 - **조직도 변경.**
@@ -905,7 +905,7 @@ push하게 하거나, 최후 수단으로 `mode=wipe` 뒤 전체 재프로비저
 - **실패한 회차·요청도 남긴다.**
   - 회차·요청이 실패하거나 멈춰도 그때까지 실제로 한 변경(쓰고 지운 튜플, 바꾼 조직도)을 그 회차·요청을 원인으로 남긴다.
   - 멈춤에는 기한(`sync.job-timeout`)·서버 종료·리스 상실, SCIM 의 503 이 든다.
-  - 회차가 어떻게 끝났는지(`FAILED` 등)는 `/admin/sync/runs` 의 그 `runId` 에 있다.
+  - 회차가 어떻게 끝났는지(`FAILED` 등)는 `GET /admin/sync/runs/{runId}`(그 `runId`, 보관 기간 안)에 있다.
 - **빠질 수 있다.**
   - 이력은 회차·요청이 끝난 뒤, 락을 반납한 뒤에 쓴다.
   - 쓰기가 끝내 실패해도 동기화·SCIM 요청은 실패하지 않는다. 대신 셋이 남는다.

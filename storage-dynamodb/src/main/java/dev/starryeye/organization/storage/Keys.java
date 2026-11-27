@@ -457,7 +457,7 @@ public final class Keys {
         return RUN_ID_TIME.format(startedAt) + "-" + random;
     }
 
-    /** 모양과 STRICT 풀기가 맞으면 id 에 실린 시작 시각(밀리초), 아니면 {@code null} 포함해 빈 값. */
+    /** 모양과 STRICT 풀기가 맞으면 id 에 실린 시작 시각(밀리초), 모양이 다르거나 풀리지 않거나 {@code null} 이면 빈 {@code Optional}. */
     public static Optional<Instant> runIdStartedAt(String runId) {
         if (runId == null || !RUN_ID_SHAPE.matcher(runId).matches()) {
             return Optional.empty();
@@ -490,7 +490,7 @@ public final class Keys {
         return sortableTimestamp(at) + "#" + causeId + "#" + "%04d".formatted(part);
     }
 
-    /** 조각 번호를 뗀 정렬키 — 한 줄의 조각끼리 같다. 원인 id 에는 {@code #} 이 없다(runId 는 UUID, traceId 는 16진수). */
+    /** 조각 번호를 뗀 정렬키 — 한 줄의 조각끼리 같다. 원인 id 에는 {@code #} 이 없다(runId 는 {@code <시작 시각>-<UUID>}, traceId 는 16진수). */
     public static String auditRecordKey(String sk) {
         return sk.substring(0, sk.lastIndexOf('#'));
     }

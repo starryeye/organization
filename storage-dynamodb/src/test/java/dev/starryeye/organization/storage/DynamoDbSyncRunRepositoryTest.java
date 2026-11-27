@@ -11,11 +11,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -48,13 +48,13 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
         assertThat(Keys.runIdStartedAt(run.runId())).contains(run.startedAt());
     }
 
-    // 깨뜨릴 변경: 단건 조회가 이번 달·지난달 파티션만 보기(설계 2026-11-25 §1 — 고치려는 한계)
+    // 깨뜨릴 변경: 단건 조회가 이번 달·지난달 파티션만 보기·id 와 SK 의 자르기가 다르기(설계 2026-11-25 §1 — 고치려는 한계)
     @Test
     @DisplayName("보관 기간을 늘린 배포에서 석 달 전에 시작한 기록도 번호로 찾는다")
     void 석_달_전_기록도_번호로_찾는다() {
         // given — 감사 때문에 보관을 1년으로 늘린 배포. 5월에 시작해 끝난 기록
         properties.setSyncrunRetentionDays(365);
-        Instant 석_달_전 = Instant.parse("2026-05-10T12:34:56.789Z");
+        Instant 석_달_전 = Instant.parse("2026-05-10T12:34:56.789123Z");
         var 석_달_전_저장소 = new DynamoDbSyncRunRepository(client, properties, Clock.fixed(석_달_전, ZoneOffset.UTC));
         var run = 석_달_전_저장소.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
         석_달_전_저장소.finish(run, SyncOutcome.noChange()).block();
