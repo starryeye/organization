@@ -12,7 +12,12 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * 단일 테이블 설계의 PK/SK/GSI 키를 만들고 파싱한다.
@@ -146,6 +151,15 @@ public final class Keys {
      */
     private static final DateTimeFormatter SORTABLE_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
+    /** 실행 id 의 시각 부분. SK 와 같은 밀리초 정밀도이고, STRICT 라 없는 날짜(2월 30일)는 풀리지 않는다. */
+    private static final DateTimeFormatter RUN_ID_TIME =
+            DateTimeFormatter.ofPattern("uuuuMMdd'T'HHmmss.SSS'Z'").withZone(ZoneOffset.UTC).withResolverStyle(ResolverStyle.STRICT);
+
+    private static final Pattern RUN_ID_SHAPE =
+            Pattern.compile("\\d{8}T\\d{6}\\.\\d{3}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+
+    private static final int RUN_ID_TIME_LENGTH = "20261125T135329.645Z".length();
 
     private Keys() {
     }
@@ -436,6 +450,23 @@ public final class Keys {
 
     public static String syncRunSk(Instant startedAt, String runId) {
         return sortableTimestamp(startedAt) + "#" + runId;
+    }
+
+    /** 실행 id 는 시작 시각을 싣는다 — 단건 조회가 id 에서 키를 다시 만든다(설계 2026-11-25 I1·I2). 시각은 밀리초로 자른다. */
+    public static String runId(Instant startedAt, UUID random) {
+        return RUN_ID_TIME.format(startedAt) + "-" + random;
+    }
+
+    /** 모양과 STRICT 풀기가 맞으면 id 에 실린 시작 시각(밀리초), 아니면 {@code null} 포함해 빈 값. */
+    public static Optional<Instant> runIdStartedAt(String runId) {
+        if (runId == null || !RUN_ID_SHAPE.matcher(runId).matches()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Instant.from(RUN_ID_TIME.parse(runId.substring(0, RUN_ID_TIME_LENGTH))));
+        } catch (DateTimeParseException e) {
+            return Optional.empty();
+        }
     }
 
     /** 하루 1회 작업 표지(설계 2026-09-30 §5.1). 날짜는 yyyy-MM-dd. */

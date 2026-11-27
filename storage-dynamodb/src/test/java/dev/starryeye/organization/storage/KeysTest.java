@@ -9,11 +9,50 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class KeysTest {
+
+    // 깨뜨릴 변경: 실행 id 의 시각 모양을 바꾸거나 SK 와 다른 정밀도로 자르기(설계 2026-11-25 I1)
+    @Test
+    @DisplayName("실행 id 는 UTC 시작 시각(밀리초)과 UUID 로 만들고, id 에서 시작 시각을 되살려 같은 SK 를 만든다")
+    void 실행_id_는_시작_시각과_UUID_로_만들고_시각을_되살린다() {
+        // given — 시계가 마이크로초까지 준 시각
+        Instant 시작 = Instant.parse("2026-11-25T13:53:29.645123Z");
+        UUID 무작위 = UUID.fromString("3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13");
+
+        // when
+        String runId = Keys.runId(시작, 무작위);
+        Optional<Instant> 되살린_시각 = Keys.runIdStartedAt(runId);
+
+        // then
+        assertThat(runId).isEqualTo("20261125T135329.645Z-3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13");
+        assertThat(되살린_시각).contains(Instant.parse("2026-11-25T13:53:29.645Z"));
+        assertThat(Keys.syncRunSk(되살린_시각.get(), runId)).isEqualTo(Keys.syncRunSk(시작, runId));
+        assertThat(Keys.syncRunPk(되살린_시각.get())).isEqualTo(Keys.syncRunPk(시작));
+    }
+
+    // 깨뜨릴 변경: 모양 검사를 느슨하게 하거나 날짜를 너그럽게 풀기(설계 2026-11-25 I2)
+    @Test
+    @DisplayName("모양이 다르거나 풀리지 않는 실행 id 에서는 시작 시각을 얻지 못한다")
+    void 모양이_다른_실행_id_는_시각이_없다() {
+        // given
+        String uuid = "3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13";
+
+        // when, then
+        assertThat(Keys.runIdStartedAt(null)).isEmpty();
+        assertThat(Keys.runIdStartedAt("")).isEmpty();
+        assertThat(Keys.runIdStartedAt(uuid)).isEmpty();
+        assertThat(Keys.runIdStartedAt("20261340T000000.000Z-" + uuid)).as("13월").isEmpty();
+        assertThat(Keys.runIdStartedAt("20260230T000000.000Z-" + uuid)).as("2월 30일").isEmpty();
+        assertThat(Keys.runIdStartedAt("20261125T135329.645Z-" + uuid.toUpperCase())).as("대문자 UUID").isEmpty();
+        assertThat(Keys.runIdStartedAt("20261125T135329.645Z-" + uuid + "x")).isEmpty();
+        assertThat(Keys.runIdStartedAt("x".repeat(1100))).isEmpty();
+    }
 
     @Test
     @DisplayName("직원과 조직은 서로 다른 파티션 접두사를 가져 한 테이블에서 구분된다")

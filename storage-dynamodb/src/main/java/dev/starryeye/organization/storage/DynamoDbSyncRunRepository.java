@@ -14,10 +14,12 @@ import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
+import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.Duration;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
@@ -66,7 +68,8 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
 
     @Override
     public Mono<SyncRun> start(SyncSource source, SyncTrigger trigger, String requestedBy) {
-        SyncRun run = SyncRun.started(UUID.randomUUID().toString(), source, trigger, clock.instant(), requestedBy);
+        Instant 지금 = clock.instant();
+        SyncRun run = SyncRun.started(Keys.runId(지금, UUID.randomUUID()), source, trigger, 지금, requestedBy);
         return save(run).thenReturn(run);
     }
 
@@ -173,19 +176,21 @@ public class DynamoDbSyncRunRepository implements SyncRunRepository {
     }
 
     /**
-     * 이번 달과 지난달 파티션에서 번호로 찾는다. 기록은 보관 기간(기본 30일) 뒤 사라지므로 그보다 앞선 달에는 없다.
-     *
-     * <p>파티션 하나가 한 달치 기록이다 — 매시 동기화면 약 720건이지 수십 건이 아니다. 그래도 파티션 하나의 Query 라 통째로 읽고, runId 로 찾는 인덱스를 따로 두지 않는다.
-     * 이번 달에서 찾으면 {@code next()} 가 구독을 끊어 지난달은 읽지 않는다({@link #findRecent} 와 같은 이유). 같은 파티션을 app-ldap 의 {@code LastSuccessGauge} 가
-     * 인스턴스마다 1분에 한 번 첫 쪽부터 읽는다(최신 성공을 만나면 멈춘다) — 읽기 비용이 문제가 되면 이 두 읽기부터 본다.
+     * 번호에서 키를 다시 만들어 GetItem 한 번으로 찾는다 — 보관 기간 안이면 몇 달 전 것도 찾는다. 모양이 다른 번호는 DynamoDB 를 부르지 않고
+     * 빈 결과다(설계 2026-11-25 I2).
      */
     @Override
     public Mono<SyncRun> findById(String runId) {
-        YearMonth thisMonth = YearMonth.from(clock.instant().atZone(ZoneOffset.UTC));
-        return queryMonth(thisMonth)
-                .concatWith(queryMonth(thisMonth.minusMonths(1)))
-                .filter(run -> runId.equals(run.runId()))
-                .next();
+        return Keys.runIdStartedAt(runId)
+                .map(startedAt -> Mono.fromFuture(() -> client.getItem(GetItemRequest.builder()
+                                .tableName(properties.getTableName())
+                                .key(Map.of(
+                                        Keys.PK, Attrs.s(Keys.syncRunPk(startedAt)),
+                                        Keys.SK, Attrs.s(Keys.syncRunSk(startedAt, runId))))
+                                .build()))
+                        .filter(response -> response.hasItem() && !response.item().isEmpty())
+                        .map(response -> toRun(response.item())))
+                .orElseGet(Mono::empty);
     }
 
     private Flux<SyncRun> queryMonth(YearMonth month) {

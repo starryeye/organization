@@ -360,6 +360,21 @@ class AdminSyncControllerTest {
                 .jsonPath("$.trigger").isEqualTo("REBUILD");
     }
 
+    // 깨뜨릴 변경: 경로 변수의 점 뒤를 확장자로 잘라 저장소에 앞부분만 넘기기(설계 2026-11-25 I1 — 새 id 에는 점이 든다)
+    @Test
+    @DisplayName("점이 든 새 모양의 실행 id 도 경로에서 잘리지 않고 저장소에 그대로 간다")
+    void 점이_든_실행_id_도_그대로_찾는다() {
+        // given
+        String 새_번호 = "20261125T135329.645Z-3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13";
+        Mockito.when(runs.findById(새_번호))
+                .thenReturn(Mono.just(완료된실행(SyncTrigger.SCHEDULED, SyncStatus.SUCCEEDED)));
+
+        // when, then
+        client.get().uri("/admin/sync/runs/" + 새_번호).exchange()
+                .expectStatus().isOk();
+        Mockito.verify(runs).findById(새_번호);
+    }
+
     @Test
     @DisplayName("없는 실행 기록 번호는 404 다")
     void 없는_번호는_404다() {

@@ -9,11 +9,18 @@ import dev.starryeye.organization.core.model.SyncTrigger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -27,6 +34,100 @@ class DynamoDbSyncRunRepositoryTest extends DynamoDbTestSupport {
     @BeforeEach
     void 저장소를_준비한다() {
         repository = new DynamoDbSyncRunRepository(client, properties, Clock.fixed(지금, ZoneOffset.UTC));
+    }
+
+    // 깨뜨릴 변경: start 가 무작위 UUID 만 쓰거나 시계를 두 번 읽기(설계 2026-11-25 I1)
+    @Test
+    @DisplayName("시작한 기록의 번호에는 UTC 시작 시각(밀리초)이 실린다")
+    void 시작한_기록의_번호에는_시작_시각이_실린다() {
+        // given, when
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
+
+        // then
+        assertThat(run.runId()).matches("20260814T030000\\.000Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+        assertThat(Keys.runIdStartedAt(run.runId())).contains(run.startedAt());
+    }
+
+    // 깨뜨릴 변경: 단건 조회가 이번 달·지난달 파티션만 보기(설계 2026-11-25 §1 — 고치려는 한계)
+    @Test
+    @DisplayName("보관 기간을 늘린 배포에서 석 달 전에 시작한 기록도 번호로 찾는다")
+    void 석_달_전_기록도_번호로_찾는다() {
+        // given — 감사 때문에 보관을 1년으로 늘린 배포. 5월에 시작해 끝난 기록
+        properties.setSyncrunRetentionDays(365);
+        Instant 석_달_전 = Instant.parse("2026-05-10T12:34:56.789Z");
+        var 석_달_전_저장소 = new DynamoDbSyncRunRepository(client, properties, Clock.fixed(석_달_전, ZoneOffset.UTC));
+        var run = 석_달_전_저장소.start(SyncSource.LDAP, SyncTrigger.SCHEDULED, 요청자).block();
+        석_달_전_저장소.finish(run, SyncOutcome.noChange()).block();
+
+        // when — 8월 14일에 찾는다
+        var found = repository.findById(run.runId()).block();
+
+        // then
+        assertThat(found).isNotNull();
+        assertThat(found.runId()).isEqualTo(run.runId());
+        assertThat(found.startedAt()).isEqualTo(석_달_전);
+        assertThat(found.status()).isNotEqualTo(SyncStatus.RUNNING);
+    }
+
+    // 깨뜨릴 변경: 단건 조회가 파티션을 Query 로 훑기(설계 2026-11-25 I2)
+    @Test
+    @DisplayName("번호 조회는 Query 없이 GetItem 한 번만 부른다")
+    void 번호_조회는_아이템_하나만_읽는다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        Map<String, AtomicInteger> 호출 = new ConcurrentHashMap<>();
+        var 세는_저장소 = new DynamoDbSyncRunRepository(호출을_세는_클라이언트(호출), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when
+        var found = 세는_저장소.findById(run.runId()).block();
+
+        // then
+        assertThat(found.runId()).isEqualTo(run.runId());
+        assertThat(호출).containsOnlyKeys("getItem");
+        assertThat(호출.get("getItem")).hasValue(1);
+    }
+
+    // 깨뜨릴 변경: SK 에서 runId 를 빼고 시각만으로 찾기(설계 2026-11-25 I1·I2)
+    @Test
+    @DisplayName("시각은 같고 UUID 가 다른 번호는 빈 결과다")
+    void 모양은_맞지만_없는_번호는_빈_결과다() {
+        // given
+        var run = repository.start(SyncSource.LDAP, SyncTrigger.MANUAL, 요청자).block();
+        String 다른_번호 = Keys.runId(run.startedAt(), UUID.fromString("00000000-0000-4000-8000-000000000000"));
+
+        // when, then
+        assertThat(repository.findById(다른_번호).blockOptional()).isEmpty();
+    }
+
+    // 깨뜨릴 변경: 모양 검사 없이 DynamoDB 에 키를 보내기 — 긴 문자열은 키 길이 한도로 오류다(설계 2026-11-25 I2)
+    @Test
+    @DisplayName("모양이 다른 번호는 DynamoDB 를 부르지 않고 빈 결과다")
+    void 모양이_다른_번호는_DynamoDB_를_부르지_않는다() {
+        // given
+        Map<String, AtomicInteger> 호출 = new ConcurrentHashMap<>();
+        var 세는_저장소 = new DynamoDbSyncRunRepository(호출을_세는_클라이언트(호출), properties, Clock.fixed(지금, ZoneOffset.UTC));
+
+        // when, then
+        for (String 번호 : List.of("3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13", "20261340T000000.000Z-3f2a9c1e-0b7d-4c8e-9a51-2d6f0e4b7a13", "x".repeat(1100))) {
+            assertThat(세는_저장소.findById(번호).blockOptional()).as(번호.length() > 60 ? "긴 문자열" : 번호).isEmpty();
+        }
+        assertThat(호출).isEmpty();
+    }
+
+    /** {@code serviceName}·{@code close} 를 뺀 모든 호출의 메서드 이름을 세고 진짜 클라이언트로 보낸다. */
+    private DynamoDbAsyncClient 호출을_세는_클라이언트(Map<String, AtomicInteger> 호출) {
+        return (DynamoDbAsyncClient) Proxy.newProxyInstance(
+                DynamoDbAsyncClient.class.getClassLoader(), new Class<?>[]{DynamoDbAsyncClient.class},
+                (proxy, method, args) -> {
+                    if (!method.getName().equals("serviceName") && !method.getName().equals("close")) {
+                        호출.computeIfAbsent(method.getName(), name -> new AtomicInteger()).incrementAndGet();
+                    }
+                    try {
+                        return method.invoke(client, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
     }
 
     @Test

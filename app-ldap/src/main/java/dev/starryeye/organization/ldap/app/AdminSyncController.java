@@ -111,7 +111,7 @@ public class AdminSyncController {
         return runs.findRecent(clampedLimit).map(SyncRunResponse::listed);
     }
 
-    /** 실행 기록 하나. 202 로 건 작업의 결과를 여기서 본다. 없으면 404 — 잘못된 번호이거나 보관 기간(30일)이 지났다. */
+    /** 실행 기록 하나. 202 로 건 작업의 결과를 여기서 본다. 없으면 404 — 잘못된 번호이거나 보관 기간(`dynamodb.syncrun-retention-days`)이 지났다. */
     @GetMapping("/runs/{runId}")
     public Mono<SyncRunResponse> run(@PathVariable String runId) {
         return runs.findById(runId)
