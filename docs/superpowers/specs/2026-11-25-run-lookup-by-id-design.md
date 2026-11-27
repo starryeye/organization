@@ -61,3 +61,43 @@
 ## 7. 검증
 
 머지 전에 메인 세션이 `cleanTest test` 와 `cleanScaleTest scaleTest` 를 차례로 돌린다.
+
+## 8. 결과 (구현 후 기록)
+
+구현은 서브에이전트 방식(2026-11-27)이다. 과제 2개마다 구현자와 검토자를 따로 띄웠고, 끝에 브랜치 전체를 한 번 검토한 뒤 수정 물결 하나를 거쳤다.
+
+### 8.1 머지 전 검증
+
+| 무엇 | 트리 | 결과 |
+|---|---|---|
+| `cleanTest test` | `fc982f8`(코드) | 통과 2,724건(실패·오류·건너뜀 0, 6분 41초). 직전 main 2,716건에 새 시험 8건(`KeysTest` 2·저장소 5·app-ldap 컨트롤러 1) |
+| `cleanScaleTest scaleTest` | `fc982f8`(코드) | 통과 89건(실패·오류·건너뜀 0, 16분 47초) |
+| `:storage-dynamodb:test` | `f7f86a2` | 통과 — 마지막 수정은 Javadoc·import 순서·시험 하나의 시각 값·문서뿐이다. 바뀐 시험(마이크로초 시각)이 컴파일된 것을 확인했다 |
+| `cleanTest test` | `f7f86a2` | 통과 2,724건(실패·오류·건너뜀 0, 6분 28초) — 최종 트리. `scaleTest` 는 다시 돌리지 않았다(수정이 제품 코드·규모 시험 소스를 바꾸지 않는다) |
+| `:storage-dynamodb:javadoc` | `f7f86a2` | 오류 1 — 이 브랜치 전부터 있던 `Keys` 의 `{@link #findRecent}`(다른 클래스의 메서드를 가리킨다). 시험 빌드에는 Javadoc 이 들지 않는다. 8.5 |
+
+### 8.2 바뀐 곳
+
+| 커밋 | 내용 |
+|---|---|
+| `fc982f8` | storage-dynamodb — `Keys.runId`·`Keys.runIdStartedAt`(I1·I2·I5), `start` 가 시계를 한 번 읽어 id 와 `startedAt` 에 쓴다, `findById` 가 GetItem 한 번(모양이 다르면 DynamoDB 를 부르지 않는다). core 포트 Javadoc, 두 앱 컨트롤러 주석. 시험: 마이크로초 시각의 SK 대칭, 모양이 다른 id 여덟 가지, 석 달 전 기록(보관 365일), GetItem 한 번만(호출을 세는 프록시), 시각이 같고 UUID 가 다른 id, 모양이 다르면 호출 0회, app-ldap 의 점이 든 경로 변수 |
+| `4616b2a` | README, 온보딩 02·04·05·07·08·09·10·11·13·15(기준 커밋 `fc982f8`) — id 모양, 단건 조회는 보관 기간 전체·목록은 두 달, 예시 runId 를 새 모양으로(시각 부분은 그 예시의 `startedAt`), 13 §6.6 을 고친 항목으로, 15 에 I1~I6 |
+| `f7f86a2` | 최종 리뷰 반영 — 11 의 읽기 비용 문장을 `findRecent` 로, 그 Javadoc 에 `LastSuccessGauge` 문장을 되살림, `Keys` Javadoc 둘, import 순서, 석 달 전 시험의 시각을 마이크로초로, 15 의 계획 수, 09 의 202 직후 404, README 의 단건 조회 표현 |
+
+### 8.3 구현 중 판정
+
+- **app-ldap 의 점이 든 id 시험은 바꾸기 전에도 통과한다.** WebFlux 는 기본으로 경로 변수의 확장자를 자르지 않는다. 새 모양이 기대는 경계를 못박는 시험이라 받아들였다(§4 는 관리 API 새 시험을 두지 않는다고 했지만 계획의 검토 초점이 더했다). app-scim 은 E2E(`SyncJobClient` 의 URI 템플릿)가 같은 길을 지난다.
+- **문서 과제의 범위를 계획의 파일 목록보다 넓혔다.** 계획은 04·09·10·11·13·15 만 짚었지만 README(§5 가 고치라고 했다), 용어집 02 의 `runId`(UUID), 04 속성 표, 09·10 의 두 달 문장, 그리고 05·07·08·09·04 의 응답 예시가 UUID 만인 id 를 싣고 있었다. 그 예시를 GET 에 넣으면 새 `findById` 가 404 다(I2·I4). 최종 리뷰가 옳다고 보았다.
+- **`findRunning`·죽은 기록 닫기·`sync_last_success` 의 두 달 문장은 그대로 두었다**(I3).
+
+### 8.4 최종 리뷰와 수정
+
+최종 리뷰(브랜치 전체)는 "고치면 머지"였다. Critical 0. Important 1 — 11 §3.2(app-ldap)의 읽기 비용 문장이 이제 GetItem 한 번인 `findById` 를 비용 후보로, 지워진 주석을 근거로 가리켰다. 과제 1 이 `findById` Javadoc 의 `LastSuccessGauge` 문장을 `findRecent` 로 옮기지 않고 지운 것이 원인이다(계획에서 벗어남). Minor 가운데 `Keys` Javadoc 둘(`auditRecordKey` 의 "runId 는 UUID", `runIdStartedAt` 의 null 표현), import 순서, 석 달 전 시험의 마이크로초 시각, 15 의 계획 수(49 → 51), 09 의 202 직후 404, README 의 `GET /admin/sync/runs/{runId}` 표현을 함께 고쳤다(`f7f86a2`). 재검토는 여덟 가지 모두 반영, 새로 깨진 것 없음이었다.
+
+### 8.5 남긴 것
+
+- **`Keys` 의 `{@link #findRecent}` 가 Javadoc 오류다**(이 브랜치 전부터, `syncRunPk(YearMonth)` 위). `:storage-dynamodb:javadoc` 이 실패한다. `{@link DynamoDbSyncRunRepository#findRecent}` 로 고치면 된다 — 범위 밖이라 두었다.
+- **15 의 설계 문서 목록에서 2026-11-20 줄이 11-24·11-25 줄 뒤에 있다**(이전부터). "현재(가장 최신)" 꼬리표는 맞는 줄에 있다.
+- **`.as(번호.length() > 60 ? "긴 문자열" : 번호)`** — 계획이 적은 꼴이고 실패 메시지가 1,100자로 터지지 않게 한다. 그대로 둔다.
+- **가짜 저장소(`FakeSyncRunRepository`)는 여전히 UUID 만인 id 를 만든다** — core 는 id 를 해석하지 않는다(I5).
+- §6 의 한계(실제 AWS 미확인, 목록은 두 달, 57자 id, 202 직후의 잠깐 404)는 그대로다.
