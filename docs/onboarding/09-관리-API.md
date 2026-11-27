@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: cdd4fc4 (reactivation-guard, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: fc982f8 (run-lookup-by-id, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -336,7 +336,7 @@ curl -i -X DELETE -H "Authorization: Bearer $TOKEN" "localhost:8082/admin/organi
   "items": [
     {
       "at": "2026-10-25T04:01:12.290Z",
-      "cause": { "source": "LDAP", "kind": "SYNC", "id": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54", "actor": "system:scheduler" },
+      "cause": { "source": "LDAP", "kind": "SYNC", "id": "20261025T040000.015Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54", "actor": "system:scheduler" },
       "created": false,
       "deleted": false,
       "attributes": [ { "name": "displayName", "before": "홍길동", "after": "홍길동(개발)" } ],
@@ -622,7 +622,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync
 
 ```json
 {
-  "runId": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
+  "runId": "20261025T040000.015Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
   "source": "LDAP",
   "trigger": "MANUAL",
   "startedAt": "2026-10-25T04:00:00.015Z",
@@ -669,7 +669,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 
 `GET /admin/sync/runs/{runId}` — 하나. 없으면 404 다. 삭제 가드가 멈춘 회차면 [멈춤 내역](02-용어집.md#멈춤-내역) `guardHold` 를, 재활성 가드가 보류한 회차면 [재활성 보류](02-용어집.md#재활성-보류) 내역 `reactivationHold` 를 싣는다(아래). **목록에는 싣지 않는다** — 멈춘 배포는 매시 `ABORTED` 를 쌓으므로, 목록에서 `ABORTED` 를 보고 그 회차를 연다.
 
-- 둘 다 이번 달과 지난달 파티션만 읽는다. 보관 기간(`dynamodb.syncrun-retention-days`, 기본 30일) 안이어도 그보다 앞선 달의 기록은 찾지 못한다. 404 는 "번호가 틀렸다" 거나 "너무 오래됐다" 다.
+- 목록만 이번 달과 지난달 파티션을 읽는다. 단건은 실행 id 에서 키를 다시 만들어 아이템 하나를 읽으므로(GetItem 한 번, [04 — 실행 기록](04-데이터-모델.md#실행-기록)) 보관 기간(`dynamodb.syncrun-retention-days`, 기본 30일) 안의 기록이면 몇 달 전 것도 찾는다. 404 는 "번호가 틀렸다"(모양이 다른 id 는 저장소를 부르지 않고 404 다) 거나 "보관 기간이 지나 지워졌다" 다.
 - 최종 일관성이다. 방금 닫힌 기록이 아직 `RUNNING` 으로 보일 수 있다.
 - app-scim 의 목록에는 재적재·초기화와 하루 1회 [아카이빙](02-용어집.md#아카이빙)(`ARCHIVE`)이 모두 나온다. 아카이빙이 멈췄는지는 `trigger=ARCHIVE` 인 기록을 본다. SCIM 쓰기 요청은 [회차](02-용어집.md#회차)가 아니므로 기록이 없다.
 
@@ -677,7 +677,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 
 | 칸 | 뜻 |
 |---|---|
-| `runId` | UUID. 감사 이력의 `cause.id` 가 이 값이다 |
+| `runId` | `<UTC 시작 시각>-<UUID>`(예 `20261025T040000.015Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54`). 앞 시각이 `startedAt` 과 같은 순간이라 단건 조회가 키를 다시 만든다. 감사 이력의 `cause.id` 가 이 값이다 |
 | `source` | `LDAP` 또는 `SCIM` |
 | `trigger` | [트리거](02-용어집.md#트리거): `SCHEDULED`, `MANUAL`, `FORCED`, `REBUILD`, `FORCED_REBUILD`, `ARCHIVE`, `RESET` |
 | `startedAt`, `finishedAt` | 시작·끝 시각. `RUNNING` 이면 `finishedAt` 은 `null` |
@@ -693,7 +693,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8082/admin/sync
 
 ```json
 {
-  "runId": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
+  "runId": "20261025T040000.015Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
   "source": "LDAP",
   "trigger": "SCHEDULED",
   "startedAt": "2026-10-25T04:00:00.015Z",

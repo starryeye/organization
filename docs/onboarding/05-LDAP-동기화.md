@@ -1,6 +1,6 @@
 # LDAP 동기화
 
-> 기준 커밋: a91b2ac (reactivation-read-errors, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: fc982f8 (run-lookup-by-id, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델 — 스냅샷 포인터](04-데이터-모델.md#스냅샷-포인터)
 
 이 문서는 app-ldap 의 [동기화](02-용어집.md#동기화) [회차](02-용어집.md#회차) 하나를 처음부터 끝까지 따라간다. LDAP 을 어떻게 읽는지, 읽은 것을 어떻게 [튜플](02-용어집.md#튜플)로 바꾸는지, 무엇을 쓰고 지울지를 어떻게 정하는지, OpenFGA 에 어떤 순서로 쓰는지, 무엇을 DynamoDB 에 남기는지, 그리고 회차가 끝날 수 있는 모든 길을 다룬다.
@@ -89,7 +89,7 @@ POST /admin/sync/full
 Authorization: Bearer <admin.sync 범위의 토큰>
 → 202 Accepted
 {
-  "runId": "9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
+  "runId": "20261025T051203.120Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
   "source": "LDAP",
   "trigger": "MANUAL",
   "startedAt": "2026-10-25T05:12:03.120Z",
