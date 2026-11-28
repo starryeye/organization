@@ -186,7 +186,7 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
     public AccountState readAccount(LdapTemplate template, String employeeId, String externalId) {
         LdapProperties.GroupOfNames config = properties.getGroupOfNames();
         ContextMapper<UserEntry> 매퍼 = userMapper(config, clock.instant());
-        return SingleAccountRead.읽는다(template, properties.getPageSize(),
+        return SingleAccountRead.읽는다(template,
                 config.getUserSearchBase(), LdapDns.절대로(config.getUserSearchBase(), properties.getBaseDn()),
                 properties.getBaseDn(), config.getUserFilter(), config.getUserIdAttribute(), 직원_속성(config),
                 context -> {

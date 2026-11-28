@@ -185,7 +185,7 @@ final class PagedLdapSearch {
         return 처음나온것.values().toArray(String[]::new);
     }
 
-    private static SearchControls controlsOf(LdapQuery query) {
+    static SearchControls controlsOf(LdapQuery query) {
         SearchControls controls = new SearchControls();
         controls.setSearchScope(query.searchScope() == null
                 ? SearchControls.SUBTREE_SCOPE

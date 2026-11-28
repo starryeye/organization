@@ -210,7 +210,7 @@ class DitReadAccountTest extends EmbeddedLdapSupport {
 
     @Test
     @DisplayName("필터 특수 문자는 이스케이프한다 — 괄호는 그 사람을 고르고, 별표는 모두를 고르지 않는다")
-    // 깨뜨릴 변경: filterEncode 를 빼면 p(1) 필터가 깨져 실패하고 * 가 모든 엔트리를 골라 ACTIVE 가 된다
+    // 깨뜨릴 변경: 이 시험은 filterEncode 를 빼도 통과한다(JDK 가 같은 BER 로 보내고 정확한 id 선택이 별표를 ABSENT 로 만든다). 이스케이프 자체는 SingleAccountReadSearchTest 가 지킨다. 여기서는 특수 문자 id 의 판정만 본다
     void 필터_특수_문자는_이스케이프한다() {
         // given
         var strategy = new DitStrategy(설정(), 고정시계);

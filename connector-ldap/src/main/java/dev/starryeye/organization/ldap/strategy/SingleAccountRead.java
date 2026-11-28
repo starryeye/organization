@@ -1,7 +1,11 @@
 package dev.starryeye.organization.ldap.strategy;
 
 import dev.starryeye.organization.core.port.DirectoryAccountSource.AccountState;
+import dev.starryeye.organization.ldap.LdapTemplates;
 import org.springframework.ldap.NameNotFoundException;
+import org.springframework.ldap.PartialResultException;
+import org.springframework.ldap.core.ContextMapperCallbackHandler;
+import javax.naming.directory.SearchControls;
 import org.springframework.ldap.core.ContextMapper;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.query.LdapQuery;
@@ -46,7 +50,7 @@ final class SingleAccountRead {
      * @param externalId     현재상태의 DN. 없으면 null — DN 다시 읽기를 하지 않는다. DN 으로 읽을 수 없는 값도 "베이스 아래가 아님" 으로 둔다
      *                       (정기 읽기가 그런 값을 만들지 않았다)
      */
-    static AccountState 읽는다(LdapTemplate template, int pageSize, String 검색베이스, String 절대_검색베이스, String baseDn,
+    static AccountState 읽는다(LdapTemplate template, String 검색베이스, String 절대_검색베이스, String baseDn,
                             String 사용자_필터, String 식별_속성, String[] 요청_속성,
                             ContextMapper<Candidate> 매퍼, String employeeId, String externalId) {
         List<Candidate> 고른것 = List.of();
@@ -57,7 +61,8 @@ final class SingleAccountRead {
                     .attributes(요청_속성)
                     .filter(AND(사용자_필터, 값_필터.get()));
             // 검색 베이스가 없으면(NameNotFoundException) 설정 오류다 — 삼키지 않고 올린다
-            고른것 = 고른다(PagedLdapSearch.search(template, 쿼리, pageSize, 매퍼), employeeId);
+            // 참조(referral)는 따라가지 않는다 — 정기 읽기가 건너뛰는 부분과 같다. 엔트리가 0개여도 그대로 DN 다시 읽기로 간다
+            고른것 = 고른다(검색한다(template, 쿼리, 매퍼).엔트리, employeeId);
         }
         if (고른것.isEmpty() && 아래인가(externalId, 절대_검색베이스)) {
             LdapQuery 쿼리 = LdapQueryBuilder.query()
@@ -66,7 +71,13 @@ final class SingleAccountRead {
                     .attributes(요청_속성)
                     .filter(사용자_필터);
             try {
-                고른것 = 고른다(PagedLdapSearch.search(template, 쿼리, pageSize, 매퍼), employeeId);
+                검색_결과 결과 = 검색한다(template, 쿼리, 매퍼);
+                if (결과.참조를_만났다 && 결과.엔트리.isEmpty()) {
+                    // 그 엔트리는 다른 서버에 있다 — 없음으로 읽으면 활성인 사람을 거둔다. 값(id·DN)은 싣지 않는다
+                    throw new DirectoryDataException("직원 DN 을 다시 읽는 검색이 엔트리 없이 referral 만 받았다 — 그 엔트리는 다른 서버에 있어 "
+                            + "없음으로 판정하지 않는다. 직원 검색 베이스가 이 DC 의 이름 공간 안인지 확인하라");
+                }
+                고른것 = 고른다(결과.엔트리, employeeId);
             } catch (NameNotFoundException e) {
                 // 그 DN 의 엔트리가 없다(결과 32) — 엔트리를 지운 퇴사자가 늘 이 길을 탄다. 고른 것이 없다
                 고른것 = List.of();
@@ -76,6 +87,30 @@ final class SingleAccountRead {
             return AccountState.ABSENT;
         }
         return 고른것.stream().anyMatch(Candidate::active) ? AccountState.ACTIVE : AccountState.BLOCKED;
+    }
+
+    private record 검색_결과(List<Candidate> 엔트리, boolean 참조를_만났다) {
+    }
+
+    /**
+     * 한 사람 읽기의 검색 — 페이징 없이 커넥션 하나에서 한 번 묻는다(한 사람이라 한 페이지다). {@link PagedLdapSearch#search} 를 쓰지 않는 까닭: 그쪽은
+     * 필터·DN 을 로그·예외 문구에 싣는데 여기서는 그 값이 직원 id·DN 이고, 엔트리 0개 + referral 을 오류로 보는데 한 사람 검색에서 0건은 정상이다.
+     * referral({@code PartialResultException})은 따라가지 않고 그 전까지 받은 엔트리를 남긴다. 로그는 남기지 않는다.
+     */
+    private static 검색_결과 검색한다(LdapTemplate template, LdapQuery query, ContextMapper<Candidate> 매퍼) {
+        String base = query.base().toString();
+        String filter = query.filter().encode();
+        SearchControls controls = PagedLdapSearch.controlsOf(query);
+        ContextMapperCallbackHandler<Candidate> handler = new ContextMapperCallbackHandler<>(매퍼);
+        boolean 참조 = LdapTemplates.한_커넥션에서(template, 한커넥션 -> {
+            try {
+                한커넥션.search(base, filter, controls, handler);
+                return false;
+            } catch (PartialResultException e) {
+                return true;
+            }
+        });
+        return new 검색_결과(handler.getList(), 참조);
     }
 
     /** 정규화한 id 가 요청 id 와 정확히 같은 엔트리만. 건너뛸 엔트리는 뺀다 */

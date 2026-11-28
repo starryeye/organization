@@ -180,7 +180,7 @@ public class DitStrategy implements LdapMappingStrategy {
     public AccountState readAccount(LdapTemplate template, String employeeId, String externalId) {
         LdapProperties.Dit config = properties.getDit();
         ContextMapper<UserEntry> 매퍼 = userMapper(config, clock.instant());
-        return SingleAccountRead.읽는다(template, properties.getPageSize(),
+        return SingleAccountRead.읽는다(template,
                 config.getRootDn(), LdapDns.절대로(config.getRootDn(), properties.getBaseDn()),
                 properties.getBaseDn(), config.getUserFilter(), config.getUserIdAttribute(), 직원_속성(config),
                 context -> {
