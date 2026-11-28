@@ -5,6 +5,8 @@ import dev.starryeye.organization.core.model.RevocationMarks;
 import dev.starryeye.organization.core.model.SnapshotMeta;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
+import dev.starryeye.organization.core.port.BaselineMovedException;
+import dev.starryeye.organization.core.port.RevocationMarksFullException;
 import dev.starryeye.organization.core.port.SnapshotIntegrityException;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +14,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
@@ -21,6 +24,7 @@ import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -77,6 +81,10 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     private static final String SNAPSHOT_ID = "snapshotId";
     private static final String RETAIN_UNTIL = "retainUntil";
     private static final String WRITING_SINCE = "writingSince";
+    /** 포인터 줄의 즉시 회수 표시 — OpenFGA 에서 지운 줄(String Set, 원소는 {@link Keys#tupleSk}). */
+    private static final String REVOKED_GONE = "revokedGone";
+    /** 포인터 줄의 즉시 회수 표시 — 지우려 했으나 결과를 모르는 줄. */
+    private static final String REVOKED_UNKNOWN = "revokedUnknown";
 
     /** 본문(B) 묶음 계열 — 정렬키 {@code CHUNK#}, 메타의 {@code tupleCount}·{@code chunkCount}. */
     private static final ChunkSeries BODY = new ChunkSeries("", TUPLE_COUNT, CHUNK_COUNT,
@@ -174,7 +182,10 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         return putItem(item);
     }
 
-    /** 줄을 통째로 새로 써 "기록 중" 칸도 지운다(설계 2026-09-30 §4.1). */
+    /**
+     * 줄을 통째로 새로 써 "기록 중" 칸도 지운다(설계 2026-09-30 §4.1). 즉시 회수 표시 두 칸({@code revokedGone}·{@code revokedUnknown})도
+     * 함께 지워진다 — 새 기준선은 이미 그 표시를 반영해 만든 것이다(설계 2026-11-28 V6). 반대로 {@link #markWriting} 은 UpdateItem 이라 표시를 남긴다.
+     */
     private Mono<Void> writePointer(String snapshotId) {
         Map<String, AttributeValue> item = new HashMap<>();
         item.put(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER));
@@ -183,13 +194,47 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         return putItem(item);
     }
 
+    /**
+     * 포인터 줄을 <b>한 번만</b> 읽어 스냅샷 번호와 즉시 회수 표시 두 칸을 같은 아이템에서 꺼낸다(설계 2026-11-28 V14) — 두 번 읽으면
+     * 그 사이 기준선이 바뀌어 스냅샷과 표시가 서로 다른 기준선의 것일 수 있다. 가져오기 실패(SDK)는 감싸지 않고, 표시를 푸는 동안의 실패만
+     * {@link SnapshotIntegrityException} 이다(E1·E3).
+     */
     @Override
     public Mono<MarkedSnapshot> findLatestMarked() {
-        // 과제 2 가 표시를 같은 포인터 읽기에서 읽도록 바꾼다 — 그때까지 표시는 없다
-        return latestId().flatMap(id -> findById(id)
-                .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
-                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id))))
-                .map(snapshot -> new MarkedSnapshot(snapshot, RevocationMarks.NONE)));
+        return 포인터().flatMap(item -> {
+            String id = Attrs.str(item, SNAPSHOT_ID);
+            if (id == null) {
+                return Mono.empty();
+            }
+            return findById(id)
+                    .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
+                            "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id))))
+                    .map(snapshot -> new MarkedSnapshot(snapshot, 표시를_푼다(item)));
+        });
+    }
+
+    private static RevocationMarks 표시를_푼다(Map<String, AttributeValue> item) {
+        try {
+            return new RevocationMarks(줄들로_푼다(item, REVOKED_GONE), 줄들로_푼다(item, REVOKED_UNKNOWN));
+        } catch (RuntimeException e) {
+            throw new SnapshotIntegrityException(
+                    "스냅샷 포인터의 즉시 회수 표시를 풀 수 없습니다 — POST /admin/sync/rebuild 로 복구하세요");
+        }
+    }
+
+    private static Set<RelationTuple> 줄들로_푼다(Map<String, AttributeValue> item, String attribute) {
+        AttributeValue value = item.get(attribute);
+        if (value == null) {
+            return Set.of();
+        }
+        Set<RelationTuple> tuples = new LinkedHashSet<>();
+        for (String sk : value.ss()) {
+            if (!Keys.isTupleSk(sk)) {
+                throw new IllegalArgumentException("튜플 정렬키가 아니다");
+            }
+            tuples.add(Keys.parseTupleSk(sk));
+        }
+        return tuples;
     }
 
     /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono. */
@@ -235,14 +280,106 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
                 .defaultIfEmpty(new BaselinePointer(BaselineState.NONE, null));
     }
 
+    /**
+     * 지우려는 줄을 포인터 줄의 {@code revokedUnknown} 칸에 더한다(설계 2026-11-28 V6·V8·V9). 빈 집합은 아무것도 쓰지 않는다(번호도 보지 않는다).
+     * 두 칸 원소의 UTF-8 바이트 합(gone + (unknown ∪ 새 줄))이 {@link RevocationMarks#MAX_BYTES} 를 넘으면 아무것도 더하지 않고
+     * {@link RevocationMarksFullException} 이다 — 같으면 허용한다. 쓰기는 스냅샷 번호가 같고 "기록 중"이 아닐 때만 하며 어긋나면
+     * {@link BaselineMovedException} 이다. 한도 검사는 읽은 뒤 쓰기라 동시 쓰기 사이에서는 한도를 약간 넘을 수 있으나, 쓰기는 회수 락 안의
+     * 한 사람씩이다.
+     */
     @Override
     public Mono<Void> markRevoking(String snapshotId, Set<RelationTuple> tuples) {
-        return Mono.error(new UnsupportedOperationException("과제 2"));
+        if (tuples.isEmpty()) {
+            return Mono.empty();
+        }
+        Set<String> added = 원소들(tuples);
+        return 포인터().defaultIfEmpty(Map.of())
+                .doOnNext(item -> {
+                    Set<String> unknown = new LinkedHashSet<>(문자열들(item, REVOKED_UNKNOWN));
+                    unknown.addAll(added);
+                    if (바이트_합(문자열들(item, REVOKED_GONE)) + 바이트_합(unknown) > RevocationMarks.MAX_BYTES) {
+                        throw new RevocationMarksFullException();
+                    }
+                })
+                .then(Mono.defer(() -> 표시를_고친다(snapshotId,
+                        "ADD #unknown :s",
+                        Map.of("#unknown", REVOKED_UNKNOWN),
+                        Map.of(":s", 문자열_집합(added)))));
     }
 
+    /**
+     * 한 UpdateItem 에서 지운 줄({@code gone})은 {@code revokedGone} 에 더하고, 지운 줄과 버린 줄({@code dropped})은
+     * {@code revokedUnknown} 에서 뺀다(설계 2026-11-28 V8). 두 칸은 서로 다른 속성이라 ADD 와 DELETE 를 함께 쓸 수 있다. 빈 String Set 은
+     * 보내지 않는다(DynamoDB 가 거절한다). 빼서 비는 칸은 DynamoDB 가 속성째 지운다. 빈 집합 둘이면 아무것도 쓰지 않는다.
+     * 조건은 {@link #markRevoking} 과 같다.
+     */
     @Override
     public Mono<Void> settleRevocation(String snapshotId, Set<RelationTuple> gone, Set<RelationTuple> dropped) {
-        return Mono.error(new UnsupportedOperationException("과제 2"));
+        Set<String> goneSks = 원소들(gone);
+        Set<String> removed = new LinkedHashSet<>(goneSks);
+        removed.addAll(원소들(dropped));
+        if (goneSks.isEmpty() && removed.isEmpty()) {
+            return Mono.empty();
+        }
+        List<String> clauses = new ArrayList<>();
+        Map<String, String> names = new HashMap<>();
+        Map<String, AttributeValue> values = new HashMap<>();
+        if (!goneSks.isEmpty()) {
+            clauses.add("ADD #gone :gone");
+            names.put("#gone", REVOKED_GONE);
+            values.put(":gone", 문자열_집합(goneSks));
+        }
+        if (!removed.isEmpty()) {
+            clauses.add("DELETE #unknown :drop");
+            names.put("#unknown", REVOKED_UNKNOWN);
+            values.put(":drop", 문자열_집합(removed));
+        }
+        return 표시를_고친다(snapshotId, String.join(" ", clauses), names, values);
+    }
+
+    private Mono<Void> 표시를_고친다(String snapshotId, String updateExpression,
+                                  Map<String, String> names, Map<String, AttributeValue> values) {
+        Map<String, String> allNames = new HashMap<>(names);
+        allNames.put("#snapshotId", SNAPSHOT_ID);
+        allNames.put("#writingSince", WRITING_SINCE);
+        Map<String, AttributeValue> allValues = new HashMap<>(values);
+        allValues.put(":id", Attrs.s(snapshotId));
+        return Mono.fromFuture(() -> client.updateItem(UpdateItemRequest.builder()
+                        .tableName(properties.getTableName())
+                        .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                        .updateExpression(updateExpression)
+                        .conditionExpression("#snapshotId = :id AND attribute_not_exists(#writingSince)")
+                        .expressionAttributeNames(allNames)
+                        .expressionAttributeValues(allValues)
+                        .build()))
+                .onErrorMap(ConditionalCheckFailedException.class,
+                        e -> new BaselineMovedException("포인터의 기준선이 읽은 것과 다릅니다"))
+                .then();
+    }
+
+    private static Set<String> 원소들(Set<RelationTuple> tuples) {
+        Set<String> sks = new LinkedHashSet<>();
+        for (RelationTuple tuple : tuples) {
+            sks.add(Keys.tupleSk(tuple));
+        }
+        return sks;
+    }
+
+    private static Set<String> 문자열들(Map<String, AttributeValue> item, String attribute) {
+        AttributeValue value = item.get(attribute);
+        return value == null ? Set.of() : new LinkedHashSet<>(value.ss());
+    }
+
+    private static long 바이트_합(Set<String> sks) {
+        long total = 0;
+        for (String sk : sks) {
+            total += sk.getBytes(StandardCharsets.UTF_8).length;
+        }
+        return total;
+    }
+
+    private static AttributeValue 문자열_집합(Set<String> sks) {
+        return AttributeValue.builder().ss(sks).build();
     }
 
     @Override
