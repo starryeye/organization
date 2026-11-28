@@ -151,7 +151,8 @@ public class ImmediateRevocationUseCase {
         return snapshots.settleRevocation(표시한_번호.get(), 지운_줄, 빠진_줄)
                 .thenReturn("")
                 .onErrorResume(error -> {
-                    log.warn("즉시 회수 표시를 정리하지 못했습니다 — 지운 줄 {}건, 확정 실패 {}건", 지운_줄.size(), 빠진_줄.size());
+                    log.warn("즉시 회수 표시를 정리하지 못했습니다 — 지운 줄 {}건, 확정 실패 {}건, 원인 {}",
+                            지운_줄.size(), 빠진_줄.size(), error.getClass().getSimpleName());
                     return Mono.just(정리_실패_꼬리);
                 });
     }

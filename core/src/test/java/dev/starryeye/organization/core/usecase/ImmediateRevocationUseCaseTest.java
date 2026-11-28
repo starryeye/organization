@@ -420,7 +420,7 @@ class ImmediateRevocationUseCaseTest {
 
     @Test
     @DisplayName("정리에 실패하면 결론은 그대로이고 메시지 끝에 알린다")
-    // 깨뜨릴 변경: 정리 실패가 회차를 FAILED 로 만들거나 꼬리를 빠뜨리거나 WARN 에 줄·직원을 싣는다
+    // 깨뜨릴 변경: 정리 실패가 회차를 FAILED 로 만들거나 꼬리를 빠뜨리거나 WARN 에 원인 클래스 이름을 빼거나 줄·직원·예외 문구를 싣는다
     void 정리에_실패하면_결론은_그대로이고_메시지_끝에_알린다() {
         // given
         기준선을_심는다("snap-1");
@@ -434,7 +434,8 @@ class ImmediateRevocationUseCaseTest {
         assertThat(run.deletedCount()).isEqualTo(2);
         assertThat(run.message()).isEqualTo(막힘 + 정리_실패_꼬리);
         assertThat(경고들()).singleElement().satisfies(경고 ->
-                assertThat(경고).contains("2").doesNotContain(직원).doesNotContain("direct_member"));
+                assertThat(경고).contains("2").contains("IllegalStateException")
+                        .doesNotContain(직원).doesNotContain("direct_member").doesNotContain("저장소 오류"));
     }
 
     @Test

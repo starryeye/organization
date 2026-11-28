@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 한 사람 즉시 회수가 쓰는 LDAP 읽기(설계 2026-11-28 V2·§5.2 "주소 넘김과 상한").
@@ -32,7 +33,7 @@ import java.util.concurrent.TimeoutException;
  * {@code ldap.read-timeout} 까지 {@code boundedElastic} 스레드에 남는다(§5.2). 같은 이유로 {@code ldap.read-timeout} 이 주소 상한보다 짧으면
  * 그 시간 초과는 JNDI 가 먼저 내므로 일시 장애 신호가 아니라 500 쪽이다.
  *
- * <p>예외 메시지·로그에 직원 id·DN 을 싣지 않는다. 넘길 때의 WARN 은 설정 값인 시작 주소만 적는다.
+ * <p>예외 메시지·로그에 직원 id·DN 을 싣지 않는다. WARN 은 설정 값인 시작 주소·시도한 주소 수·원인의 클래스 이름만 적는다.
  */
 @Slf4j
 public class LdapDirectoryAccountSource implements DirectoryAccountSource {
@@ -62,14 +63,21 @@ public class LdapDirectoryAccountSource implements DirectoryAccountSource {
 
     @Override
     public Mono<AccountState> accountState(String employeeId, String externalId) {
-        return 시도한다(0, employeeId, externalId)
+        AtomicInteger 시도한_주소 = new AtomicInteger();
+        return 시도한다(0, employeeId, externalId, 시도한_주소)
                 .timeout(전체)
-                .onErrorMap(TimeoutException.class,
-                        e -> new DirectoryUnavailableException("디렉터리 읽기가 상한 안에 끝나지 않았습니다", e));
+                .onErrorMap(TimeoutException.class, e -> {
+                    log.warn("한 사람 읽기가 일시 장애로 끝났다 — 시도한 주소 {}개, 마지막 원인 {}",
+                            시도한_주소.get(), e.getClass().getSimpleName());
+                    return new DirectoryUnavailableException("디렉터리 읽기가 상한 안에 끝나지 않았습니다", e);
+                });
     }
 
-    private Mono<AccountState> 시도한다(int k, String employeeId, String externalId) {
-        return Mono.fromCallable(() -> strategy.readAccount(템플릿들.get(k), employeeId, externalId))
+    private Mono<AccountState> 시도한다(int k, String employeeId, String externalId, AtomicInteger 시도한_주소) {
+        return Mono.fromCallable(() -> {
+                    시도한_주소.incrementAndGet();
+                    return strategy.readAccount(템플릿들.get(k), employeeId, externalId);
+                })
                 .subscribeOn(Schedulers.boundedElastic())
                 .timeout(주소당)
                 .onErrorResume(e -> {
@@ -78,12 +86,16 @@ public class LdapDirectoryAccountSource implements DirectoryAccountSource {
                                 "디렉터리에서 직원을 읽지 못했습니다(" + e.getClass().getSimpleName() + ")", e));
                     }
                     if (k + 1 >= 템플릿들.size()) {
+                        log.warn("한 사람 읽기가 일시 장애로 끝났다 — 시도한 주소 {}개, 마지막 원인 {}",
+                                k + 1, e.getClass().getSimpleName());
                         return Mono.error(new DirectoryUnavailableException(
                                 "디렉터리의 모든 주소가 일시 장애로 답하지 않았습니다", e));
                     }
-                    log.warn("한 사람 읽기를 다음 주소로 넘긴다 — 시작 주소 {}",
+                    log.warn("한 사람 읽기를 다음 주소로 넘긴다 — 실패한 시작 주소 {} ({}), 다음 시작 주소 {}",
+                            LdapUrls.첫_주소(템플릿들.get(k).getContextSource()).orElse("?"),
+                            e.getClass().getSimpleName(),
                             LdapUrls.첫_주소(템플릿들.get(k + 1).getContextSource()).orElse("?"));
-                    return 시도한다(k + 1, employeeId, externalId);
+                    return 시도한다(k + 1, employeeId, externalId, 시도한_주소);
                 });
     }
 

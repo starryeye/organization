@@ -217,15 +217,22 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
         try {
             return new RevocationMarks(줄들로_푼다(item, REVOKED_GONE), 줄들로_푼다(item, REVOKED_UNKNOWN));
         } catch (RuntimeException e) {
-            throw new SnapshotIntegrityException(
-                    "스냅샷 포인터의 즉시 회수 표시를 풀 수 없습니다 — POST /admin/sync/rebuild 로 복구하세요");
+            throw 표시를_풀_수_없다();
         }
+    }
+
+    private static SnapshotIntegrityException 표시를_풀_수_없다() {
+        return new SnapshotIntegrityException(
+                "스냅샷 포인터의 즉시 회수 표시를 풀 수 없습니다 — POST /admin/sync/rebuild 로 복구하세요");
     }
 
     private static Set<RelationTuple> 줄들로_푼다(Map<String, AttributeValue> item, String attribute) {
         AttributeValue value = item.get(attribute);
         if (value == null) {
             return Set.of();
+        }
+        if (!value.hasSs()) {
+            throw new IllegalArgumentException("String Set 이 아니다");
         }
         Set<RelationTuple> tuples = new LinkedHashSet<>();
         for (String sk : value.ss()) {
@@ -367,7 +374,13 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
 
     private static Set<String> 문자열들(Map<String, AttributeValue> item, String attribute) {
         AttributeValue value = item.get(attribute);
-        return value == null ? Set.of() : new LinkedHashSet<>(value.ss());
+        if (value == null) {
+            return Set.of();
+        }
+        if (!value.hasSs()) {
+            throw 표시를_풀_수_없다();
+        }
+        return new LinkedHashSet<>(value.ss());
     }
 
     private static long 바이트_합(Set<String> sks) {

@@ -40,4 +40,29 @@ class SingleAccountReadTest {
         // then
         assertThat(필터).contains("(uid=a\\2a\\28b\\29\\5cc)");
     }
+
+    @Test
+    @DisplayName("괄호 없는 사용자 필터는 괄호로 감싸 AND 로 잇는다")
+    // 깨뜨릴 변경: 괄호로 시작하지 않는 필터를 감싸지 않으면 (&objectClass=inetOrgPerson(uid=kim)) 로 깨져 이 시험이 깨진다
+    void 괄호_없는_사용자_필터는_감싸서_잇는다() {
+        // given
+        var 값_필터 = "(uid=kim)";
+
+        // when
+        var 필터 = SingleAccountRead.AND("objectClass=inetOrgPerson", 값_필터);
+
+        // then
+        assertThat(필터).isEqualTo("(&(objectClass=inetOrgPerson)(uid=kim))");
+    }
+
+    @Test
+    @DisplayName("괄호가 있는 사용자 필터는 다시 감싸지 않는다")
+    // 깨뜨릴 변경: 항상 감싸면 ((objectClass=inetOrgPerson)) 로 겹괄호가 되어 이 시험이 깨진다
+    void 괄호가_있는_사용자_필터는_그대로_잇는다() {
+        // given, when
+        var 필터 = SingleAccountRead.AND("(objectClass=inetOrgPerson)", "(uid=kim)");
+
+        // then
+        assertThat(필터).isEqualTo("(&(objectClass=inetOrgPerson)(uid=kim))");
+    }
 }

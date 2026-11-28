@@ -240,7 +240,7 @@ public class FullSyncUseCase {
                 ReactivationCheck check = 재활성을_판정한다(재활성_가드, 직전_I, directory);
                 return 재활성_보류를_적는다(훑어_맞춘다(check.picture(), 매핑한다(check.picture()), 가드, 기록), check);
             });
-            // 최신 스냅샷을 한 번 읽어 I 로 판정하고, 같은 스냅샷의 B·U 를 비교의 기준선으로 쓴다. 못 읽으면 지금처럼 실패한다
+            // 최신 스냅샷을 한 번 읽어 I 로 판정하고, 같은 스냅샷의 B′·U′(즉시 회수 표시를 반영한 기준선)를 비교의 기준선으로 쓴다. 못 읽으면 지금처럼 실패한다
             case PRESENT -> 기준_스냅샷().flatMap(직전 -> {
                 ReactivationCheck check = 재활성을_판정한다(재활성_가드, 직전.snapshot().inactive(), directory);
                 return 재활성_보류를_적는다(비교해_맞춘다(check.picture(), 매핑한다(check.picture()), 기준선.of(직전), 가드,
@@ -297,7 +297,7 @@ public class FullSyncUseCase {
 
     /**
      * 기준선과 비교해 맞춘다. {@code directory} 는 재활성 판정이 정한 그림(보류면 그림′)이다 — 삭제 가드의 비활성 회수·멈춤 내역·현재상태 교체·새 스냅샷의
-     * I 가 모두 이것을 본다(설계 2026-11-24 R4·R5). {@code baseline} 은 판정에 쓴 바로 그 스냅샷의 B·U 다(§3.3 — 스냅샷을 한 번만 읽는다).
+     * I 가 모두 이것을 본다(설계 2026-11-24 R4·R5). {@code baseline} 은 판정에 쓴 바로 그 스냅샷의 B′·U′(즉시 회수 표시를 반영한 기준선)다(§3.3 — 스냅샷을 한 번만 읽는다).
      */
     private Mono<Mono<SyncOutcome>> 비교해_맞춘다(DirectorySnapshot directory, Set<RelationTuple> desired, 기준선 baseline,
                                                 DeletionGuard 가드, AuditChanges 기록) {

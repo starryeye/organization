@@ -150,7 +150,7 @@ final class SingleAccountRead {
      * {@code (&<사용자 필터>(<식별>=<값>))}. 정기 읽기는 필터를 그대로 넘겨 괄호 없는 필터도 JNDI 가 받아 주지만 AND 로 이으려면 괄호가
      * 있어야 하므로 괄호로 시작하지 않으면 감싼다(계획 P8).
      */
-    private static String AND(String 사용자_필터, String 값_필터) {
+    static String AND(String 사용자_필터, String 값_필터) {
         String 필터 = 사용자_필터.strip();
         if (!필터.startsWith("(")) {
             필터 = "(" + 필터 + ")";

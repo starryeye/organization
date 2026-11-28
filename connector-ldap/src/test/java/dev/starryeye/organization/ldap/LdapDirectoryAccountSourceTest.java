@@ -1,5 +1,9 @@
 package dev.starryeye.organization.ldap;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.unboundid.ldap.listener.InMemoryDirectoryServer;
 import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
 import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchRequest;
@@ -14,8 +18,10 @@ import dev.starryeye.organization.core.port.DirectoryUnavailableException;
 import dev.starryeye.organization.ldap.fixture.EmbeddedLdapListener;
 import dev.starryeye.organization.ldap.strategy.LdapMappingStrategy;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.ldap.core.LdapTemplate;
 import org.springframework.ldap.core.support.LdapContextSource;
 
@@ -57,11 +63,41 @@ class LdapDirectoryAccountSourceTest {
             sn: Kim
             """;
 
+    private static final String 끝남_문구 = "한 사람 읽기가 일시 장애로 끝났다";
+    private static final String 넘김_문구 = "한 사람 읽기를 다음 주소로 넘긴다";
+
     private final List<InMemoryDirectoryServer> 서버들 = new ArrayList<>();
+    private ListAppender<ILoggingEvent> 로그;
+    private Level 이전_수준;
+
+    @BeforeEach
+    void 로그를_잡는다() {
+        로그 = new ListAppender<>();
+        로그.start();
+        Logger logger = (Logger) LoggerFactory.getLogger("dev.starryeye.organization.ldap");
+        이전_수준 = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
+        logger.addAppender(로그);
+    }
 
     @AfterEach
     void 서버를_내린다() {
+        Logger logger = (Logger) LoggerFactory.getLogger("dev.starryeye.organization.ldap");
+        logger.detachAppender(로그);
+        logger.setLevel(이전_수준);
+        로그.stop();
         서버들.forEach(서버 -> 서버.shutDown(true));
+    }
+
+    private List<String> 경고들() {
+        return 로그.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+    }
+
+    private List<String> 경고들(String 문구) {
+        return 경고들().stream().filter(message -> message.contains(문구)).toList();
     }
 
     @Test
@@ -100,7 +136,7 @@ class LdapDirectoryAccountSourceTest {
 
     @Test
     @DisplayName("모든 주소가 바쁘면 DirectoryUnavailableException 이다")
-    // 깨뜨릴 변경: 다 쓴 뒤 일시 장애를 DirectoryReadException 으로 바꾸면 이 시험이 깨진다
+    // 깨뜨릴 변경: 다 쓴 뒤 일시 장애를 DirectoryReadException 으로 바꾸거나, 끝났다는 WARN(주소 수·원인 클래스)·넘길 때 실패한 주소와 원인을 빼거나, 직원 id·DN 을 로그에 실으면 이 시험이 깨진다
     void 모든_주소가_바쁘면_DirectoryUnavailableException() throws Exception {
         // given
         var A = 서버(BIND_PASSWORD, new 검색을_바쁘게_거절한다());
@@ -110,16 +146,21 @@ class LdapDirectoryAccountSourceTest {
         // when, then
         assertThatThrownBy(() -> source.accountState("kim", KIM_DN).block(Duration.ofSeconds(30)))
                 .isInstanceOf(DirectoryUnavailableException.class);
+        assertThat(경고들(끝남_문구)).singleElement().satisfies(경고 ->
+                assertThat(경고).contains("시도한 주소 2개").contains("ServiceUnavailableException"));
+        assertThat(경고들(넘김_문구)).singleElement().satisfies(경고 ->
+                assertThat(경고).contains(주소(A)).contains(주소(B)).contains("ServiceUnavailableException"));
+        assertThat(경고들()).allSatisfy(경고 -> assertThat(경고).doesNotContain("kim").doesNotContain(KIM_DN));
     }
 
     @Test
     @DisplayName("주소 상한을 넘으면 다음 주소로 넘긴다")
-    // 깨뜨릴 변경: 시도마다 건 timeout(주소당) 을 빼면 A 가 2초 뒤 제 답(BLOCKED)을 내 이 시험이 깨진다
+    // 깨뜨릴 변경: 시도마다 건 timeout(주소당) 을 빼면 A 가 5초 뒤 제 답(BLOCKED)을 내 이 시험이 깨진다
     void 주소_상한을_넘으면_다음_주소로_넘긴다() throws Exception {
-        // given — A 는 느리고 BLOCKED 로 답하고, B 는 ACTIVE 로 답한다
-        var A = 잠금_서버(new 검색에서_잔다(Duration.ofSeconds(2)));
+        // given — A 는 5초를 자고 나면 BLOCKED 로 답하고, B 는 ACTIVE 로 답한다. 주소 상한은 1초라 B 는 넉넉하다
+        var A = 잠금_서버(new 검색에서_잔다(Duration.ofSeconds(5)));
         var B = 서버(BIND_PASSWORD);
-        var source = 원천(List.of(주소(A), 주소(B)), Duration.ofSeconds(30), Duration.ofMillis(200));
+        var source = 원천(List.of(주소(A), 주소(B)), Duration.ofSeconds(10), Duration.ofSeconds(1));
 
         // when
         var 상태 = source.accountState("kim", KIM_DN).block(Duration.ofSeconds(30));
@@ -130,17 +171,20 @@ class LdapDirectoryAccountSourceTest {
 
     @Test
     @DisplayName("전체 상한을 넘으면 DirectoryUnavailableException 이다")
-    // 깨뜨릴 변경: 바깥 timeout(전체) 을 빼면 A·B 가 주소 상한에서 넘어가 C 가 ACTIVE 로 답해 이 시험이 깨진다
+    // 깨뜨릴 변경: 바깥 timeout(전체) 을 빼면 A·B 가 주소 상한에서 넘어가 C 가 ACTIVE 로 답하고, 전체 상한의 WARN 을 빼거나 직원 id 를 실으면 이 시험이 깨진다
     void 전체_상한을_넘으면_DirectoryUnavailableException() throws Exception {
-        // given — 셋째(C)가 멀쩡해, 전체 상한이 없으면 A·B 를 넘겨 ACTIVE 가 나온다
-        var A = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(2)));
-        var B = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(2)));
+        // given — 셋째(C)가 멀쩡해, 전체 상한이 없으면 A·B 가 1초씩 지나 넘어가 C 가 ACTIVE 로 답한다
+        var A = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(5)));
+        var B = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(5)));
         var C = 서버(BIND_PASSWORD);
-        var source = 원천(List.of(주소(A), 주소(B), 주소(C)),Duration.ofMillis(300), Duration.ofMillis(200));
+        var source = 원천(List.of(주소(A), 주소(B), 주소(C)), Duration.ofMillis(1500), Duration.ofSeconds(1));
 
         // when, then
         assertThatThrownBy(() -> source.accountState("kim", KIM_DN).block(Duration.ofSeconds(30)))
                 .isInstanceOf(DirectoryUnavailableException.class);
+        assertThat(경고들(끝남_문구)).singleElement().satisfies(경고 ->
+                assertThat(경고).contains("시도한 주소").contains("TimeoutException"));
+        assertThat(경고들()).allSatisfy(경고 -> assertThat(경고).doesNotContain("kim").doesNotContain(KIM_DN));
     }
 
     @Test
@@ -195,7 +239,9 @@ class LdapDirectoryAccountSourceTest {
 
     /** kim 이 영구 잠금인 그림을 내는 서버 — 활성인 서버와 답이 갈린다. */
     private InMemoryDirectoryServer 잠금_서버(InMemoryOperationInterceptor... 가로채기) throws Exception {
-        return 서버(LDIF + "pwdAccountLockedTime: 000001010000Z\n", BIND_PASSWORD, 가로채기);
+        String 잠긴_ldif = LDIF.replace("sn: Kim\n", "sn: Kim\npwdAccountLockedTime: 000001010000Z\n");
+        assertThat(잠긴_ldif).as("kim 엔트리에 잠금 속성이 붙어야 한다").contains("pwdAccountLockedTime");
+        return 서버(잠긴_ldif, BIND_PASSWORD, 가로채기);
     }
 
     private InMemoryDirectoryServer 서버(String ldif, String 비밀번호, InMemoryOperationInterceptor... 가로채기) throws Exception {

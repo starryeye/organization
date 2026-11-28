@@ -244,6 +244,44 @@ class DynamoDbRevocationMarksTest extends DynamoDbTestSupport {
                 .hasMessageContaining("즉시 회수 표시를 풀 수 없습니다");
     }
 
+    // 깨뜨릴 변경: String Set 이 아닌 표시 칸을 빈 집합으로 읽으면 깨진 기준선이 표시 없음으로 둔갑해 회수한 줄이 다음 회차에 되살아난다
+    @Test
+    @DisplayName("표시 칸이 String Set 이 아니면 findLatestMarked 가 SnapshotIntegrityException")
+    void 표시_칸이_String_Set_이_아니면_findLatestMarked_가_SnapshotIntegrityException() {
+        // given
+        기준선을_남긴다(줄("u1", "G1"));
+        client.updateItem(UpdateItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                .updateExpression("SET revokedGone = :g")
+                .expressionAttributeValues(Map.of(":g", Attrs.s("plain")))
+                .build()).join();
+
+        // when, then
+        assertThatThrownBy(() -> repository.findLatestMarked().block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("즉시 회수 표시를 풀 수 없습니다");
+    }
+
+    // 깨뜨릴 변경: 한도 검사가 String Set 이 아닌 칸을 빈 집합으로 읽으면 깨진 칸 위에 표시를 쌓고 한도를 잘못 센다
+    @Test
+    @DisplayName("표시 칸이 String Set 이 아니면 markRevoking 도 SnapshotIntegrityException")
+    void 표시_칸이_String_Set_이_아니면_markRevoking_도_SnapshotIntegrityException() {
+        // given
+        기준선을_남긴다(줄("u1", "G1"));
+        client.updateItem(UpdateItemRequest.builder()
+                .tableName(properties.getTableName())
+                .key(Map.of(Keys.PK, Attrs.s(Keys.SNAPSHOT_POINTER), Keys.SK, Attrs.s(Keys.LATEST)))
+                .updateExpression("SET revokedGone = :g")
+                .expressionAttributeValues(Map.of(":g", Attrs.s("plain")))
+                .build()).join();
+
+        // when, then
+        assertThatThrownBy(() -> repository.markRevoking(번호, Set.of(줄("u1", "G1"))).block())
+                .isInstanceOf(SnapshotIntegrityException.class)
+                .hasMessageContaining("즉시 회수 표시를 풀 수 없습니다");
+    }
+
     // 깨뜨릴 변경: 빈 집합에도 UpdateItem 을 보내면 빈 Set 오류가 나거나 번호 검사에 걸린다
     @Test
     @DisplayName("빈 집합은 아무것도 쓰지 않는다")

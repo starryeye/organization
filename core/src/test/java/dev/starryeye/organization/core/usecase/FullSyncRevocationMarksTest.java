@@ -179,6 +179,27 @@ class FullSyncRevocationMarksTest {
     }
 
     @Test
+    @DisplayName("결과를 몰라 U 에 있던 줄을 회수가 확실히 지웠다면 다음 회차는 그 줄을 다시 지우지 않고 U 에서 뺀다")
+    // 깨뜨릴 변경: U′ 를 만들 때 U − gone 의 빼기(u.removeAll(marks.gone()))를 빼면 지운 줄이 U′ 에 남아 델타가 비지 않고 다시 지운다
+    void 불확실했던_줄을_회수가_지웠으면_다시_지우지_않는다() {
+        // given — B = {park-be}, U = {kim-be}, 회수가 kim-be 를 확실히 지웠고 디렉터리에서 kim 은 여전히 막혀 있다
+        snapshots.save(new TupleSnapshot("이전", 고정시각, SyncSource.LDAP, Set.of(박_be), Set.of(김_be))).block();
+        snapshots.markRevoking("이전", Set.of(김_be)).block();
+        snapshots.settleRevocation("이전", Set.of(김_be), Set.of()).block();
+        source.willReturn(조직도(Map.of("be", Set.of("kim", "park")), Set.of("kim")));
+
+        // when
+        var run = 동기화한다();
+
+        // then
+        assertThat(run.status()).isEqualTo(SyncStatus.SUCCEEDED);
+        assertThat(run.message()).isEqualTo("변경 없음 — 즉시 회수를 기준선에 반영해 스냅샷을 새로 남김");
+        assertThat(writer.appliedDeltas).isEmpty();
+        assertThat(마지막_스냅샷().uncertain()).isEmpty();
+        assertThat(snapshots.marks().isEmpty()).isTrue();
+    }
+
+    @Test
     @DisplayName("표시가 없으면 변경 없음은 스냅샷을 남기지 않는다")
     // 깨뜨릴 변경: 표시 유무를 보지 않고 변경 없음마다 저장하면 매 시간 스냅샷이 쌓인다
     void 표시가_없으면_변경_없음은_스냅샷을_남기지_않는다() {
