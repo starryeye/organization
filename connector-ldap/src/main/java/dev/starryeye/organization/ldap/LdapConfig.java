@@ -1,5 +1,6 @@
 package dev.starryeye.organization.ldap;
 
+import dev.starryeye.organization.core.port.DirectoryAccountSource;
 import dev.starryeye.organization.ldap.strategy.ActiveDirectoryPrimaryGroup;
 import dev.starryeye.organization.ldap.strategy.DitStrategy;
 import dev.starryeye.organization.ldap.strategy.GroupOfNamesStrategy;
@@ -240,6 +241,13 @@ public class LdapConfig {
     public LdapDirectorySnapshotSource ldapDirectorySnapshotSource(
             LdapTemplate template, LdapMappingStrategy strategy, LdapProperties properties) {
         return new LdapDirectorySnapshotSource(시작_주소별_템플릿(properties, template), strategy, properties);
+    }
+
+    /** 한 사람 즉시 회수의 LDAP 읽기(설계 2026-11-28 V2) — 정기 읽기와 같은 시작 주소별 템플릿을 쓴다. */
+    @Bean
+    public DirectoryAccountSource ldapDirectoryAccountSource(
+            LdapTemplate template, LdapMappingStrategy strategy, LdapProperties properties) {
+        return new LdapDirectoryAccountSource(시작_주소별_템플릿(properties, template), strategy);
     }
 
     /**
