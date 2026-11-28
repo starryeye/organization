@@ -7,15 +7,18 @@ import dev.starryeye.organization.core.guard.ReactivationGuard;
 import dev.starryeye.organization.core.guard.ReactivationGuardPolicy;
 import dev.starryeye.organization.core.port.AuditLog;
 import dev.starryeye.organization.core.port.DailyJobClaims;
+import dev.starryeye.organization.core.port.DirectoryAccountSource;
 import dev.starryeye.organization.core.port.DirectorySnapshotSource;
 import dev.starryeye.organization.core.port.DirectoryStateRepository;
 import dev.starryeye.organization.core.port.MutationLock;
+import dev.starryeye.organization.core.port.RelationTupleChecker;
 import dev.starryeye.organization.core.port.RelationTupleScanner;
 import dev.starryeye.organization.core.port.RelationTupleWriter;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TupleSnapshotRepository;
 import dev.starryeye.organization.core.usecase.DailyOnce;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.ImmediateRevocationUseCase;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
 import dev.starryeye.organization.core.usecase.SyncJobs;
 import dev.starryeye.organization.storage.DynamoDbProperties;
@@ -104,5 +107,16 @@ public class UseCaseConfig {
                                          SyncJobs jobs,
                                          Clock clock) {
         return new RebuildUseCase(source, snapshots, state, writer, scanner, guard, reactivationGuard, jobs, clock);
+    }
+
+    /** 한 사람 즉시 회수(설계 2026-11-28) — 디렉터리 계정 상태는 LDAP 어댑터가, 줄 확인은 OpenFGA 가 준다. */
+    @Bean
+    public ImmediateRevocationUseCase immediateRevocationUseCase(DirectoryStateRepository state,
+                                                                 DirectoryAccountSource accounts,
+                                                                 RelationTupleChecker checker,
+                                                                 RelationTupleWriter writer,
+                                                                 TupleSnapshotRepository snapshots,
+                                                                 SyncJobs jobs) {
+        return new ImmediateRevocationUseCase(state, accounts, checker, writer, snapshots, jobs);
     }
 }

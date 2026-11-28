@@ -8,11 +8,16 @@ import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.DirectoryReadException;
+import dev.starryeye.organization.core.port.DirectoryUnavailableException;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.port.TemporaryFailureClassifier;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.ImmediateRevocationUseCase;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.core.usecase.StillActiveInDirectoryException;
+import dev.starryeye.organization.core.usecase.UnknownEmployeeException;
 import dev.starryeye.organization.security.Scopes;
 import dev.starryeye.organization.storage.DynamoDbTemporaryFailures;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -55,6 +60,7 @@ class AdminSyncControllerTest {
 
     private FullSyncUseCase fullSync;
     private RebuildUseCase rebuild;
+    private ImmediateRevocationUseCase revocation;
     private SyncRunRepository runs;
     private WebTestClient client;
 
@@ -62,9 +68,10 @@ class AdminSyncControllerTest {
     void 컨트롤러를_준비한다() {
         fullSync = Mockito.mock(FullSyncUseCase.class);
         rebuild = Mockito.mock(RebuildUseCase.class);
+        revocation = Mockito.mock(ImmediateRevocationUseCase.class);
         runs = Mockito.mock(SyncRunRepository.class);
         client = WebTestClient.bindToController(
-                        new AdminSyncController(fullSync, rebuild, runs, new SyncMetrics(new SimpleMeterRegistry())))
+                        new AdminSyncController(fullSync, rebuild, revocation, runs, new SyncMetrics(new SimpleMeterRegistry())))
                 .controllerAdvice(new AdminExceptionHandler(
                         new TemporaryFailureClassifier(List.of(new DynamoDbTemporaryFailures()))))
                 // 운영에서는 보안 체인의 이 필터가 보안 컨텍스트의 인증을 exchange 의 principal 로 내놓아 컨트롤러의 Authentication 인자가 채워진다.
@@ -120,6 +127,133 @@ class AdminSyncControllerTest {
                 .jsonPath("$.status").isEqualTo("RUNNING")
                 .jsonPath("$.trigger").isEqualTo("MANUAL")
                 .jsonPath("$.requestedBy").isEqualTo("client:ops");
+    }
+
+    @Test
+    @DisplayName("즉시 회수는 REVOCATION 으로 걸리고, 끝나기를 기다리지 않고 202 와 RUNNING 기록을 준다")
+    void 즉시_회수는_202와_RUNNING을_준다() {
+        // 깨뜨릴 변경: 끝점이 사라지거나 다른 상태·trigger 로 답하면 실패한다
+        // given
+        Mockito.when(revocation.start(eq("kim"), any()))
+                .thenReturn(Mono.just(도는실행(SyncTrigger.REVOCATION)));
+
+        // when, then
+        client.post().uri("/admin/sync/revocations")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"employeeId\":\"kim\"}")
+                .exchange()
+                .expectStatus().isAccepted()
+                .expectBody()
+                .jsonPath("$.runId").isEqualTo("run-1")
+                .jsonPath("$.status").isEqualTo("RUNNING")
+                .jsonPath("$.trigger").isEqualTo("REVOCATION");
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 본문이 없거나 비면 400 이고 유스케이스를 부르지 않는다")
+    void 즉시_회수의_본문이_없거나_비면_400이고_유스케이스를_부르지_않는다() {
+        // 깨뜨릴 변경: 본문 검사를 빼거나 유스케이스를 부른 뒤 검사하면 실패한다
+        // given, when, then — 본문 없음
+        client.post().uri("/admin/sync/revocations").exchange()
+                .expectStatus().isBadRequest()
+                .expectBody().jsonPath("$.detail").isEqualTo("employeeId 가 필요합니다");
+        // 빈 객체
+        client.post().uri("/admin/sync/revocations")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{}").exchange()
+                .expectStatus().isBadRequest()
+                .expectBody().jsonPath("$.detail").isEqualTo("employeeId 가 필요합니다");
+        // 공백
+        client.post().uri("/admin/sync/revocations")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"employeeId\":\"  \"}").exchange()
+                .expectStatus().isBadRequest()
+                .expectBody().jsonPath("$.detail").isEqualTo("employeeId 가 필요합니다");
+
+        Mockito.verifyNoInteractions(revocation);
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 현재상태에 없는 직원은 404 이고 P4 문구다")
+    void 즉시_회수의_모르는_직원은_404다() {
+        // 깨뜨릴 변경: 예외를 상태로 옮기지 않으면 500 이 된다
+        // given
+        Mockito.when(revocation.start(any(), any())).thenReturn(Mono.error(new UnknownEmployeeException()));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isNotFound()
+                .expectBody().jsonPath("$.detail").isEqualTo("현재상태에 그 직원이 없습니다 — 직원 id 를 확인하세요");
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 디렉터리에서 활성인 직원은 409 이고 활성 문구다")
+    void 즉시_회수의_활성_직원은_409다() {
+        // 깨뜨릴 변경: 활성 예외를 상태로 옮기지 않으면 500 이 된다
+        // given
+        Mockito.when(revocation.start(any(), any())).thenReturn(Mono.error(new StillActiveInDirectoryException()));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isEqualTo(HttpStatus.CONFLICT)
+                .expectBody().jsonPath("$.detail")
+                .isEqualTo("디렉터리에서 활성인 직원은 거두지 않습니다 — 디렉터리에서 먼저 막으세요");
+    }
+
+    @Test
+    @DisplayName("즉시 회수가 락을 못 잡으면 /full 과 같은 409 다")
+    void 즉시_회수가_락을_못_잡으면_409다() {
+        // 깨뜨릴 변경: 락 경합을 옮기지 않으면 락 문구가 아닌 다른 응답이 된다
+        // given
+        Mockito.when(revocation.start(any(), any()))
+                .thenReturn(Mono.error(new LockUnavailableException("다른 인스턴스가 변경 락을 쥐고 있습니다")));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isEqualTo(HttpStatus.CONFLICT)
+                .expectBody().jsonPath("$.detail").isEqualTo("다른 동기화·재적재가 진행 중입니다");
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 디렉터리 일시 장애는 503 과 Retry-After 10 이고 P4 문구다")
+    void 즉시_회수의_일시_장애는_503이다() {
+        // 깨뜨릴 변경: 503 으로 옮기지 않거나 Retry-After 를 빼면 실패한다
+        // given
+        Mockito.when(revocation.start(any(), any()))
+                .thenReturn(Mono.error(new DirectoryUnavailableException("읽기 시간 초과", null)));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
+                .expectHeader().valueEquals(HttpHeaders.RETRY_AFTER, "10")
+                .expectBody().jsonPath("$.detail")
+                .isEqualTo("디렉터리를 읽지 못했습니다(일시 장애) — 잠시 뒤 다시 시도하세요");
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 디렉터리 읽기 실패는 500 이고 P4 문구다")
+    void 즉시_회수의_읽기_실패는_500이다() {
+        // 깨뜨릴 변경: 읽기 실패를 옮기지 않으면 일반 500 문구가 되어 P4 문구가 사라진다
+        // given
+        Mockito.when(revocation.start(any(), any()))
+                .thenReturn(Mono.error(new DirectoryReadException("읽기 실패", null)));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR)
+                .expectBody().jsonPath("$.detail")
+                .isEqualTo("디렉터리에서 직원을 읽지 못했습니다 — 서버 로그를 확인하세요");
+    }
+
+    @Test
+    @DisplayName("즉시 회수의 모르는 오류는 삼키지 않고 처리기가 낸다 — 500 내부 오류")
+    void 즉시_회수의_모르는_오류는_처리기로_간다() {
+        // 깨뜨릴 변경: 모든 오류를 읽기 실패 문구로 바꾸면 실패한다
+        // given
+        Mockito.when(revocation.start(any(), any())).thenReturn(Mono.error(new IllegalStateException("뜻밖")));
+
+        // when, then
+        즉시_회수를_건다().expectStatus().isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR)
+                .expectBody().jsonPath("$.detail").value(detail ->
+                        assertThat((String) detail).doesNotContain("디렉터리에서 직원을 읽지 못했습니다"));
+    }
+
+    private WebTestClient.ResponseSpec 즉시_회수를_건다() {
+        return client.post().uri("/admin/sync/revocations")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"employeeId\":\"kim\"}")
+                .exchange();
     }
 
     @Test

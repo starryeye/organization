@@ -148,6 +148,24 @@ class LdapAuthEndToEndTest {
     }
 
     @Test
+    @DisplayName("admin.sync 범위가 없으면 즉시 회수는 403 이고 회차를 만들지 않는다")
+    void 범위가_없으면_즉시_회수는_403이다() {
+        // 깨뜨릴 변경: 보안 규칙이 /admin/sync/** 에서 새 끝점을 빼면 실패한다
+        // given
+        WebTestClient 읽기만 = client.mutate().defaultHeaders(머리 -> 머리.setBearerAuth(TestTokens.발급한다("limited-client", Scopes.ADMIN_READ))).build();
+        int 전 = 회차_수();
+
+        // when
+        읽기만.post().uri("/admin/sync/revocations")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"employeeId\":\"kim\"}")
+                .exchange()
+
+                // then
+                .expectStatus().isForbidden();
+        assertThat(회차_수()).as("거절한 요청은 회차를 만들지 않는다").isEqualTo(전);
+    }
+
+    @Test
     @DisplayName("헬스 세부는 actuator 범위가 있을 때만 보인다 — 토큰 없는 프로브와 다른 범위의 토큰은 상태만")
     void 헬스_세부는_actuator_범위가_있을_때만() {
         // given

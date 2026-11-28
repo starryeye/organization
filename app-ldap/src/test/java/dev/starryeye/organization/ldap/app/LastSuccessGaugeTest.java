@@ -95,6 +95,29 @@ class LastSuccessGaugeTest {
     }
 
     @Test
+    @DisplayName("즉시 회수 회차는 세지 않는다 — 더 새 REVOCATION 성공이 있어도 그 앞 정기 회차의 시각이다")
+    void 즉시_회수_회차는_세지_않는다() {
+        // 깨뜨릴 변경: REVOCATION 을 거르지 않으면 한 사람 회수가 전체 동기화의 신선도처럼 보인다
+        // given
+        끝난_회차를_심는다("run-1", SyncStatus.SUCCEEDED, "2026-10-23T01:00:12Z");
+        Instant 끝 = Instant.parse("2026-10-23T02:00:00Z");
+        runs.seed(SyncRun.builder()
+                .runId("run-2")
+                .source(SyncSource.LDAP)
+                .trigger(SyncTrigger.REVOCATION)
+                .startedAt(끝.minusSeconds(3))
+                .finishedAt(끝)
+                .status(SyncStatus.SUCCEEDED)
+                .build());
+
+        // when
+        gauge.갱신한다().block();
+
+        // then
+        assertThat(게이지_값()).isEqualTo(에포크_초("2026-10-23T01:00:12Z"));
+    }
+
+    @Test
     @DisplayName("성공한 회차가 없으면 값이 없다(NaN)")
     void 성공한_회차가_없으면_값이_없다() {
         // given — 기록은 있으나 모두 실패다

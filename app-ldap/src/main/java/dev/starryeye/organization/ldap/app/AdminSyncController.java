@@ -1,14 +1,20 @@
 package dev.starryeye.organization.ldap.app;
 
 import dev.starryeye.organization.admin.AdminApi;
+import dev.starryeye.organization.admin.RetryLaterStatusException;
 import dev.starryeye.organization.admin.SyncRunResponse;
 import dev.starryeye.organization.core.guard.ForceAllowance;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncTrigger;
+import dev.starryeye.organization.core.port.DirectoryReadException;
+import dev.starryeye.organization.core.port.DirectoryUnavailableException;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import dev.starryeye.organization.core.usecase.FullSyncUseCase;
+import dev.starryeye.organization.core.usecase.ImmediateRevocationUseCase;
 import dev.starryeye.organization.core.usecase.LockUnavailableException;
 import dev.starryeye.organization.core.usecase.RebuildUseCase;
+import dev.starryeye.organization.core.usecase.StillActiveInDirectoryException;
+import dev.starryeye.organization.core.usecase.UnknownEmployeeException;
 import dev.starryeye.organization.security.Callers;
 import dev.starryeye.organization.security.Scopes;
 import lombok.RequiredArgsConstructor;
@@ -18,6 +24,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -31,6 +38,10 @@ import java.util.function.Supplier;
 /**
  * app-ldap 관리 API. 동기화·재적재는 작업 락을 잡으면 곧바로 202 와 실행 기록(RUNNING)을 주고 따로 돈다(설계 2026-09-29 §4) —
  * 결과는 {@code GET /admin/sync/runs/{runId}} 로 본다. 락은 클러스터 전체에서 하나라 다른 인스턴스가 쥐고 있으면 409 다(설계 2026-09-30 §3).
+ *
+ * <p>{@code POST /revocations} 는 디렉터리에서 막혔거나 없는 한 사람의 장부 줄만 바로 거둔다(설계 2026-11-28). 본문의 {@code employeeId} 를 보고(400),
+ * 현재상태에 없으면 404, 디렉터리에서 활성이면 409, 디렉터리 읽기가 일시 장애면 503({@code Retry-After}), 그 밖의 읽기 실패는 500 이다. 이 검사들은
+ * 락 밖이고, 통과하면 202 와 실행 기록(RUNNING)을 준다. 사유 문구에 직원 id 를 싣지 않는다.
  */
 @Slf4j
 @AdminApi
@@ -43,6 +54,15 @@ public class AdminSyncController {
     private static final int MIN_RUNS_LIMIT = 1;
     private static final int MAX_RUNS_LIMIT = 100;
 
+    /** 즉시 회수의 응답 사유(설계 2026-11-28 계획 P4) — 직원 id 를 싣지 않는다 */
+    private static final String 직원_id가_필요하다 = "employeeId 가 필요합니다";
+    private static final String 디렉터리_일시_장애 = "디렉터리를 읽지 못했습니다(일시 장애) — 잠시 뒤 다시 시도하세요";
+    private static final String 디렉터리_읽기_실패 = "디렉터리에서 직원을 읽지 못했습니다 — 서버 로그를 확인하세요";
+
+    /** 즉시 회수 요청의 본문 */
+    public record RevocationRequest(String employeeId) {
+    }
+
     /** {@code force=true} 인데 허용 수가 하나도 없거나 준 수가 1 미만일 때의 400 문구(설계 2026-11-20 F3, 2026-11-24 R9) */
     static final String 허용_수가_없다 = "force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다";
     /** {@code force} 없이 허용 수만 왔을 때의 400 문구(설계 2026-11-20 F3, 2026-11-24 R9) — 없는 force 에 붙은 수는 실수다. 조용히 무시하지 않는다 */
@@ -50,6 +70,7 @@ public class AdminSyncController {
 
     private final FullSyncUseCase fullSync;
     private final RebuildUseCase rebuild;
+    private final ImmediateRevocationUseCase revocation;
     private final SyncRunRepository runs;
     private final SyncMetrics metrics;
 
@@ -103,6 +124,31 @@ public class AdminSyncController {
         return 걸되_겹치면_409(() -> allowance != null
                 ? rebuild.startForced(allowance, metrics::record)
                 : rebuild.start(metrics::record));
+    }
+
+    /**
+     * 한 사람 즉시 회수를 건다(설계 2026-11-28). 본문이 없거나 {@code employeeId} 가 없거나 공백이면 유스케이스를 부르기 전에 400 이다.
+     * 404(현재상태에 없음)·409(디렉터리에서 활성)·503(읽기 일시 장애, {@code Retry-After})·500(그 밖의 읽기 실패)은 락 밖 검사의 결과이고,
+     * 락을 못 잡으면 {@code /full} 과 같은 409 다.
+     */
+    @PostMapping("/revocations")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Mono<SyncRunResponse> revoke(@RequestBody(required = false) RevocationRequest body) {
+        if (body == null || body.employeeId() == null || body.employeeId().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, 직원_id가_필요하다);
+        }
+        log.info("즉시 회수 요청");
+        return 걸되_겹치면_409(() -> revocation.start(body.employeeId(), metrics::record)
+                .onErrorMap(UnknownEmployeeException.class, e ->
+                        new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e))
+                .onErrorMap(StillActiveInDirectoryException.class, e ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e))
+                .onErrorMap(DirectoryUnavailableException.class, e ->
+                        new RetryLaterStatusException(디렉터리_일시_장애, e.retryAfter(), e))
+                .onErrorMap(DirectoryReadException.class, e -> {
+                    log.error("즉시 회수의 디렉터리 읽기가 실패했다", e);
+                    return new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, 디렉터리_읽기_실패, e);
+                }));
     }
 
     @GetMapping("/runs")

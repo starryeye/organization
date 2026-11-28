@@ -2,6 +2,7 @@ package dev.starryeye.organization.ldap.app;
 
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.SyncStatus;
+import dev.starryeye.organization.core.model.SyncTrigger;
 import dev.starryeye.organization.core.port.SyncRunRepository;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -20,6 +21,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p><b>SUCCEEDED 와 PARTIAL 만 센다.</b> 영구히 거절되는 줄 하나가 있으면 매 회차가 PARTIAL 이지만 회수는 계속 나간다. 그것을 "멈춤"으로 울리면 경보가
  * 늘 울린다. ABORTED(가드가 멈춘 회차, 일부 반영 포함)와 FAILED 는 세지 않는다 — 그 동안이 바로 경보가 울려야 하는 때다.
+ *
+ * <p><b>즉시 회수({@code REVOCATION}) 회차는 세지 않는다</b>(설계 2026-11-28 V12). 한 사람만 거둔 회차는 디렉터리 그림 전체를 받아들인 것이 아니라 "회수가
+ * 얼마나 낡았는지"의 신선도를 알리지 못한다 — 세면 전체 동기화가 멈춘 동안에도 즉시 회수 한 번에 경보가 꺼진다.
  *
  * <p><b>값은 실행 이력(DynamoDB)에서 읽는다.</b> 이 인스턴스가 돌린 회차만 보면 여러 인스턴스 중 락을 못 잡은 쪽은 영영 낡은 값이고, 재시작하면 값이 사라진다. 이력을
  * 읽으면 어느 인스턴스를 보든·재시작을 넘어서도 같은 값이다. 1분마다 읽어 그 사이는 쥐고 있는다(캐시).
@@ -62,7 +66,7 @@ public class LastSuccessGauge {
      */
     Mono<Void> 갱신한다() {
         return Flux.defer(() -> runs.findRecent(Integer.MAX_VALUE))
-                .filter(run -> 센다(run.status()) && run.finishedAt() != null)
+                .filter(run -> run.trigger() != SyncTrigger.REVOCATION && 센다(run.status()) && run.finishedAt() != null)
                 .next()
                 .map(run -> run.finishedAt().getEpochSecond())
                 .timeout(읽기_상한)
