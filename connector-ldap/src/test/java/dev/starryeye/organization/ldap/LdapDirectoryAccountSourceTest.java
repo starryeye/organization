@@ -114,10 +114,10 @@ class LdapDirectoryAccountSourceTest {
 
     @Test
     @DisplayName("주소 상한을 넘으면 다음 주소로 넘긴다")
-    // 깨뜨릴 변경: 시도마다 건 timeout 을 빼면 첫 주소의 2초 잠을 기다리다 전체 상한에서야 끊긴다
+    // 깨뜨릴 변경: 시도마다 건 timeout(주소당) 을 빼면 A 가 2초 뒤 제 답(BLOCKED)을 내 이 시험이 깨진다
     void 주소_상한을_넘으면_다음_주소로_넘긴다() throws Exception {
-        // given
-        var A = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(2)));
+        // given — A 는 느리고 BLOCKED 로 답하고, B 는 ACTIVE 로 답한다
+        var A = 잠금_서버(new 검색에서_잔다(Duration.ofSeconds(2)));
         var B = 서버(BIND_PASSWORD);
         var source = 원천(List.of(주소(A), 주소(B)), Duration.ofSeconds(30), Duration.ofMillis(200));
 
@@ -130,12 +130,13 @@ class LdapDirectoryAccountSourceTest {
 
     @Test
     @DisplayName("전체 상한을 넘으면 DirectoryUnavailableException 이다")
-    // 깨뜨릴 변경: 바깥 timeout 을 빼거나 그 TimeoutException 을 그대로 두면 이 시험이 깨진다
+    // 깨뜨릴 변경: 바깥 timeout(전체) 을 빼면 A·B 가 주소 상한에서 넘어가 C 가 ACTIVE 로 답해 이 시험이 깨진다
     void 전체_상한을_넘으면_DirectoryUnavailableException() throws Exception {
-        // given
+        // given — 셋째(C)가 멀쩡해, 전체 상한이 없으면 A·B 를 넘겨 ACTIVE 가 나온다
         var A = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(2)));
         var B = 서버(BIND_PASSWORD, new 검색에서_잔다(Duration.ofSeconds(2)));
-        var source = 원천(List.of(주소(A), 주소(B)), Duration.ofMillis(300), Duration.ofMillis(200));
+        var C = 서버(BIND_PASSWORD);
+        var source = 원천(List.of(주소(A), 주소(B), 주소(C)),Duration.ofMillis(300), Duration.ofMillis(200));
 
         // when, then
         assertThatThrownBy(() -> source.accountState("kim", KIM_DN).block(Duration.ofSeconds(30)))
@@ -189,6 +190,15 @@ class LdapDirectoryAccountSourceTest {
     }
 
     private InMemoryDirectoryServer 서버(String 비밀번호, InMemoryOperationInterceptor... 가로채기) throws Exception {
+        return 서버(LDIF, 비밀번호, 가로채기);
+    }
+
+    /** kim 이 영구 잠금인 그림을 내는 서버 — 활성인 서버와 답이 갈린다. */
+    private InMemoryDirectoryServer 잠금_서버(InMemoryOperationInterceptor... 가로채기) throws Exception {
+        return 서버(LDIF + "pwdAccountLockedTime: 000001010000Z\n", BIND_PASSWORD, 가로채기);
+    }
+
+    private InMemoryDirectoryServer 서버(String ldif, String 비밀번호, InMemoryOperationInterceptor... 가로채기) throws Exception {
         InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(BASE_DN);
         config.addAdditionalBindCredentials(BIND_DN, 비밀번호);
         config.setListenerConfigs(EmbeddedLdapListener.리스너("test"));
@@ -197,7 +207,7 @@ class LdapDirectoryAccountSourceTest {
             config.addInMemoryOperationInterceptor(가로챈다);
         }
         var server = new InMemoryDirectoryServer(config);
-        server.importFromLDIF(true, new LDIFReader(new ByteArrayInputStream(LDIF.getBytes(StandardCharsets.UTF_8))));
+        server.importFromLDIF(true, new LDIFReader(new ByteArrayInputStream(ldif.getBytes(StandardCharsets.UTF_8))));
         server.startListening();
         서버들.add(server);
         return server;
@@ -212,7 +222,7 @@ class LdapDirectoryAccountSourceTest {
         }
     }
 
-    /** 검색마다 정해진 시간 잔다 — 시험이 서버를 내릴 때 풀린다(2초 이하로 둔다). */
+    /** 검색마다 정해진 시간 잔다(2초 이하로 둔다) — 잔 뒤에는 검색이 그대로 진행된다. */
     private static final class 검색에서_잔다 extends InMemoryOperationInterceptor {
 
         private final Duration 시간;
