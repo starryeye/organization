@@ -3,6 +3,8 @@ package dev.starryeye.organization.ldap.strategy;
 import javax.naming.NamingException;
 import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
+import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * 식별 값을 한 곳에서 읽는다(설계 2026-10-04 §4.1). {@code objectGUID}(AD)는 이진 값이라 표준 GUID 문자열로 바꾸고, 그 밖의 속성은 문자열 그대로 읽는다.
@@ -12,7 +14,29 @@ public final class LdapIdentifiers {
 
     public static final String OBJECT_GUID = "objectGUID";
 
+    private static final Pattern GUID_모양 =
+            Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+
+    /** {@link #guid(byte[])} 가 앞 세 묶음에서 뒤집는 자리 — 문자열의 i 번째 바이트는 원래 바이트 배열의 이 자리에 있었다. */
+    private static final int[] 문자열_자리의_원래_자리 = {3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15};
+
     private LdapIdentifiers() {
+    }
+
+    /**
+     * {@link #guid(byte[])} 의 역(설계 2026-11-28 §5.2) — 소문자 GUID 문자열을 16바이트로 되돌린다. 앞 세 묶음은 다시 뒤집는다.
+     * 소문자 8-4-4-4-12 꼴이 아니면 빈 값이다(대문자도 아니다 — 정기 읽기가 만든 id 는 늘 소문자다).
+     */
+    public static Optional<byte[]> guidBytes(String guid) {
+        if (guid == null || !GUID_모양.matcher(guid).matches()) {
+            return Optional.empty();
+        }
+        String 열여섯 = guid.replace("-", "");
+        byte[] 바이트 = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            바이트[문자열_자리의_원래_자리[i]] = (byte) Integer.parseInt(열여섯.substring(i * 2, i * 2 + 2), 16);
+        }
+        return Optional.of(바이트);
     }
 
     /** 이 속성을 이진으로 읽어야 하는가. 이름의 대소문자는 가리지 않는다. */

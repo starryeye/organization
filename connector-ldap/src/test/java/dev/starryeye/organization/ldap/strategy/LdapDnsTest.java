@@ -196,4 +196,18 @@ class LdapDnsTest {
         assertThat(LdapDns.첫_RDN_값("")).isNull();
         assertThat(LdapDns.첫_RDN_값(null)).isNull();
     }
+
+    @Test
+    @DisplayName("같은 DN 이거나 그 아래면 아래다 — 형제는 아니고, 표기만 다른 베이스는 같다")
+    // 깨뜨릴 변경: 문자열 접두사 비교로 바꾸면 대소문자·공백 케이스가 깨지고, 부모만 보면 형제가 참이 된다
+    void 아래인가() {
+        // given
+        String 베이스 = "ou=people," + BASE;
+
+        // when, then
+        assertThat(LdapDns.아래인가(베이스, 베이스)).as("같음").isTrue();
+        assertThat(LdapDns.아래인가("uid=kim,ou=a,ou=people," + BASE, 베이스)).as("자식").isTrue();
+        assertThat(LdapDns.아래인가("uid=out,ou=other," + BASE, 베이스)).as("형제").isFalse();
+        assertThat(LdapDns.아래인가("uid=kim,ou=people," + BASE, "OU=People, DC=example, DC=com")).as("표기만 다른 베이스").isTrue();
+    }
 }

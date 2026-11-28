@@ -43,6 +43,29 @@ class LdapIdentifiersTest {
     }
 
     @Test
+    @DisplayName("GUID 문자열을 바이트로 되돌리면 guid 가 같은 문자열을 준다 — 대문자·모양 밖은 빈 값이다")
+    // 깨뜨릴 변경: 되돌릴 때 앞 세 묶음을 다시 뒤집지 않으면 왕복이 깨진다
+    void GUID_문자열을_바이트로_되돌리면_guid_가_같은_문자열을_준다() {
+        // given
+        byte[] 원래 = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            원래[i] = (byte) i;
+        }
+        String guid = LdapIdentifiers.guid(원래);
+
+        // when
+        var 되돌림 = LdapIdentifiers.guidBytes(guid);
+
+        // then
+        assertThat(되돌림).isPresent();
+        assertThat(되돌림.get()).containsExactly(원래);
+        assertThat(LdapIdentifiers.guidBytes(guid.toUpperCase())).as("대문자").isEmpty();
+        assertThat(LdapIdentifiers.guidBytes("abc")).as("모양 밖").isEmpty();
+        assertThat(LdapIdentifiers.guidBytes(guid + "0")).as("긴 값").isEmpty();
+        assertThat(LdapIdentifiers.guidBytes(null)).as("null").isEmpty();
+    }
+
+    @Test
     @DisplayName("이진 속성인지는 이름의 대소문자를 가리지 않고 objectGUID 만 가른다")
     void 이진인가는_objectGUID_만_가른다() {
         // given, when, then

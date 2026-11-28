@@ -62,6 +62,14 @@ final class LdapDns {
     }
 
     /**
+     * 절대 DN 이 절대 베이스와 같거나 그 아래인가. 표기(대소문자·공백·이스케이프)가 달라도 {@link LdapName} 으로 가른다.
+     * 어느 쪽이든 DN 으로 읽을 수 없으면 {@link DirectoryDataException} 이다.
+     */
+    static boolean 아래인가(String 절대DN, String 절대베이스) {
+        return 파싱한다(절대DN).startsWith(파싱한다(절대베이스));
+    }
+
+    /**
      * 부모 DN — 맨 앞 RDN 하나를 뗀다. 최상위면 빈 문자열이다.
      * 첫 쉼표에서 자르면 이스케이프된 쉼표({@code ou=R\,D})를 RDN 경계로 오인한다.
      */

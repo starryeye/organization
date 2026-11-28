@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.KeyValueLimits;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.port.DirectoryAccountSource.AccountState;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
@@ -174,6 +175,27 @@ public class GroupOfNamesStrategy implements LdapMappingStrategy {
         DirectorySnapshot 그림 = new DirectorySnapshot(users, groups);
         EmptyMembershipGuard.확인한다(그림, "member 값 " + 멤버값수 + "개");
         return 그림;
+    }
+
+    /**
+     * 직원 한 사람의 계정 상태(설계 2026-11-28 V3·§5.2) — 직원 검색의 베이스·필터·요청 속성·매퍼를 그대로 쓰고 식별 속성을 AND 로 더한다.
+     * 매퍼 결과에서 id 가 null 인 엔트리(식별 속성 없음·한도 넘음)는 건너뛸 엔트리다.
+     * 다시 읽을 DN 의 베이스는 {@code user-search-base} 의 절대 DN 이다.
+     */
+    @Override
+    public AccountState readAccount(LdapTemplate template, String employeeId, String externalId) {
+        LdapProperties.GroupOfNames config = properties.getGroupOfNames();
+        ContextMapper<UserEntry> 매퍼 = userMapper(config, clock.instant());
+        return SingleAccountRead.읽는다(template, properties.getPageSize(),
+                config.getUserSearchBase(), LdapDns.절대로(config.getUserSearchBase(), properties.getBaseDn()),
+                properties.getBaseDn(), config.getUserFilter(), config.getUserIdAttribute(), 직원_속성(config),
+                context -> {
+                    UserEntry entry = 매퍼.mapFromContext(context);
+                    return entry.id() == null
+                            ? SingleAccountRead.Candidate.건너뜀()
+                            : new SingleAccountRead.Candidate(entry.id(), entry.active());
+                },
+                employeeId, externalId);
     }
 
     /**

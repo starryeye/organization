@@ -6,6 +6,7 @@ import dev.starryeye.organization.core.model.DirectoryUser;
 import dev.starryeye.organization.core.model.KeyValueLimits;
 import dev.starryeye.organization.core.model.MemberRef;
 import dev.starryeye.organization.core.model.PersonName;
+import dev.starryeye.organization.core.port.DirectoryAccountSource.AccountState;
 import dev.starryeye.organization.core.tuple.IdNormalizer;
 import dev.starryeye.organization.ldap.LdapProperties;
 import lombok.RequiredArgsConstructor;
@@ -168,6 +169,27 @@ public class DitStrategy implements LdapMappingStrategy {
         // 직원 검색이 비었으면 건너뛴 것도 없다 — 빈 요약("0건을 건너뛰었다")은 싣지 않는다
         EmptyMembershipGuard.확인한다(그림, 건너뛴_직원.건너뛴_것이_있는가() ? 세부 + " — " + 건너뛴_직원.요약() : 세부);
         return 그림;
+    }
+
+    /**
+     * 직원 한 사람의 계정 상태(설계 2026-11-28 V3·§5.2) — 직원 검색의 베이스·필터·요청 속성·매퍼를 그대로 쓰고 식별 속성을 AND 로 더한다.
+     * 매퍼 결과에서 id 가 null 인 엔트리(식별 속성 없음·한도 넘음)는 건너뛸 엔트리다. 다시 읽을 DN 의 베이스는 {@code root-dn} 의 절대 DN 이다.
+     * 매퍼가 주는 DN 은 컨텍스트 베이스에 상대적이지만 여기서는 쓰지 않는다.
+     */
+    @Override
+    public AccountState readAccount(LdapTemplate template, String employeeId, String externalId) {
+        LdapProperties.Dit config = properties.getDit();
+        ContextMapper<UserEntry> 매퍼 = userMapper(config, clock.instant());
+        return SingleAccountRead.읽는다(template, properties.getPageSize(),
+                config.getRootDn(), LdapDns.절대로(config.getRootDn(), properties.getBaseDn()),
+                properties.getBaseDn(), config.getUserFilter(), config.getUserIdAttribute(), 직원_속성(config),
+                context -> {
+                    UserEntry entry = 매퍼.mapFromContext(context);
+                    return entry.id() == null
+                            ? SingleAccountRead.Candidate.건너뜀()
+                            : new SingleAccountRead.Candidate(entry.id(), entry.active());
+                },
+                employeeId, externalId);
     }
 
     /** OU 검색이 요청하는 속성. {@link #orgMapper} 가 읽는 속성과 같아야 한다 — 요청하지 않은 속성은 오지 않는다. */
