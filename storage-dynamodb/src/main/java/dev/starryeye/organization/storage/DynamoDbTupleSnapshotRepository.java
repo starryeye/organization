@@ -1,6 +1,7 @@
 package dev.starryeye.organization.storage;
 
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.RevocationMarks;
 import dev.starryeye.organization.core.model.SnapshotMeta;
 import dev.starryeye.organization.core.model.SyncSource;
 import dev.starryeye.organization.core.model.TupleSnapshot;
@@ -183,10 +184,12 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
     }
 
     @Override
-    public Mono<TupleSnapshot> findLatest() {
+    public Mono<MarkedSnapshot> findLatestMarked() {
+        // 과제 2 가 표시를 같은 포인터 읽기에서 읽도록 바꾼다 — 그때까지 표시는 없다
         return latestId().flatMap(id -> findById(id)
                 .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
-                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id)))));
+                        "기준선 스냅샷 %s 의 메타가 없습니다 — POST /admin/sync/rebuild 로 복구하세요".formatted(id))))
+                .map(snapshot -> new MarkedSnapshot(snapshot, RevocationMarks.NONE)));
     }
 
     /** 최신 포인터가 가리키는 스냅샷 id. 강한 일관성으로 읽는다 — 정리 작업이 이 값으로 최신을 건너뛴다. 포인터가 없거나 "기록 중" 표시만 있으면 빈 Mono. */
@@ -222,12 +225,24 @@ public class DynamoDbTupleSnapshotRepository implements TupleSnapshotRepository 
      * 지난 회차가 기록 전에 멈춘 것이다. 줄이 없거나 두 칸이 다 없으면 기준선 없음이다.
      */
     @Override
-    public Mono<BaselineState> baselineState() {
+    public Mono<BaselinePointer> baselinePointer() {
         return 포인터()
-                .map(item -> item.containsKey(WRITING_SINCE) ? BaselineState.WRITING
-                        : Attrs.str(item, SNAPSHOT_ID) != null ? BaselineState.PRESENT
-                        : BaselineState.NONE)
-                .defaultIfEmpty(BaselineState.NONE);
+                .map(item -> new BaselinePointer(
+                        item.containsKey(WRITING_SINCE) ? BaselineState.WRITING
+                                : Attrs.str(item, SNAPSHOT_ID) != null ? BaselineState.PRESENT
+                                : BaselineState.NONE,
+                        Attrs.str(item, SNAPSHOT_ID)))
+                .defaultIfEmpty(new BaselinePointer(BaselineState.NONE, null));
+    }
+
+    @Override
+    public Mono<Void> markRevoking(String snapshotId, Set<RelationTuple> tuples) {
+        return Mono.error(new UnsupportedOperationException("과제 2"));
+    }
+
+    @Override
+    public Mono<Void> settleRevocation(String snapshotId, Set<RelationTuple> gone, Set<RelationTuple> dropped) {
+        return Mono.error(new UnsupportedOperationException("과제 2"));
     }
 
     @Override

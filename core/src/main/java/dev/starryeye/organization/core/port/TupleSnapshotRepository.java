@@ -1,9 +1,13 @@
 package dev.starryeye.organization.core.port;
 
+import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.RevocationMarks;
 import dev.starryeye.organization.core.model.SnapshotMeta;
 import dev.starryeye.organization.core.model.TupleSnapshot;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.util.Set;
 
 /**
  * OpenFGA 에 실제로 반영된 튜플의 기록.
@@ -21,7 +25,19 @@ public interface TupleSnapshotRepository {
      * 가져온 아이템을 푸는 동안의 실패는 모두 {@link SnapshotIntegrityException} 이고, 가져오는 중의 실패(저장소·SDK 오류)는 절대 이 예외로 보고하지 않는다 —
      * 기록 중 회차와 재적재는 이 예외일 때만 재활성 가드를 건너뛰고 그 밖의 오류는 회차를 실패시킨다(설계 2026-11-25 E1·E3).
      */
-    Mono<TupleSnapshot> findLatest();
+    default Mono<TupleSnapshot> findLatest() {
+        return findLatestMarked().map(MarkedSnapshot::snapshot);
+    }
+
+    /**
+     * {@link #findLatest} 와 같은 계약이고, 즉시 회수 표시를 함께 준다. 표시는 스냅샷 번호를 알려 준 같은 포인터 읽기에서 온다 —
+     * 번호와 표시가 서로 다른 읽기에서 오면 어긋난다(설계 2026-11-28 V14).
+     */
+    Mono<MarkedSnapshot> findLatestMarked();
+
+    /** 최신 스냅샷과 그 포인터 줄의 즉시 회수 표시(설계 2026-11-28 V14). */
+    record MarkedSnapshot(TupleSnapshot snapshot, RevocationMarks marks) {
+    }
 
     /**
      * 메타 → 본문 → 불확실 줄(U) → 포인터 순으로 저장한다. 메타가 먼저라 중간에 죽어도 정리 대상이고, 포인터가 마지막이라 반쪽이 기준선이
@@ -51,7 +67,33 @@ public interface TupleSnapshotRepository {
      *   <li>{@link BaselineState#PRESENT} — 표시 없이 스냅샷 번호가 있다.</li>
      * </ul>
      */
-    Mono<BaselineState> baselineState();
+    default Mono<BaselineState> baselineState() {
+        return baselinePointer().map(BaselinePointer::state);
+    }
+
+    /**
+     * 포인터 줄만 강한 일관성으로 읽어 상태와 포인터의 스냅샷 번호를 함께 준다. 본문은 읽지 않는다(설계 2026-11-28 V6·V14).
+     * 번호가 없으면 null.
+     */
+    Mono<BaselinePointer> baselinePointer();
+
+    /** {@link #baselinePointer()} 의 값. {@code snapshotId} 는 포인터의 번호이고 없으면 null. */
+    record BaselinePointer(BaselineState state, String snapshotId) {
+    }
+
+    /**
+     * 즉시 회수가 지우려는 줄을 포인터 줄의 {@code unknown} 칸에 더한다 — OpenFGA 에서 지우기 <b>직전</b>에 부른다(설계 2026-11-28 V6·V9).
+     * 조건: 포인터 번호가 {@code snapshotId} 와 같고 "기록 중" 칸이 없다. 아니면 {@link BaselineMovedException}.
+     * 더한 뒤 두 칸이 한도({@link RevocationMarks#MAX_BYTES})를 넘으면 {@link RevocationMarksFullException} 이고 아무것도 쓰지 않는다.
+     * 빈 집합이면 아무것도 하지 않는다.
+     */
+    Mono<Void> markRevoking(String snapshotId, Set<RelationTuple> tuples);
+
+    /**
+     * 지우기가 끝난 줄을 정리한다 — {@code gone} 은 {@code unknown} 에서 빼서 {@code gone} 칸에 더하고, {@code dropped} 는 {@code unknown} 에서만 뺀다
+     * (설계 2026-11-28 V8). 조건은 {@link #markRevoking} 과 같다. 둘 다 비면 아무것도 하지 않는다.
+     */
+    Mono<Void> settleRevocation(String snapshotId, Set<RelationTuple> gone, Set<RelationTuple> dropped);
 
     /** {@link #baselineState()} 의 값. */
     enum BaselineState {
