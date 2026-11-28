@@ -27,6 +27,11 @@ public record SyncOutcome(
         return new SyncOutcome(SyncStatus.SUCCEEDED, 0, 0, 0, null, "변경 없음");
     }
 
+    /** 변경은 없지만 즉시 회수 표시를 기준선에 반영해 스냅샷을 새로 남겼다(설계 2026-11-28 V10). */
+    public static SyncOutcome noChangeWithSnapshot(String snapshotId) {
+        return new SyncOutcome(SyncStatus.SUCCEEDED, 0, 0, 0, snapshotId, "변경 없음 — 즉시 회수를 기준선에 반영해 스냅샷을 새로 남김");
+    }
+
     public static SyncOutcome succeeded(TupleWriteResult result, String snapshotId) {
         return new SyncOutcome(SyncStatus.SUCCEEDED,
                 result.written().size(), result.deleted().size(), 0, snapshotId, null);

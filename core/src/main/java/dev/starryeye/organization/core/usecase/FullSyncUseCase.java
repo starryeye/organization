@@ -11,6 +11,7 @@ import dev.starryeye.organization.core.guard.ReactivationGuard;
 import dev.starryeye.organization.core.model.DirectorySnapshot;
 import dev.starryeye.organization.core.model.GuardHold;
 import dev.starryeye.organization.core.model.RelationTuple;
+import dev.starryeye.organization.core.model.RevocationMarks;
 import dev.starryeye.organization.core.model.SyncOutcome;
 import dev.starryeye.organization.core.model.SyncRun;
 import dev.starryeye.organization.core.model.SyncSource;
@@ -75,6 +76,10 @@ import java.util.function.Consumer;
  * <p><b>포인터가 없을 때도 기준선을 믿지 않는다(설계 2026-10-20 §4).</b> 첫 회차이거나 테이블을 새로 만들었다 — 후자는 이미 장부(store)에 줄이 있는데 빈 기준선과
  * 비교해 지울 줄이 없다고 잘못 보게 된다. 그래서 비교 대신 같은 장부 맞추기로 간다. 빈 장부의 첫 설치는 D 를 다 쓰고 장부를 한 번 훑을 뿐이다. 포인터 상태는 셋이다
  * — 없음(장부 맞추기, 이력은 동기화 그대로), 기록 중(장부 맞추기, 이력은 장부 맞추기), 있음(비교).
+ *
+ * <p><b>즉시 회수 표시를 기준선에 반영한다(설계 2026-11-28 V10).</b> 한 사람 즉시 회수가 스냅샷 포인터에 남긴 표시(gone·unknown)가 있으면 비교의 기준선은
+ * B′ = B − gone − unknown, U′ = (U − gone) ∪ unknown 이다 — 델타·삭제 가드의 기준 수·새 스냅샷의 식이 모두 B′·U′ 를 본다. 변경이 없어도 표시가 있었으면
+ * 스냅샷을 새로 남겨 표시를 지운다. 기록 중·포인터 없음 회차는 표시를 읽지 않고, 스냅샷 저장이 표시를 지운다.
  *
  * <p><b>이력(설계 2026-10-10 §4, 2026-10-15).</b> 회차가 OpenFGA 에 쓰고 지운 튜플은 묶음마다, 현재상태가 바뀐 것은 직원·조직 하나마다 끝나는 즉시
  * 회차의 변경 모음에 더한다. 회차가 어떻게 끝나든 {@link SyncJobs} 가 락을 반납한 뒤 남긴다 — 스냅샷 저장·현재상태 교체가 실패하거나 리스를 잃어도
@@ -237,7 +242,7 @@ public class FullSyncUseCase {
             });
             // 최신 스냅샷을 한 번 읽어 I 로 판정하고, 같은 스냅샷의 B·U 를 비교의 기준선으로 쓴다. 못 읽으면 지금처럼 실패한다
             case PRESENT -> 기준_스냅샷().flatMap(직전 -> {
-                ReactivationCheck check = 재활성을_판정한다(재활성_가드, 직전.inactive(), directory);
+                ReactivationCheck check = 재활성을_판정한다(재활성_가드, 직전.snapshot().inactive(), directory);
                 return 재활성_보류를_적는다(비교해_맞춘다(check.picture(), 매핑한다(check.picture()), 기준선.of(직전), 가드,
                         기록.changes()), check);
             });
@@ -298,8 +303,14 @@ public class FullSyncUseCase {
                                                 DeletionGuard 가드, AuditChanges 기록) {
         TupleDelta delta = 델타를_정한다(baseline, desired);
         if (delta.isEmpty()) {
-            // 델타가 비면 U 도 비어 있다 — U 의 줄은 D 에 있으면 쓸 줄에, 없으면 지울 줄에 반드시 든다
+            // 델타가 비면 U′ 도 비어 있다 — U′ 의 줄은 D 에 있으면 쓸 줄에, 없으면 지울 줄에 반드시 든다
             log.info("변경 없음. OpenFGA 를 호출하지 않는다");
+            if (baseline.표시_있음()) {
+                // 표시를 반영한 기준선을 새 스냅샷으로 남겨 표시를 지운다 — 안 남기면 다음 회차마다 같은 계산을 되풀이한다(설계 2026-11-28 V10)
+                return 스냅샷을_저장한다(directory, baseline, TupleWriteResult.empty())
+                        .flatMap(snapshotId -> state.replaceWith(directory, 기록.directoryListener())
+                                .thenReturn(Mono.just(SyncOutcome.noChangeWithSnapshot(snapshotId))));
+            }
             return state.replaceWith(directory, 기록.directoryListener())
                     .thenReturn(Mono.just(SyncOutcome.noChange()));
         }
@@ -352,26 +363,40 @@ public class FullSyncUseCase {
                                         결론 + " / " + stopped.getMessage()).withGuardHold(hold))));
     }
 
-    /** 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄). */
-    private record 기준선(Set<RelationTuple> tuples, Set<RelationTuple> uncertain) {
+    /**
+     * 기준선 — 직전 스냅샷의 B(장부에 있다고 확실히 아는 줄)와 U(결과를 몰라 있는지 모르는 줄)에 즉시 회수 표시를 반영한 B′·U′ 다
+     * (설계 2026-11-28 V10). B′ = B − gone − unknown, U′ = (U − gone) ∪ unknown. {@code 표시_있음} 은 표시가 비지 않았는지다.
+     */
+    private record 기준선(Set<RelationTuple> tuples, Set<RelationTuple> uncertain, boolean 표시_있음) {
 
-        static 기준선 of(TupleSnapshot snapshot) {
-            return new 기준선(snapshot.tuples(), snapshot.uncertain());
+        static 기준선 of(TupleSnapshotRepository.MarkedSnapshot marked) {
+            TupleSnapshot snapshot = marked.snapshot();
+            RevocationMarks marks = marked.marks();
+            if (marks.isEmpty()) {
+                return new 기준선(snapshot.tuples(), snapshot.uncertain(), false);
+            }
+            Set<RelationTuple> b = new HashSet<>(snapshot.tuples());
+            b.removeAll(marks.gone());
+            b.removeAll(marks.unknown());
+            Set<RelationTuple> u = new HashSet<>(snapshot.uncertain());
+            u.removeAll(marks.gone());
+            u.addAll(marks.unknown());
+            return new 기준선(b, u, true);
         }
 
-        /** 삭제 가드의 기준 수 — |B| + |U|. 불확실 줄도 장부에 있을 수 있는 줄이다 */
+        /** 삭제 가드의 기준 수 — |B′| + |U′|. 불확실 줄도 장부에 있을 수 있는 줄이다 */
         int 크기() {
             return tuples.size() + uncertain.size();
         }
     }
 
     /**
-     * 포인터가 "기준선 있음"인 회차의 기준 스냅샷 — 비교의 기준선(B·U)과 재활성 판정의 직전 I 를 이 한 번의 읽기에서 함께 쓴다(설계 2026-11-24 §3.3).
-     * 여기서 스냅샷이 비어 돌아오면 빈 기준선과 비교하지 않고 {@link SnapshotIntegrityException} 으로 멈춘다 — 빈 기준선은 지울 줄이 0 이라 장부의 줄을
-     * 영원히 못 지운다(설계 2026-10-20 §1.4 의 뒷문). 포인터가 없는 회차는 여기 오지 않고 장부를 훑는다.
+     * 포인터가 "기준선 있음"인 회차의 기준 스냅샷 — 비교의 기준선(B′·U′)과 재활성 판정의 직전 I 를 이 한 번의 읽기에서 함께 쓴다(설계 2026-11-24 §3.3).
+     * 즉시 회수 표시도 같은 읽기에서 온다(설계 2026-11-28 V14). 여기서 스냅샷이 비어 돌아오면 빈 기준선과 비교하지 않고 {@link SnapshotIntegrityException} 으로
+     * 멈춘다 — 빈 기준선은 지울 줄이 0 이라 장부의 줄을 영원히 못 지운다(설계 2026-10-20 §1.4 의 뒷문). 포인터가 없는 회차는 여기 오지 않고 장부를 훑는다.
      */
-    private Mono<TupleSnapshot> 기준_스냅샷() {
-        return snapshots.findLatest()
+    private Mono<TupleSnapshotRepository.MarkedSnapshot> 기준_스냅샷() {
+        return snapshots.findLatestMarked()
                 .switchIfEmpty(Mono.error(() -> new SnapshotIntegrityException(
                         "스냅샷 포인터는 기준선이 있다고 하는데 최신 스냅샷을 읽지 못했습니다 — POST /admin/sync/rebuild 로 복구하세요")));
     }
