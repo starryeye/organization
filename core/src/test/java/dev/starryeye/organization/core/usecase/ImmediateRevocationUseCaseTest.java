@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -288,6 +289,16 @@ class ImmediateRevocationUseCaseTest {
     void 소속이_없는_직원은_Check_없이_거둘_줄_없음이다() {
         // given
         state.saveUser(new DirectoryUser("solo", "uid=solo", "solo", "solo", null, false)).block();
+        AtomicInteger existing_호출 = new AtomicInteger();
+        // checked 는 후보마다 남아 빈 후보로 existing 을 불러도 비어 있다 — 부름 자체를 센다
+        checker = new FakeTupleChecker() {
+            @Override
+            public Mono<Set<RelationTuple>> existing(Set<RelationTuple> candidates) {
+                existing_호출.incrementAndGet();
+                return super.existing(candidates);
+            }
+        };
+        useCase = 유스케이스();
 
         // when
         SyncRun started = useCase.start("solo", run -> {
@@ -296,6 +307,7 @@ class ImmediateRevocationUseCaseTest {
 
         // then
         assertThat(run.message()).isEqualTo(줄_없음);
+        assertThat(existing_호출.get()).isZero();
         assertThat(checker.checked).isEmpty();
         assertThat(writer.appliedDeltas).isEmpty();
     }
