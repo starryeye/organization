@@ -1,6 +1,6 @@
 # 관리 API
 
-> 기준 커밋: fc982f8 (run-lookup-by-id, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
+> 기준 커밋: a315656 (immediate-revocation, main 에 머지됨). 코드가 바뀌면 이 문서도 함께 고친다.
 > 읽기 전에: [개요](01-개요.md), [용어집](02-용어집.md), [데이터 모델](04-데이터-모델.md)
 
 [관리 API](02-용어집.md#관리-api)는 `/admin/**` 아래의 HTTP 엔드포인트다. 두 앱(app-ldap 8081, app-scim 8082)이 같은 코드를 일부 나눠 쓴다.
@@ -29,6 +29,7 @@
 | `PUT /admin/organizations/{orgCode}/parent` 본문 `{"parentOrgCode": "<상위 orgCode>"}` | app-scim | 조직의 지정 상위를 둔다(이미 있으면 바꾼다)([4.4](#44-조직-계층-지정-app-scim)) | `admin.hierarchy` | 204 | 400, 404, 409, 503 |
 | `DELETE /admin/organizations/{orgCode}/parent` | app-scim | 조직의 지정 상위를 없앤다 — 없었으면 아무것도 하지 않는다 | `admin.hierarchy` | 204 | 404, 503 |
 | `POST /admin/sync/full[?force=true&maxDeletes=N&maxReactivations=M]` | app-ldap | 동기화를 건다([9.2](#92-app-ldap)). `force=true` 는 허용할 지울 줄 수 `maxDeletes` 또는 허용할 재활성 직원 수 `maxReactivations`(각각 1 이상, 하나 이상)와 함께만 온다 | `admin.sync`. `force=true` 는 `admin.destructive` 도 | 202 실행 기록 | 400(`force=true` 에 두 수가 하나도 없거나 준 수가 1 미만, `force` 없이 어느 수든), 403, 409 |
+| `POST /admin/sync/revocations` 본문 `{"employeeId": "<직원 id>"}` | app-ldap | 한 사람 [즉시 회수](02-용어집.md#즉시-회수)를 건다 — 디렉터리가 막았거나 그 사람이 없을 때만 그 사람의 권한 줄을 바로 지운다([9.2](#92-app-ldap)) | `admin.sync` | 202 실행 기록 | 400, 404, 409(디렉터리에서 활성 / 락 경합), 500, 503 + `Retry-After` |
 | `POST /admin/sync/rebuild[?force=true&maxDeletes=N&maxReactivations=M]` | app-ldap | 재적재를 건다. 두 수는 위와 같다 | 같다 | 202 실행 기록 | 400(위와 같다. `mode` 가 와도), 403, 409 |
 | `POST /admin/sync/rebuild?mode=tuples\|wipe[&confirm=<테이블명>]` | app-scim | 재적재 또는 [초기화](02-용어집.md#초기화)를 건다([9.3](#93-app-scim)) | `admin.sync`. `mode=wipe` 는 `admin.destructive` 도 | 202 실행 기록 | 400, 403, 409 |
 | `GET /admin/sync/runs[?limit=]` | 둘 다 | 최근 실행 기록 목록([9.4](#94-실행-기록-보기)). 멈춤 내역(`guardHold`)·재활성 보류 내역(`reactivationHold`)은 싣지 않는다 | `admin.read` | 200 배열 | 400 — `limit` 이 숫자가 아닐 때만(스프링의 파라미터 변환 실패, 코드에서 도출했다). 범위 밖 값은 거절하지 않고 1~100 으로 맞춘다([2절](#요청과-응답)) |
@@ -41,7 +42,7 @@
 없는 것이 있다.
 
 - 직원·조직을 고치거나 지우는 경로는 없다. 조직도는 디렉터리가 바꾼다. 하나가 예외다 — app-scim 의 지정 상위([4.4](#44-조직-계층-지정-app-scim))는 운영자가 둔다.
-- 한 사람의 권한만 즉시 거두는 경로는 없다. 급하면 `POST /admin/sync/full`(app-ldap)을 건다.
+- 한 사람의 권한만 즉시 거두는 경로는 app-ldap 의 `POST /admin/sync/revocations` 하나다. 디렉터리에서 먼저 막아야 하고(활성이면 409), 여럿은 거두지 않는다 — 여럿이면 `POST /admin/sync/full` 을 건다([9.2](#92-app-ldap)).
 - app-scim 에는 `full` 이 없다. SCIM 은 push 라 "전체를 다시 달라" 고 말할 상대가 없다.
 
 ## 2. 공통 규칙
@@ -81,7 +82,7 @@
 
 | 상태 | 언제 | `detail` |
 |---|---|---|
-| 컨트롤러가 정한 상태(400·403·404·409, 지정 컨트롤러는 503 도) | 원인 사슬에 `ResponseStatusException` 이 있다 — 컨트롤러가 정한 오류(아래)와, 스프링의 입력 오류(`ServerWebInputException` — 형식이 틀린 파라미터). 두 앱의 `AdminSyncController` 는 락 경합을 409 로 감싸 여기로 온다. 지정 컨트롤러는 락 경합을 `RetryLaterStatusException`(`ResponseStatusException` 의 하위, 503 + `Retry-After`)으로 바꿔 던져 여기로 온다. 그 예외가 든 머리(`ResponseStatusException.getHeaders`)는 응답에 그대로 옮긴다 — 범위 403 의 `WWW-Authenticate` 가 그 예다 | 그 사유. 없으면 상태 문구 |
+| 컨트롤러가 정한 상태(400·403·404·409, 지정 컨트롤러는 503 도, app-ldap 의 즉시 회수는 503·500 도) | 원인 사슬에 `ResponseStatusException` 이 있다 — 컨트롤러가 정한 오류(아래)와, 스프링의 입력 오류(`ServerWebInputException` — 형식이 틀린 파라미터). 두 앱의 `AdminSyncController` 는 락 경합을 409 로 감싸 여기로 온다. 즉시 회수는 디렉터리 읽기의 일시 장애를 `RetryLaterStatusException`(503 + `Retry-After: 10`), 그 밖의 읽기 실패를 `ResponseStatusException(500)` 으로 바꿔 던져 여기로 온다. 지정 컨트롤러는 락 경합을 `RetryLaterStatusException`(`ResponseStatusException` 의 하위, 503 + `Retry-After`)으로 바꿔 던져 여기로 온다. 그 예외가 든 머리(`ResponseStatusException.getHeaders`)는 응답에 그대로 옮긴다 — 범위 403 의 `WWW-Authenticate` 가 그 예다 | 그 사유. 없으면 상태 문구 |
 | 409 | 감싸지 않은 채 원인 사슬에 `LockUnavailableException` 이 있다 — 남이 [변경 락](02-용어집.md#변경-락)을 쥐었다 | 그 예외의 메시지 |
 | 503 + `Retry-After`(초) | 분류기(`TemporaryFailureClassifier`, core `port`)가 [일시 장애](02-용어집.md#일시-장애)로 본다 — SCIM 과 같은 분류기다. DynamoDB 의 스로틀·5xx·클라이언트 오류(시간 한도 포함), OpenFGA 의 재시도 가능한 오류, I/O 실패 | `일시 장애 — 잠시 뒤 다시 시도한다`. 예외 문구는 WARN 로그로만 간다 |
 | 500 | 그 밖 | `내부 오류` — 예외 문구(저장소·라이브러리 메시지)는 응답에 싣지 않고 ERROR 로그로만 간다 |
@@ -95,10 +96,10 @@
 
 | 상태 | 언제 |
 |---|---|
-| 400 | 지정 API(`PUT …/parent`)의 본문이 틀렸다 — `parentOrgCode 가 필요하다`. 순환을 판정하느라 펼친 조직이 1만 개를 넘었다(다시 보내도 같다). 검색 파라미터가 정확히 하나가 아니다. 정확 조회의 파라미터가 맞지 않다(직원은 `userName`·`externalId` 중 정확히 하나, 조직은 `externalId`). `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언으로 읽히지 않는다(스프링은 `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 읽는다). app-ldap 의 `force=true` 에 `maxDeletes`·`maxReactivations` 가 하나도 없거나 준 수가 1 미만이다 — `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다`. `force` 없이 어느 수가 왔다 — `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다`. 두 수가 정수로 읽히지 않는다(스프링의 변환 실패라 범위 403 보다도 먼저다, [9.2](#92-app-ldap)). app-ldap `rebuild` 에 `mode` 가 왔다. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
+| 400 | 지정 API(`PUT …/parent`)의 본문이 틀렸다 — `parentOrgCode 가 필요하다`. 순환을 판정하느라 펼친 조직이 1만 개를 넘었다(다시 보내도 같다). 검색 파라미터가 정확히 하나가 아니다. 정확 조회의 파라미터가 맞지 않다(직원은 `userName`·`externalId` 중 정확히 하나, 조직은 `externalId`). `limit` 이 범위 밖이거나 숫자가 아니다(`/admin/sync/runs` 의 `limit` 은 범위를 거절하지 않고 맞춘다). 커서가 깨졌거나 다른 검색의 것이다. `force` 가 불리언으로 읽히지 않는다(스프링은 `true`·`false` 말고도 `yes`·`on`·`1`, `no`·`off`·`0` 을 대소문자 없이 읽는다). app-ldap 의 `force=true` 에 `maxDeletes`·`maxReactivations` 가 하나도 없거나 준 수가 1 미만이다 — `force=true 에는 maxDeletes(허용할 지울 줄 수) 또는 maxReactivations(허용할 재활성 직원 수)가 1 이상으로 함께 와야 합니다`. `force` 없이 어느 수가 왔다 — `maxDeletes·maxReactivations 는 force=true 와 함께만 씁니다`. 두 수가 정수로 읽히지 않는다(스프링의 변환 실패라 범위 403 보다도 먼저다, [9.2](#92-app-ldap)). app-ldap `rebuild` 에 `mode` 가 왔다. 즉시 회수의 본문이 없거나 `{}` 이거나 `employeeId` 가 공백이다 — `employeeId 가 필요합니다`. app-scim `rebuild` 의 `mode` 를 모른다, 또는 `wipe` 의 `confirm` 이 테이블명과 다르다 |
 | 403 | `force=true`(app-ldap, 두 수가 있든 없든)·`mode=wipe`(app-scim)인데 토큰에 `admin.destructive` 가 없다 — `force=true은 admin.destructive 범위가 필요하다`, `mode=wipe은 admin.destructive 범위가 필요하다`. `WWW-Authenticate: Bearer error="insufficient_scope"` 가 붙는다([10.3](#103-위험한-요청--admindestructive)) |
-| 404 | 지정 API 의 조직이 없다 — `조직이 없다: <orgCode>`, 상위 조직이 없다 — `상위 조직이 없다: <parentOrgCode>`. 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). 정확 조회가 하나도 찾지 못했다 — `일치하는 직원이 없다`, `일치하는 조직이 없다`. **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
-| 409 | 락 경합(위, 지정 API 는 제외). 지정이 순환을 닫는다 — `<parentOrgCode> 를 <orgCode> 의 상위로 두면 순환이 된다`. 정확 조회가 여럿을 찾았다 — `<N>명이 일치한다 — externalId 로 찾는다`, `<N>개가 일치한다` |
+| 404 | 지정 API 의 조직이 없다 — `조직이 없다: <orgCode>`, 상위 조직이 없다 — `상위 조직이 없다: <parentOrgCode>`. 직원·조직·실행 기록이 없다(상세, 멤버 목록, 실행 기록 하나). 즉시 회수의 직원이 현재상태에 없다 — `현재상태에 그 직원이 없습니다 — 직원 id 를 확인하세요`. 정확 조회가 하나도 찾지 못했다 — `일치하는 직원이 없다`, `일치하는 조직이 없다`. **검색과 감사 이력은 404 가 아니다** — 빈 목록이다 |
+| 409 | 락 경합(위, 지정 API 는 제외). 즉시 회수의 직원이 디렉터리에서 활성이다 — `디렉터리에서 활성인 직원은 거두지 않습니다 — 디렉터리에서 먼저 막으세요`. 지정이 순환을 닫는다 — `<parentOrgCode> 를 <orgCode> 의 상위로 두면 순환이 된다`. 정확 조회가 여럿을 찾았다 — `<N>명이 일치한다 — externalId 로 찾는다`, `<N>개가 일치한다` |
 
 ### 일관성
 
@@ -585,6 +586,7 @@ sequenceDiagram
 | `POST /admin/sync/full?force=true&maxDeletes=N&maxReactivations=M` | 같되 준 수의 가드를 비율 없이 그 수를 상한으로 본다 — [삭제 가드](02-용어집.md#삭제-가드)는 N, [재활성 가드](02-용어집.md#재활성-가드)는 M(하나만 줘도 된다). `ABORTED` 뒤 사람이 [멈춤 내역](02-용어집.md#멈춤-내역)·[재활성 보류](02-용어집.md#재활성-보류) 내역을 확인하고 넘기는 통로다 | `FORCED` | `SYNC` | `admin.sync` + `admin.destructive` |
 | `POST /admin/sync/rebuild` | 재적재 — LDAP 을 다시 읽어 장부를 맞추고 현재상태를 교체한다 | `REBUILD` | `REBUILD` | `admin.sync` |
 | `POST /admin/sync/rebuild?force=true&maxDeletes=N&maxReactivations=M` | 같되 준 수의 가드를 비율 없이 상한으로 본다 | `FORCED_REBUILD` | `REBUILD` | `admin.sync` + `admin.destructive` |
+| `POST /admin/sync/revocations` 본문 `{"employeeId":"…"}` | 한 사람 [즉시 회수](02-용어집.md#즉시-회수) — 아래 [즉시 회수](#즉시-회수-post-adminsyncrevocations) | `REVOCATION` | `REVOCATION` | `admin.sync` |
 
 **`force=true` 는 `maxDeletes=N` 또는 `maxReactivations=M`(둘 다여도 된다)과 함께만 받는다.** N 은 운영자가 멈춘 회차의 [멈춤 내역](02-용어집.md#멈춤-내역)을 보고 허용하는 지울 **줄** 수, M 은 [재활성 보류](02-용어집.md#재활성-보류) 내역을 보고 허용하는 재활성 **직원** 수다(각각 1 이상). 요청은 이렇게 갈린다(`AdminSyncController.허용_수를_정한다`).
 
@@ -636,6 +638,49 @@ curl -X POST -H "Authorization: Bearer $TOKEN" 'http://localhost:8081/admin/sync
   "requestedBy": "client:ops"
 }
 ```
+
+#### 즉시 회수 `POST /admin/sync/revocations`
+
+디렉터리에서 막혔거나 없는 한 사람의 장부 줄만 다음 정각을 기다리지 않고 바로 지운다. 본문으로 받는 것은 id 에 경로에 쓰기 어려운 글자가 들 수 있어서다. 흐름·판정·표시는 [05 — 12.1](05-LDAP-동기화.md#121-한-사람-즉시-회수)이고 여기는 응답이다.
+
+```
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"employeeId": "<직원 id>"}' 'http://localhost:8081/admin/sync/revocations'
+```
+
+```json
+{
+  "runId": "20261128T051203.120Z-9a7c3e1f-5b2d-4c8e-a6f0-3d1b7e9c2a54",
+  "source": "LDAP",
+  "trigger": "REVOCATION",
+  "startedAt": "2026-11-28T05:12:03.120Z",
+  "finishedAt": null,
+  "status": "RUNNING",
+  "writtenCount": 0,
+  "deletedCount": 0,
+  "failureCount": 0,
+  "snapshotId": null,
+  "message": null,
+  "requestedBy": "client:hr-offboarding"
+}
+```
+
+결과는 `GET /admin/sync/runs/{runId}` 로 본다(`admin.read` 가 따로 필요하다). 검사는 락을 잡기 전에 이 순서로 한다. 하나라도 걸리면 락도 실행 기록도 열지 않으므로 다시 걸어도 된다.
+
+| 응답 | 때 | `detail` |
+|---|---|---|
+| 202 | 디렉터리가 막았거나 그 사람이 없어 작업을 띄웠다 | — |
+| 400 | 본문이 없거나 `{}` 이거나 `employeeId` 가 없거나 공백이다 | `employeeId 가 필요합니다` |
+| 401·403 | 토큰·범위(`admin.sync`) | — |
+| 404 | 현재상태에 그 직원이 없다 | `현재상태에 그 직원이 없습니다 — 직원 id 를 확인하세요` |
+| 409 | 디렉터리에서 활성이다 | `디렉터리에서 활성인 직원은 거두지 않습니다 — 디렉터리에서 먼저 막으세요` |
+| 409 | 다른 동기화·재적재가 락을 쥐고 있다 | `다른 동기화·재적재가 진행 중입니다` |
+| 503 + `Retry-After: 10` | LDAP 읽기가 모든 주소에서 일시 장애 신호로 실패했거나 30초를 넘겼다. 락·실행 기록의 일시 장애도 같다 | `디렉터리를 읽지 못했습니다(일시 장애) — 잠시 뒤 다시 시도하세요`(락·기록 쪽은 위 [오류](#오류)의 503) |
+| 500 | 그 밖의 LDAP 읽기 실패 — 인증·권한·검색 베이스 없음·데이터 오류·모르는 종류 | `디렉터리에서 직원을 읽지 못했습니다 — 서버 로그를 확인하세요` |
+
+- 응답 문구에는 직원 id 를 싣지 않는다. 자세한 원인은 서버 로그다.
+- 202 뒤의 결과는 실행 기록의 `status`·`message` 로 본다 — 앞머리 `즉시 회수 — 디렉터리에서 막힘` 또는 `즉시 회수 — 디렉터리에 없음`, 거둘 줄이 없으면 `즉시 회수 — 장부에 거둘 줄이 없습니다`(`SUCCEEDED`, 0건), 일부 실패면 `PARTIAL`(`N건의 튜플 적용에 실패했습니다. 다음 동기화가 다시 시도합니다`), 표시 한도·표시 실패면 `FAILED`(아무것도 지우지 않았다 — 처방은 [12](12-장애와-복구.md#48-막은-계정의-권한을-지금-거둬야-한다)).
+- `sync.last.success` 는 이 회차를 세지 않는다. 지표는 [11](11-운영.md).
 
 ### 9.3 app-scim
 
