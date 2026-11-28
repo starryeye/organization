@@ -14,5 +14,7 @@ public enum SyncTrigger {
     /** SCIM 인스턴스의 일 1회 스냅샷 아카이빙 */
     ARCHIVE,
     /** 조직도까지 전부 비우는 초기화. 되돌릴 수 없고 IdP 재푸시가 뒤따라야 한다 */
-    RESET
+    RESET,
+    /** 한 사람 즉시 회수 — 관리 API 가 디렉터리에서 막힌·없는 직원의 장부 줄만 바로 거둔다(설계 2026-11-28 V4) */
+    REVOCATION
 }

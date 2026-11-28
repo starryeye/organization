@@ -51,6 +51,8 @@ public interface MutationLock {
         WRITE,
         REBUILD,
         /** app-ldap 전체 동기화(정기·수동). 재적재는 {@link #REBUILD}. */
-        SYNC
+        SYNC,
+        /** app-ldap 한 사람 즉시 회수(설계 2026-11-28 V4) — 정각 회차·재적재와 같은 락이다. */
+        REVOCATION
     }
 }

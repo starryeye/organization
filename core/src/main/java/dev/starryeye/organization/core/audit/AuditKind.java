@@ -11,5 +11,7 @@ public enum AuditKind {
     /** SCIM 쓰기 요청 하나 */
     SCIM_REQUEST,
     /** 관리 API 의 지정 요청 하나 — 운영자가 조직의 지정 상위를 두거나 없앤다(설계 2026-11-04 H7) */
-    HIERARCHY_REQUEST
+    HIERARCHY_REQUEST,
+    /** 한 사람 즉시 회수 — 디렉터리에서 막힌·없는 직원의 장부 줄을 지웠다(설계 2026-11-28 V7) */
+    REVOCATION
 }
